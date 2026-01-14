@@ -1,0 +1,1 @@
+{"version":3,"file":"PagePlaceholder.d.ts","sourceRoot":"","sources":["PagePlaceholder.tsx"],"names":[],"mappings":"AAAA,OAAO,EAAE,KAAK,UAAU,EAAE,MAAM,cAAc,CAAA;AAE9C,UAAU,oBAAoB;IAC5B,KAAK,EAAE,MAAM,CAAA;IACb,WAAW,EAAE,MAAM,CAAA;IACnB,IAAI,EAAE,UAAU,CAAA;CACjB;AAED,wBAAgB,eAAe,CAAC,EAAE,KAAK,EAAE,WAAW,EAAE,IAAI,EAAE,IAAI,EAAE,EAAE,oBAAoB,2CAmBvF"}

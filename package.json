@@ -1,0 +1,28 @@
+{
+  "name": "mps-ng",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MPS Next Generation - ERP Textile/Knitting for ETS Malterre",
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "start": "turbo run start",
+    "clean": "turbo run clean",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:coverage": "turbo run test:coverage",
+    "test:watch": "vitest --workspace vitest.workspace.ts"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.0.16",
+    "@vitest/ui": "^4.0.16",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2",
+    "vitest": "^4.0.16"
+  },
+  "packageManager": "pnpm@9.15.2",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

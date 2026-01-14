@@ -1,9 +1,12 @@
 # Dependencies
 node_modules/
+.pnpm-store/
 
 # Build outputs
 dist/
 build/
+.next/
+.turbo/
 
 # IDE
 .idea/
@@ -14,11 +17,20 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # Environment
 .env
 .env.local
+.env.*.local
+
+# Test coverage
+coverage/
 
 # Logs
 *.log
 npm-debug.log*
+
+# Temp files
+*.tmp
+tmpclaude-*
