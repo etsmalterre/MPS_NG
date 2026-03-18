@@ -4,6 +4,8 @@
 
 MPS_NG is the next-generation ERP system for **ETS Malterre**, a French textile/knitting manufacturing company (bonnetterie/tricotage). This project migrates the legacy WinDev/HFSQL application to a modern web-based solution.
 
+> **Note**: `MPS_NG` is a temporary name used during the migration period. Once the legacy WinDev app is fully migrated, this project will be renamed to simply **MPS**.
+
 ## Company Context
 
 - **Company**: ETS Malterre
@@ -139,6 +141,10 @@ MPS_NG/
    - Livraisons (`/transport/livraisons`)
 9. **Paramètres** (`/parametres`)
 
+## Conventions
+
+- **"check last screenshot"** → read the latest file in `C:\Users\vince\Pictures\Screenshots`
+
 ## Development Guidelines
 
 ### Language
@@ -195,7 +201,20 @@ pnpm build
 pnpm test
 ```
 
-## Business Domain (French Terms)
+## Reference Documentation
+
+Detailed docs are in `claude_doc/` — load only when needed:
+
+| File | Description |
+|------|-------------|
+| `legacy_tables.md` | All 204 HFSQL tables with fields, organized by domain |
+| `legacy_windows.md` | All 319 windows + 49 reports, organized by functional area |
+| `navigation_mapping.md` | Legacy windows → new MPS_NG routes mapping |
+| `business_glossary.md` | Complete domain vocabulary, production flow, business terms |
+
+## Business Domain (Quick Reference)
+
+Full glossary in `claude_doc/business_glossary.md`. Key terms:
 
 | French | English |
 |--------|---------|

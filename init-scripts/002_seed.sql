@@ -1,0 +1,3 @@
+-- Seed data is now handled via data_migration/
+-- See data_migration/import/001_entreprise.sql
+-- Run: docker exec mps-postgres-dev psql -U postgres -d mps_dev -f /import/001_entreprise.sql
