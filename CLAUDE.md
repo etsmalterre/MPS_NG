@@ -36,18 +36,19 @@ The original MPS is a WinDev-based ERP:
 
 ## Project Phases
 
-### Phase 1: UI Shell (Current)
+### Phase 1: UI Shell (Complete)
 Create the user interface without data:
 - Navigation structure
 - Dashboard placeholder
 - Page placeholders for all routes
 - MPS branding (gold/navy color scheme)
 
-### Phase 2: Database (Future)
+### Phase 2: Database (POC Complete, In Progress)
 Rebuild PostgreSQL database from legacy HFSQL:
 - Schema design based on 204 legacy tables
 - Data migration scripts
 - Drizzle ORM schemas
+- POC validated: `entreprise` table migrated, WinDev connected to PostgreSQL via native connector
 
 ### Phase 3: Features (Future)
 Implement features screen by screen:
@@ -140,6 +141,15 @@ MPS_NG/
    - Expéditions (`/transport/expeditions`)
    - Livraisons (`/transport/livraisons`)
 9. **Paramètres** (`/parametres`)
+
+## WinDev ↔ PostgreSQL Connection
+
+The legacy WinDev app connects to the PostgreSQL dev database via the **Native PostgreSQL Connector**:
+- **Connector DLLs**: `C:\PC SOFT\WINDEV Suite 2026\Programs\Framework\Win64x86\`
+- **Client DLLs**: `libpq.dll` + dependencies from PostgreSQL 18 Windows x64 binaries
+- **Connection**: `HDécritConnexion` + `HOuvreConnexion` (not `HChangeConnexion` — incompatible with native connector)
+- **Port config**: Use `Server port=5435` in extended info ("Infos étendues")
+- **Column casing**: PostgreSQL columns must use quoted mixed-case names to match WinDev analysis fields (e.g., `"IDentreprise"` not `identreprise`)
 
 ## Conventions
 
