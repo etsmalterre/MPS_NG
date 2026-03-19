@@ -24,7 +24,6 @@
     "@mps/db": "workspace:*",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
-    "drizzle-orm": "^0.38.3",
     "express": "^4.21.2",
     "helmet": "^8.0.0",
     "postgres": "^3.4.5",

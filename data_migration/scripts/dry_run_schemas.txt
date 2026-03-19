@@ -1,0 +1,292 @@
+// ============================================================================
+// Dry Run: Generate PostgreSQL schemas from HFSQL analysis (no data transfer)
+// ============================================================================
+// Scans all HFSQL tables and generates CREATE TABLE SQL files.
+// Does NOT connect to PostgreSQL or transfer any data.
+//
+// Output: One .sql file per table in data_migration/schemas/
+// Also generates a summary report: data_migration/schemas/_report.txt
+//
+// Usage: Copy into WinDev and call DryRunSchemas()
+// ============================================================================
+
+PROCEDURE DryRunSchemas()
+
+sSqlOutputPath is string = "C:\dev\MPS_NG\data_migration\schemas\"
+fMakeDir(sSqlOutputPath)
+
+// ---------------------------------------------------------------------------
+// HFSQL type codes (from HListeRubrique with hLstDétail)
+// ---------------------------------------------------------------------------
+// 1  = Auto ID (8 bytes)         | 2  = Text (ANSI)
+// 3  = Signed int 2B             | 4  = Signed int 1B
+// 5  = Signed int 4B             | 6  = Real 4B (single)
+// 7  = Real 8B (double)          | 8  = Record number
+// 9  = Unsigned int 2B           | 10 = Date YYMMDD
+// 11 = Time                      | 12 = Unsigned int 1B
+// 13 = Turbo real                | 14 = Date YYYYMMDD
+// 15 = Text memo                 | 16 = Binary memo (4.0)
+// 17 = Currency                  | 18 = Binary memo
+// 19 = Signed int 8B             | 20 = Unsigned int 8B
+// 21 = Image                     | 22 = Unsigned int 4B
+// 23 = Binary string             | 24 = DateTime
+// 25 = Duration                  | 26 = Character
+// 27 = Boolean                   | 28 = Auto ID (4 bytes)
+// 29 = Unicode text              | 30 = Unicode memo
+// 31 = High-precision numeric    | 32 = Enumeration
+// 33 = Combination               | 34 = UUID 128
+// 35 = UUID 128 auto             | 36 = UUID 256
+// 37 = UUID 256 auto             | 38 = JSON
+// 39 = Secure password
+
+// ---------------------------------------------------------------------------
+// Internal: Map HFSQL type code to PostgreSQL type
+// ---------------------------------------------------------------------------
+PROCEDURE INTERNE MapType(LOCAL nType is int, LOCAL nSize is int, LOCAL nDecimals is int)
+	SWITCH nType
+		// Auto ID
+		CASE 1
+			RENVOYER "BIGSERIAL"
+		CASE 28
+			RENVOYER "SERIAL"
+
+		// Text
+		CASE 2, 26
+			IF nSize > 0 AND nSize <= 10000 THEN
+				RENVOYER "VARCHAR(" + nSize + ")"
+			ELSE
+				RENVOYER "TEXT"
+			END
+		CASE 29
+			IF nSize > 0 AND nSize <= 10000 THEN
+				RENVOYER "VARCHAR(" + nSize + ")"
+			ELSE
+				RENVOYER "TEXT"
+			END
+
+		// Text memos
+		CASE 15, 30
+			RENVOYER "TEXT"
+
+		// Signed integers
+		CASE 4
+			RENVOYER "SMALLINT"
+		CASE 3
+			RENVOYER "SMALLINT"
+		CASE 5
+			RENVOYER "INTEGER"
+		CASE 19
+			RENVOYER "BIGINT"
+
+		// Unsigned integers
+		CASE 12
+			RENVOYER "SMALLINT"
+		CASE 9
+			RENVOYER "INTEGER"
+		CASE 22
+			RENVOYER "BIGINT"
+		CASE 20
+			RENVOYER "BIGINT"
+
+		// Reals
+		CASE 6
+			RENVOYER "REAL"
+		CASE 7, 13
+			RENVOYER "DOUBLE PRECISION"
+
+		// Currency
+		CASE 17
+			RENVOYER "NUMERIC(19,4)"
+
+		// High-precision numeric
+		CASE 31
+			IF nDecimals > 0 THEN
+				RENVOYER "NUMERIC(" + nSize + "," + nDecimals + ")"
+			ELSE IF nSize > 0 THEN
+				RENVOYER "NUMERIC(" + nSize + ")"
+			ELSE
+				RENVOYER "NUMERIC"
+			END
+
+		// Dates
+		CASE 10, 14
+			RENVOYER "DATE"
+
+		// Time
+		CASE 11
+			RENVOYER "TIME"
+
+		// DateTime
+		CASE 24
+			RENVOYER "TIMESTAMP"
+
+		// Boolean
+		CASE 27
+			RENVOYER "BOOLEAN"
+
+		// Binary memo / Image
+		CASE 16, 18, 21, 23
+			RENVOYER "BYTEA"
+
+		// Duration
+		CASE 25
+			RENVOYER "BIGINT"
+
+		// Enumeration / Combination (WinDev returns text labels)
+		CASE 32, 33
+			RENVOYER "VARCHAR(100)"
+
+		// UUID
+		CASE 34, 35
+			RENVOYER "UUID"
+		CASE 36, 37
+			RENVOYER "VARCHAR(64)"
+
+		// JSON
+		CASE 38
+			RENVOYER "JSONB"
+
+		// Secure password (hash, store as text)
+		CASE 39
+			RENVOYER "TEXT"
+
+		// Record number
+		CASE 8
+			RENVOYER "BIGINT"
+
+		// Fallback
+		OTHER CASE
+			RENVOYER "TEXT /* unknown type " + nType + " */"
+	END
+FIN
+
+// Type code to human-readable label (for report)
+PROCEDURE INTERNE TypeLabel(LOCAL nType is int)
+	SWITCH nType
+		CASE 1: RENVOYER "AutoID8"
+		CASE 2: RENVOYER "Text"
+		CASE 3: RENVOYER "Int2"
+		CASE 4: RENVOYER "Int1"
+		CASE 5: RENVOYER "Int4"
+		CASE 6: RENVOYER "Real4"
+		CASE 7: RENVOYER "Real8"
+		CASE 8: RENVOYER "RecNum"
+		CASE 9: RENVOYER "UInt2"
+		CASE 10: RENVOYER "Date6"
+		CASE 11: RENVOYER "Time"
+		CASE 12: RENVOYER "UInt1"
+		CASE 13: RENVOYER "TurboReal"
+		CASE 14: RENVOYER "Date8"
+		CASE 15: RENVOYER "TextMemo"
+		CASE 16: RENVOYER "BinMemo4"
+		CASE 17: RENVOYER "Currency"
+		CASE 18: RENVOYER "BinMemo"
+		CASE 19: RENVOYER "Int8"
+		CASE 20: RENVOYER "UInt8"
+		CASE 21: RENVOYER "Image"
+		CASE 22: RENVOYER "UInt4"
+		CASE 23: RENVOYER "Binary"
+		CASE 24: RENVOYER "DateTime"
+		CASE 25: RENVOYER "Duration"
+		CASE 26: RENVOYER "Char"
+		CASE 27: RENVOYER "Boolean"
+		CASE 28: RENVOYER "AutoID4"
+		CASE 29: RENVOYER "UnicodeText"
+		CASE 30: RENVOYER "UnicodeMemo"
+		CASE 31: RENVOYER "Numeric"
+		CASE 32: RENVOYER "Enum"
+		CASE 33: RENVOYER "Combination"
+		CASE 34: RENVOYER "UUID128"
+		CASE 35: RENVOYER "UUID128Auto"
+		CASE 36: RENVOYER "UUID256"
+		CASE 37: RENVOYER "UUID256Auto"
+		CASE 38: RENVOYER "JSON"
+		CASE 39: RENVOYER "SecurePassword"
+		OTHER CASE: RENVOYER "Unknown(" + nType + ")"
+	END
+FIN
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+sTableList is string = HListeFichier(hLstNormal)
+sReport is string = "HFSQL -> PostgreSQL Schema Report" + Charact(10)
+sReport += "Generated: " + DateToString(DateSys(), "YYYY-MM-DD") + " " + TimeToString(TimeSys(), "HH:MM:SS") + Charact(10)
+sReport += "==========================================" + Charact(10) + Charact(10)
+
+nTableIndex is int = 1
+nTotalTables is int = 0
+nTotalFields is int = 0
+sTableName is string = ExtractString(sTableList, nTableIndex, CR)
+
+WHILE sTableName <> EOT
+
+	sPgTableName is string = Lower(sTableName)
+	sFieldList is string = HListeRubrique(sTableName, hLstDétail)
+
+	sCreateCols is string = ""
+	nFieldCount is int = 0
+	sFieldSummary is string = ""
+
+	nFieldIndex is int = 1
+	sFieldLine is string = ExtractString(sFieldList, nFieldIndex, CR)
+
+	WHILE sFieldLine <> EOT
+		sFieldName is string = ExtractString(sFieldLine, 1, TAB)
+		// Position 2 = "T" or "N" (text vs numeric flag) - skip
+		nFieldType is int = Val(ExtractString(sFieldLine, 3, TAB))
+		nFieldSize is int = Val(ExtractString(sFieldLine, 4, TAB))
+		nFieldDecimals is int = Val(ExtractString(sFieldLine, 5, TAB))
+
+		sPgType is string = MapType(nFieldType, nFieldSize, nFieldDecimals)
+
+		IF sCreateCols <> "" THEN
+			sCreateCols += "," + Charact(10)
+		END
+		sCreateCols += "  """ + sFieldName + """ " + sPgType
+
+		nFieldCount++
+		sFieldSummary += "  " + sFieldName + " [" + TypeLabel(nFieldType) + "] -> " + sPgType + Charact(10)
+
+		nFieldIndex++
+		sFieldLine = ExtractString(sFieldList, nFieldIndex, CR)
+	END
+
+	IF nFieldCount = 0 THEN
+		Trace("[SKIP] " + sTableName + " - no fields")
+		nTableIndex++
+		sTableName = ExtractString(sTableList, nTableIndex, CR)
+		CONTINUE
+	END
+
+	// Generate CREATE TABLE SQL
+	sCreateSQL is string = "-- Table: " + sTableName + " (" + nFieldCount + " columns)" + Charact(10)
+	sCreateSQL += "-- Generated from HFSQL analysis" + Charact(10) + Charact(10)
+	sCreateSQL += "CREATE TABLE IF NOT EXISTS " + sPgTableName + " (" + Charact(10) + sCreateCols + Charact(10) + ");" + Charact(10)
+
+	fSaveText(sSqlOutputPath + sPgTableName + ".sql", StringToUTF8(sCreateSQL))
+
+	// Add to report
+	sReport += sPgTableName + " (" + nFieldCount + " columns)" + Charact(10)
+	sReport += sFieldSummary + Charact(10)
+
+	nTotalTables++
+	nTotalFields += nFieldCount
+
+	Trace("[" + nTotalTables + "] " + sPgTableName + " -> " + nFieldCount + " columns")
+
+	nTableIndex++
+	sTableName = ExtractString(sTableList, nTableIndex, CR)
+END
+
+// Write report
+sReport += "==========================================" + Charact(10)
+sReport += "Total tables: " + nTotalTables + Charact(10)
+sReport += "Total fields: " + nTotalFields + Charact(10)
+
+fSaveText(sSqlOutputPath + "_report.txt", StringToUTF8(sReport))
+
+Trace("Done! " + nTotalTables + " schemas generated in " + sSqlOutputPath)
+Trace("Report: " + sSqlOutputPath + "_report.txt")
+
+RETURN True

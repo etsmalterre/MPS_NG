@@ -1,0 +1,486 @@
+// ============================================================================
+// Bulk HFSQL -> PostgreSQL Migration Utility
+// ============================================================================
+// Migrates all HFSQL tables to PostgreSQL via the Native PostgreSQL Connector.
+//
+// How it works:
+//   1. Connects to PostgreSQL via HDécritConnexion + HOuvreConnexion
+//   2. Scans the HFSQL analysis for all tables
+//   3. For each table: creates the PostgreSQL table (CREATE TABLE IF NOT EXISTS)
+//   4. For each table: reads all HFSQL records and inserts in batches
+//   5. Logs progress and errors to a log file
+//
+// Prerequisites:
+//   - Native PostgreSQL connector DLLs in place
+//   - PostgreSQL dev database running (Docker, port 5435)
+//   - WinDev project linked to the MPS HFSQL analysis
+//
+// Usage: Copy this code into a WinDev procedure and call BulkMigrate()
+// ============================================================================
+
+PROCEDURE BulkMigrate()
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+sLogPath is string = "C:\dev\MPS_NG\data_migration\logs\migration.log"
+sSqlOutputPath is string = "C:\dev\MPS_NG\data_migration\schemas\"
+
+// PostgreSQL connection settings
+sPgServer is string = "localhost"
+sPgPort is string = "5435"
+sPgDatabase is string = "mps_dev"
+sPgUser is string = "postgres"
+sPgPassword is string = "devpassword"
+
+// PostgreSQL connection name
+sConnectionName is string = "PG_MIGRATION"
+
+// Batch size for INSERTs
+nBatchSize is int = 200
+
+// Tables to skip (comma-separated, no spaces)
+sSkipTables is string = ""
+
+// ---------------------------------------------------------------------------
+// HFSQL type codes (from HListeRubrique with hLstDétail)
+// ---------------------------------------------------------------------------
+// 1  = Auto ID 8B    2  = Text         3  = Int2 signed    4  = Int1 signed
+// 5  = Int4 signed   6  = Real4        7  = Real8          8  = Record number
+// 9  = UInt2        10  = Date6       11  = Time          12  = UInt1
+// 13 = Turbo real   14  = Date8       15  = Text memo     16  = BinMemo 4.0
+// 17 = Currency     18  = Binary memo 19  = Int8 signed   20  = UInt8
+// 21 = Image        22  = UInt4       23  = Binary        24  = DateTime
+// 25 = Duration     26  = Character   27  = Boolean       28  = Auto ID 4B
+// 29 = Unicode text 30  = Unicode memo 31 = Numeric       32  = Enumeration
+// 33 = Combination  34  = UUID128     35  = UUID128 auto  36  = UUID256
+// 37 = UUID256 auto 38  = JSON        39  = Secure password
+
+// ---------------------------------------------------------------------------
+// Internal procedures
+// ---------------------------------------------------------------------------
+
+// Log a message to both Trace and log file
+PROCEDURE INTERNE LogMsg(LOCAL sMsg is string)
+	sLine is string = DateToString(DateSys(), "YYYY-MM-DD") + " " + TimeToString(TimeSys(), "HH:MM:SS") + " " + sMsg
+	Trace(sLine)
+	// Append to log file
+	nFile is int = fOpen(sLogPath, foAdd)
+	IF nFile = -1 THEN
+		// File doesn't exist yet, create it
+		nFile = fOpen(sLogPath, foCreate)
+	END
+	IF nFile <> -1 THEN
+		fWriteLine(nFile, sLine)
+		fClose(nFile)
+	END
+FIN
+
+// Map HFSQL field type code to PostgreSQL type
+PROCEDURE INTERNE MapType(LOCAL nType is int, LOCAL nSize is int, LOCAL nDecimals is int)
+	SWITCH nType
+		// Auto ID
+		CASE 1
+			RENVOYER "BIGSERIAL"
+		CASE 28
+			RENVOYER "SERIAL"
+
+		// Text / Character
+		CASE 2, 26
+			IF nSize > 0 AND nSize <= 10000 THEN
+				RENVOYER "VARCHAR(" + nSize + ")"
+			ELSE
+				RENVOYER "TEXT"
+			END
+		CASE 29
+			IF nSize > 0 AND nSize <= 10000 THEN
+				RENVOYER "VARCHAR(" + nSize + ")"
+			ELSE
+				RENVOYER "TEXT"
+			END
+
+		// Text memos
+		CASE 15, 30
+			RENVOYER "TEXT"
+
+		// Signed integers
+		CASE 4
+			RENVOYER "SMALLINT"
+		CASE 3
+			RENVOYER "SMALLINT"
+		CASE 5
+			RENVOYER "INTEGER"
+		CASE 19
+			RENVOYER "BIGINT"
+
+		// Unsigned integers
+		CASE 12
+			RENVOYER "SMALLINT"
+		CASE 9
+			RENVOYER "INTEGER"
+		CASE 22
+			RENVOYER "BIGINT"
+		CASE 20
+			RENVOYER "BIGINT"
+
+		// Reals
+		CASE 6
+			RENVOYER "REAL"
+		CASE 7, 13
+			RENVOYER "DOUBLE PRECISION"
+
+		// Currency
+		CASE 17
+			RENVOYER "NUMERIC(19,4)"
+
+		// High-precision numeric
+		CASE 31
+			IF nDecimals > 0 THEN
+				RENVOYER "NUMERIC(" + nSize + "," + nDecimals + ")"
+			ELSE IF nSize > 0 THEN
+				RENVOYER "NUMERIC(" + nSize + ")"
+			ELSE
+				RENVOYER "NUMERIC"
+			END
+
+		// Dates
+		CASE 10, 14
+			RENVOYER "DATE"
+
+		// Time
+		CASE 11
+			RENVOYER "TIME"
+
+		// DateTime
+		CASE 24
+			RENVOYER "TIMESTAMP"
+
+		// Boolean
+		CASE 27
+			RENVOYER "BOOLEAN"
+
+		// Binary memo / Image / Binary
+		CASE 16, 18, 21, 23
+			RENVOYER "BYTEA"
+
+		// Duration
+		CASE 25
+			RENVOYER "BIGINT"
+
+		// Enumeration / Combination (WinDev returns text labels)
+		CASE 32, 33
+			RENVOYER "VARCHAR(100)"
+
+		// UUID
+		CASE 34, 35
+			RENVOYER "UUID"
+		CASE 36, 37
+			RENVOYER "VARCHAR(64)"
+
+		// JSON
+		CASE 38
+			RENVOYER "JSONB"
+
+		// Secure password
+		CASE 39
+			RENVOYER "TEXT"
+
+		// Record number
+		CASE 8
+			RENVOYER "BIGINT"
+
+		// Fallback
+		OTHER CASE
+			RENVOYER "TEXT"
+	END
+FIN
+
+// Escape a value for use in a SQL INSERT statement
+PROCEDURE INTERNE EscapeSqlValue(LOCAL sValue is string, LOCAL nType is int)
+	// NULL handling for non-text types
+	IF sValue = "" THEN
+		SWITCH nType
+			CASE 2, 15, 26, 29, 30, 38, 39
+				// Text types: empty string
+				RENVOYER "''"
+			OTHER CASE
+				RENVOYER "NULL"
+		END
+	END
+
+	SWITCH nType
+		// Boolean
+		CASE 27
+			IF sValue = "1" OR Upper(sValue) = "VRAI" OR Upper(sValue) = "TRUE" THEN
+				RENVOYER "TRUE"
+			ELSE
+				RENVOYER "FALSE"
+			END
+
+		// Date (YYMMDD or YYYYMMDD)
+		CASE 10, 14
+			IF Length(sValue) = 8 THEN
+				sYear is string = Left(sValue, 4)
+				nMonth is int = Val(Middle(sValue, 5, 2))
+				nDay is int = Val(Middle(sValue, 7, 2))
+				// Reject invalid dates
+				IF sYear = "0000" OR nMonth < 1 OR nMonth > 12 OR nDay < 1 OR nDay > 31 THEN
+					RENVOYER "NULL"
+				END
+				RENVOYER "'" + sYear + "-" + NumToString(nMonth, "02d") + "-" + NumToString(nDay, "02d") + "'"
+			ELSE IF Length(sValue) = 6 AND sValue <> "000000" THEN
+				sYY is string = Left(sValue, 2)
+				nMM is int = Val(Middle(sValue, 3, 2))
+				nDD is int = Val(Middle(sValue, 5, 2))
+				IF nMM < 1 OR nMM > 12 OR nDD < 1 OR nDD > 31 THEN
+					RENVOYER "NULL"
+				END
+				RENVOYER "'20" + sYY + "-" + NumToString(nMM, "02d") + "-" + NumToString(nDD, "02d") + "'"
+			ELSE
+				RENVOYER "NULL"
+			END
+
+		// Time
+		CASE 11
+			IF Length(sValue) >= 6 THEN
+				RENVOYER "'" + Left(sValue, 2) + ":" + Middle(sValue, 3, 2) + ":" + Middle(sValue, 5, 2) + "'"
+			ELSE
+				RENVOYER "NULL"
+			END
+
+		// DateTime (YYYYMMDDHHMMSS)
+		CASE 24
+			IF Length(sValue) >= 14 THEN
+				sYear2 is string = Left(sValue, 4)
+				nMonth2 is int = Val(Middle(sValue, 5, 2))
+				nDay2 is int = Val(Middle(sValue, 7, 2))
+				// Reject invalid dates
+				IF sYear2 = "0000" OR nMonth2 < 1 OR nMonth2 > 12 OR nDay2 < 1 OR nDay2 > 31 THEN
+					RENVOYER "NULL"
+				END
+				sHour is string = Middle(sValue, 9, 2)
+				sMin is string = Middle(sValue, 11, 2)
+				sSec is string = Middle(sValue, 13, 2)
+				RENVOYER "'" + sYear2 + "-" + NumToString(nMonth2, "02d") + "-" + NumToString(nDay2, "02d") + " " + sHour + ":" + sMin + ":" + sSec + "'"
+			ELSE
+				RENVOYER "NULL"
+			END
+
+		// Enumeration / Combination: WinDev returns text labels, store as quoted string
+		CASE 32, 33
+			RENVOYER "'" + Replace(sValue, "'", "''") + "'"
+
+		// Numeric types (integers, reals, currency, duration, auto ID, record number)
+		CASE 1, 3, 4, 5, 6, 7, 8, 9, 12, 13, 17, 19, 20, 22, 25, 28, 31
+			RENVOYER sValue
+
+		// Binary types: skip for now
+		CASE 16, 18, 21, 23
+			RENVOYER "NULL"
+
+		// Text types (Text, Unicode, Memo, Character, JSON, SecurePassword)
+		OTHER CASE
+			RENVOYER "'" + Replace(sValue, "'", "''") + "'"
+	END
+FIN
+
+// Execute a SQL query on the PostgreSQL connection
+// Uses hRequêteSansCorrection to pass SQL through without WLanguage parsing
+// Returns True if successful, False otherwise
+PROCEDURE INTERNE ExecPgSQL(LOCAL sQuery is string)
+	dsQuery is Data Source
+	IF NOT HExécuteRequêteSQL(dsQuery, sConnectionName, hRequêteSansCorrection, sQuery) THEN
+		RENVOYER False
+	END
+	HLibèreRequête(dsQuery)
+	RENVOYER True
+FIN
+
+// ---------------------------------------------------------------------------
+// Main logic
+// ---------------------------------------------------------------------------
+
+// Ensure output directories exist
+fMakeDir("C:\dev\MPS_NG\data_migration\logs")
+fMakeDir(sSqlOutputPath)
+
+LogMsg("========================================")
+LogMsg("Migration started")
+LogMsg("========================================")
+
+// Connect to PostgreSQL
+HDécritConnexion(sConnectionName, sPgUser, sPgPassword, sPgServer, sPgDatabase, hAccèsNatifPostgreSQL, hOLecture, "Server port=" + sPgPort)
+
+IF NOT HOuvreConnexion(sConnectionName) THEN
+	LogMsg("ERROR: Cannot connect to PostgreSQL: " + HErreurInfo())
+	RETURN False
+END
+LogMsg("Connected to PostgreSQL " + sPgServer + ":" + sPgPort + "/" + sPgDatabase)
+
+// Get list of all HFSQL tables from the analysis
+sTableList is string = HListeFichier(hLstNormal)
+nTotalTables is int = 0
+nMigrated is int = 0
+nErrors is int = 0
+
+// Count tables
+nCount is int = 1
+WHILE ExtractString(sTableList, nCount, CR) <> EOT
+	nTotalTables++
+	nCount++
+END
+
+LogMsg("Found " + nTotalTables + " tables in HFSQL analysis")
+
+// Process each table
+nTableIndex is int = 1
+sTableName is string = ExtractString(sTableList, nTableIndex, CR)
+
+WHILE sTableName <> EOT
+
+	// Skip excluded tables
+	IF sSkipTables <> "" AND Contains("," + sSkipTables + ",", "," + sTableName + ",") THEN
+		LogMsg("[SKIP] " + sTableName)
+		nTableIndex++
+		sTableName = ExtractString(sTableList, nTableIndex, CR)
+		CONTINUE
+	END
+
+	LogMsg("--------------------------------------------------")
+	LogMsg("[" + nTableIndex + "/" + nTotalTables + "] Processing: " + sTableName)
+
+	// -----------------------------------------------------------------------
+	// Step 1: Read column definitions from HFSQL analysis
+	// -----------------------------------------------------------------------
+	sFieldList is string = HListeRubrique(sTableName, hLstDétail)
+
+	sCreateCols is string = ""
+	sPgTableName is string = Lower(sTableName)
+	tabFieldNames is array of strings
+	tabFieldTypes is array of int
+
+	nFieldIndex is int = 1
+	sFieldLine is string = ExtractString(sFieldList, nFieldIndex, CR)
+
+	WHILE sFieldLine <> EOT
+		sFieldName is string = ExtractString(sFieldLine, 1, TAB)
+		// Position 2 = "T" or "N" (text vs numeric flag) - skip
+		nFieldType is int = Val(ExtractString(sFieldLine, 3, TAB))
+		nFieldSize is int = Val(ExtractString(sFieldLine, 4, TAB))
+		nFieldDecimals is int = Val(ExtractString(sFieldLine, 5, TAB))
+
+		sPgType is string = MapType(nFieldType, nFieldSize, nFieldDecimals)
+
+		// Quote column name to preserve casing for WinDev compatibility
+		IF sCreateCols <> "" THEN
+			sCreateCols += "," + Charact(10)
+		END
+		sCreateCols += "  """ + sFieldName + """ " + sPgType
+
+		ArrayAdd(tabFieldNames, sFieldName)
+		ArrayAdd(tabFieldTypes, nFieldType)
+
+		nFieldIndex++
+		sFieldLine = ExtractString(sFieldList, nFieldIndex, CR)
+	END
+
+	IF tabFieldNames..Occurrence = 0 THEN
+		LogMsg("[WARN] No fields found for " + sTableName + ", skipping")
+		nTableIndex++
+		sTableName = ExtractString(sTableList, nTableIndex, CR)
+		CONTINUE
+	END
+
+	// -----------------------------------------------------------------------
+	// Step 2: CREATE TABLE in PostgreSQL
+	// -----------------------------------------------------------------------
+	sCreateSQL is string = "CREATE TABLE IF NOT EXISTS " + sPgTableName + " (" + Charact(10) + sCreateCols + Charact(10) + ");"
+
+	// Save schema to file for reference
+	fSaveText(sSqlOutputPath + sPgTableName + ".sql", StringToUTF8(sCreateSQL))
+
+	IF NOT ExecPgSQL(sCreateSQL) THEN
+		LogMsg("[ERROR] CREATE TABLE failed for " + sTableName + ": " + HErreurInfo())
+		nErrors++
+		nTableIndex++
+		sTableName = ExtractString(sTableList, nTableIndex, CR)
+		CONTINUE
+	END
+
+	LogMsg("[OK] Table created: " + sPgTableName + " (" + tabFieldNames..Occurrence + " columns)")
+
+	// -----------------------------------------------------------------------
+	// Step 3: Migrate data in batches
+	// -----------------------------------------------------------------------
+
+	// Build column list for INSERT
+	sColList is string = ""
+	FOR i = 1 TO tabFieldNames..Occurrence
+		IF i > 1 THEN sColList += ", "
+		sColList += """" + tabFieldNames[i] + """"
+	END
+
+	nRecordCount is int = 0
+	nBatchCount is int = 0
+	sValues is string = ""
+
+	HReadFirst(sTableName)
+	WHILE NOT HOut()
+		// Build VALUES row
+		sRow is string = "("
+		FOR i = 1 TO tabFieldNames..Occurrence
+			IF i > 1 THEN sRow += ", "
+			// Read field value using indirection
+			sFieldValue is string = {"" + sTableName + "." + tabFieldNames[i], indRubrique}
+			sRow += EscapeSqlValue(sFieldValue, tabFieldTypes[i])
+		END
+		sRow += ")"
+
+		IF sValues <> "" THEN sValues += "," + Charact(10)
+		sValues += sRow
+		nBatchCount++
+		nRecordCount++
+
+		// Flush batch
+		IF nBatchCount >= nBatchSize THEN
+			sInsertSQL is string = "INSERT INTO " + sPgTableName + " (" + sColList + ") VALUES " + Charact(10) + sValues + ";"
+			IF NOT ExecPgSQL(sInsertSQL) THEN
+				LogMsg("[ERROR] INSERT batch failed for " + sTableName + " at record " + nRecordCount + ": " + HErreurInfo())
+				nErrors++
+			END
+			sValues = ""
+			nBatchCount = 0
+		END
+
+		HReadNext(sTableName)
+	END
+
+	// Flush remaining records
+	IF sValues <> "" THEN
+		sInsertSQL is string = "INSERT INTO " + sPgTableName + " (" + sColList + ") VALUES " + Charact(10) + sValues + ";"
+		IF NOT ExecPgSQL(sInsertSQL) THEN
+			LogMsg("[ERROR] INSERT final batch failed for " + sTableName + ": " + HErreurInfo())
+			nErrors++
+		END
+	END
+
+	LogMsg("[OK] Data migrated: " + nRecordCount + " records")
+	nMigrated++
+
+	nTableIndex++
+	sTableName = ExtractString(sTableList, nTableIndex, CR)
+END
+
+// ---------------------------------------------------------------------------
+// Summary
+// ---------------------------------------------------------------------------
+HFermeConnexion(sConnectionName)
+
+LogMsg("========================================")
+LogMsg("Migration complete")
+LogMsg("  Tables migrated: " + nMigrated)
+LogMsg("  Errors: " + nErrors)
+LogMsg("  Total tables: " + nTotalTables)
+LogMsg("========================================")
+
+RETURN (nErrors = 0)

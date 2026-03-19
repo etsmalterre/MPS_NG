@@ -34,3 +34,8 @@ npm-debug.log*
 # Temp files
 *.tmp
 tmpclaude-*
+
+# Data migration (real company data, generated schemas)
+data_migration/data/
+data_migration/schemas/
+data_migration/logs/

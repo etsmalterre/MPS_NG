@@ -1,0 +1,70 @@
+// ============================================================================
+// Clean PostgreSQL: Drop all migrated tables
+// ============================================================================
+// Drops every table that was created by BulkMigrate.
+// Uses the same HListeFichier scan to build the table list.
+//
+// Usage: Copy into WinDev and call CleanPg()
+// ============================================================================
+
+PROCEDURE CleanPg()
+
+// PostgreSQL connection settings
+sPgServer is string = "localhost"
+sPgPort is string = "5435"
+sPgDatabase is string = "mps_dev"
+sPgUser is string = "postgres"
+sPgPassword is string = "devpassword"
+sConnectionName is string = "PG_CLEAN"
+
+// Connect to PostgreSQL
+HDécritConnexion(sConnectionName, sPgUser, sPgPassword, sPgServer, sPgDatabase, hAccèsNatifPostgreSQL, hOLecture, "Server port=" + sPgPort)
+
+IF NOT HOuvreConnexion(sConnectionName) THEN
+	Trace("ERROR: Cannot connect to PostgreSQL: " + HErreurInfo())
+	RETURN False
+END
+Trace("Connected to PostgreSQL")
+
+// Get all HFSQL table names (same list BulkMigrate uses)
+sTableList is string = HListeFichier(hLstNormal)
+
+// Build a single DROP statement with CASCADE
+nTableIndex is int = 1
+sTableName is string = ExtractString(sTableList, nTableIndex, CR)
+sDropList is string = ""
+nCount is int = 0
+
+WHILE sTableName <> EOT
+	sPgTableName is string = Lower(sTableName)
+	IF sDropList <> "" THEN
+		sDropList += ", "
+	END
+	sDropList += sPgTableName
+	nCount++
+	nTableIndex++
+	sTableName = ExtractString(sTableList, nTableIndex, CR)
+END
+
+IF sDropList = "" THEN
+	Trace("No tables found in analysis")
+	HFermeConnexion(sConnectionName)
+	RETURN True
+END
+
+// Execute DROP TABLE ... CASCADE
+sDropSQL is string = "DROP TABLE IF EXISTS " + sDropList + " CASCADE;"
+
+Trace("Dropping " + nCount + " tables...")
+
+dsQuery is Data Source
+IF NOT HExécuteRequêteSQL(dsQuery, sConnectionName, hRequêteSansCorrection, sDropSQL) THEN
+	Trace("ERROR: DROP failed: " + HErreurInfo())
+	HFermeConnexion(sConnectionName)
+	RETURN False
+END
+HLibèreRequête(dsQuery)
+
+HFermeConnexion(sConnectionName)
+Trace("Done! " + nCount + " tables dropped from " + sPgDatabase)
+RETURN True

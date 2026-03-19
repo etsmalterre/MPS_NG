@@ -47,7 +47,7 @@ Create the user interface without data:
 Rebuild PostgreSQL database from legacy HFSQL:
 - Schema design based on 204 legacy tables
 - Data migration scripts
-- Drizzle ORM schemas
+- Plain SQL migrations (no ORM)
 - POC validated: `entreprise` table migrated, WinDev connected to PostgreSQL via native connector
 
 ### Phase 3: Features (Future)
@@ -69,7 +69,8 @@ Implement features screen by screen:
 | Monorepo | pnpm + Turborepo |
 | Testing | Vitest |
 | API | Express (placeholder) |
-| ORM | Drizzle (Phase 2) |
+| Database | PostgreSQL + plain SQL migrations |
+| DB Client | postgres.js (raw SQL, no ORM) |
 
 ## Project Structure
 
@@ -98,7 +99,7 @@ MPS_NG/
 │       └── vite.config.ts
 ├── packages/
 │   ├── shared/        # Shared types/utilities
-│   └── db/            # Drizzle schemas (Phase 2)
+│   └── db/            # Database connection + SQL migrations
 ├── .claude/
 │   └── skills/
 │       └── mps_designer/
