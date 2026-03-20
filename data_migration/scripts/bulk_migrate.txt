@@ -40,7 +40,8 @@ sConnectionName is string = "PG_MIGRATION"
 nBatchSize is int = 200
 
 // Tables to skip (comma-separated, no spaces)
-sSkipTables is string = ""
+// Skip tables with enum/combination fields: native PostgreSQL connector doesn't support them
+sSkipTables is string = "utilisateur,conformite_action,envoi_email"
 
 // ---------------------------------------------------------------------------
 // HFSQL type codes (from HListeRubrique with hLstDétail)
@@ -358,6 +359,7 @@ WHILE sTableName <> EOT
 	sPgTableName is string = Lower(sTableName)
 	tabFieldNames is array of strings
 	tabFieldTypes is array of int
+	sPrimaryKeyCol is string = ""
 
 	nFieldIndex is int = 1
 	sFieldLine is string = ExtractString(sFieldList, nFieldIndex, CR)
@@ -370,6 +372,11 @@ WHILE sTableName <> EOT
 		nFieldDecimals is int = Val(ExtractString(sFieldLine, 5, TAB))
 
 		sPgType is string = MapType(nFieldType, nFieldSize, nFieldDecimals)
+
+		// Auto ID fields become primary key
+		IF (nFieldType = 1 OR nFieldType = 28) AND sPrimaryKeyCol = "" THEN
+			sPrimaryKeyCol = sFieldName
+		END
 
 		// Quote column name to preserve casing for WinDev compatibility
 		IF sCreateCols <> "" THEN
@@ -394,6 +401,11 @@ WHILE sTableName <> EOT
 	// -----------------------------------------------------------------------
 	// Step 2: CREATE TABLE in PostgreSQL
 	// -----------------------------------------------------------------------
+	// Add PRIMARY KEY constraint if an auto-ID column was found
+	IF sPrimaryKeyCol <> "" THEN
+		sCreateCols += "," + Charact(10) + "  PRIMARY KEY (""" + sPrimaryKeyCol + """)"
+	END
+
 	sCreateSQL is string = "CREATE TABLE IF NOT EXISTS " + sPgTableName + " (" + Charact(10) + sCreateCols + Charact(10) + ");"
 
 	// Save schema to file for reference
