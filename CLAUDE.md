@@ -43,12 +43,14 @@ Create the user interface without data:
 - Page placeholders for all routes
 - MPS branding (gold/navy color scheme)
 
-### Phase 2: Database (POC Complete, In Progress)
-Rebuild PostgreSQL database from legacy HFSQL:
-- Schema design based on 204 legacy tables
-- Data migration scripts
-- Plain SQL migrations (no ORM)
-- POC validated: `entreprise` table migrated, WinDev connected to PostgreSQL via native connector
+### Phase 2: Database (Architecture Decided)
+Connect the new web app directly to HFSQL via ODBC:
+- **Decision**: Web app connects to HFSQL directly — no PostgreSQL migration needed during transition
+- **Reason**: PostgreSQL migration caused column casing issues between the native connector (quoted mixed-case) and manual SQL queries (unquoted). HFSQL ODBC avoids this entirely.
+- **POC validated**: Node.js → ODBC → HFSQL Client/Server works (2026-03-25)
+- **Connection**: `DRIVER={HFSQL};Server Name=localhost;Server Port=4900;Database=MPS;UID=Admin;PWD=;`
+- WinDev app stays on HFSQL as-is — both apps share the same live data
+- PostgreSQL migration scripts remain in `data_migration/` for reference
 
 ### Phase 3: Features (Future)
 Implement features screen by screen:
@@ -68,9 +70,9 @@ Implement features screen by screen:
 | State | TanStack React Query 5 |
 | Monorepo | pnpm + Turborepo |
 | Testing | Vitest |
-| API | Express (placeholder) |
-| Database | PostgreSQL + plain SQL migrations |
-| DB Client | postgres.js (raw SQL, no ORM) |
+| API | Express |
+| Database | HFSQL Client/Server (via ODBC) |
+| DB Client | odbc (npm package) |
 
 ## Project Structure
 
@@ -97,9 +99,10 @@ MPS_NG/
 │       │   └── index.css
 │       ├── tailwind.config.js
 │       └── vite.config.ts
+├── data_migration/    # Legacy PostgreSQL migration scripts (reference)
 ├── packages/
 │   ├── shared/        # Shared types/utilities
-│   └── db/            # Database connection + SQL migrations
+│   └── db/            # Database connection
 ├── .claude/
 │   └── skills/
 │       └── mps_designer/
@@ -143,14 +146,25 @@ MPS_NG/
    - Livraisons (`/transport/livraisons`)
 9. **Paramètres** (`/parametres`)
 
-## WinDev ↔ PostgreSQL Connection
+## HFSQL ODBC Connection (Web App → HFSQL)
 
-The legacy WinDev app connects to the PostgreSQL dev database via the **Native PostgreSQL Connector**:
-- **Connector DLLs**: `C:\PC SOFT\WINDEV Suite 2026\Programs\Framework\Win64x86\`
-- **Client DLLs**: `libpq.dll` + dependencies from PostgreSQL 18 Windows x64 binaries
-- **Connection**: `HDécritConnexion` + `HOuvreConnexion` (not `HChangeConnexion` — incompatible with native connector)
-- **Port config**: Use `Server port=5435` in extended info ("Infos étendues")
-- **Column casing**: PostgreSQL columns must use quoted mixed-case names to match WinDev analysis fields (e.g., `"IDentreprise"` not `identreprise`)
+The MPS_NG web app connects to the HFSQL server via ODBC:
+- **Driver**: `HFSQL` (installed from `C:\PC SOFT\WINDEV Suite 2026\Install\ODBC\WX310PACKODBC.exe`)
+- **Connection string**: `DRIVER={HFSQL};Server Name=localhost;Server Port=4900;Database=MPS;UID=Admin;PWD=;`
+- **npm package**: `odbc`
+- **Known issues**:
+  - Accented table names cause "fichier de données est déjà décrit" error — avoid accents in HFSQL table names
+  - HFSQL backup folders with accented file names trigger the same error — delete backups before connecting
+  - Empty memo fields return as `\x00` — need cleanup in API layer
+  - BigInt fields return with `n` suffix in Node.js
+
+## WinDev ↔ PostgreSQL Connection (Legacy Reference)
+
+> **Note**: PostgreSQL migration was attempted but abandoned due to column casing issues. Kept for reference.
+
+- **Native PostgreSQL Connector**: column casing mismatch between native connector (quoted mixed-case) and manual SQL (unquoted)
+- **Bulk migration scripts**: `data_migration/scripts/bulk_migrate.txt` — migrates all 204 HFSQL tables to PostgreSQL
+- **Skipped tables** (cross-server HFSQL FK constraints): `lst_prev`, `lst_info_sal_annee`, `lst_lissage`, `lst_message`
 
 ## Conventions
 

@@ -40,8 +40,7 @@ sConnectionName is string = "PG_MIGRATION"
 nBatchSize is int = 200
 
 // Tables to skip (comma-separated, no spaces)
-// Skip tables with enum/combination fields: native PostgreSQL connector doesn't support them
-sSkipTables is string = "utilisateur,conformite_action,envoi_email"
+sSkipTables is string = ""
 
 // ---------------------------------------------------------------------------
 // HFSQL type codes (from HListeRubrique with hLstDétail)
@@ -53,8 +52,8 @@ sSkipTables is string = "utilisateur,conformite_action,envoi_email"
 // 17 = Currency     18  = Binary memo 19  = Int8 signed   20  = UInt8
 // 21 = Image        22  = UInt4       23  = Binary        24  = DateTime
 // 25 = Duration     26  = Character   27  = Boolean       28  = Auto ID 4B
-// 29 = Unicode text 30  = Unicode memo 31 = Numeric       32  = Enumeration
-// 33 = Combination  34  = UUID128     35  = UUID128 auto  36  = UUID256
+// 29 = Unicode text 30  = Unicode memo 31 = Numeric
+// 34 = UUID128      35  = UUID128 auto 36  = UUID256
 // 37 = UUID256 auto 38  = JSON        39  = Secure password
 
 // ---------------------------------------------------------------------------
@@ -168,10 +167,6 @@ PROCEDURE INTERNE MapType(LOCAL nType is int, LOCAL nSize is int, LOCAL nDecimal
 		CASE 25
 			RENVOYER "BIGINT"
 
-		// Enumeration / Combination (WinDev returns text labels)
-		CASE 32, 33
-			RENVOYER "VARCHAR(100)"
-
 		// UUID
 		CASE 34, 35
 			RENVOYER "UUID"
@@ -267,10 +262,6 @@ PROCEDURE INTERNE EscapeSqlValue(LOCAL sValue is string, LOCAL nType is int)
 				RENVOYER "NULL"
 			END
 
-		// Enumeration / Combination: WinDev returns text labels, store as quoted string
-		CASE 32, 33
-			RENVOYER "'" + Replace(sValue, "'", "''") + "'"
-
 		// Numeric types (integers, reals, currency, duration, auto ID, record number)
 		CASE 1, 3, 4, 5, 6, 7, 8, 9, 12, 13, 17, 19, 20, 22, 25, 28, 31
 			RENVOYER sValue
@@ -318,7 +309,24 @@ IF NOT HOuvreConnexion(sConnectionName) THEN
 END
 LogMsg("Connected to PostgreSQL " + sPgServer + ":" + sPgPort + "/" + sPgDatabase)
 
+// Wipe the public schema for a clean migration
+LogMsg("Wiping public schema...")
+IF NOT ExecPgSQL("DROP SCHEMA public CASCADE") THEN
+	LogMsg("[ERROR] DROP SCHEMA failed: " + HErreurInfo())
+	HFermeConnexion(sConnectionName)
+	RETURN False
+END
+IF NOT ExecPgSQL("CREATE SCHEMA public") THEN
+	LogMsg("[ERROR] CREATE SCHEMA failed: " + HErreurInfo())
+	HFermeConnexion(sConnectionName)
+	RETURN False
+END
+LogMsg("[OK] Public schema wiped")
+
 // Get list of all HFSQL tables from the analysis
+// Disable HFSQL integrity checks to avoid cross-server FK errors during read
+HGèreIntégrité(False)
+
 sTableList is string = HListeFichier(hLstNormal)
 nTotalTables is int = 0
 nMigrated is int = 0
@@ -378,7 +386,7 @@ WHILE sTableName <> EOT
 			sPrimaryKeyCol = sFieldName
 		END
 
-		// Quote column name to preserve casing for WinDev compatibility
+		// Quote column name to preserve casing for WinDev native connector
 		IF sCreateCols <> "" THEN
 			sCreateCols += "," + Charact(10)
 		END
@@ -436,7 +444,23 @@ WHILE sTableName <> EOT
 	nBatchCount is int = 0
 	sValues is string = ""
 
-	HReadFirst(sTableName)
+	WHEN EXCEPTION IN
+		HReadFirst(sTableName)
+	DO
+		LogMsg("[SKIP-DATA] " + sTableName + ": " + ExceptionInfo(errMessage))
+		nTableIndex++
+		sTableName = ExtractString(sTableList, nTableIndex, CR)
+		CONTINUE
+	END
+
+	IF HOut() THEN
+		LogMsg("[OK] Data migrated: 0 records (empty table)")
+		nMigrated++
+		nTableIndex++
+		sTableName = ExtractString(sTableList, nTableIndex, CR)
+		CONTINUE
+	END
+
 	WHILE NOT HOut()
 		// Build VALUES row
 		sRow is string = "("
