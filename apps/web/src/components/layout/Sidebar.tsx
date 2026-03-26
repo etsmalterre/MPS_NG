@@ -104,10 +104,10 @@ export function Sidebar({ collapsed, onToggle, className }: SidebarProps) {
             'font-semibold text-2xl transition-all duration-300 whitespace-nowrap overflow-hidden ml-2',
             collapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'
           )}>
-            <span className="text-[#E8AD33]">MPS</span>
+            <span className="text-accent">MPS</span>
           </span>
           {collapsed && (
-            <span className="font-semibold text-2xl text-[#E8AD33]">M</span>
+            <span className="font-semibold text-2xl text-accent">M</span>
           )}
         </div>
       </div>

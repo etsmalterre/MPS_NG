@@ -112,8 +112,10 @@ MPS_NG/
 │   └── db/            # Database connection (PostgreSQL — legacy, unused)
 ├── .claude/
 │   └── skills/
-│       └── mps_designer/
-│           └── SKILL.md
+│       ├── mps_designer/
+│       │   └── SKILL.md    # Complete design system (colors, layout, components, patterns)
+│       └── terminate_mps/
+│           └── SKILL.md    # Session termination: update CLAUDE.md, commit, push
 ├── package.json
 ├── pnpm-workspace.yaml
 ├── turbo.json
@@ -197,6 +199,7 @@ Follow the MPS design system defined in `.claude/skills/mps_designer/SKILL.md`:
 - Navy primary color
 - Premium card styles with gold borders
 - Icon boxes with gradient backgrounds
+- **Never hardcode color hex values** — use Tailwind CSS variable classes (`text-accent`, `bg-primary`, `border-gold/30`) so colors are consistent and themeable
 
 ### Typography
 
