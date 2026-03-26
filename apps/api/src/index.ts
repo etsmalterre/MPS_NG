@@ -3,6 +3,7 @@ import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
 import { entreprisesRouter } from './routes/entreprises.js'
+import { closeConnection } from './lib/hfsql.js'
 
 const app = express()
 const PORT = process.env.PORT || 8080
@@ -20,3 +21,11 @@ app.use('/api/entreprises', entreprisesRouter)
 app.listen(PORT, () => {
   console.log(`MPS API running on port ${PORT}`)
 })
+
+async function shutdown() {
+  await closeConnection()
+  process.exit(0)
+}
+
+process.on('SIGTERM', shutdown)
+process.on('SIGINT', shutdown)

@@ -1,0 +1,116 @@
+import odbc from 'odbc'
+
+const CONNECTION_STRING =
+  process.env.HFSQL_CONNECTION_STRING ||
+  'DRIVER={HFSQL};Server Name=localhost;Server Port=4900;Database=MPS;UID=Admin;PWD=;'
+
+let connectionPromise: Promise<odbc.Connection> | null = null
+
+function getConnection(): Promise<odbc.Connection> {
+  if (!connectionPromise) {
+    connectionPromise = odbc.connect({
+      connectionString: CONNECTION_STRING,
+      loginTimeout: 10,
+    })
+    connectionPromise.catch(() => {
+      connectionPromise = null
+    })
+  }
+  return connectionPromise
+}
+
+/** Decode ArrayBuffer from CONVERT() to UTF-8 string */
+function decodeValue(value: unknown): unknown {
+  if (value instanceof ArrayBuffer) {
+    const str = Buffer.from(value).toString('utf8')
+    return str === '' ? null : str
+  }
+  return value
+}
+
+/** Clean HFSQL quirks: ArrayBuffer → string, \x00 memo → null, BigInt → number, U+FFFD → kept for now */
+function cleanRow<T>(row: Record<string, unknown>): T {
+  const cleaned: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(row)) {
+    const decoded = decodeValue(value)
+    if (typeof decoded === 'string' && (decoded === '\x00' || decoded.charCodeAt(0) === 0)) {
+      cleaned[key] = null
+    } else if (typeof decoded === 'bigint') {
+      cleaned[key] = Number(decoded)
+    } else {
+      cleaned[key] = decoded
+    }
+  }
+  return cleaned as T
+}
+
+/** Run a SQL query against HFSQL via ODBC */
+export async function query<T = Record<string, unknown>>(
+  sql: string,
+  params?: (string | number | null)[]
+): Promise<T[]> {
+  const conn = await getConnection()
+  const rows = params ? await conn.query(sql, params) : await conn.query(sql)
+  return (rows as Record<string, unknown>[]).map((row) => cleanRow<T>(row))
+}
+
+/**
+ * Fix encoding for text/memo fields that contain U+FFFD replacement characters.
+ * HFSQL ODBC driver corrupts accented chars; CONVERT(field USING 'UTF-8') fixes them.
+ * This does per-row CONVERT queries only for rows that actually have broken encoding.
+ */
+export async function fixEncoding<T extends Record<string, unknown>>(
+  rows: T[],
+  table: string,
+  idField: string,
+  textFields: string[]
+): Promise<T[]> {
+  const conn = await getConnection()
+  const result: T[] = []
+
+  for (const row of rows) {
+    const needsFix = textFields.some((f) => {
+      const val = row[f]
+      return typeof val === 'string' && val.includes('\ufffd')
+    })
+
+    if (!needsFix) {
+      result.push(row)
+      continue
+    }
+
+    const id = row[idField]
+    const fixed = { ...row }
+    for (const field of textFields) {
+      if (typeof row[field] === 'string' && (row[field] as string).includes('\ufffd')) {
+        try {
+          const r = await conn.query(
+            `SELECT CONVERT(${field} USING 'UTF-8') as v FROM ${table} WHERE ${idField} = ${Number(id)}`
+          )
+          if (r.length > 0 && r[0].v != null) {
+            const val = r[0].v
+            ;(fixed as Record<string, unknown>)[field] =
+              val instanceof ArrayBuffer ? Buffer.from(val).toString('utf8') : val
+          }
+        } catch {
+          // keep original value if CONVERT fails
+        }
+      }
+    }
+    result.push(fixed)
+  }
+
+  return result
+}
+
+export async function closeConnection(): Promise<void> {
+  if (connectionPromise) {
+    try {
+      const conn = await connectionPromise
+      await conn.close()
+    } catch {
+      // ignore close errors
+    }
+    connectionPromise = null
+  }
+}

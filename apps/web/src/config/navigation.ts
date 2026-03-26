@@ -7,6 +7,7 @@ import {
   Tag,
   Factory,
   Boxes,
+  Globe,
   Settings,
   type LucideIcon,
 } from 'lucide-react'
@@ -119,6 +120,15 @@ export const mainNavigation: MainMenuItem[] = [
       { title: 'Livraisons', href: '/transport/livraisons' },
     ],
   },
+  {
+    id: 'reseau',
+    title: 'Réseau',
+    icon: Globe,
+    href: '/reseau',
+    submenus: [
+      { title: 'Entreprises', href: '/reseau/entreprises' },
+    ],
+  },
 ]
 
 // Helper to find active menu based on current path
@@ -173,6 +183,9 @@ export const routeTitles: Record<string, string> = {
   '/transport': 'Transport',
   '/transport/expeditions': 'Expéditions',
   '/transport/livraisons': 'Livraisons',
+  // Réseau
+  '/reseau': 'Réseau',
+  '/reseau/entreprises': 'Entreprises',
   // Settings
   '/settings': 'Paramètres',
 }

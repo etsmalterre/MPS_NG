@@ -11,6 +11,7 @@ import {
   Building2,
   Truck,
   Send,
+  Globe,
   Tag,
   Palette,
   Factory,
@@ -64,6 +65,9 @@ const ProduitsColoris = createPlaceholder('Coloris', 'Gestion des coloris dispon
 const TransportExpeditions = createPlaceholder('Expéditions', 'Gestion des expéditions', Send)
 const TransportLivraisons = createPlaceholder('Livraisons', 'Suivi des livraisons', Truck)
 
+// Réseau pages
+import { Entreprises } from '@/pages/Entreprises'
+
 // Settings
 const SettingsPage = createPlaceholder('Paramètres', 'Configuration de l\'application', Settings)
 
@@ -114,6 +118,10 @@ export const router = createBrowserRouter([
       { path: 'transport', element: <Navigate to="/transport/expeditions" replace /> },
       { path: 'transport/expeditions', element: <TransportExpeditions /> },
       { path: 'transport/livraisons', element: <TransportLivraisons /> },
+
+      // Réseau
+      { path: 'reseau', element: <Navigate to="/reseau/entreprises" replace /> },
+      { path: 'reseau/entreprises', element: <Entreprises /> },
 
       // Settings
       { path: 'settings', element: <SettingsPage /> },
