@@ -81,19 +81,26 @@ MPS_NG/
 ├── apps/
 │   ├── api/           # Express API server
 │   │   └── src/
+│   │       ├── lib/
+│   │       │   └── hfsql.ts       # HFSQL ODBC connection singleton + encoding fix
+│   │       ├── routes/
+│   │       │   └── entreprises.ts # Full CRUD: entreprises, contacts, adresses, competences, recommandations
 │   │       └── index.ts
 │   └── web/           # React frontend
 │       ├── src/
 │       │   ├── components/
-│       │   │   ├── layout/    # AppShell, Sidebar, Header, MobileNav
+│       │   │   ├── layout/    # AppShell, Sidebar, Header, MobileNav, MasterDetailLayout
 │       │   │   ├── shared/    # PagePlaceholder, etc.
 │       │   │   └── ui/        # Radix-based components
 │       │   ├── config/
 │       │   │   └── navigation.ts
+│       │   ├── hooks/
+│       │   │   └── useResponsiveLayout.ts  # Responsive 3-panel layout (full/compact/stacked)
 │       │   ├── lib/
 │       │   │   └── utils.ts
 │       │   ├── pages/
-│       │   │   └── Dashboard.tsx
+│       │   │   ├── Dashboard.tsx
+│       │   │   └── Entreprises.tsx  # First real data screen with edit mode
 │       │   ├── main.tsx
 │       │   ├── router.tsx
 │       │   └── index.css
@@ -102,7 +109,7 @@ MPS_NG/
 ├── data_migration/    # Legacy PostgreSQL migration scripts (reference)
 ├── packages/
 │   ├── shared/        # Shared types/utilities
-│   └── db/            # Database connection
+│   └── db/            # Database connection (PostgreSQL — legacy, unused)
 ├── .claude/
 │   └── skills/
 │       └── mps_designer/
@@ -144,7 +151,9 @@ MPS_NG/
 8. **Transport** (`/transport`)
    - Expéditions (`/transport/expeditions`)
    - Livraisons (`/transport/livraisons`)
-9. **Paramètres** (`/parametres`)
+9. **Réseau** (`/reseau`)
+   - Entreprises (`/reseau/entreprises`) — **first implemented data screen**
+10. **Paramètres** (`/parametres`)
 
 ## HFSQL ODBC Connection (Web App → HFSQL)
 
@@ -152,11 +161,16 @@ The MPS_NG web app connects to the HFSQL server via ODBC:
 - **Driver**: `HFSQL` (installed from `C:\PC SOFT\WINDEV Suite 2026\Install\ODBC\WX310PACKODBC.exe`)
 - **Connection string**: `DRIVER={HFSQL};Server Name=localhost;Server Port=4900;Database=MPS;UID=Admin;PWD=;`
 - **npm package**: `odbc`
+- **ODBC connection helper**: `apps/api/src/lib/hfsql.ts` — singleton connection, `query()` wrapper, `fixEncoding()`, `closeConnection()`
 - **Known issues**:
   - Accented table names cause "fichier de données est déjà décrit" error — avoid accents in HFSQL table names
   - HFSQL backup folders with accented file names trigger the same error — delete backups before connecting
-  - Empty memo fields return as `\x00` — need cleanup in API layer
-  - BigInt fields return with `n` suffix in Node.js
+  - Empty memo fields return as `\x00` — cleaned automatically by `query()` in hfsql.ts
+  - BigInt fields return with `n` suffix — converted to Number automatically by `query()`
+  - **Encoding**: HFSQL ODBC driver corrupts accented characters (é→U+FFFD). Fix: use `fixEncoding()` which calls `CONVERT(field USING 'UTF-8')` per-row for affected fields. Returns ArrayBuffer decoded as UTF-8.
+  - **No parameterized queries**: `?` placeholders cause "SQLGetDescribeParam non supportée" error. Use string interpolation with `esc()` (single-quote doubling) for strings, `parseInt` for IDs.
+  - **No `RETURNING *`**: HFSQL SQL doesn't support it. Use follow-up SELECT after INSERT/UPDATE.
+  - **Booleans as numbers**: HFSQL returns `0`/`1` not `true`/`false`. In React, always use `!!value &&` to avoid rendering `0` as text.
 
 ## WinDev ↔ PostgreSQL Connection (Legacy Reference)
 
@@ -202,11 +216,35 @@ Follow the MPS design system defined in `.claude/skills/mps_designer/SKILL.md`:
 className="bg-gradient-to-r from-gold/40 via-gold/15 to-transparent"
 ```
 
+### Stale .js Build Artifacts
+
+The `apps/web/src/` directory contains compiled `.js` files alongside `.ts`/`.tsx` source files (caused by `tsconfig` with no `outDir`). **Vite picks up `.js` before `.tsx`**, so when modifying source files, the corresponding `.js` file must also be updated or Vite will serve stale code. This affects `router.js`, `navigation.js`, and other files.
+
+### Screen Layout Pattern (MasterDetailLayout)
+
+New data screens should use the 3-panel `MasterDetailLayout` component (`apps/web/src/components/layout/MasterDetailLayout.tsx`):
+- **Left panel** (`w-72`): Searchable list with selection
+- **Center**: Detail header + main content area
+- **Right panel** (`w-96`): Sidebar with tabs (e.g. contacts, adresses)
+- Responsive: full (1400px+), compact (1240-1400px, sidebar as drawer), stacked (<1240px)
+
+### Edit Mode Pattern
+
+Follow the Entreprises screen pattern for edit mode:
+- `isEditing` state toggle via "Modifier" button → "Annuler" / "Enregistrer"
+- **Visual indicator**: `border-l-4 border-l-accent/70 bg-accent/[0.03]` on editable cards
+- **Header**: Gold "Mode edition" badge, name becomes input field
+- **Forms**: Only shown on demand (click "+" to add), not always visible
+- **Hover-reveal actions**: `opacity-0 group-hover:opacity-100` for edit/delete buttons
+- **Labeled inputs**: Use `LabeledInput` component (label above field)
+- **InlineForm wrapper**: Shared component with uppercase gold title, save/cancel buttons
+- **View cards**: `bg-muted/40 rounded-md` for list items (contacts, adresses, recommandations)
+
 ### Related Project
 
-MPS_NG follows the architecture of **MFProd_NG** (`C:\dev\MFProd_NG`):
+MPS_NG follows the architecture of **MFProd_NG** (`C:\dev\mfprod\mfprod_erp`):
 - Same tech stack
-- Same layout patterns
+- Same layout patterns (MasterDetailLayout, edit mode, sidebar tabs)
 - Different branding (gold vs orange)
 - Different business domain (textile vs fencing)
 
@@ -236,6 +274,17 @@ Detailed docs are in `claude_doc/` — load only when needed:
 | `legacy_windows.md` | All 319 windows + 49 reports, organized by functional area |
 | `navigation_mapping.md` | Legacy windows → new MPS_NG routes mapping |
 | `business_glossary.md` | Complete domain vocabulary, production flow, business terms |
+
+## Implemented Screens
+
+### Entreprises (`/reseau/entreprises`)
+First fully implemented data screen. 3-panel layout with:
+- **Left**: Searchable enterprise list, "Nouveau" button in footer (edit mode only)
+- **Center**: Company header (name, competence badges, @ email button, Modifier button), notes card, competences card, recommandations card
+- **Detail API**: `GET /api/entreprises/:id` returns enterprise + adresses + contacts + competences + recommandations
+- **CRUD endpoints**: Full CRUD for all sub-entities under `/api/entreprises/:id/{contacts,adresses,competences,recommandations}`
+- **Edit mode**: Inline forms, hover-reveal edit/delete, labeled inputs
+- **HFSQL tables**: `entreprise`, `adresse`, `contact`, `competence`, `entreprise_competence`, `recommandation`
 
 ## Business Domain (Quick Reference)
 
