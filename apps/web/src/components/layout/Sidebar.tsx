@@ -99,17 +99,11 @@ export function Sidebar({ collapsed, onToggle, className }: SidebarProps) {
     >
       {/* Logo */}
       <div className="flex h-14 items-center border-b border-white/10 px-3">
-        <div className="flex items-center gap-0">
-          <span className={cn(
-            'font-semibold text-2xl transition-all duration-300 whitespace-nowrap overflow-hidden ml-2',
-            collapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'
-          )}>
-            <span className="text-accent">MPS</span>
-          </span>
-          {collapsed && (
-            <span className="font-semibold text-2xl text-accent">M</span>
-          )}
-        </div>
+        {collapsed ? (
+          <img src="/logo-small.png" alt="MPS" className="h-8 w-auto mx-auto" />
+        ) : (
+          <img src="/logo-full.png" alt="MPS" className="h-10 w-auto mx-auto" />
+        )}
       </div>
 
       {/* Navigation */}

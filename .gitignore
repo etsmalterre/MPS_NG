@@ -21,8 +21,7 @@ desktop.ini
 
 # Environment
 .env
-.env.local
-.env.*.local
+.env.*
 
 # Test coverage
 coverage/

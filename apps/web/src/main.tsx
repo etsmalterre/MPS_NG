@@ -5,6 +5,12 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { router } from './router'
 import './index.css'
 
+// Clean up design carousel artifacts from localStorage
+document.documentElement.removeAttribute('data-theme')
+localStorage.removeItem('mps-theme')
+localStorage.removeItem('mps-panel-bg')
+localStorage.removeItem('mps-panel-hf')
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

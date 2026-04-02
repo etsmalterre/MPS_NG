@@ -8,41 +8,41 @@
 @layer base {
   :root {
     /* MPS/ETS Malterre Brand Colors */
-    /* Primary: #00243E (Dark Navy) */
-    /* Accent Gold: #E8AD33 (Golden Yellow) */
-    /* Accent Blue: #046bd2 (Corporate Blue) */
+    /* Primary: #143D6B (Medium-dark blue) */
+    /* Accent Gold: #F2B80A (Vivid Gold) */
+    /* Accent Blue: #3B7DC9 (Corporate Blue) */
 
-    /* WARM light mode - sand undertone */
-    --background: 36 20% 98%;
-    --foreground: 210 25% 12%;
-    --card: 36 15% 99%;
-    --card-foreground: 210 25% 12%;
+    /* Light mode - bright warm whites */
+    --background: 40 18% 99%;
+    --foreground: 211 22% 14%;
+    --card: 0 0% 100%;
+    --card-foreground: 211 22% 14%;
     --popover: 0 0% 100%;
-    --popover-foreground: 210 25% 12%;
+    --popover-foreground: 211 22% 14%;
 
-    /* Primary - MPS Navy #00243E */
-    --primary: 207 100% 12%;
+    /* Primary - MPS Blue #143D6B */
+    --primary: 211 68% 25%;
     --primary-foreground: 0 0% 100%;
 
     /* Secondary - Warm gray */
-    --secondary: 36 12% 96%;
-    --secondary-foreground: 210 12% 20%;
+    --secondary: 38 12% 96%;
+    --secondary-foreground: 211 12% 22%;
 
     /* Muted - Warm soft backgrounds */
-    --muted: 36 12% 96%;
-    --muted-foreground: 210 8% 46%;
+    --muted: 38 12% 96%;
+    --muted-foreground: 211 8% 46%;
 
-    /* Accent - MPS Gold #E8AD33 */
-    --accent: 42 80% 55%;
-    --accent-foreground: 210 25% 12%;
+    /* Accent - MPS Vivid Gold #F2B80A */
+    --accent: 44 92% 50%;
+    --accent-foreground: 211 25% 12%;
 
     /* Brand Gold for highlights */
-    --gold: 42 80% 55%;
-    --gold-foreground: 210 25% 12%;
-    --gold-light: 42 80% 95%;
+    --gold: 44 92% 50%;
+    --gold-foreground: 211 25% 12%;
+    --gold-light: 44 85% 94%;
 
-    /* Accent Blue for alternative highlights #046bd2 */
-    --accent-blue: 211 96% 42%;
+    /* Accent Blue for alternative highlights */
+    --accent-blue: 211 68% 35%;
     --accent-blue-foreground: 0 0% 100%;
 
     /* Extended Palette - Teal */
@@ -56,9 +56,9 @@
     --terracotta-foreground: 0 0% 100%;
 
     /* Extended Palette - Sand */
-    --sand: 36 30% 92%;
-    --sand-darker: 36 25% 85%;
-    --sand-foreground: 36 15% 25%;
+    --sand: 38 20% 93%;
+    --sand-darker: 38 16% 86%;
+    --sand-foreground: 38 15% 25%;
 
     /* Success - Refined Green */
     --success: 152 69% 40%;
@@ -72,52 +72,52 @@
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 210 12% 89%;
-    --input: 210 12% 89%;
-    --ring: 42 80% 55%;
+    --border: 211 10% 91%;
+    --input: 211 10% 91%;
+    --ring: 44 92% 50%;
     --radius: 0.625rem;
 
-    /* Warm shadows with gold tint */
-    --shadow-sm: 0 1px 2px 0 rgb(232 173 51 / 0.04), 0 1px 3px 0 rgb(0 36 62 / 0.03);
-    --shadow-md: 0 4px 6px -1px rgb(232 173 51 / 0.06), 0 2px 4px -2px rgb(0 36 62 / 0.03);
-    --shadow-lg: 0 10px 15px -3px rgb(232 173 51 / 0.08), 0 4px 6px -4px rgb(0 36 62 / 0.04);
-    --shadow-xl: 0 20px 25px -5px rgb(232 173 51 / 0.10), 0 8px 10px -6px rgb(0 36 62 / 0.04);
+    /* Soft shadows with blue tint */
+    --shadow-sm: 0 1px 2px 0 rgb(20 61 107 / 0.04), 0 1px 3px 0 rgb(20 50 90 / 0.02);
+    --shadow-md: 0 4px 6px -1px rgb(20 61 107 / 0.05), 0 2px 4px -2px rgb(20 50 90 / 0.02);
+    --shadow-lg: 0 10px 15px -3px rgb(20 61 107 / 0.06), 0 4px 6px -4px rgb(20 50 90 / 0.03);
+    --shadow-xl: 0 20px 25px -5px rgb(20 61 107 / 0.08), 0 8px 10px -6px rgb(20 50 90 / 0.03);
 
     /* Gradient tokens */
-    --gradient-brand: linear-gradient(135deg, hsl(207 100% 12%) 0%, hsl(207 100% 8%) 100%);
-    --gradient-surface: linear-gradient(180deg, hsl(36 20% 99%) 0%, hsl(36 15% 96%) 100%);
-    --gradient-accent: linear-gradient(135deg, hsl(42 80% 55%) 0%, hsl(42 80% 47%) 100%);
-    --gradient-accent-subtle: linear-gradient(135deg, hsl(42 80% 55% / 0.12) 0%, hsl(42 80% 55% / 0.04) 100%);
+    --gradient-brand: linear-gradient(135deg, hsl(211 68% 25%) 0%, hsl(211 68% 18%) 100%);
+    --gradient-surface: linear-gradient(180deg, hsl(40 18% 99%) 0%, hsl(38 14% 96%) 100%);
+    --gradient-accent: linear-gradient(135deg, hsl(44 92% 50%) 0%, hsl(44 92% 43%) 100%);
+    --gradient-accent-subtle: linear-gradient(135deg, hsl(44 92% 50% / 0.10) 0%, hsl(44 92% 50% / 0.03) 100%);
     --gradient-teal: linear-gradient(135deg, hsl(175 42% 45%) 0%, hsl(175 42% 38%) 100%);
-    --gradient-warm: linear-gradient(180deg, hsl(36 25% 98%) 0%, hsl(36 20% 96%) 100%);
+    --gradient-warm: linear-gradient(180deg, hsl(40 18% 99%) 0%, hsl(38 14% 97%) 100%);
   }
 
   .dark {
-    --background: 210 15% 8%;
-    --foreground: 36 20% 95%;
-    --card: 210 12% 11%;
-    --card-foreground: 36 20% 95%;
-    --popover: 210 12% 11%;
-    --popover-foreground: 36 20% 95%;
+    --background: 211 15% 8%;
+    --foreground: 40 18% 95%;
+    --card: 211 12% 11%;
+    --card-foreground: 40 18% 95%;
+    --popover: 211 12% 11%;
+    --popover-foreground: 40 18% 95%;
 
     /* Primary - Lighter blue for dark mode */
-    --primary: 211 80% 55%;
-    --primary-foreground: 210 47% 6%;
+    --primary: 211 68% 50%;
+    --primary-foreground: 211 47% 6%;
 
-    --secondary: 210 12% 16%;
-    --secondary-foreground: 36 15% 90%;
-    --muted: 210 12% 16%;
-    --muted-foreground: 210 10% 60%;
+    --secondary: 211 12% 16%;
+    --secondary-foreground: 40 15% 90%;
+    --muted: 211 12% 16%;
+    --muted-foreground: 211 10% 60%;
 
-    /* Accent - Gold stays vibrant */
-    --accent: 42 80% 58%;
-    --accent-foreground: 210 25% 10%;
+    /* Accent - Vivid Gold stays vibrant */
+    --accent: 44 92% 52%;
+    --accent-foreground: 211 25% 10%;
 
-    --gold: 42 80% 58%;
-    --gold-foreground: 210 25% 10%;
-    --gold-light: 42 60% 18%;
+    --gold: 44 92% 52%;
+    --gold-foreground: 211 25% 10%;
+    --gold-light: 44 60% 18%;
 
-    --accent-blue: 211 96% 55%;
+    --accent-blue: 211 68% 50%;
     --accent-blue-foreground: 0 0% 100%;
 
     /* Extended Palette - Dark mode */
@@ -129,9 +129,9 @@
     --terracotta-light: 18 40% 18%;
     --terracotta-foreground: 0 0% 100%;
 
-    --sand: 30 15% 18%;
-    --sand-darker: 30 12% 14%;
-    --sand-foreground: 30 10% 85%;
+    --sand: 38 15% 18%;
+    --sand-darker: 38 12% 14%;
+    --sand-foreground: 38 10% 85%;
 
     --success: 152 69% 45%;
     --success-foreground: 0 0% 100%;
@@ -140,23 +140,23 @@
     --warning-foreground: 38 92% 10%;
 
     --destructive: 0 62% 50%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive-foreground: 211 40% 98%;
 
-    --border: 210 12% 20%;
-    --input: 210 12% 20%;
-    --ring: 42 80% 58%;
+    --border: 211 12% 20%;
+    --input: 211 12% 20%;
+    --ring: 44 92% 52%;
 
     --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
     --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.4);
     --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.45);
     --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.5);
 
-    --gradient-brand: linear-gradient(135deg, hsl(211 80% 50%) 0%, hsl(211 80% 40%) 100%);
-    --gradient-surface: linear-gradient(180deg, hsl(210 12% 12%) 0%, hsl(210 12% 9%) 100%);
-    --gradient-accent: linear-gradient(135deg, hsl(42 80% 58%) 0%, hsl(42 80% 50%) 100%);
-    --gradient-accent-subtle: linear-gradient(135deg, hsl(42 80% 58% / 0.15) 0%, hsl(42 80% 58% / 0.05) 100%);
+    --gradient-brand: linear-gradient(135deg, hsl(211 68% 45%) 0%, hsl(211 68% 35%) 100%);
+    --gradient-surface: linear-gradient(180deg, hsl(211 12% 12%) 0%, hsl(211 12% 9%) 100%);
+    --gradient-accent: linear-gradient(135deg, hsl(44 92% 52%) 0%, hsl(44 92% 45%) 100%);
+    --gradient-accent-subtle: linear-gradient(135deg, hsl(44 92% 52% / 0.15) 0%, hsl(44 92% 52% / 0.05) 100%);
     --gradient-teal: linear-gradient(135deg, hsl(175 42% 55%) 0%, hsl(175 42% 45%) 100%);
-    --gradient-warm: linear-gradient(180deg, hsl(210 15% 10%) 0%, hsl(210 12% 8%) 100%);
+    --gradient-warm: linear-gradient(180deg, hsl(211 15% 10%) 0%, hsl(211 12% 8%) 100%);
   }
 }
 
@@ -177,10 +177,9 @@
     @apply bg-background text-foreground h-full overflow-hidden;
     font-feature-settings: "rlig" 1, "calt" 1;
     background-image:
-      radial-gradient(ellipse 100% 60% at 50% -10%, hsl(42 80% 55% / 0.06), transparent 60%),
-      radial-gradient(ellipse 80% 50% at 0% 50%, hsl(175 42% 45% / 0.04), transparent),
-      radial-gradient(ellipse 70% 50% at 100% 80%, hsl(42 80% 55% / 0.05), transparent),
-      linear-gradient(180deg, hsl(36 25% 98%) 0%, hsl(36 20% 97%) 100%);
+      radial-gradient(ellipse 100% 60% at 50% -10%, hsl(44 92% 50% / 0.05), transparent 60%),
+      radial-gradient(ellipse 80% 50% at 0% 50%, hsl(211 68% 35% / 0.02), transparent),
+      linear-gradient(180deg, hsl(40 18% 99%) 0%, hsl(38 14% 98%) 100%);
     background-attachment: fixed;
   }
 
@@ -190,9 +189,8 @@
 
   .dark body {
     background-image:
-      radial-gradient(ellipse 100% 60% at 50% -10%, hsl(42 80% 55% / 0.08), transparent 60%),
-      radial-gradient(ellipse 80% 50% at 0% 50%, hsl(175 42% 45% / 0.05), transparent),
-      radial-gradient(ellipse 70% 50% at 100% 80%, hsl(42 80% 55% / 0.06), transparent);
+      radial-gradient(ellipse 100% 60% at 50% -10%, hsl(44 92% 52% / 0.08), transparent 60%),
+      radial-gradient(ellipse 80% 50% at 0% 50%, hsl(211 68% 40% / 0.04), transparent);
   }
 
   /* Premium heading styles */
@@ -284,18 +282,18 @@
     ring-color: hsl(18 40% 80%);
   }
 
-  /* Gold accent cards (replaces orange accent cards) */
+  /* Gold accent cards */
   .card-warm {
     @apply relative overflow-hidden rounded-xl bg-card border;
-    border-color: hsl(42 80% 55% / 0.15);
-    background: linear-gradient(135deg, hsl(0 0% 100%) 0%, hsl(42 80% 55% / 0.04) 100%);
-    box-shadow: var(--shadow-md), inset 0 1px 0 hsl(42 80% 55% / 0.06);
+    border-color: hsl(44 92% 50% / 0.15);
+    background: linear-gradient(135deg, hsl(0 0% 100%) 0%, hsl(44 92% 50% / 0.04) 100%);
+    box-shadow: var(--shadow-md), inset 0 1px 0 hsl(44 92% 50% / 0.06);
     transition: all 0.2s ease;
   }
 
   .card-warm:hover {
-    border-color: hsl(42 80% 55% / 0.25);
-    box-shadow: var(--shadow-lg), inset 0 1px 0 hsl(42 80% 55% / 0.08);
+    border-color: hsl(44 92% 50% / 0.25);
+    box-shadow: var(--shadow-lg), inset 0 1px 0 hsl(44 92% 50% / 0.08);
   }
 
   .card-teal {
@@ -311,11 +309,11 @@
     box-shadow: var(--shadow-lg);
   }
 
-  /* Icon containers with color - gold instead of orange */
+  /* Icon containers with color */
   .icon-box-gold {
     @apply flex items-center justify-center rounded-xl;
-    background: linear-gradient(135deg, hsl(42 80% 55% / 0.15) 0%, hsl(42 80% 55% / 0.08) 100%);
-    color: hsl(42 80% 45%);
+    background: linear-gradient(135deg, hsl(44 92% 50% / 0.15) 0%, hsl(44 92% 50% / 0.08) 100%);
+    color: hsl(44 92% 40%);
   }
 
   .icon-box-teal {
@@ -333,7 +331,7 @@
   /* Warm dividers - gold tint */
   .divider-warm {
     @apply w-full h-px;
-    background: linear-gradient(90deg, transparent, hsl(42 80% 55% / 0.25), transparent);
+    background: linear-gradient(90deg, transparent, hsl(44 92% 50% / 0.25), transparent);
   }
 
   /* Stat card glow effect - warm gold glow */
@@ -344,7 +342,7 @@
   .stat-glow::after {
     content: '';
     @apply absolute -inset-px rounded-xl opacity-0 transition-opacity duration-300;
-    background: linear-gradient(135deg, hsl(42 80% 55% / 0.12), hsl(42 80% 55% / 0.06));
+    background: linear-gradient(135deg, hsl(44 92% 50% / 0.12), hsl(44 92% 50% / 0.06));
     z-index: -1;
   }
 
@@ -364,6 +362,21 @@
 }
 
 @layer utilities {
+  /* Transparent scrollbar track — blends with parent bg */
+  .scrollbar-transparent::-webkit-scrollbar {
+    width: 6px;
+  }
+  .scrollbar-transparent::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-transparent::-webkit-scrollbar-thumb {
+    background: hsl(211 10% 75%);
+    border-radius: 3px;
+  }
+  .scrollbar-transparent::-webkit-scrollbar-thumb:hover {
+    background: hsl(211 10% 65%);
+  }
+
   /* Animation utilities */
   .animate-fade-in {
     animation: fadeIn 0.5s ease-out forwards;

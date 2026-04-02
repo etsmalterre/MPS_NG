@@ -19,7 +19,7 @@ export function MobileNav({ open, onOpenChange }: MobileNavProps) {
         <SheetHeader className="border-b border-white/10 px-6 h-14 flex items-center">
           <SheetTitle className="flex items-center gap-2">
             <span className="font-semibold text-2xl">
-              <span className="text-[#E8AD33]">MPS</span>
+              <span className="text-accent">MPS</span>
             </span>
           </SheetTitle>
         </SheetHeader>

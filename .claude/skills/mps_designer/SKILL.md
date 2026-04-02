@@ -12,9 +12,9 @@ Design system for **MPS_NG**, the ERP system for **ETS Malterre** (French textil
 
 | Name | Hex | HSL | CSS Variable | Usage |
 |------|-----|-----|--------------|-------|
-| **Primary Navy** | `#00243E` | `207 100% 12%` | `--primary` | Sidebar background, primary buttons |
-| **Accent Gold** | `#E8AD33` | `42 80% 55%` | `--accent` / `--gold` | CTAs, active states, highlights, focus rings |
-| **Accent Blue** | `#046BD2` | `211 96% 42%` | `--accent-blue` | Links, secondary actions |
+| **Primary Blue** | `#143D6B` | `211 68% 25%` | `--primary` | Sidebar background, primary buttons |
+| **Vivid Gold** | `#F2B80A` | `44 92% 50%` | `--accent` / `--gold` | CTAs, active states, highlights, focus rings |
+| **Accent Blue** | `#3B7DC9` | `211 68% 35%` | `--accent-blue` | Links, secondary actions |
 
 ### Extended Palette
 
@@ -22,7 +22,7 @@ Design system for **MPS_NG**, the ERP system for **ETS Malterre** (French textil
 |------|-----|--------------|-------|
 | Teal | `175 42% 45%` | `--teal` | Complementary accent, alt badges |
 | Terracotta | `18 55% 48%` | `--terracotta` | Warm accent, alt icon boxes |
-| Sand | `36 30% 92%` | `--sand` | Warm surface backgrounds |
+| Sand | `38 20% 93%` | `--sand` | Warm surface backgrounds |
 | Success Green | `152 69% 40%` | `--success` | Success states |
 | Warning Amber | `38 92% 50%` | `--warning` | Warning states |
 | Destructive Red | `0 72% 51%` | `--destructive` | Error states, delete actions |
@@ -31,27 +31,27 @@ Design system for **MPS_NG**, the ERP system for **ETS Malterre** (French textil
 
 | Name | HSL | CSS Variable | Usage |
 |------|-----|--------------|-------|
-| Background | `36 20% 98%` | `--background` | Page background (warm sand tint) |
-| Card | `36 15% 99%` | `--card` | Card surfaces |
-| Muted | `36 12% 96%` | `--muted` | Disabled backgrounds, soft surfaces |
-| Border | `210 12% 89%` | `--border` | Default borders |
+| Background | `40 18% 99%` | `--background` | Page background (bright warm white) |
+| Card | `0 0% 100%` | `--card` | Card surfaces (pure white) |
+| Muted | `38 12% 96%` | `--muted` | Disabled backgrounds, soft surfaces |
+| Border | `211 10% 91%` | `--border` | Default borders |
 
-### Shadows (Gold-tinted)
+### Shadows (Blue-tinted)
 
-All shadows have a warm gold tint from `rgb(232 173 51)`:
+All shadows have a soft blue tint from `rgb(20 61 107)`:
 
 ```css
---shadow-sm: 0 1px 2px 0 rgb(232 173 51 / 0.04), 0 1px 3px 0 rgb(0 36 62 / 0.03);
---shadow-md: 0 4px 6px -1px rgb(232 173 51 / 0.06), 0 2px 4px -2px rgb(0 36 62 / 0.03);
---shadow-lg: 0 10px 15px -3px rgb(232 173 51 / 0.08), 0 4px 6px -4px rgb(0 36 62 / 0.04);
+--shadow-sm: 0 1px 2px 0 rgb(20 61 107 / 0.04), 0 1px 3px 0 rgb(20 50 90 / 0.02);
+--shadow-md: 0 4px 6px -1px rgb(20 61 107 / 0.05), 0 2px 4px -2px rgb(20 50 90 / 0.02);
+--shadow-lg: 0 10px 15px -3px rgb(20 61 107 / 0.06), 0 4px 6px -4px rgb(20 50 90 / 0.03);
 ```
 
 ### Gradients
 
 ```css
---gradient-brand: linear-gradient(135deg, hsl(207 100% 12%) 0%, hsl(207 100% 8%) 100%);
---gradient-accent: linear-gradient(135deg, hsl(42 80% 55%) 0%, hsl(42 80% 47%) 100%);
---gradient-accent-subtle: linear-gradient(135deg, hsl(42 80% 55% / 0.12) 0%, hsl(42 80% 55% / 0.04) 100%);
+--gradient-brand: linear-gradient(135deg, hsl(211 68% 25%) 0%, hsl(211 68% 18%) 100%);
+--gradient-accent: linear-gradient(135deg, hsl(44 92% 50%) 0%, hsl(44 92% 43%) 100%);
+--gradient-accent-subtle: linear-gradient(135deg, hsl(44 92% 50% / 0.10) 0%, hsl(44 92% 50% / 0.03) 100%);
 ```
 
 ---
@@ -219,13 +219,22 @@ className="fixed top-0 right-0 z-50 h-full w-full max-w-md bg-background shadow-
 
 Container:
 ```tsx
-className="flex flex-col h-full bg-card rounded-lg border shadow-sm"
+className="flex flex-col h-full rounded-lg border shadow-sm bg-zinc-100/80"
 ```
+
+### Panel Background Pattern
+
+All panels (left list, right sidebar) and section item cards use **Zinc** background for contrast against white cards:
+- **Panel body**: `bg-zinc-100/80` — neutral dense gray
+- **Header/footer areas**: `bg-zinc-200/50` — slightly darker for visual structure
+- **Item cards inside sections** (certificats, refs, commandes): `bg-zinc-100/80`
+- **Contact/address cards in sidebar**: `bg-card` (white) since they sit on the zinc panel
+- **Scrollbar**: Use `scrollbar-transparent` utility class for blending
 
 ### Search Bar (top, `border-b`)
 
 ```tsx
-<div className="p-3 border-b">
+<div className="p-3 border-b rounded-t-lg bg-zinc-200/50">
   <div className="relative">
     <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
     <input className="w-full h-9 pl-9 pr-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring" />
@@ -233,14 +242,14 @@ className="flex flex-col h-full bg-card rounded-lg border shadow-sm"
 </div>
 ```
 
-### List Items (scrollable body, `p-3 space-y-2`)
+### List Items (scrollable body, `p-3 space-y-2 scrollbar-transparent`)
 
 ```tsx
 // Selected item
-className="p-3 border rounded-lg cursor-pointer border-accent bg-accent/5 ring-1 ring-accent"
+className="p-3 border rounded-lg cursor-pointer border-accent bg-white ring-1 ring-accent"
 
 // Unselected item
-className="p-3 border rounded-lg cursor-pointer border-border hover:border-accent/50 hover:bg-muted/30"
+className="p-3 border rounded-lg cursor-pointer border-border bg-white hover:border-accent/50"
 ```
 
 Item content:
@@ -250,7 +259,7 @@ Item content:
 ### Footer (bottom, `border-t`)
 
 ```tsx
-<div className="p-3 border-t text-xs text-muted-foreground flex items-center justify-between">
+<div className="p-3 border-t text-xs text-muted-foreground flex items-center justify-between rounded-b-lg bg-zinc-200/50">
   <span>{count} entreprise{plural}</span>
   {isEditing && (
     <Button size="sm" variant="ghost" className="text-accent hover:text-accent hover:bg-accent/10">
@@ -401,10 +410,10 @@ Adds a gold left border and very subtle gold background tint.
 
 Available competences section: `mt-3 pt-3 border-t border-border/50 flex flex-wrap gap-2`
 
-### Item View Cards (recommandations, used in detail body)
+### Item View Cards (certificats, refs, commandes, recommandations)
 
 ```tsx
-<div className="rounded-md p-3 bg-muted/40 group relative">
+<div className="rounded-lg p-3 border border-border/60 bg-zinc-100/80 group relative">
   <div className="flex items-center justify-between gap-2">
     <div className="flex items-center gap-2">
       <Icon className="h-3.5 w-3.5 text-muted-foreground" />
@@ -438,13 +447,13 @@ Available competences section: `mt-3 pt-3 border-t border-border/50 flex flex-wr
 
 Container:
 ```tsx
-className="w-96 flex-shrink-0 bg-muted/30 rounded-xl border flex flex-col overflow-hidden"
+className="w-96 flex-shrink-0 rounded-xl border flex flex-col overflow-hidden bg-zinc-100/80"
 ```
 
 ### Tab Bar
 
 ```tsx
-<div className="flex border-b p-1 gap-1">
+<div className="flex border-b p-1 gap-1 rounded-t-xl bg-zinc-200/50">
   {tabs.map(tab => (
     <button className={cn(
       'flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-md transition-colors',

@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  Package,
+  Factory,
   Search,
   Loader2,
   AlertCircle,
@@ -28,6 +28,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { BobineIcon } from '@/components/icons/BobineIcon'
 import { cn } from '@/lib/utils'
 
 // ── Types ──────────────────────────────────────────────
@@ -42,11 +43,32 @@ interface Fournisseur {
   IDsociete: number | null
 }
 
+interface LigneCommande {
+  IDref_fil_commande: number
+  IDcommande_fil: number
+  quantite: number | null
+  unite: number | null
+  prix_unitaire: number | null
+  date_livraison: string | null
+  etat: number | null
+  ref_fil: string | null
+  colori_reference: string | null
+}
+
+interface CommandeFil {
+  IDcommande_fil: number
+  date_commande: string | null
+  etat: number | null
+  commentaire: string | null
+  lignes: LigneCommande[]
+}
+
 interface FournisseurDetail extends Fournisseur {
   adresses: Adresse[]
   contacts: Contact[]
   refsFil: RefFil[]
   certificats: Certificat[]
+  commandes: CommandeFil[]
 }
 
 interface RefFil {
@@ -201,30 +223,30 @@ function FournisseurList({ fournisseurs, isLoading, isError, error, selectedId, 
   onNew: () => void; isCreating: boolean; isEditing: boolean
 }) {
   return (
-    <div className="flex flex-col h-full bg-card rounded-lg border shadow-sm">
-      <div className="p-3 border-b">
+    <div className="flex flex-col h-full rounded-lg border shadow-sm bg-zinc-100/80">
+      <div className="p-3 border-b rounded-t-lg bg-zinc-200/50">
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <input type="text" placeholder="Rechercher..." value={searchQuery} onChange={(e) => onSearchChange(e.target.value)}
             autoComplete="off" className="w-full h-9 pl-9 pr-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring" />
         </div>
       </div>
-      <div className="flex-1 overflow-auto p-3 space-y-2">
+      <div className="flex-1 overflow-auto p-3 space-y-2 scrollbar-transparent">
         {isLoading ? <div className="flex items-center justify-center py-8"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>
         : isError ? <div className="flex flex-col items-center justify-center py-8 text-destructive"><AlertCircle className="h-6 w-6 mb-2" /><p className="text-sm">{error?.message || 'Erreur'}</p></div>
-        : fournisseurs.length === 0 ? <div className="flex flex-col items-center justify-center py-8 text-muted-foreground"><Package className="h-12 w-12 mb-3 opacity-50" /><p className="text-sm">Aucun fournisseur</p></div>
+        : fournisseurs.length === 0 ? <div className="flex flex-col items-center justify-center py-8 text-muted-foreground"><Factory className="h-12 w-12 mb-3 opacity-50" /><p className="text-sm">Aucun fournisseur</p></div>
         : fournisseurs.map((f) => (
           <div key={f.IDfournisseur} onClick={() => onSelect(f.IDfournisseur)}
             className={cn('p-3 border rounded-lg cursor-pointer transition-all',
-              selectedId === f.IDfournisseur ? 'border-accent bg-accent/5 ring-1 ring-accent' : 'border-border hover:border-accent/50 hover:bg-muted/30')}>
+              selectedId === f.IDfournisseur ? 'border-accent bg-white ring-1 ring-accent' : 'border-border bg-white hover:border-accent/50')}>
             <div className="flex items-center gap-2">
-              <Package className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+              <Factory className="h-4 w-4 text-muted-foreground flex-shrink-0" />
               <p className="font-medium text-sm truncate">{f.nom}</p>
             </div>
           </div>
         ))}
       </div>
-      <div className="p-3 border-t text-xs text-muted-foreground flex items-center justify-between">
+      <div className="p-3 border-t text-xs text-muted-foreground flex items-center justify-between rounded-b-lg bg-zinc-200/50">
         <span>{fournisseurs.length} fournisseur{fournisseurs.length !== 1 ? 's' : ''}</span>
         {isEditing && (
           <Button size="sm" variant="ghost" onClick={onNew} disabled={isCreating} className="text-accent hover:text-accent hover:bg-accent/10">
@@ -248,7 +270,7 @@ function DetailHeader({ fournisseur, isLoading, isEditing, editNom, onEditNomCha
     <div className="flex-shrink-0 pt-0.5">
       <div className="flex items-center gap-3">
         <div className={cn('h-11 w-11 rounded-lg flex items-center justify-center', isEditing ? 'bg-accent/15' : 'icon-box-gold')}>
-          <Package className="h-5 w-5" />
+          <Factory className="h-5 w-5" />
         </div>
         <div className="min-w-0 flex-1">
           {isLoading ? <div className="h-8 w-48 bg-muted animate-pulse rounded" />
@@ -297,13 +319,23 @@ function isCertExpired(dateExp: string | null): boolean {
   return new Date(d) < new Date()
 }
 
+function CommandeEtatBadge({ etat }: { etat: number | null }) {
+  switch (etat) {
+    case 0: return <Badge variant="secondary" className="text-[10px] py-0">Brouillon</Badge>
+    case 1: return <Badge className="badge-warning text-[10px] py-0">En cours</Badge>
+    case 2: return <Badge className="badge-success text-[10px] py-0">Livree</Badge>
+    case 3: return <Badge variant="outline" className="text-[10px] py-0">Cloturee</Badge>
+    default: return etat != null ? <Badge variant="secondary" className="text-[10px] py-0">Etat {etat}</Badge> : null
+  }
+}
+
 function DetailMain({ fournisseur, isLoading, hasSelection }: {
   fournisseur: FournisseurDetail | null; isLoading: boolean; hasSelection: boolean
 }) {
   if (!hasSelection) return (
     <div className="flex-1 flex items-center justify-center">
       <div className="text-center space-y-3">
-        <div className="icon-box-gold h-16 w-16 mx-auto"><Package className="h-8 w-8" /></div>
+        <div className="icon-box-gold h-16 w-16 mx-auto"><Factory className="h-8 w-8" /></div>
         <p className="text-muted-foreground text-sm">Selectionnez un fournisseur dans la liste</p>
       </div>
     </div>
@@ -311,8 +343,9 @@ function DetailMain({ fournisseur, isLoading, hasSelection }: {
   if (isLoading) return <div className="flex-1 flex items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-accent" /></div>
   if (!fournisseur) return null
 
-  const [certifsOpen, setCertifsOpen] = useState(true)
-  const [refsOpen, setRefsOpen] = useState(true)
+  const [certifsOpen, setCertifsOpen] = useState(false)
+  const [refsOpen, setRefsOpen] = useState(false)
+  const [commandesOpen, setCommandesOpen] = useState(false)
 
   // Group yarn refs by base reference
   const refsGrouped = useMemo(() => {
@@ -338,7 +371,7 @@ function DetailMain({ fournisseur, isLoading, hasSelection }: {
     <div className="flex-1 min-h-0 overflow-auto space-y-4">
       {/* Certificats */}
       <Card className="card-premium">
-        <CardHeader className="flex flex-row items-center gap-2 pb-2 cursor-pointer select-none" onClick={() => setCertifsOpen(!certifsOpen)}>
+        <CardHeader className="flex flex-row items-center gap-2 p-4 space-y-0 cursor-pointer select-none" onClick={() => setCertifsOpen(!certifsOpen)}>
           <Shield className="h-4 w-4 text-accent" />
           <CardTitle className="text-sm font-semibold">Certificats</CardTitle>
           <Badge variant="secondary" className="text-xs ml-auto">{fournisseur.certificats.length}</Badge>
@@ -350,7 +383,7 @@ function DetailMain({ fournisseur, isLoading, hasSelection }: {
           ) : fournisseur.certificats.map((c) => {
             const expired = isCertExpired(c.date_expiration)
             return (
-              <div key={c.IDcertificat} className="rounded-lg p-3 border border-border/60 bg-muted/50">
+              <div key={c.IDcertificat} className="rounded-lg p-3 border border-border/60 bg-zinc-100/80">
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <Shield className="h-3.5 w-3.5 text-muted-foreground" />
@@ -378,8 +411,8 @@ function DetailMain({ fournisseur, isLoading, hasSelection }: {
 
       {/* References de fil */}
       <Card className="card-premium">
-        <CardHeader className="flex flex-row items-center gap-2 pb-2 cursor-pointer select-none" onClick={() => setRefsOpen(!refsOpen)}>
-          <Package className="h-4 w-4 text-accent" />
+        <CardHeader className="flex flex-row items-center gap-2 p-4 space-y-0 cursor-pointer select-none" onClick={() => setRefsOpen(!refsOpen)}>
+          <BobineIcon className="h-4 w-4 text-accent" />
           <CardTitle className="text-sm font-semibold">References de fil</CardTitle>
           <Badge variant="secondary" className="text-xs ml-auto">{refsGrouped.length}</Badge>
           <ChevronDown className={cn('h-4 w-4 text-muted-foreground transition-transform', refsOpen && 'rotate-180')} />
@@ -388,7 +421,7 @@ function DetailMain({ fournisseur, isLoading, hasSelection }: {
           {refsGrouped.length === 0 ? (
             <p className="text-sm text-muted-foreground italic">Aucune reference</p>
           ) : refsGrouped.map((ref, i) => (
-            <div key={i} className="rounded-lg p-3 border border-border/60 bg-muted/50">
+            <div key={i} className="rounded-lg p-3 border border-border/60 bg-zinc-100/80">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-sm font-medium">{ref.reference}</span>
                 <div className="flex gap-1">
@@ -408,6 +441,57 @@ function DetailMain({ fournisseur, isLoading, hasSelection }: {
                   </Badge>
                 ))}
               </div>
+            </div>
+          ))}
+        </CardContent>}
+      </Card>
+
+      {/* Commandes */}
+      <Card className="card-premium">
+        <CardHeader className="flex flex-row items-center gap-2 p-4 space-y-0 cursor-pointer select-none" onClick={() => setCommandesOpen(!commandesOpen)}>
+          <ShoppingCart className="h-4 w-4 text-accent" />
+          <CardTitle className="text-sm font-semibold">Commandes</CardTitle>
+          <Badge variant="secondary" className="text-xs ml-auto">{fournisseur.commandes?.length ?? 0}</Badge>
+          <ChevronDown className={cn('h-4 w-4 text-muted-foreground transition-transform', commandesOpen && 'rotate-180')} />
+        </CardHeader>
+        {commandesOpen && <CardContent className="space-y-2">
+          {!fournisseur.commandes || fournisseur.commandes.length === 0 ? (
+            <p className="text-sm text-muted-foreground italic">Aucune commande</p>
+          ) : fournisseur.commandes.map((cmd) => (
+            <div key={cmd.IDcommande_fil} className="rounded-lg p-3 border border-border/60 bg-zinc-100/80">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <ShoppingCart className="h-3.5 w-3.5 text-muted-foreground" />
+                  <span className="text-sm font-medium">
+                    N° {cmd.IDcommande_fil}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  {cmd.date_commande && (
+                    <span className="text-xs text-muted-foreground">{formatHfsqlDate(cmd.date_commande)}</span>
+                  )}
+                  <CommandeEtatBadge etat={cmd.etat} />
+                </div>
+              </div>
+              {cmd.lignes.length > 0 && (
+                <div className="mt-2 space-y-1">
+                  {cmd.lignes.map((l) => (
+                    <div key={l.IDref_fil_commande} className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span>
+                        {l.ref_fil || '—'}
+                        {l.colori_reference ? ` / ${l.colori_reference}` : ''}
+                      </span>
+                      <div className="flex items-center gap-3">
+                        {l.quantite != null && <span>{Number(l.quantite).toFixed(1)} kg</span>}
+                        {l.prix_unitaire != null && Number(l.prix_unitaire) > 0 && <span>{Number(l.prix_unitaire).toFixed(2)} €/kg</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {cmd.commentaire && (
+                <p className="text-xs text-muted-foreground mt-1.5 italic">{cmd.commentaire}</p>
+              )}
             </div>
           ))}
         </CardContent>}
@@ -469,8 +553,8 @@ function DetailSidebar({ fournisseur, isLoading, isEditing, fournisseurId, onMut
   ]
 
   return (
-    <div className="w-96 flex-shrink-0 bg-muted/30 rounded-xl border flex flex-col overflow-hidden">
-      <div className="flex border-b p-1 gap-1">
+    <div className="w-96 flex-shrink-0 rounded-xl border flex flex-col overflow-hidden bg-zinc-100/80">
+      <div className="flex border-b p-1 gap-1 rounded-t-xl bg-zinc-200/50">
         {tabs.map((tab) => {
           const Icon = tab.icon
           return (

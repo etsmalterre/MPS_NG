@@ -18,10 +18,9 @@ MPS_NG is the next-generation ERP system for **ETS Malterre**, a French textile/
 
 | Color | Hex | Usage |
 |-------|-----|-------|
-| **Primary Navy** | #00243E | Sidebar, navigation, headers |
-| **Accent Gold** | #E8AD33 | CTAs, highlights, active states |
-| **Accent Blue** | #046BD2 | Links, alternative accent |
-| **Secondary Gold** | #F1B439 | Hover states, warm accents |
+| **Primary Blue** | #143D6B | Sidebar, navigation, headers |
+| **Vivid Gold** | #F2B80A | CTAs, highlights, active states |
+| **Accent Blue** | #3B7DC9 | Links, alternative accent |
 
 See `.claude/skills/mps_designer/SKILL.md` for complete design system documentation.
 
@@ -85,11 +84,12 @@ MPS_NG/
 │   │       │   └── hfsql.ts       # HFSQL ODBC connection singleton + encoding fix
 │   │       ├── routes/
 │   │       │   ├── entreprises.ts # Full CRUD: entreprises, contacts, adresses, competences, recommandations
-│   │       │   └── fournisseurs.ts # Full CRUD: fournisseurs, contacts, adresses + yarn refs & certificates read
+│   │       │   └── fournisseurs.ts # Full CRUD: fournisseurs, contacts, adresses + yarn refs, certificates, commandes
 │   │       └── index.ts
 │   └── web/           # React frontend
 │       ├── src/
 │       │   ├── components/
+│       │   │   ├── icons/     # Custom SVG icon components (BobineIcon)
 │       │   │   ├── layout/    # AppShell, Sidebar, Header, MobileNav, MasterDetailLayout
 │       │   │   ├── shared/    # PagePlaceholder, etc.
 │       │   │   └── ui/        # Radix-based components
@@ -197,10 +197,12 @@ The MPS_NG web app connects to the HFSQL server via ODBC:
 
 ### Design System
 Follow the MPS design system defined in `.claude/skills/mps_designer/SKILL.md`:
-- Gold accent color (not orange)
-- Navy primary color
+- Vivid Gold accent (`#F2B80A`), not orange
+- Medium-dark Blue primary (`#143D6B`), not dark navy
 - Premium card styles with gold borders
 - Icon boxes with gradient backgrounds
+- **Panel backgrounds**: `bg-zinc-100/80` for list/sidebar panels, `bg-zinc-200/50` for header/footer areas, `bg-white` for item cards
+- **Scrollbar**: Use `scrollbar-transparent` class on scrollable panel areas
 - **Never hardcode color hex values** — use Tailwind CSS variable classes (`text-accent`, `bg-primary`, `border-gold/30`) so colors are consistent and themeable
 
 ### Typography
@@ -243,7 +245,7 @@ Follow the Entreprises screen pattern for edit mode:
 - **Hover-reveal actions**: `opacity-0 group-hover:opacity-100` for edit/delete buttons
 - **Labeled inputs**: Use `LabeledInput` component (label above field)
 - **InlineForm wrapper**: Shared component with uppercase gold title, save/cancel buttons
-- **View cards**: `bg-muted/40 rounded-md` for list items (contacts, adresses, recommandations)
+- **View cards**: `bg-zinc-100/80 rounded-lg border border-border/60` for section items (certificats, refs, commandes, recommandations)
 
 ### Related Project
 
@@ -252,6 +254,11 @@ MPS_NG follows the architecture of **MFProd_NG** (`C:\dev\mfprod\mfprod_erp`):
 - Same layout patterns (MasterDetailLayout, edit mode, sidebar tabs)
 - Different branding (gold vs orange)
 - Different business domain (textile vs fencing)
+
+### Sidebar Logo
+
+- **Expanded**: `public/logo-full.png` (Malterre full logo, `h-10 mx-auto`)
+- **Collapsed**: `public/logo-small.png` (Malterre icon, `h-8 mx-auto`)
 
 ## Quick Start
 
@@ -302,13 +309,13 @@ First fully implemented data screen. 3-panel layout with:
 
 ### Fournisseurs (`/fournisseurs/gestion`)
 Supplier management screen. 3-panel layout with:
-- **Left**: Searchable supplier list (name only, no phone/fax in cards)
-- **Center**: Supplier header (name, Modifier button), collapsible certificats card (validity badges), collapsible references de fil card (grouped by base ref with Bio/Recycle badges and coloris)
+- **Left**: Searchable supplier list (Factory icon, name only, no phone/fax in cards)
+- **Center**: Supplier header (name, Modifier button), collapsible certificats card (validity badges), collapsible references de fil card (BobineIcon, grouped by base ref with Bio/Recycle badges and coloris), collapsible commandes card (order lines with ref/coloris/qty/price, status badges)
 - **Right sidebar**: 3 tabs — Info (commentaire), Contacts (with envoi_bl/facture/commande/soumission flags), Adresses (with facturation/livraison default flags)
-- **Detail API**: `GET /api/fournisseurs/:id` returns fournisseur + adresses + contacts + refsFil (joined colori_fil→ref_fil) + certificats (joined type_doc)
+- **Detail API**: `GET /api/fournisseurs/:id` returns fournisseur + adresses + contacts + refsFil + certificats + commandes (with lignes)
 - **CRUD endpoints**: Full CRUD for fournisseurs + sub-entity CRUD under `/api/fournisseurs/:id/{contacts,adresses}`
 - **Edit mode**: Inline forms for contacts/adresses, commentaire editable in Info tab
-- **HFSQL tables**: `fournisseur`, `adresse`, `contact`, `colori_fil`, `ref_fil`, `certificat`, `type_doc`
+- **HFSQL tables**: `fournisseur`, `adresse`, `contact`, `colori_fil`, `ref_fil`, `certificat`, `type_doc`, `commande_fil`, `ref_fil_commande`
 
 ## Business Domain (Quick Reference)
 

@@ -211,22 +211,22 @@ function EntrepriseList({ entreprises, isLoading, isError, error, selectedId, on
   onNew: () => void; isCreating: boolean; isEditing: boolean
 }) {
   return (
-    <div className="flex flex-col h-full bg-card rounded-lg border shadow-sm">
-      <div className="p-3 border-b">
+    <div className="flex flex-col h-full rounded-lg border shadow-sm bg-zinc-100/80">
+      <div className="p-3 border-b rounded-t-lg bg-zinc-200/50">
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <input type="text" placeholder="Rechercher..." value={searchQuery} onChange={(e) => onSearchChange(e.target.value)}
             autoComplete="off" className="w-full h-9 pl-9 pr-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring" />
         </div>
       </div>
-      <div className="flex-1 overflow-auto p-3 space-y-2">
+      <div className="flex-1 overflow-auto p-3 space-y-2 scrollbar-transparent">
         {isLoading ? <div className="flex items-center justify-center py-8"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>
         : isError ? <div className="flex flex-col items-center justify-center py-8 text-destructive"><AlertCircle className="h-6 w-6 mb-2" /><p className="text-sm">{error?.message || 'Erreur'}</p></div>
         : entreprises.length === 0 ? <div className="flex flex-col items-center justify-center py-8 text-muted-foreground"><Building2 className="h-12 w-12 mb-3 opacity-50" /><p className="text-sm">Aucune entreprise</p></div>
         : entreprises.map((e) => (
           <div key={e.IDentreprise} onClick={() => onSelect(e.IDentreprise)}
             className={cn('p-3 border rounded-lg cursor-pointer transition-all',
-              selectedId === e.IDentreprise ? 'border-accent bg-accent/5 ring-1 ring-accent' : 'border-border hover:border-accent/50 hover:bg-muted/30')}>
+              selectedId === e.IDentreprise ? 'border-accent bg-white ring-1 ring-accent' : 'border-border bg-white hover:border-accent/50')}>
             <div className="flex items-center gap-2">
               <Building2 className="h-4 w-4 text-muted-foreground flex-shrink-0" />
               <p className="font-medium text-sm truncate">{e.nom}</p>
@@ -235,7 +235,7 @@ function EntrepriseList({ entreprises, isLoading, isError, error, selectedId, on
           </div>
         ))}
       </div>
-      <div className="p-3 border-t text-xs text-muted-foreground flex items-center justify-between">
+      <div className="p-3 border-t text-xs text-muted-foreground flex items-center justify-between rounded-b-lg bg-zinc-200/50">
         <span>{entreprises.length} entreprise{entreprises.length !== 1 ? 's' : ''}</span>
         {isEditing && (
           <Button size="sm" variant="ghost" onClick={onNew} disabled={isCreating} className="text-accent hover:text-accent hover:bg-accent/10">
@@ -364,7 +364,7 @@ function CompetencesCard({ competences, isEditing, entrepriseId, onMutationSucce
 
   return (
     <Card className={cn('card-premium', isEditing && editSectionClass)}>
-      <CardHeader className="flex flex-row items-center gap-2 pb-2">
+      <CardHeader className="flex flex-row items-center gap-2 p-4 space-y-0">
         <Award className="h-4 w-4 text-accent" />
         <CardTitle className="text-sm font-semibold">Competences</CardTitle>
         {isEditing && (
@@ -433,7 +433,7 @@ function RecommandationsCard({ recommandations, isEditing, entrepriseId, onMutat
 
   return (
     <Card className={cn('card-premium', isEditing && editSectionClass)}>
-      <CardHeader className="flex flex-row items-center gap-2 pb-2">
+      <CardHeader className="flex flex-row items-center gap-2 p-4 space-y-0">
         <MessageSquare className="h-4 w-4 text-accent" />
         <CardTitle className="text-sm font-semibold">Recommandations</CardTitle>
         <Badge variant="secondary" className="text-xs ml-auto">{recommandations.length}</Badge>
@@ -459,7 +459,7 @@ function RecommandationsCard({ recommandations, isEditing, entrepriseId, onMutat
               </div>
             </InlineForm>
           ) : (
-            <div key={r.IDrecommandation} className="rounded-md p-3 bg-muted/40 group relative">
+            <div key={r.IDrecommandation} className="rounded-lg p-3 border border-border/60 bg-zinc-100/80 group relative">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <Building className="h-3.5 w-3.5 text-muted-foreground" />
@@ -537,7 +537,7 @@ function DetailSidebar({ entreprise, isLoading, isEditing, entrepriseId, onMutat
 }) {
   const [activeTab, setActiveTab] = useState<SidebarTab>('contacts')
   if (isLoading) return (
-    <div className="w-96 flex-shrink-0 bg-muted/30 rounded-xl border p-4 space-y-4">
+    <div className="w-96 flex-shrink-0 bg-zinc-100/80 rounded-xl border p-4 space-y-4">
       <div className="flex gap-2"><div className="h-8 flex-1 bg-muted animate-pulse rounded-md" /><div className="h-8 flex-1 bg-muted animate-pulse rounded-md" /></div>
       {[1, 2, 3].map((i) => <div key={i} className="h-24 bg-muted animate-pulse rounded-lg" />)}
     </div>
@@ -550,8 +550,8 @@ function DetailSidebar({ entreprise, isLoading, isEditing, entrepriseId, onMutat
   ]
 
   return (
-    <div className="w-96 flex-shrink-0 bg-muted/30 rounded-xl border flex flex-col overflow-hidden">
-      <div className="flex border-b p-1 gap-1">
+    <div className="w-96 flex-shrink-0 rounded-xl border flex flex-col overflow-hidden bg-zinc-100/80">
+      <div className="flex border-b p-1 gap-1 rounded-t-xl bg-zinc-200/50">
         {tabs.map((tab) => {
           const Icon = tab.icon
           return (
