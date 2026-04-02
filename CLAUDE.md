@@ -84,7 +84,8 @@ MPS_NG/
 │   │       ├── lib/
 │   │       │   └── hfsql.ts       # HFSQL ODBC connection singleton + encoding fix
 │   │       ├── routes/
-│   │       │   └── entreprises.ts # Full CRUD: entreprises, contacts, adresses, competences, recommandations
+│   │       │   ├── entreprises.ts # Full CRUD: entreprises, contacts, adresses, competences, recommandations
+│   │       │   └── fournisseurs.ts # Full CRUD: fournisseurs, contacts, adresses + yarn refs & certificates read
 │   │       └── index.ts
 │   └── web/           # React frontend
 │       ├── src/
@@ -100,7 +101,8 @@ MPS_NG/
 │       │   │   └── utils.ts
 │       │   ├── pages/
 │       │   │   ├── Dashboard.tsx
-│       │   │   └── Entreprises.tsx  # First real data screen with edit mode
+│       │   │   ├── Entreprises.tsx  # First real data screen with edit mode
+│       │   │   └── Fournisseurs.tsx # Supplier management with yarn refs & certificates
 │       │   ├── main.tsx
 │       │   ├── router.tsx
 │       │   └── index.css
@@ -267,6 +269,15 @@ pnpm build
 pnpm test
 ```
 
+### Dev Ports
+
+| Service | Port | Notes |
+|---------|------|-------|
+| MPS_NG API | 3002 | Set in `apps/api/.env.development` |
+| MPS_NG Web | 5175 | Vite (5173 and 5174 taken by MFProd) |
+| MFProd API | 8080 | Separate project, do not conflict |
+| MFProd Web | 5173 | Separate project |
+
 ## Reference Documentation
 
 Detailed docs are in `claude_doc/` — load only when needed:
@@ -288,6 +299,16 @@ First fully implemented data screen. 3-panel layout with:
 - **CRUD endpoints**: Full CRUD for all sub-entities under `/api/entreprises/:id/{contacts,adresses,competences,recommandations}`
 - **Edit mode**: Inline forms, hover-reveal edit/delete, labeled inputs
 - **HFSQL tables**: `entreprise`, `adresse`, `contact`, `competence`, `entreprise_competence`, `recommandation`
+
+### Fournisseurs (`/fournisseurs/gestion`)
+Supplier management screen. 3-panel layout with:
+- **Left**: Searchable supplier list (name only, no phone/fax in cards)
+- **Center**: Supplier header (name, Modifier button), collapsible certificats card (validity badges), collapsible references de fil card (grouped by base ref with Bio/Recycle badges and coloris)
+- **Right sidebar**: 3 tabs — Info (commentaire), Contacts (with envoi_bl/facture/commande/soumission flags), Adresses (with facturation/livraison default flags)
+- **Detail API**: `GET /api/fournisseurs/:id` returns fournisseur + adresses + contacts + refsFil (joined colori_fil→ref_fil) + certificats (joined type_doc)
+- **CRUD endpoints**: Full CRUD for fournisseurs + sub-entity CRUD under `/api/fournisseurs/:id/{contacts,adresses}`
+- **Edit mode**: Inline forms for contacts/adresses, commentaire editable in Info tab
+- **HFSQL tables**: `fournisseur`, `adresse`, `contact`, `colori_fil`, `ref_fil`, `certificat`, `type_doc`
 
 ## Business Domain (Quick Reference)
 

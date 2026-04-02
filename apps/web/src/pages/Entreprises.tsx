@@ -82,7 +82,7 @@ interface Recommandation {
 
 // ── API helpers ────────────────────────────────────────
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080/api'
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002/api'
 
 function formatHfsqlDate(raw: string): string {
   if (raw.length === 8) return new Date(`${raw.substring(0, 4)}-${raw.substring(4, 6)}-${raw.substring(6, 8)}`).toLocaleDateString('fr-FR')
@@ -617,7 +617,7 @@ function ContactsTab({ contacts, isEditing, entrepriseId, onMutationSuccess }: {
             <LabeledInput label="Email" value={form.mail} onChange={(v) => setForm({ ...form, mail: v })} />
           </InlineForm>
         ) : (
-          <div key={c.IDcontact} className="p-2.5 rounded-md bg-muted/40 group relative">
+          <div key={c.IDcontact} className="p-3 rounded-lg border bg-card shadow-sm group relative">
             <div className="flex items-start justify-between">
               <div className="min-w-0 flex-1">
                 <div className="font-medium text-sm flex items-center gap-2">
@@ -703,7 +703,7 @@ function AdressesTab({ adresses, isEditing, entrepriseId, onMutationSuccess }: {
             <LabeledInput label="Pays" value={form.pays} onChange={(v) => setForm({ ...form, pays: v })} />
           </InlineForm>
         ) : (
-          <div key={a.IDadresse} className="p-2.5 rounded-md bg-muted/40 group relative">
+          <div key={a.IDadresse} className="p-3 rounded-lg border bg-card shadow-sm group relative">
             <div className="flex items-start justify-between">
               <div className="min-w-0 flex-1">
                 <div className="font-medium text-sm flex items-center gap-2">

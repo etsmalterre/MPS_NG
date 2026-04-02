@@ -1,9 +1,14 @@
-import 'dotenv/config'
+import dotenv from 'dotenv'
+
+const env = process.env.NODE_ENV || 'development'
+dotenv.config({ path: `.env.${env}` })
+dotenv.config({ path: '.env' }) // fallback / overrides
 import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
 import { entreprisesRouter } from './routes/entreprises.js'
-import { closeConnection } from './lib/hfsql.js'
+import { fournisseursRouter } from './routes/fournisseurs.js'
+import { closeConnection } from './lib/hfsql-auto.js'
 
 const app = express()
 const PORT = process.env.PORT || 8080
@@ -17,9 +22,10 @@ app.get('/api/health', (_req, res) => {
 })
 
 app.use('/api/entreprises', entreprisesRouter)
+app.use('/api/fournisseurs', fournisseursRouter)
 
 app.listen(PORT, () => {
-  console.log(`MPS API running on port ${PORT}`)
+  console.log(`MPS API running on port ${PORT} [${env}]`)
 })
 
 async function shutdown() {

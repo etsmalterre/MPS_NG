@@ -40,7 +40,6 @@ const ClientsGestionPage = createPlaceholder('Gestion Clients', 'Gérez votre po
 
 // Fournisseurs pages
 const FournisseursCommandesPage = createPlaceholder('Commandes Fournisseurs', 'Gérez les commandes fournisseurs', ShoppingCart)
-const FournisseursGestionPage = createPlaceholder('Gestion Fournisseurs', 'Gérez vos fournisseurs', Package)
 
 // Sous-traitants pages
 const SousTraitantsCommandesPage = createPlaceholder('Commandes Sous-traitants', 'Gérez les commandes sous-traitants', ShoppingCart)
@@ -64,6 +63,9 @@ const ProduitsColoris = createPlaceholder('Coloris', 'Gestion des coloris dispon
 // Transport pages
 const TransportExpeditions = createPlaceholder('Expéditions', 'Gestion des expéditions', Send)
 const TransportLivraisons = createPlaceholder('Livraisons', 'Suivi des livraisons', Truck)
+
+// Fournisseurs pages (real)
+import { Fournisseurs } from '@/pages/Fournisseurs'
 
 // Réseau pages
 import { Entreprises } from '@/pages/Entreprises'
@@ -89,7 +91,7 @@ export const router = createBrowserRouter([
       // Fournisseurs
       { path: 'fournisseurs', element: <Navigate to="/fournisseurs/commandes" replace /> },
       { path: 'fournisseurs/commandes', element: <FournisseursCommandesPage /> },
-      { path: 'fournisseurs/gestion', element: <FournisseursGestionPage /> },
+      { path: 'fournisseurs/gestion', element: <Fournisseurs /> },
 
       // Sous-traitants
       { path: 'sous-traitants', element: <Navigate to="/sous-traitants/commandes" replace /> },

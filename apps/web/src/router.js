@@ -3,7 +3,7 @@ import { createBrowserRouter, Navigate } from 'react-router-dom';
 import { AppShell } from '@/components/layout/AppShell';
 import { PagePlaceholder } from '@/components/shared/PagePlaceholder';
 import { Dashboard } from '@/pages/Dashboard';
-import { Users, ShoppingCart, FileText, Receipt, Package, Building2, Truck, Send, Globe, Tag, Palette, Factory, Scissors, FlaskConical, ClipboardCheck, Boxes, Box, ArrowRightLeft, Settings, } from 'lucide-react';
+import { Users, ShoppingCart, FileText, Receipt, Package, Building2, Truck, Send, Tag, Palette, Factory, Scissors, FlaskConical, ClipboardCheck, Boxes, Box, ArrowRightLeft, Settings, } from 'lucide-react';
 // Placeholder component factory
 function createPlaceholder(title, description, Icon) {
     return function PlaceholderPage() {
@@ -17,7 +17,7 @@ const ClientsFacturationPage = createPlaceholder('Facturation', 'Gérez la factu
 const ClientsGestionPage = createPlaceholder('Gestion Clients', 'Gérez votre portefeuille clients', Users);
 // Fournisseurs pages
 const FournisseursCommandesPage = createPlaceholder('Commandes Fournisseurs', 'Gérez les commandes fournisseurs', ShoppingCart);
-const FournisseursGestionPage = createPlaceholder('Gestion Fournisseurs', 'Gérez vos fournisseurs', Package);
+import { Fournisseurs } from '@/pages/Fournisseurs';
 // Sous-traitants pages
 const SousTraitantsCommandesPage = createPlaceholder('Commandes Sous-traitants', 'Gérez les commandes sous-traitants', ShoppingCart);
 const SousTraitantsGestionPage = createPlaceholder('Gestion Sous-traitants', 'Gérez vos sous-traitants', Building2);
@@ -56,7 +56,7 @@ export const router = createBrowserRouter([
             // Fournisseurs
             { path: 'fournisseurs', element: _jsx(Navigate, { to: "/fournisseurs/commandes", replace: true }) },
             { path: 'fournisseurs/commandes', element: _jsx(FournisseursCommandesPage, {}) },
-            { path: 'fournisseurs/gestion', element: _jsx(FournisseursGestionPage, {}) },
+            { path: 'fournisseurs/gestion', element: _jsx(Fournisseurs, {}) },
             // Sous-traitants
             { path: 'sous-traitants', element: _jsx(Navigate, { to: "/sous-traitants/commandes", replace: true }) },
             { path: 'sous-traitants/commandes', element: _jsx(SousTraitantsCommandesPage, {}) },
