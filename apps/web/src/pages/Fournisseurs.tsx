@@ -356,6 +356,27 @@ function DetailMain({ fournisseur, isLoading, hasSelection, isEditing, fournisse
     onSuccess: onMutationSuccess,
   })
 
+  // Group yarn refs by base reference (must be before early returns to keep hook order stable)
+  const refsGrouped = useMemo(() => {
+    if (!fournisseur) return []
+    const map = new Map<number, { reference: string; titrage: number | null; nb_fil: number | null; nb_brin: number | null; bio: boolean; recycle: boolean; coloris: { colori_reference: string; colori_prix_kg: number | null }[] }>()
+    for (const r of fournisseur.refsFil) {
+      if (!map.has(r.IDref_fil)) {
+        map.set(r.IDref_fil, {
+          reference: r.reference ?? '—',
+          titrage: r.titrage,
+          nb_fil: r.nb_fil,
+          nb_brin: r.nb_brin,
+          bio: !!r.bio,
+          recycle: !!(r as any)['recyclé'] || !!(r as any)['recycl'] || !!(r as any)['recyclb'] || !!(r as any)['recycle'],
+          coloris: [],
+        })
+      }
+      map.get(r.IDref_fil)!.coloris.push({ colori_reference: r.colori_reference ?? '—', colori_prix_kg: r.colori_prix_kg })
+    }
+    return Array.from(map.values())
+  }, [fournisseur?.refsFil])
+
   if (!hasSelection) return (
     <div className="flex-1 flex items-center justify-center">
       <div className="text-center space-y-3">
@@ -377,26 +398,6 @@ function DetailMain({ fournisseur, isLoading, hasSelection, isEditing, fournisse
       setViewCert(c)
     }
   }
-
-  // Group yarn refs by base reference
-  const refsGrouped = useMemo(() => {
-    const map = new Map<number, { reference: string; titrage: number | null; nb_fil: number | null; nb_brin: number | null; bio: boolean; recycle: boolean; coloris: { colori_reference: string; colori_prix_kg: number | null }[] }>()
-    for (const r of fournisseur.refsFil) {
-      if (!map.has(r.IDref_fil)) {
-        map.set(r.IDref_fil, {
-          reference: r.reference ?? '—',
-          titrage: r.titrage,
-          nb_fil: r.nb_fil,
-          nb_brin: r.nb_brin,
-          bio: !!r.bio,
-          recycle: !!(r as any)['recyclé'] || !!(r as any)['recycl'] || !!(r as any)['recyclb'] || !!(r as any)['recycle'],
-          coloris: [],
-        })
-      }
-      map.get(r.IDref_fil)!.coloris.push({ colori_reference: r.colori_reference ?? '—', colori_prix_kg: r.colori_prix_kg })
-    }
-    return Array.from(map.values())
-  }, [fournisseur.refsFil])
 
   return (
     <div className="flex-1 min-h-0 overflow-auto space-y-4">
