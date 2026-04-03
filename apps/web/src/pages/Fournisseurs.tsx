@@ -24,6 +24,7 @@ import {
   Phone,
   ChevronDown,
   Upload,
+  MessageSquare,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -506,26 +507,29 @@ function DetailMain({ fournisseur, isLoading, hasSelection, isEditing, fournisse
           {refsGrouped.length === 0 ? (
             <p className="text-sm text-muted-foreground italic">Aucune reference</p>
           ) : refsGrouped.map((ref, i) => (
-            <div key={i} className="rounded-lg p-3 border border-border/60 bg-zinc-100/80">
+            <div key={i} className={cn('group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3', 'border-l-amber-400/60')}>
+              {/* Top row: icon + reference + badges */}
               <div className="flex items-center justify-between gap-2">
-                <span className="text-sm font-medium">{ref.reference}</span>
-                <div className="flex gap-1">
-                  {ref.bio && <Badge className="bg-green-500/10 text-green-700 text-[10px] py-0 gap-0.5"><Leaf className="h-2.5 w-2.5" />Bio</Badge>}
-                  {ref.recycle && <Badge className="bg-blue-500/10 text-blue-700 text-[10px] py-0 gap-0.5"><Recycle className="h-2.5 w-2.5" />Recycle</Badge>}
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-amber-400/10">
+                    <BobineIcon className="h-3.5 w-3.5 text-amber-600" />
+                  </div>
+                  <p className="text-sm font-medium truncate">{ref.reference}</p>
+                </div>
+                <div className="flex items-center gap-1 flex-shrink-0">
+                  {ref.bio && <Badge className="bg-green-500/10 text-green-700 text-[10px] py-0 px-1.5 gap-0.5"><Leaf className="h-2.5 w-2.5" />Bio</Badge>}
+                  {ref.recycle && <Badge className="bg-blue-500/10 text-blue-700 text-[10px] py-0 px-1.5 gap-0.5"><Recycle className="h-2.5 w-2.5" />Recycle</Badge>}
                 </div>
               </div>
-              <div className="text-xs text-muted-foreground mt-1 flex gap-3">
-                {ref.titrage != null && <span>Titrage: {ref.titrage}</span>}
-                {ref.nb_fil != null && ref.nb_fil > 0 && <span>{ref.nb_fil} fil{ref.nb_fil > 1 ? 's' : ''}</span>}
-                {ref.nb_brin != null && ref.nb_brin > 0 && <span>{ref.nb_brin} brin{ref.nb_brin > 1 ? 's' : ''}</span>}
-              </div>
-              <div className="flex flex-wrap gap-1.5 mt-1.5">
-                {ref.coloris.map((col, j) => (
-                  <Badge key={j} variant="outline" className="text-[10px] py-0 px-1.5 font-normal">
-                    {col.colori_reference}{col.colori_prix_kg != null && col.colori_prix_kg > 0 ? ` (${Number(col.colori_prix_kg).toFixed(2)} €/kg)` : ''}
-                  </Badge>
-                ))}
-              </div>
+              {/* Bottom row: specs */}
+              {(ref.titrage != null || (ref.nb_fil != null && ref.nb_fil > 0) || (ref.nb_brin != null && ref.nb_brin > 0)) && (
+                <div className="flex items-center gap-3 mt-2 text-[11px] text-muted-foreground">
+                  {ref.titrage != null && <span>Titrage: {ref.titrage}</span>}
+                  {ref.nb_fil != null && ref.nb_fil > 0 && <span>{ref.nb_fil} fil{ref.nb_fil > 1 ? 's' : ''}</span>}
+                  {ref.nb_brin != null && ref.nb_brin > 0 && <span>{ref.nb_brin} brin{ref.nb_brin > 1 ? 's' : ''}</span>}
+                  <span className="ml-auto">{ref.coloris.length} coloris</span>
+                </div>
+              )}
             </div>
           ))}
         </CardContent>}
@@ -542,43 +546,52 @@ function DetailMain({ fournisseur, isLoading, hasSelection, isEditing, fournisse
         {commandesOpen && <CardContent className="space-y-2">
           {!fournisseur.commandes || fournisseur.commandes.length === 0 ? (
             <p className="text-sm text-muted-foreground italic">Aucune commande</p>
-          ) : fournisseur.commandes.map((cmd) => (
-            <div key={cmd.IDcommande_fil} className="rounded-lg p-3 border border-border/60 bg-zinc-100/80">
-              <div className="flex items-center justify-between gap-2">
+          ) : fournisseur.commandes.map((cmd) => {
+            const borderColor = cmd.etat === 1 ? 'border-l-amber-400/60' : cmd.etat === 2 ? 'border-l-green-500/60' : 'border-l-border'
+            const iconBg = cmd.etat === 1 ? 'bg-amber-400/10' : cmd.etat === 2 ? 'bg-green-500/10' : 'bg-muted'
+            const iconColor = cmd.etat === 1 ? 'text-amber-600' : cmd.etat === 2 ? 'text-green-600' : 'text-muted-foreground'
+            const totalKg = cmd.lignes.reduce((sum, l) => sum + (l.quantite != null ? Number(l.quantite) : 0), 0)
+            const totalPrice = cmd.lignes.reduce((sum, l) => sum + (l.quantite != null && l.prix_unitaire != null ? Number(l.quantite) * Number(l.prix_unitaire) : 0), 0)
+            return (
+              <div key={cmd.IDcommande_fil} className={cn('group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3', borderColor)}>
+                {/* Top row: icon + order number + summary */}
                 <div className="flex items-center gap-2">
-                  <ShoppingCart className="h-3.5 w-3.5 text-muted-foreground" />
-                  <span className="text-sm font-medium">
-                    N° {cmd.IDcommande_fil}
-                  </span>
+                  <div className={cn('h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0', iconBg)}>
+                    <ShoppingCart className={cn('h-3.5 w-3.5', iconColor)} />
+                  </div>
+                  <p className="text-sm font-medium">N° {cmd.IDcommande_fil}</p>
+                  <div className="flex items-center gap-2 ml-auto flex-shrink-0 text-[11px] text-muted-foreground">
+                    {cmd.date_commande && <span>{formatHfsqlDate(cmd.date_commande)}</span>}
+                    {totalKg > 0 && <span className="px-1.5 py-0.5 rounded bg-zinc-200/80">{totalKg.toFixed(1)} kg</span>}
+                    {totalPrice > 0 && <span className="px-1.5 py-0.5 rounded bg-accent/10 font-medium text-foreground">{totalPrice.toFixed(2)} €</span>}
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  {cmd.date_commande && (
-                    <span className="text-xs text-muted-foreground">{formatHfsqlDate(cmd.date_commande)}</span>
-                  )}
-                  <CommandeEtatBadge etat={cmd.etat} />
-                </div>
-              </div>
-              {cmd.lignes.length > 0 && (
-                <div className="mt-2 space-y-1">
-                  {cmd.lignes.map((l) => (
-                    <div key={l.IDref_fil_commande} className="flex items-center justify-between text-xs text-muted-foreground">
-                      <span>
-                        {l.ref_fil || '—'}
-                        {l.colori_reference ? ` / ${l.colori_reference}` : ''}
-                      </span>
-                      <div className="flex items-center gap-3">
-                        {l.quantite != null && <span>{Number(l.quantite).toFixed(1)} kg</span>}
-                        {l.prix_unitaire != null && Number(l.prix_unitaire) > 0 && <span>{Number(l.prix_unitaire).toFixed(2)} €/kg</span>}
+                {/* Order lines */}
+                {cmd.lignes.length > 0 && (
+                  <div className="mt-2 space-y-1 ml-9">
+                    {cmd.lignes.map((l) => (
+                      <div key={l.IDref_fil_commande} className="flex items-center justify-between text-[11px] text-muted-foreground">
+                        <span className="truncate max-w-[220px]">
+                          {l.ref_fil || '—'}
+                          {l.colori_reference ? ` / ${l.colori_reference}` : ''}
+                        </span>
+                        <div className="flex items-center gap-3 flex-shrink-0">
+                          {l.quantite != null && <span>{Number(l.quantite).toFixed(1)} kg</span>}
+                          {l.prix_unitaire != null && Number(l.prix_unitaire) > 0 && <span>{Number(l.prix_unitaire).toFixed(2)} €/kg</span>}
+                        </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {cmd.commentaire && (
-                <p className="text-xs text-muted-foreground mt-1.5 italic">{cmd.commentaire}</p>
-              )}
-            </div>
-          ))}
+                    ))}
+                  </div>
+                )}
+                {cmd.commentaire?.trim() && (
+                  <div className="flex items-start gap-1.5 mt-2 ml-9">
+                    <MessageSquare className="h-3 w-3 text-muted-foreground/50 flex-shrink-0 mt-0.5" />
+                    <p className="text-[11px] text-muted-foreground italic">{cmd.commentaire.trim()}</p>
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </CardContent>}
       </Card>
     </div>

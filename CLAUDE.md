@@ -165,14 +165,14 @@ The MPS_NG web app connects to the HFSQL server via ODBC:
 - **Driver**: `HFSQL` (installed from `C:\PC SOFT\WINDEV Suite 2026\Install\ODBC\WX310PACKODBC.exe`)
 - **Connection string**: `DRIVER={HFSQL};Server Name=localhost;Server Port=4900;Database=MPS;UID=Admin;PWD=;`
 - **npm package**: `odbc`
-- **ODBC connection helper**: `apps/api/src/lib/hfsql.ts` — singleton connection, `query()` wrapper, `fixEncoding()`, `closeConnection()`
+- **ODBC connection helper**: `apps/api/src/lib/hfsql.ts` — singleton connection, `query()` wrapper, `queryRaw()` (preserves binary ArrayBuffers), `fixEncoding()`, `closeConnection()`, `getConnection()`
 - **Known issues**:
   - Accented table names cause "fichier de données est déjà décrit" error — avoid accents in HFSQL table names
   - HFSQL backup folders with accented file names trigger the same error — delete backups before connecting
   - Empty memo fields return as `\x00` — cleaned automatically by `query()` in hfsql.ts
   - BigInt fields return with `n` suffix — converted to Number automatically by `query()`
   - **Encoding**: HFSQL ODBC driver corrupts accented characters (é→U+FFFD). Fix: use `fixEncoding()` which calls `CONVERT(field USING 'UTF-8')` per-row for affected fields. Returns ArrayBuffer decoded as UTF-8.
-  - **No parameterized queries**: `?` placeholders cause "SQLGetDescribeParam non supportée" error. Use string interpolation with `esc()` (single-quote doubling) for strings, `parseInt` for IDs.
+  - **No parameterized queries**: `?` placeholders cause "SQLGetDescribeParam non supportée" error. Use string interpolation with `esc()` (single-quote doubling) for strings, `parseInt` for IDs. For binary blobs, use hex literals: `x'${buffer.toString('hex')}'`.
   - **No `RETURNING *`**: HFSQL SQL doesn't support it. Use follow-up SELECT after INSERT/UPDATE.
   - **Booleans as numbers**: HFSQL returns `0`/`1` not `true`/`false`. In React, always use `!!value &&` to avoid rendering `0` as text.
 
@@ -310,11 +310,12 @@ First fully implemented data screen. 3-panel layout with:
 ### Fournisseurs (`/fournisseurs/gestion`)
 Supplier management screen. 3-panel layout with:
 - **Left**: Searchable supplier list (Factory icon, name only, no phone/fax in cards)
-- **Center**: Supplier header (name, Modifier button), collapsible certificats card (validity badges), collapsible references de fil card (BobineIcon, grouped by base ref with Bio/Recycle badges and coloris), collapsible commandes card (order lines with ref/coloris/qty/price, status badges)
+- **Center**: Supplier header (name, Modifier button), collapsible certificats card (clickable: view mode opens PDF viewer, edit mode opens edit dialog with document upload), collapsible references de fil card (BobineIcon, grouped by base ref with Bio/Recycle badges), collapsible commandes card (order lines with ref/coloris/qty/price, total weight/price summary)
 - **Right sidebar**: 3 tabs — Info (commentaire), Contacts (with envoi_bl/facture/commande/soumission flags), Adresses (with facturation/livraison default flags)
-- **Detail API**: `GET /api/fournisseurs/:id` returns fournisseur + adresses + contacts + refsFil + certificats + commandes (with lignes)
+- **Detail API**: `GET /api/fournisseurs/:id` returns fournisseur + adresses + contacts + refsFil + certificats (with `has_fichier`, `IDtype_doc`) + commandes (with lignes)
+- **Certificat endpoints**: `GET /fournisseurs/certificats/:certId/fichier` (serves PDF blob with MIME detection), `PUT /fournisseurs/certificats/:certId` (multipart update), `POST /fournisseurs/:id/certificats` (multipart create), `DELETE /fournisseurs/certificats/:certId`, `GET /fournisseurs/type-doc` (document type list)
 - **CRUD endpoints**: Full CRUD for fournisseurs + sub-entity CRUD under `/api/fournisseurs/:id/{contacts,adresses}`
-- **Edit mode**: Inline forms for contacts/adresses, commentaire editable in Info tab
+- **Edit mode**: Inline forms for contacts/adresses, commentaire editable in Info tab, certificate edit dialog with document viewer/upload
 - **HFSQL tables**: `fournisseur`, `adresse`, `contact`, `colori_fil`, `ref_fil`, `certificat`, `type_doc`, `commande_fil`, `ref_fil_commande`
 
 ## Business Domain (Quick Reference)

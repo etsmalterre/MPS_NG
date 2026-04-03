@@ -412,32 +412,81 @@ Available competences section: `mt-3 pt-3 border-t border-border/50 flex flex-wr
 
 ### Item View Cards (certificats, refs, commandes, recommandations)
 
+Cards use a consistent two-row layout with a colored left accent border and an icon box.
+
+**Important**: Use `cn()` to combine the base classes with the border color class. Do NOT use a static className string — `twMerge` inside `cn()` resolves `border` + `border-l-4` in a specific way that produces the correct thin left accent.
+
+#### Card Color Variants
+
+| Variant | Left border | Icon bg | Icon color | Usage |
+|---------|------------|---------|------------|-------|
+| **Neutral (default)** | `border-l-amber-400/60` | `bg-amber-400/10` | `text-amber-600` | Standard cards (refs, neutral commandes) |
+| **Success** | `border-l-green-500/60` | `bg-green-500/10` | `text-green-600` | Valid certificates, delivered orders |
+| **Danger** | `border-l-destructive/60` | `bg-destructive/10` | `text-destructive/70` | Expired certificates |
+| **Muted** | `border-l-border` | `bg-muted` | `text-muted-foreground` | Closed/draft items |
+
+**Amber/gold is the standard neutral color for item cards throughout the app.**
+
+#### Base Card Template
+
 ```tsx
-<div className="rounded-lg p-3 border border-border/60 bg-zinc-100/80 group relative">
+<div className={cn(
+  'group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3',
+  'border-l-amber-400/60' // or dynamic borderColor variable
+)}>
+  {/* Top row: icon box + title + badges/actions */}
   <div className="flex items-center justify-between gap-2">
-    <div className="flex items-center gap-2">
-      <Icon className="h-3.5 w-3.5 text-muted-foreground" />
-      <span className="text-sm font-medium">{title}</span>
+    <div className="flex items-center gap-2 min-w-0">
+      <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-amber-400/10">
+        <Icon className="h-3.5 w-3.5 text-amber-600" />
+      </div>
+      <div className="min-w-0">
+        <p className="text-sm font-medium truncate">{title}</p>
+        <p className="text-[11px] text-muted-foreground truncate">{subtitle}</p>
+      </div>
     </div>
-    <div className="flex items-center gap-1.5">
-      {/* Metadata */}
-      <span className="flex items-center gap-1 text-xs text-muted-foreground">
-        <Calendar className="h-3 w-3" />{date}
-      </span>
-      {/* Hover-reveal edit/delete buttons */}
-      {isEditing && (
-        <div className="flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-          <Button variant="ghost" size="icon" className="h-6 w-6"><Pencil className="h-3 w-3" /></Button>
-          <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive hover:text-destructive"><Trash2 className="h-3 w-3" /></Button>
-        </div>
-      )}
+    <div className="flex items-center gap-1.5 flex-shrink-0">
+      {/* Badges, hover-reveal edit/delete buttons */}
     </div>
   </div>
-  {/* Sub-info */}
-  <div className="text-xs text-muted-foreground flex items-center gap-1.5 mt-1">
-    <User className="h-3 w-3" /><span>{contact}</span>
+  {/* Bottom row: metadata */}
+  <div className="flex items-center gap-3 mt-2 text-[11px] text-muted-foreground">
+    <span>{detail}</span>
+    <span className="ml-auto">{rightDetail}</span>
   </div>
-  <p className="text-sm text-muted-foreground whitespace-pre-line mt-1.5">{description}</p>
+</div>
+```
+
+#### Status-colored Card (dynamic border)
+
+```tsx
+const borderColor = etat === 1 ? 'border-l-amber-400/60'
+  : etat === 2 ? 'border-l-green-500/60'
+  : 'border-l-border'
+const iconBg = etat === 1 ? 'bg-amber-400/10'
+  : etat === 2 ? 'bg-green-500/10'
+  : 'bg-muted'
+const iconColor = etat === 1 ? 'text-amber-600'
+  : etat === 2 ? 'text-green-600'
+  : 'text-muted-foreground'
+
+<div className={cn('group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3', borderColor)}>
+  <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 {iconBg}">
+    <Icon className={cn('h-3.5 w-3.5', iconColor)} />
+  </div>
+  ...
+</div>
+```
+
+#### Indented Sub-content (e.g., order lines)
+
+```tsx
+{/* Indent under the icon box with ml-9 */}
+<div className="mt-2 space-y-1 ml-9">
+  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+    <span className="truncate max-w-[220px]">{lineText}</span>
+    <span className="flex-shrink-0">{lineValue}</span>
+  </div>
 </div>
 ```
 
