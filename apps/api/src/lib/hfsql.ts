@@ -6,7 +6,7 @@ const CONNECTION_STRING =
 
 let connectionPromise: Promise<odbc.Connection> | null = null
 
-function getConnection(): Promise<odbc.Connection> {
+export function getConnection(): Promise<odbc.Connection> {
   if (!connectionPromise) {
     connectionPromise = odbc.connect({
       connectionString: CONNECTION_STRING,
@@ -101,6 +101,13 @@ export async function fixEncoding<T extends Record<string, unknown>>(
   }
 
   return result
+}
+
+/** Run a SQL query and return raw rows without cleanRow (preserves ArrayBuffer for binary blobs) */
+export async function queryRaw(sql: string): Promise<Record<string, unknown>[]> {
+  const conn = await getConnection()
+  const rows = await conn.query(sql)
+  return rows as Record<string, unknown>[]
 }
 
 export async function closeConnection(): Promise<void> {

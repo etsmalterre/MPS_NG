@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "cross-env NODE_ENV=development tsx watch src/index.ts",
     "dev:8081": "cross-env PORT=8081 tsx watch src/index.ts",
     "dev:8082": "cross-env PORT=8082 tsx watch src/index.ts",
     "dev:8083": "cross-env PORT=8083 tsx watch src/index.ts",
@@ -12,7 +12,7 @@
     "dev:8085": "cross-env PORT=8085 tsx watch src/index.ts",
     "dev:8086": "cross-env PORT=8086 tsx watch src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js",
+    "start": "cross-env NODE_ENV=production node dist/index.js",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "clean": "rimraf dist",
@@ -22,10 +22,12 @@
   },
   "dependencies": {
     "@mps/db": "workspace:*",
+    "@types/multer": "^2.1.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "helmet": "^8.0.0",
+    "multer": "^2.1.1",
     "odbc": "^2.4.9",
     "postgres": "^3.4.5",
     "zod": "^3.24.1"

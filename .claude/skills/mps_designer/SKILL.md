@@ -653,6 +653,14 @@ className="w-full h-9 pl-9 pr-3 text-sm rounded-md border border-input bg-backgr
 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
 ```
 
+### Select / Dropdown
+
+```tsx
+<select className={cn(inputClass, 'cursor-pointer')}>
+```
+
+Dropdowns always use `cursor-pointer` so the pointing finger icon shows on hover.
+
 ### Focus Ring
 
 All inputs: `focus:ring-2 focus:ring-ring` where `--ring: 42 80% 55%` (gold).

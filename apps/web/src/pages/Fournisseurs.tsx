@@ -23,10 +23,12 @@ import {
   Info,
   Phone,
   ChevronDown,
+  Upload,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { BobineIcon } from '@/components/icons/BobineIcon'
 import { cn } from '@/lib/utils'
@@ -92,6 +94,13 @@ interface Certificat {
   debut_validite: string | null
   date_expiration: string | null
   type_doc: string | null
+  IDtype_doc: number | null
+  has_fichier: boolean
+}
+
+interface TypeDoc {
+  IDtype_doc: number
+  nom: string
 }
 
 interface Adresse {
@@ -143,7 +152,7 @@ function useFournisseurDetail(id: number | null) {
 
 // ── Shared styling ─────────────────────────────────────
 
-const inputClass = 'w-full h-8 px-2.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring'
+const inputClass = 'w-full h-8 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring'
 const editSectionClass = 'border-l-4 border-l-accent/70 bg-accent/[0.03]'
 
 // ── Main Page ──────────────────────────────────────────
@@ -205,7 +214,7 @@ export function Fournisseurs() {
         isEditing={isEditing} editNom={editNom} onEditNomChange={setEditNom}
         onStartEdit={startEdit} onCancelEdit={cancelEdit} onSave={() => saveMutation.mutate()} isSaving={saveMutation.isPending} />}
       detail={<DetailMain fournisseur={detail ?? null} isLoading={detailLoading && selectedId !== null}
-        hasSelection={selectedId !== null} />}
+        hasSelection={selectedId !== null} isEditing={isEditing} fournisseurId={selectedId} onMutationSuccess={invalidateAll} />}
       sidebar={selectedId !== null ? <DetailSidebar fournisseur={detail ?? null} isLoading={detailLoading}
         isEditing={isEditing} fournisseurId={selectedId} onMutationSuccess={invalidateAll}
         editCommentaire={editCommentaire} onEditCommentaireChange={setEditCommentaire} /> : null}
@@ -329,8 +338,9 @@ function CommandeEtatBadge({ etat }: { etat: number | null }) {
   }
 }
 
-function DetailMain({ fournisseur, isLoading, hasSelection }: {
+function DetailMain({ fournisseur, isLoading, hasSelection, isEditing, fournisseurId, onMutationSuccess }: {
   fournisseur: FournisseurDetail | null; isLoading: boolean; hasSelection: boolean
+  isEditing: boolean; fournisseurId: number | null; onMutationSuccess: () => void
 }) {
   if (!hasSelection) return (
     <div className="flex-1 flex items-center justify-center">
@@ -344,8 +354,28 @@ function DetailMain({ fournisseur, isLoading, hasSelection }: {
   if (!fournisseur) return null
 
   const [certifsOpen, setCertifsOpen] = useState(false)
+  const [showExpired, setShowExpired] = useState(false)
   const [refsOpen, setRefsOpen] = useState(false)
   const [commandesOpen, setCommandesOpen] = useState(false)
+  const [viewCert, setViewCert] = useState<Certificat | null>(null)
+  const [editCert, setEditCert] = useState<Certificat | null>(null)
+  const [createCert, setCreateCert] = useState(false)
+
+  const validCertificats = fournisseur.certificats.filter((c) => !isCertExpired(c.date_expiration))
+  const displayedCertificats = showExpired ? fournisseur.certificats : validCertificats
+
+  const deleteCertMut = useMutation({
+    mutationFn: (certId: number) => apiFetch(`/fournisseurs/certificats/${certId}`, { method: 'DELETE' }),
+    onSuccess: onMutationSuccess,
+  })
+
+  const handleCertClick = (c: Certificat) => {
+    if (isEditing) {
+      setEditCert(c)
+    } else {
+      setViewCert(c)
+    }
+  }
 
   // Group yarn refs by base reference
   const refsGrouped = useMemo(() => {
@@ -374,40 +404,95 @@ function DetailMain({ fournisseur, isLoading, hasSelection }: {
         <CardHeader className="flex flex-row items-center gap-2 p-4 space-y-0 cursor-pointer select-none" onClick={() => setCertifsOpen(!certifsOpen)}>
           <Shield className="h-4 w-4 text-accent" />
           <CardTitle className="text-sm font-semibold">Certificats</CardTitle>
-          <Badge variant="secondary" className="text-xs ml-auto">{fournisseur.certificats.length}</Badge>
+          {isEditing && (
+            <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-accent hover:text-accent hover:bg-accent/10"
+              onClick={(e) => { e.stopPropagation(); setCreateCert(true) }}>
+              <Plus className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          <Badge variant="secondary" className="text-xs ml-auto">{validCertificats.length}</Badge>
           <ChevronDown className={cn('h-4 w-4 text-muted-foreground transition-transform', certifsOpen && 'rotate-180')} />
         </CardHeader>
         {certifsOpen && <CardContent className="space-y-2">
-          {fournisseur.certificats.length === 0 ? (
+          {fournisseur.certificats.length > validCertificats.length && (
+            <button
+              onClick={() => setShowExpired(!showExpired)}
+              className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              {showExpired ? 'Masquer expirés' : `Afficher expirés (${fournisseur.certificats.length - validCertificats.length})`}
+            </button>
+          )}
+          {displayedCertificats.length === 0 ? (
             <p className="text-sm text-muted-foreground italic">Aucun certificat</p>
-          ) : fournisseur.certificats.map((c) => {
+          ) : displayedCertificats.map((c) => {
             const expired = isCertExpired(c.date_expiration)
             return (
-              <div key={c.IDcertificat} className="rounded-lg p-3 border border-border/60 bg-zinc-100/80">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <Shield className="h-3.5 w-3.5 text-muted-foreground" />
-                    <span className="text-sm font-medium">{c.nom || '—'}</span>
-                  </div>
-                  {expired ? (
-                    <Badge variant="destructive" className="text-[10px] py-0">Expire</Badge>
-                  ) : (
-                    <Badge className="badge-success text-[10px] py-0">Valide</Badge>
-                  )}
-                </div>
-                <div className="text-xs text-muted-foreground mt-1 space-y-0.5">
-                  {c.numero_ref && <p>Ref: {c.numero_ref}</p>}
-                  {c.type_doc && <p>Type: {c.type_doc}</p>}
-                  <div className="flex gap-3">
-                    {c.debut_validite && <span>Du {formatHfsqlDate(c.debut_validite)}</span>}
-                    {c.date_expiration && <span>au {formatHfsqlDate(c.date_expiration)}</span>}
-                  </div>
+              <div key={c.IDcertificat} onClick={() => handleCertClick(c)}
+                className={cn('group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 cursor-pointer transition-all hover:shadow-md p-3',
+                  expired ? 'border-l-destructive/60' : 'border-l-green-500/60',
+                  isEditing && editSectionClass)}>
+                <div>
+                    {/* Top row: name + status */}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className={cn('h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0',
+                          expired ? 'bg-destructive/10' : 'bg-green-500/10')}>
+                          <Shield className={cn('h-3.5 w-3.5', expired ? 'text-destructive/70' : 'text-green-600')} />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">{c.nom || '—'}</p>
+                          {c.type_doc && <p className="text-[11px] text-muted-foreground truncate">{c.type_doc}</p>}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 flex-shrink-0">
+                        {c.has_fichier && <FileText className="h-3.5 w-3.5 text-accent/50" />}
+                        {isEditing && (
+                          <button onClick={(e) => { e.stopPropagation(); if (confirm('Supprimer ce certificat ?')) deleteCertMut.mutate(c.IDcertificat) }}
+                            className="opacity-0 group-hover:opacity-100 p-0.5 text-destructive hover:text-destructive/80 transition-opacity">
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        {expired ? (
+                          <Badge variant="destructive" className="text-[10px] py-0 px-1.5">Expiré</Badge>
+                        ) : (
+                          <Badge className="badge-success text-[10px] py-0 px-1.5">Valide</Badge>
+                        )}
+                      </div>
+                    </div>
+                    {/* Bottom row: ref + dates */}
+                    {(c.numero_ref || c.debut_validite || c.date_expiration) && (
+                      <div className="flex items-center gap-3 mt-2 text-[11px] text-muted-foreground">
+                        {c.numero_ref && (
+                          <span className="truncate max-w-[320px]" title={c.numero_ref}>
+                            Ref: {c.numero_ref}
+                          </span>
+                        )}
+                        {(c.debut_validite || c.date_expiration) && (
+                          <span className="flex-shrink-0 ml-auto">
+                            {c.debut_validite && formatHfsqlDate(c.debut_validite)}
+                            {c.debut_validite && c.date_expiration && ' → '}
+                            {c.date_expiration && formatHfsqlDate(c.date_expiration)}
+                          </span>
+                        )}
+                      </div>
+                    )}
                 </div>
               </div>
             )
           })}
         </CardContent>}
       </Card>
+
+      {/* View mode dialog */}
+      <CertificatViewDialog cert={viewCert} onClose={() => setViewCert(null)} />
+
+      {/* Edit mode dialog */}
+      <CertificatEditDialog cert={editCert} onClose={() => setEditCert(null)}
+        fournisseurId={fournisseurId!} onSuccess={onMutationSuccess} />
+
+      {/* Create mode dialog */}
+      <CertificatEditDialog cert={createCert ? { IDcertificat: 0, nom: '', numero_ref: '', debut_validite: '', date_expiration: '', type_doc: null, IDtype_doc: null, has_fichier: false } : null}
+        onClose={() => setCreateCert(false)} fournisseurId={fournisseurId!} onSuccess={onMutationSuccess} isNew />
 
       {/* References de fil */}
       <Card className="card-premium">
@@ -497,6 +582,217 @@ function DetailMain({ fournisseur, isLoading, hasSelection }: {
         </CardContent>}
       </Card>
     </div>
+  )
+}
+
+// ── Certificate Dialogs ───────────────────────────────
+
+function hfsqlDateToInput(d: string | null): string {
+  if (!d || d.length !== 8) return ''
+  return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`
+}
+function inputDateToHfsql(d: string): string {
+  return d.replace(/-/g, '')
+}
+
+function CertificatViewDialog({ cert, onClose }: { cert: Certificat | null; onClose: () => void }) {
+  if (!cert) return null
+  return (
+    <Dialog open={!!cert} onOpenChange={() => onClose()}>
+      {cert.has_fichier ? (
+        <div className="relative z-50 w-[60vw] max-w-3xl h-[95vh]" onClick={(e) => e.stopPropagation()}>
+          <iframe
+            src={`${API_URL}/fournisseurs/certificats/${cert.IDcertificat}/fichier#view=FitH`}
+            className="w-full h-full rounded-lg"
+            title="Document"
+          />
+        </div>
+      ) : (
+        <DialogContent className="max-w-sm" onClose={onClose}>
+          <div className="flex items-center justify-center py-8 text-muted-foreground">
+            <div className="text-center space-y-2">
+              <FileText className="h-12 w-12 mx-auto opacity-30" />
+              <p className="text-sm">Aucun document attaché</p>
+            </div>
+          </div>
+        </DialogContent>
+      )}
+    </Dialog>
+  )
+}
+
+function CertificatEditDialog({ cert, onClose, fournisseurId, onSuccess, isNew }: {
+  cert: Certificat | null; onClose: () => void; fournisseurId: number; onSuccess: () => void; isNew?: boolean
+}) {
+  const [nom, setNom] = useState('')
+  const [numeroRef, setNumeroRef] = useState('')
+  const [debutValidite, setDebutValidite] = useState('')
+  const [dateExpiration, setDateExpiration] = useState('')
+  const [idTypeDoc, setIdTypeDoc] = useState<number>(0)
+  const [newFile, setNewFile] = useState<File | null>(null)
+  const [newFileUrl, setNewFileUrl] = useState<string | null>(null)
+  const [removeFichier, setRemoveFichier] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
+
+  const { data: typeDocs } = useQuery<TypeDoc[]>({
+    queryKey: ['types-doc'],
+    queryFn: () => apiFetch('/fournisseurs/type-doc'),
+  })
+
+  // Reset form when cert changes
+  useEffect(() => {
+    if (cert) {
+      setNom(cert.nom ?? '')
+      setNumeroRef(cert.numero_ref ?? '')
+      setDebutValidite(hfsqlDateToInput(cert.debut_validite))
+      setDateExpiration(hfsqlDateToInput(cert.date_expiration))
+      setIdTypeDoc(cert.IDtype_doc ?? 0)
+      if (newFileUrl) URL.revokeObjectURL(newFileUrl)
+      setNewFile(null)
+      setNewFileUrl(null)
+      setRemoveFichier(false)
+    }
+  }, [cert])
+
+  const handleSave = async () => {
+    setIsSaving(true)
+    try {
+      const formData = new FormData()
+      formData.append('nom', nom)
+      formData.append('numero_ref', numeroRef)
+      formData.append('debut_validite', inputDateToHfsql(debutValidite))
+      formData.append('date_expiration', inputDateToHfsql(dateExpiration))
+      formData.append('IDtype_doc', String(idTypeDoc))
+      if (removeFichier && !newFile) formData.append('remove_fichier', '1')
+      if (newFile) formData.append('fichier', newFile)
+
+      const url = isNew
+        ? `${API_URL}/fournisseurs/${fournisseurId}/certificats`
+        : `${API_URL}/fournisseurs/certificats/${cert!.IDcertificat}`
+
+      const res = await fetch(url, {
+        method: isNew ? 'POST' : 'PUT',
+        body: formData,
+      })
+      if (!res.ok) throw new Error('Erreur API')
+      onSuccess()
+      onClose()
+    } catch (err) {
+      console.error('Error saving certificat:', err)
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  if (!cert) return null
+
+  const hasFichier = cert.has_fichier && !removeFichier
+
+  return (
+    <Dialog open={!!cert} onOpenChange={() => onClose()}>
+      <DialogContent className="max-w-5xl h-[85vh] flex flex-col" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Shield className="h-4 w-4 text-accent" />
+            {isNew ? 'Nouveau certificat' : 'Modifier le certificat'}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="flex-1 min-h-0 flex gap-4">
+          {/* Left: Form fields */}
+          <div className="w-80 flex-shrink-0 overflow-y-auto space-y-3 px-1">
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Nom</label>
+              <input value={nom} onChange={(e) => setNom(e.target.value)} autoFocus
+                className={inputClass} />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Référence</label>
+              <input value={numeroRef} onChange={(e) => setNumeroRef(e.target.value)}
+                className={inputClass} />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Début validité</label>
+              <input type="date" value={debutValidite} onChange={(e) => setDebutValidite(e.target.value)}
+                autoComplete="off" data-form-type="other" data-lpignore="true" className={inputClass} />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Date expiration</label>
+              <input type="date" value={dateExpiration} onChange={(e) => setDateExpiration(e.target.value)}
+                autoComplete="off" data-form-type="other" data-lpignore="true" className={inputClass} />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Type de document</label>
+              <select value={idTypeDoc} onChange={(e) => setIdTypeDoc(parseInt(e.target.value, 10))}
+                className={cn(inputClass, 'cursor-pointer')}>
+                <option value={0}>— Aucun —</option>
+                {typeDocs?.filter((t) => t.nom.toLowerCase().includes('cert')).map((t) => (
+                  <option key={t.IDtype_doc} value={t.IDtype_doc}>{t.nom}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Right: Document viewer + file controls */}
+          <div className="flex-1 min-w-0 flex flex-col gap-2">
+            <div className="flex-1 min-h-0 rounded-lg border border-border/60 bg-zinc-50 overflow-hidden">
+              {newFileUrl ? (
+                <iframe src={newFileUrl + '#view=FitH'} className="w-full h-full" title="Document" />
+              ) : hasFichier && !isNew ? (
+                <iframe
+                  src={`${API_URL}/fournisseurs/certificats/${cert.IDcertificat}/fichier#view=FitH`}
+                  className="w-full h-full"
+                  title="Document"
+                />
+              ) : (
+                <div className="flex items-center justify-center h-full text-muted-foreground">
+                  <div className="text-center space-y-2">
+                    <FileText className="h-12 w-12 mx-auto opacity-30" />
+                    <p className="text-sm">{removeFichier ? 'Document supprimé' : 'Aucun document'}</p>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="cursor-pointer">
+                <input type="file" className="hidden" accept=".pdf,image/*" onClick={(e) => { (e.target as HTMLInputElement).value = '' }} onChange={(e) => {
+                  const f = e.target.files?.[0]
+                  if (f) {
+                    if (newFileUrl) URL.revokeObjectURL(newFileUrl)
+                    setNewFile(f)
+                    setNewFileUrl(URL.createObjectURL(f))
+                    setRemoveFichier(false)
+                  }
+                }} />
+                <span className={cn(inputClass, 'inline-flex items-center gap-1.5 cursor-pointer hover:bg-accent/5 w-auto px-3')}>
+                  <Upload className="h-3.5 w-3.5" />
+                  {newFile ? newFile.name : 'Choisir un fichier'}
+                </span>
+              </label>
+              {newFile && (
+                <Button variant="ghost" size="sm" className="h-8 px-2" onClick={() => {
+                  if (newFileUrl) URL.revokeObjectURL(newFileUrl)
+                  setNewFile(null); setNewFileUrl(null); setRemoveFichier(true)
+                }}>
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              )}
+              {hasFichier && !newFile && !isNew && (
+                <Button variant="ghost" size="sm" className="h-8 px-2 text-destructive hover:text-destructive"
+                  onClick={() => setRemoveFichier(true)}>
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              )}
+              <div className="flex items-center gap-2 ml-auto">
+                <Button variant="outline" onClick={onClose}>Annuler</Button>
+                <Button onClick={handleSave} disabled={isSaving}>
+                  {isSaving ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Enregistrement...</> : <><Save className="h-3.5 w-3.5 mr-1.5" />Enregistrer</>}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 

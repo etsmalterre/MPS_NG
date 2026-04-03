@@ -99,7 +99,9 @@ export function Sidebar({ collapsed, onToggle, className }: SidebarProps) {
     >
       {/* Logo */}
       <div className="flex h-14 items-center border-b border-white/10 px-3">
-        {collapsed ? (
+        {import.meta.env.DEV ? (
+          <img src="/logo-dev.webp" alt="MPS DEV" className="h-12 w-auto mx-auto rounded" />
+        ) : collapsed ? (
           <img src="/logo-small.png" alt="MPS" className="h-8 w-auto mx-auto" />
         ) : (
           <img src="/logo-full.png" alt="MPS" className="h-10 w-auto mx-auto" />

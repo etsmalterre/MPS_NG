@@ -1,0 +1,215 @@
+import { spawn, ChildProcess } from 'child_process'
+import { resolve } from 'path'
+import { createInterface, Interface } from 'readline'
+
+/**
+ * HFSQL Bridge - communicates with HFSQL via a C child process linked against iODBC.
+ * Used on Linux where the HFSQL ODBC driver requires iODBC (incompatible with Node.js odbc/unixODBC).
+ * On Windows, the standard `odbc` npm package is used instead (see hfsql.ts).
+ *
+ * Queries are serialized through a queue since the bridge handles one query at a time.
+ */
+
+let bridge: ChildProcess | null = null
+let rl: Interface | null = null
+let pendingResolve: ((value: string) => void) | null = null
+let connected = false
+
+// Query queue to serialize concurrent requests
+const queryQueue: Array<{ sql: string; resolve: (value: string) => void; reject: (err: Error) => void }> = []
+let processing = false
+
+function getBridgePath(): string {
+  return resolve(process.cwd(), 'hfsql_bridge')
+}
+
+function getConnectionString(): string {
+  const cs = process.env.HFSQL_CONNECTION_STRING || ''
+  if (cs.includes('DRIVER={HFSQL}')) {
+    return cs.replace('DRIVER={HFSQL}', 'DRIVER=/opt/hfsql_odbc/wd310hfo64.so')
+  }
+  return cs
+}
+
+async function ensureConnected(): Promise<void> {
+  if (connected && bridge && !bridge.killed) return
+
+  return new Promise((resolve, reject) => {
+    const connStr = getConnectionString()
+    bridge = spawn(getBridgePath(), [connStr], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+
+    rl = createInterface({ input: bridge.stdout! })
+
+    bridge.stderr!.on('data', (data: Buffer) => {
+      console.error('[hfsql_bridge stderr]', data.toString())
+    })
+
+    bridge.on('error', (err) => {
+      console.error('[hfsql_bridge] Failed to start:', err.message)
+      connected = false
+      bridge = null
+      reject(err)
+    })
+
+    bridge.on('exit', (code) => {
+      connected = false
+      bridge = null
+      rl = null
+      if (pendingResolve) {
+        pendingResolve('')
+        pendingResolve = null
+      }
+      // Reject all queued queries
+      while (queryQueue.length > 0) {
+        const item = queryQueue.shift()!
+        item.reject(new Error('Bridge process exited'))
+      }
+    })
+
+    rl.on('line', (line: string) => {
+      if (!connected) {
+        try {
+          const msg = JSON.parse(line)
+          if (msg.status === 'connected') {
+            connected = true
+            resolve()
+          } else if (msg.error) {
+            reject(new Error(msg.error))
+          }
+        } catch {
+          reject(new Error(`Unexpected bridge output: ${line}`))
+        }
+      } else if (pendingResolve) {
+        const cb = pendingResolve
+        pendingResolve = null
+        cb(line)
+      }
+    })
+  })
+}
+
+function sendQueryRaw(sql: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (!bridge || !bridge.stdin) {
+      reject(new Error('Bridge not connected'))
+      return
+    }
+    pendingResolve = resolve
+    const escaped = sql.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r')
+    bridge.stdin.write(`{"sql":"${escaped}"}\n`)
+  })
+}
+
+async function processQueue(): Promise<void> {
+  if (processing) return
+  processing = true
+
+  while (queryQueue.length > 0) {
+    const item = queryQueue.shift()!
+    try {
+      await ensureConnected()
+      const result = await sendQueryRaw(item.sql)
+      item.resolve(result)
+    } catch (err) {
+      item.reject(err instanceof Error ? err : new Error(String(err)))
+    }
+  }
+
+  processing = false
+}
+
+function sendQuery(sql: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    queryQueue.push({ sql, resolve, reject })
+    processQueue()
+  })
+}
+
+/** Clean HFSQL quirks: \x00 memo → null */
+function cleanRow<T>(row: Record<string, unknown>): T {
+  const cleaned: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(row)) {
+    if (typeof value === 'string' && (value === '\x00' || value.charCodeAt(0) === 0)) {
+      cleaned[key] = null
+    } else {
+      cleaned[key] = value
+    }
+  }
+  return cleaned as T
+}
+
+/** Run a SQL query against HFSQL via the iODBC bridge */
+export async function query<T = Record<string, unknown>>(
+  sql: string,
+  _params?: (string | number | null)[]
+): Promise<T[]> {
+  const raw = await sendQuery(sql)
+  if (!raw) throw new Error('Empty response from bridge')
+
+  const result = JSON.parse(raw)
+  if (result.error) throw new Error(result.error)
+
+  return (result.rows as Record<string, unknown>[]).map((row) => cleanRow<T>(row))
+}
+
+/**
+ * Fix encoding for text/memo fields - on iODBC bridge, encoding may already be correct.
+ * Keeping the same interface as hfsql.ts for compatibility.
+ */
+export async function fixEncoding<T extends Record<string, unknown>>(
+  rows: T[],
+  table: string,
+  idField: string,
+  textFields: string[]
+): Promise<T[]> {
+  const result: T[] = []
+
+  for (const row of rows) {
+    const needsFix = textFields.some((f) => {
+      const val = row[f]
+      return typeof val === 'string' && val.includes('\ufffd')
+    })
+
+    if (!needsFix) {
+      result.push(row)
+      continue
+    }
+
+    const id = row[idField]
+    const fixed = { ...row }
+    for (const field of textFields) {
+      if (typeof row[field] === 'string' && (row[field] as string).includes('\ufffd')) {
+        try {
+          const r = await query<{ v: string }>(
+            `SELECT CONVERT(${field} USING 'UTF-8') as v FROM ${table} WHERE ${idField} = ${Number(id)}`
+          )
+          if (r.length > 0 && r[0].v != null) {
+            ;(fixed as Record<string, unknown>)[field] = r[0].v
+          }
+        } catch {
+          // keep original value if CONVERT fails
+        }
+      }
+    }
+    result.push(fixed)
+  }
+
+  return result
+}
+
+/** queryRaw for bridge — same as query since bridge returns JSON (no ArrayBuffer) */
+export async function queryRaw(sql: string): Promise<Record<string, unknown>[]> {
+  return query(sql)
+}
+
+export async function closeConnection(): Promise<void> {
+  if (bridge && bridge.stdin) {
+    bridge.stdin.write('{"cmd":"quit"}\n')
+    bridge.kill()
+  }
+  bridge = null
+  rl = null
+  connected = false
+}
