@@ -127,8 +127,24 @@ function sendQuery(sql: string): Promise<string> {
   })
 }
 
-/** Clean HFSQL quirks: \x00 memo → null, b64: prefix → Buffer */
+/** Clean HFSQL quirks: \x00 memo → null, b64: prefix → UTF-8 string */
 function cleanRow<T>(row: Record<string, unknown>): T {
+  const cleaned: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(row)) {
+    if (typeof value === 'string' && (value === '\x00' || value.charCodeAt(0) === 0)) {
+      cleaned[key] = null
+    } else if (typeof value === 'string' && value.startsWith('b64:')) {
+      // Decode base64 — for text fields (CONVERT results), return as UTF-8 string
+      cleaned[key] = Buffer.from(value.slice(4), 'base64').toString('utf8')
+    } else {
+      cleaned[key] = value
+    }
+  }
+  return cleaned as T
+}
+
+/** Clean row but preserve b64 as raw Buffer (for binary blob retrieval) */
+function cleanRowRaw(row: Record<string, unknown>): Record<string, unknown> {
   const cleaned: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(row)) {
     if (typeof value === 'string' && (value === '\x00' || value.charCodeAt(0) === 0)) {
@@ -139,7 +155,7 @@ function cleanRow<T>(row: Record<string, unknown>): T {
       cleaned[key] = value
     }
   }
-  return cleaned as T
+  return cleaned
 }
 
 /** Run a SQL query against HFSQL via the iODBC bridge */
@@ -201,9 +217,13 @@ export async function fixEncoding<T extends Record<string, unknown>>(
   return result
 }
 
-/** queryRaw for bridge — same as query since bridge returns JSON (no ArrayBuffer) */
+/** queryRaw for bridge — preserves b64 as raw Buffer (for binary blob retrieval) */
 export async function queryRaw(sql: string): Promise<Record<string, unknown>[]> {
-  return query(sql)
+  const raw = await sendQuery(sql)
+  if (!raw) throw new Error('Empty response from bridge')
+  const result = JSON.parse(raw)
+  if (result.error) throw new Error(result.error)
+  return (result.rows as Record<string, unknown>[]).map(cleanRowRaw)
 }
 
 export async function closeConnection(): Promise<void> {
