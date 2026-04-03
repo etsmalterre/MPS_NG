@@ -343,6 +343,19 @@ function DetailMain({ fournisseur, isLoading, hasSelection, isEditing, fournisse
   fournisseur: FournisseurDetail | null; isLoading: boolean; hasSelection: boolean
   isEditing: boolean; fournisseurId: number | null; onMutationSuccess: () => void
 }) {
+  const [certifsOpen, setCertifsOpen] = useState(false)
+  const [showExpired, setShowExpired] = useState(false)
+  const [refsOpen, setRefsOpen] = useState(false)
+  const [commandesOpen, setCommandesOpen] = useState(false)
+  const [viewCert, setViewCert] = useState<Certificat | null>(null)
+  const [editCert, setEditCert] = useState<Certificat | null>(null)
+  const [createCert, setCreateCert] = useState(false)
+
+  const deleteCertMut = useMutation({
+    mutationFn: (certId: number) => apiFetch(`/fournisseurs/certificats/${certId}`, { method: 'DELETE' }),
+    onSuccess: onMutationSuccess,
+  })
+
   if (!hasSelection) return (
     <div className="flex-1 flex items-center justify-center">
       <div className="text-center space-y-3">
@@ -354,21 +367,8 @@ function DetailMain({ fournisseur, isLoading, hasSelection, isEditing, fournisse
   if (isLoading) return <div className="flex-1 flex items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-accent" /></div>
   if (!fournisseur) return null
 
-  const [certifsOpen, setCertifsOpen] = useState(false)
-  const [showExpired, setShowExpired] = useState(false)
-  const [refsOpen, setRefsOpen] = useState(false)
-  const [commandesOpen, setCommandesOpen] = useState(false)
-  const [viewCert, setViewCert] = useState<Certificat | null>(null)
-  const [editCert, setEditCert] = useState<Certificat | null>(null)
-  const [createCert, setCreateCert] = useState(false)
-
   const validCertificats = fournisseur.certificats.filter((c) => !isCertExpired(c.date_expiration))
   const displayedCertificats = showExpired ? fournisseur.certificats : validCertificats
-
-  const deleteCertMut = useMutation({
-    mutationFn: (certId: number) => apiFetch(`/fournisseurs/certificats/${certId}`, { method: 'DELETE' }),
-    onSuccess: onMutationSuccess,
-  })
 
   const handleCertClick = (c: Certificat) => {
     if (isEditing) {
