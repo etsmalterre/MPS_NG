@@ -389,7 +389,7 @@ function DetailMain({ fournisseur, isLoading, hasSelection, isEditing, fournisse
           nb_fil: r.nb_fil,
           nb_brin: r.nb_brin,
           bio: !!r.bio,
-          recycle: !!r['recycle'],
+          recycle: !!(r as any)['recyclé'] || !!(r as any)['recycl'] || !!(r as any)['recyclb'] || !!(r as any)['recycle'],
           coloris: [],
         })
       }
