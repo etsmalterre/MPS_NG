@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import { Outlet } from 'react-router-dom'
+import { Outlet, useSearchParams } from 'react-router-dom'
 import { Sidebar } from './Sidebar'
 import { Header } from './Header'
 import { MobileNav } from './MobileNav'
@@ -11,6 +11,18 @@ interface AppShellProps {
 export function AppShell({ children }: AppShellProps) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [searchParams] = useSearchParams()
+  const embed = searchParams.get('embed') === 'true'
+
+  if (embed) {
+    return (
+      <div className="h-screen bg-background flex flex-col overflow-hidden">
+        <main className="flex-1 min-h-0 p-4 flex flex-col overflow-hidden">
+          {children || <Outlet />}
+        </main>
+      </div>
+    )
+  }
 
   return (
     <div className="h-screen bg-background flex overflow-hidden">
