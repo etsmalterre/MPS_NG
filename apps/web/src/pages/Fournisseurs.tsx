@@ -610,10 +610,21 @@ function inputDateToHfsql(d: string): string {
 }
 
 function CertificatViewDialog({ cert, onClose }: { cert: Certificat | null; onClose: () => void }) {
+  const [fichierOk, setFichierOk] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    if (!cert) { setFichierOk(null); return }
+    setFichierOk(null)
+    fetch(`${API_URL}/fournisseurs/certificats/${cert.IDcertificat}/fichier`, { method: 'HEAD' })
+      .then(r => setFichierOk(r.ok))
+      .catch(() => setFichierOk(false))
+  }, [cert?.IDcertificat])
+
   if (!cert) return null
+
   return (
     <Dialog open={!!cert} onOpenChange={() => onClose()}>
-      {cert.has_fichier ? (
+      {fichierOk ? (
         <div className="relative z-50 w-[60vw] max-w-3xl h-[95vh]" onClick={(e) => e.stopPropagation()}>
           <iframe
             src={`${API_URL}/fournisseurs/certificats/${cert.IDcertificat}/fichier#view=FitH`}
@@ -626,7 +637,7 @@ function CertificatViewDialog({ cert, onClose }: { cert: Certificat | null; onCl
           <div className="flex items-center justify-center py-8 text-muted-foreground">
             <div className="text-center space-y-2">
               <FileText className="h-12 w-12 mx-auto opacity-30" />
-              <p className="text-sm">Aucun document attaché</p>
+              <p className="text-sm">{fichierOk === null ? 'Chargement...' : 'Aucun document attaché'}</p>
             </div>
           </div>
         </DialogContent>
