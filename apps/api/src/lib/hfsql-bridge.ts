@@ -127,12 +127,14 @@ function sendQuery(sql: string): Promise<string> {
   })
 }
 
-/** Clean HFSQL quirks: \x00 memo → null */
+/** Clean HFSQL quirks: \x00 memo → null, b64: prefix → Buffer */
 function cleanRow<T>(row: Record<string, unknown>): T {
   const cleaned: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(row)) {
     if (typeof value === 'string' && (value === '\x00' || value.charCodeAt(0) === 0)) {
       cleaned[key] = null
+    } else if (typeof value === 'string' && value.startsWith('b64:')) {
+      cleaned[key] = Buffer.from(value.slice(4), 'base64')
     } else {
       cleaned[key] = value
     }
