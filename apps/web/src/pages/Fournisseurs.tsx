@@ -85,7 +85,7 @@ interface RefFil {
   nb_fil: number | null
   nb_brin: number | null
   bio: number
-  recyclé: number
+  recycle: number
 }
 
 interface Certificat {
@@ -389,7 +389,7 @@ function DetailMain({ fournisseur, isLoading, hasSelection, isEditing, fournisse
           nb_fil: r.nb_fil,
           nb_brin: r.nb_brin,
           bio: !!r.bio,
-          recycle: !!r['recyclé'],
+          recycle: !!r['recycle'],
           coloris: [],
         })
       }

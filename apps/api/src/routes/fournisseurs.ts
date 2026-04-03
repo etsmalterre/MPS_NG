@@ -213,7 +213,7 @@ fournisseursRouter.get('/:id', async (req: Request, res: Response) => {
     const [adresses, contacts, refsFil, certificats, commandes] = await Promise.all([
       query(`SELECT * FROM adresse WHERE IDfournisseur = ${id} ORDER BY est_defaut DESC, IDadresse`),
       query(`SELECT * FROM contact WHERE IDfournisseur = ${id} ORDER BY est_defaut DESC, IDcontact`),
-      query(`SELECT cf.IDcolori_fil, cf.reference as colori_reference, cf.prix_kg as colori_prix_kg, rf.IDref_fil, rf.reference, rf.prix_kg, rf.titrage, rf.nb_fil, rf.nb_brin, rf.bio, rf.recyclé FROM colori_fil cf, ref_fil rf WHERE cf.IDfournisseur = ${id} AND cf.IDref_fil = rf.IDref_fil ORDER BY rf.reference, cf.reference`),
+      query(`SELECT cf.IDcolori_fil, cf.reference as colori_reference, cf.prix_kg as colori_prix_kg, rf.IDref_fil, rf.reference, rf.prix_kg, rf.titrage, rf.nb_fil, rf.nb_brin, rf.bio FROM colori_fil cf, ref_fil rf WHERE cf.IDfournisseur = ${id} AND cf.IDref_fil = rf.IDref_fil ORDER BY rf.reference, cf.reference`),
       query(`SELECT c.IDcertificat, c.nom, c.numero_ref, c.debut_validite, c.date_expiration, c.IDtype_doc, t.nom as type_doc FROM certificat c LEFT JOIN type_doc t ON c.IDtype_doc = t.IDtype_doc WHERE c.IDfournisseur = ${id} ORDER BY c.date_expiration DESC`),
       query(`SELECT IDcommande_fil, date_commande, etat, commentaire FROM commande_fil WHERE IDfournisseur = ${id} ORDER BY date_commande DESC`),
     ])
@@ -246,26 +246,16 @@ fournisseursRouter.get('/:id', async (req: Request, res: Response) => {
     const fixedRefsFil = await fixEncoding(refsFil, 'colori_fil', 'IDcolori_fil', ['colori_reference', 'reference'])
     const fixedCertificats = await fixEncoding(certificats, 'certificat', 'IDcertificat', ['nom', 'numero_ref', 'type_doc'])
 
-    // Check which certs have a fichier attached (lightweight query, no blob data)
+    // Check which certs have a fichier attached
+    // Cannot use LENGTH() or fetch blob directly — just check IS NOT NULL
     const certIds = fixedCertificats.map((c: any) => c.IDcertificat).filter(Boolean)
     let fichierSet = new Set<number>()
     if (certIds.length > 0) {
-      const fichierRows = await queryRaw(
-        `SELECT IDcertificat, fichier FROM certificat WHERE IDcertificat IN (${certIds.join(',')})`
+      const fichierRows = await query<{ IDcertificat: number }>(
+        `SELECT IDcertificat FROM certificat WHERE fichier IS NOT NULL AND IDcertificat IN (${certIds.join(',')})`
       )
       for (const r of fichierRows) {
-        const f = r.fichier
-        if (f != null && !(f instanceof ArrayBuffer && f.byteLength === 0) && f !== '\x00') {
-          // Check ArrayBuffer is not just a null terminator
-          if (f instanceof ArrayBuffer) {
-            const bytes = new Uint8Array(f)
-            if (bytes.length > 1 || (bytes.length === 1 && bytes[0] !== 0)) {
-              fichierSet.add(Number(r.IDcertificat))
-            }
-          } else {
-            fichierSet.add(Number(r.IDcertificat))
-          }
-        }
+        fichierSet.add(r.IDcertificat)
       }
     }
     const certsWithFichier = fixedCertificats.map((c: any) => ({
