@@ -81,11 +81,13 @@ wsl bash -c "ssh -i $SSH_KEY debian@10.10.2.165 'command'"
    ```
 
 ### Key Differences from Local Dev
-- Linux uses `hfsql-bridge.ts` (C bridge binary) instead of `odbc` npm package
+- Linux uses `hfsql-bridge.ts` (C bridge binary via iODBC) instead of `odbc` npm package (unixODBC)
 - `hfsql-auto.ts` must export `queryRaw` on both paths
 - `hfsql-bridge.ts` must also export `queryRaw`
-- The `hfsql_bridge` binary is pre-compiled and stays on the server — do not overwrite
+- **Binary blobs**: The C bridge base64-encodes binary columns (`"b64:..."` prefix), Node decodes in `cleanRow()`. If `hfsql_bridge.c` changes, recompile on server: `gcc -o hfsql_bridge src/hfsql_bridge.c -I/usr/include/iodbc -liodbc -liodbcinst`
+- **Accented column names**: iODBC bridge mangles accents (e.g. `recyclé` → `recyclb`). Frontend must handle all variants.
 - `multer` must be in `package.json` dependencies for certificate file uploads
+- **Use `npm install` (not `--production`)** — `tsx` is in devDependencies but needed at runtime since the service runs TypeScript directly
 
 ## Web Server (10.10.2.165)
 
@@ -141,5 +143,7 @@ After deployment, verify:
 ## Known Issues
 
 - **nginx upload limit**: Default 1MB `client_max_body_size` may block large certificate uploads. Fix: add `client_max_body_size 10m;` to the `/api/` location block in nginx config.
-- **hfsql_bridge binary**: Compiled separately, lives on the server. If `hfsql-bridge.ts` interface changes, the C source (`src/hfsql_bridge.c`) must be recompiled on the server.
+- **hfsql_bridge binary**: Compiled on the server from `src/hfsql_bridge.c`. Must be recompiled when the C source changes. Build: `gcc -o hfsql_bridge src/hfsql_bridge.c -I/usr/include/iodbc -liodbc -liodbcinst`
 - **Logo files**: `logo-full.png`, `logo-small.png`, `logo-dev.webp` are in `public/` and included in the build. The `logo-dev.webp` only shows in dev mode (`import.meta.env.DEV`), so it won't appear in production.
+- **Service Worker caching**: After deploying, users may need to hard-refresh (Ctrl+Shift+R) or unregister the SW in DevTools to pick up the new bundle. The SW precaches assets by hash, so new filenames are picked up on next SW update cycle.
+- **SW NavigationRoute**: The `navigateFallbackDenylist: [/^\/api\//]` in `vite.config.ts` is critical — without it, the SW intercepts iframe loads to `/api/` and serves `index.html`, causing React Router 404 errors.

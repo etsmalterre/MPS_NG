@@ -175,6 +175,9 @@ The MPS_NG web app connects to the HFSQL server via ODBC:
   - **No parameterized queries**: `?` placeholders cause "SQLGetDescribeParam non supportée" error. Use string interpolation with `esc()` (single-quote doubling) for strings, `parseInt` for IDs. For binary blobs, use hex literals: `x'${buffer.toString('hex')}'`.
   - **No `RETURNING *`**: HFSQL SQL doesn't support it. Use follow-up SELECT after INSERT/UPDATE.
   - **Booleans as numbers**: HFSQL returns `0`/`1` not `true`/`false`. In React, always use `!!value &&` to avoid rendering `0` as text.
+  - **BinMemo `IS NOT NULL`**: Unreliable for checking if a document is attached — empty blobs pass the check. For file-serving endpoints, return 404 if the buffer is empty. For UI, use a HEAD pre-check before rendering iframes.
+  - **Accented column names through bridge**: The Linux iODBC bridge mangles accented characters in column names (e.g. `recyclé` → `recyclb`). Handle all variants in frontend code: `(r as any)['recyclé'] || (r as any)['recyclb']`.
+  - **Bridge binary blob support**: The C bridge (`hfsql_bridge`) outputs binary columns as base64 with `"b64:"` prefix. `hfsql-bridge.ts` decodes these back to Buffers in `cleanRow()`. To recompile: `gcc -o hfsql_bridge src/hfsql_bridge.c -I/usr/include/iodbc -liodbc -liodbcinst`
 
 ## WinDev ↔ PostgreSQL Connection (Legacy Reference)
 
@@ -223,9 +226,14 @@ Follow the MPS design system defined in `.claude/skills/mps_designer/SKILL.md`:
 className="bg-gradient-to-r from-gold/40 via-gold/15 to-transparent"
 ```
 
-### Stale .js Build Artifacts
+### Stale .js Build Artifacts (Resolved)
 
-The `apps/web/src/` directory contains compiled `.js` files alongside `.ts`/`.tsx` source files (caused by `tsconfig` with no `outDir`). **Vite picks up `.js` before `.tsx`**, so when modifying source files, the corresponding `.js` file must also be updated or Vite will serve stale code. This affects `router.js`, `navigation.js`, and other files.
+Previously, `apps/web/src/` contained compiled `.js` files alongside `.tsx` source — Vite picked `.js` before `.tsx`, serving stale code. **Fixed**: all stale `.js`/`.js.map`/`.d.ts`/`.d.ts.map` files deleted; `.gitignore` now blocks `apps/web/src/**/*.js` etc. If stale `.js` files reappear (e.g. from an accidental `tsc`), delete them — they will cause production builds to use outdated code.
+
+### React Component Rules
+
+- **Hooks before early returns**: All `useState`, `useMutation`, `useMemo`, `useQuery` calls must come before any conditional `return`. React requires stable hook order across renders — violating this causes "Rendered more hooks" crashes in production builds (minified error #310).
+- **Service Worker**: The PWA service worker has a `navigateFallbackDenylist` for `/api/`. Never remove this — without it, the SW intercepts iframe/fetch navigations to `/api/` and serves `index.html`, causing React Router 404 errors.
 
 ### Screen Layout Pattern (MasterDetailLayout)
 
