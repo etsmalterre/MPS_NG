@@ -158,18 +158,58 @@ function cleanRowRaw(row: Record<string, unknown>): Record<string, unknown> {
   return cleaned
 }
 
-/** Run a SQL query against HFSQL via the iODBC bridge */
+/** Detect errors that indicate the HFSQL connection is dead and the bridge needs respawning */
+function isConnectionLostError(errMsg: string): boolean {
+  return errMsg.includes('[01000]')
+    || errMsg.includes('Unable to establish communication')
+    || errMsg.includes('Connection reset by peer')
+    || errMsg.includes('Bridge not connected')
+    || errMsg.includes('Bridge process exited')
+}
+
+/** Force-kill the bridge so the next query respawns it with a fresh HFSQL connection */
+function killBridge(): void {
+  if (bridge) {
+    try { bridge.kill() } catch { /* ignore */ }
+  }
+  bridge = null
+  rl = null
+  connected = false
+  pendingResolve = null
+}
+
+/** Run a SQL query against HFSQL via the iODBC bridge, with auto-reconnect on connection loss */
 export async function query<T = Record<string, unknown>>(
   sql: string,
   _params?: (string | number | null)[]
 ): Promise<T[]> {
-  const raw = await sendQuery(sql)
-  if (!raw) throw new Error('Empty response from bridge')
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const raw = await sendQuery(sql)
+      if (!raw) throw new Error('Empty response from bridge')
 
-  const result = JSON.parse(raw)
-  if (result.error) throw new Error(result.error)
+      const result = JSON.parse(raw)
+      if (result.error) {
+        if (isConnectionLostError(result.error) && attempt === 0) {
+          console.warn('[hfsql_bridge] Connection lost, respawning bridge and retrying:', result.error)
+          killBridge()
+          continue
+        }
+        throw new Error(result.error)
+      }
 
-  return (result.rows as Record<string, unknown>[]).map((row) => cleanRow<T>(row))
+      return (result.rows as Record<string, unknown>[]).map((row) => cleanRow<T>(row))
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (isConnectionLostError(msg) && attempt === 0) {
+        console.warn('[hfsql_bridge] Connection error, respawning bridge and retrying:', msg)
+        killBridge()
+        continue
+      }
+      throw err
+    }
+  }
+  throw new Error('Query failed after retry')
 }
 
 /**
@@ -219,11 +259,31 @@ export async function fixEncoding<T extends Record<string, unknown>>(
 
 /** queryRaw for bridge — preserves b64 as raw Buffer (for binary blob retrieval) */
 export async function queryRaw(sql: string): Promise<Record<string, unknown>[]> {
-  const raw = await sendQuery(sql)
-  if (!raw) throw new Error('Empty response from bridge')
-  const result = JSON.parse(raw)
-  if (result.error) throw new Error(result.error)
-  return (result.rows as Record<string, unknown>[]).map(cleanRowRaw)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const raw = await sendQuery(sql)
+      if (!raw) throw new Error('Empty response from bridge')
+      const result = JSON.parse(raw)
+      if (result.error) {
+        if (isConnectionLostError(result.error) && attempt === 0) {
+          console.warn('[hfsql_bridge] Connection lost in queryRaw, respawning:', result.error)
+          killBridge()
+          continue
+        }
+        throw new Error(result.error)
+      }
+      return (result.rows as Record<string, unknown>[]).map(cleanRowRaw)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (isConnectionLostError(msg) && attempt === 0) {
+        console.warn('[hfsql_bridge] Connection error in queryRaw, respawning:', msg)
+        killBridge()
+        continue
+      }
+      throw err
+    }
+  }
+  throw new Error('queryRaw failed after retry')
 }
 
 export async function closeConnection(): Promise<void> {
