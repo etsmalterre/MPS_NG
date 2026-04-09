@@ -4,6 +4,10 @@
 
 Design system for **MPS_NG**, the ERP system for **ETS Malterre** (French textile/knitting manufacturer). This document is the single source of truth for all visual patterns — follow it precisely when building new screens or modifying existing ones.
 
+## Reference implementation
+
+The gold-standard reference for new data screens is **`apps/web/src/pages/Fournisseurs.tsx`** (the `/fournisseurs/gestion` route). It implements every pattern documented here: 3-panel `MasterDetailLayout`, collapsible card sections with status-colored items, side-by-side edit dialogs with file upload and PDF preview, sidebar tabs with inline edit forms, global vs per-section edit state, and HFSQL date helpers. When in doubt, look there.
+
 ---
 
 ## 1. Brand Colors
@@ -418,14 +422,17 @@ Cards use a consistent two-row layout with a colored left accent border and an i
 
 #### Card Color Variants
 
-| Variant | Left border | Icon bg | Icon color | Usage |
-|---------|------------|---------|------------|-------|
-| **Neutral (default)** | `border-l-amber-400/60` | `bg-amber-400/10` | `text-amber-600` | Standard cards (refs, neutral commandes) |
-| **Success** | `border-l-green-500/60` | `bg-green-500/10` | `text-green-600` | Valid certificates, delivered orders |
-| **Danger** | `border-l-destructive/60` | `bg-destructive/10` | `text-destructive/70` | Expired certificates |
-| **Muted** | `border-l-border` | `bg-muted` | `text-muted-foreground` | Closed/draft items |
+The full status color system — left border, icon box, icon color, AND matching badge — should always be used together for visual consistency.
 
-**Amber/gold is the standard neutral color for item cards throughout the app.**
+| Status | Left border | Icon bg | Icon color | Status badge |
+|--------|-------------|---------|------------|--------------|
+| **Neutral / Default** | `border-l-amber-400/60` | `bg-amber-400/10` | `text-amber-600` | `variant="secondary"` |
+| **Success / Valid** | `border-l-green-500/60` | `bg-green-500/10` | `text-green-600` | `badge-success` |
+| **Warning / In progress** | `border-l-amber-400/60` | `bg-amber-400/10` | `text-amber-600` | `badge-warning` |
+| **Danger / Error / Expired** | `border-l-destructive/60` | `bg-destructive/10` | `text-destructive/70` | `variant="destructive"` |
+| **Muted / Closed / Draft** | `border-l-border` | `bg-muted` | `text-muted-foreground` | `variant="outline"` |
+
+**Amber/gold is the standard neutral color for item cards throughout the app** — use it for cards that don't have a meaningful status (e.g. references de fil, generic items). It's not just "warning".
 
 #### Base Card Template
 
@@ -839,9 +846,17 @@ All inputs: `focus:ring-2 focus:ring-ring` where `--ring: 42 80% 55%` (gold).
 
 ## 18. Dialog/Modal Pattern
 
+Three variants are used in the app — pick the one that matches your use case.
+
+> **Critical hooks rule**: Any `useState` / `useQuery` / `useEffect` inside a dialog component must be declared **before** any `if (!cert) return null` early return. Hooks after conditional returns work in dev but crash production builds with React error #310. See the React Component Rules in `CLAUDE.md`.
+
+### A. Basic Form Dialog
+
+For simple forms — use `DialogContent` with header, body, and footer.
+
 ```tsx
 <Dialog open={open} onOpenChange={setOpen}>
-  <DialogContent>
+  <DialogContent className="max-w-md" onClose={() => setOpen(false)}>
     <DialogHeader>
       <DialogTitle className="flex items-center gap-2">
         <Icon className="h-5 w-5 text-accent" />
@@ -849,9 +864,88 @@ All inputs: `focus:ring-2 focus:ring-ring` where `--ring: 42 80% 55%` (gold).
       </DialogTitle>
     </DialogHeader>
     {/* Body content */}
+    <DialogFooter>
+      <Button variant="outline" onClick={() => setOpen(false)}>Annuler</Button>
+      <Button onClick={handleSave}>Enregistrer</Button>
+    </DialogFooter>
   </DialogContent>
 </Dialog>
 ```
+
+### B. Full-Bleed Viewer Dialog (chrome-free)
+
+For embedded document/PDF viewers where the dialog frame would distract. Used by `CertificatViewDialog` in `Fournisseurs.tsx`.
+
+```tsx
+<Dialog open={!!cert} onOpenChange={() => onClose()}>
+  {fichierOk ? (
+    <div className="relative z-50 w-[60vw] max-w-3xl h-[95vh]" onClick={(e) => e.stopPropagation()}>
+      <iframe
+        src={`${API_URL}/.../fichier#view=FitH`}
+        className="w-full h-full rounded-lg"
+        title="Document"
+      />
+    </div>
+  ) : (
+    <DialogContent className="max-w-sm" onClose={onClose}>
+      <div className="flex items-center justify-center py-8 text-muted-foreground">
+        <FileText className="h-12 w-12 opacity-30" />
+        <p className="text-sm">Aucun document attaché</p>
+      </div>
+    </DialogContent>
+  )}
+</Dialog>
+```
+
+Key points:
+- Renders a raw `<div>` directly inside `<Dialog>` (NOT wrapped in `<DialogContent>`) so there's no card chrome around the iframe
+- `e.stopPropagation()` on the inner div prevents overlay-click-to-close from firing
+- Always pre-check resource availability with a HEAD request before showing the iframe — falls back to a small `DialogContent` for empty/error states
+
+### C. Side-by-Side Form + Preview Dialog
+
+For complex edit dialogs where the user needs both a form AND a preview/viewer. Used by `CertificatEditDialog`.
+
+```tsx
+<Dialog open={!!cert} onOpenChange={() => onClose()}>
+  <DialogContent className="max-w-5xl h-[85vh] flex flex-col" onClose={onClose}>
+    <DialogHeader>
+      <DialogTitle className="flex items-center gap-2">
+        <Icon className="h-4 w-4 text-accent" />
+        Modifier l'élément
+      </DialogTitle>
+    </DialogHeader>
+    <div className="flex-1 min-h-0 flex gap-4">
+      {/* Left: form fields */}
+      <div className="w-80 flex-shrink-0 overflow-y-auto space-y-3 px-1">
+        <LabeledInput label="Nom" value={nom} onChange={setNom} />
+        {/* more fields */}
+      </div>
+      {/* Right: viewer + file controls + action buttons */}
+      <div className="flex-1 min-w-0 flex flex-col gap-2">
+        <div className="flex-1 min-h-0 rounded-lg border border-border/60 bg-zinc-50 overflow-hidden">
+          <iframe src={previewUrl} className="w-full h-full" title="Document" />
+        </div>
+        <div className="flex items-center gap-2">
+          {/* file picker, then action buttons aligned right */}
+          <FileUploadButton ... />
+          <div className="flex items-center gap-2 ml-auto">
+            <Button variant="outline" onClick={onClose}>Annuler</Button>
+            <Button onClick={handleSave}>Enregistrer</Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </DialogContent>
+</Dialog>
+```
+
+Key points:
+- **`max-w-5xl h-[85vh]`** — wide enough for form + preview side by side
+- **`flex-1 min-h-0 flex gap-4`** — body splits horizontally; `min-h-0` is required so children can scroll
+- **Form column**: `w-80 flex-shrink-0 overflow-y-auto px-1` — `px-1` is critical, otherwise input focus rings get clipped
+- **Viewer column**: `flex-1 min-w-0 flex flex-col gap-2` — fills remaining width; `min-w-0` prevents flex overflow
+- **Action buttons live at the bottom of the right column**, NOT in a `DialogFooter`. This vertically aligns Annuler/Enregistrer with the file upload controls (looks intentional and avoids a stranded footer)
 
 ---
 
@@ -879,3 +973,253 @@ body {
 - Screen reader labels: `<span className="sr-only">` for icon-only buttons
 - Keyboard navigation support via Radix primitives
 - Focus ring: `ring-2 ring-accent/40 ring-offset-2 ring-offset-background`
+
+---
+
+## 21. Iframe Document Viewer
+
+For embedding PDFs, images, and other documents served by the API.
+
+```tsx
+<iframe
+  src={`${API_URL}/.../fichier#view=FitH`}
+  className="w-full h-full rounded-lg"
+  title="Document"
+/>
+```
+
+**Container**: `flex-1 min-h-0 rounded-lg border border-border/60 bg-zinc-50 overflow-hidden`
+
+### Conventions
+
+- **`#view=FitH`** is the PDF.js URL parameter that defaults the viewer to "fit width" — most readable for letter/A4 documents
+- **Pre-check availability with HEAD** before showing the iframe — saves the user from seeing raw JSON 404 text inside the frame:
+  ```tsx
+  useEffect(() => {
+    if (!cert) return
+    fetch(`${API_URL}/.../fichier`, { method: 'HEAD' })
+      .then(r => setFichierOk(r.ok))
+      .catch(() => setFichierOk(false))
+  }, [cert?.IDcertificat])
+  ```
+- **Object URL previews**: when showing a file the user just picked but hasn't saved yet, use `URL.createObjectURL(file)` and remember to `URL.revokeObjectURL()` on cleanup or when replacing the file:
+  ```tsx
+  if (newFileUrl) URL.revokeObjectURL(newFileUrl)
+  setNewFileUrl(URL.createObjectURL(file))
+  ```
+
+### API-side requirements
+
+Endpoints serving documents must override helmet's restrictive headers, otherwise iframes from a different port/host will be blocked:
+
+```ts
+res.setHeader('Content-Type', contentType)
+res.setHeader('Content-Disposition', 'inline')
+res.removeHeader('X-Frame-Options')
+res.removeHeader('Content-Security-Policy')
+res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+```
+
+---
+
+## 22. File Upload Pattern
+
+Hidden `<input type="file">` wrapped in a styled `<label>` for a polished button look. Used in `CertificatEditDialog` in `Fournisseurs.tsx`.
+
+```tsx
+<label className="cursor-pointer">
+  <input
+    type="file"
+    className="hidden"
+    accept=".pdf,image/*"
+    onClick={(e) => { (e.target as HTMLInputElement).value = '' }}
+    onChange={(e) => {
+      const f = e.target.files?.[0]
+      if (f) {
+        if (newFileUrl) URL.revokeObjectURL(newFileUrl)
+        setNewFile(f)
+        setNewFileUrl(URL.createObjectURL(f))
+        setRemoveFichier(false)
+      }
+    }}
+  />
+  <span className={cn(inputClass, 'inline-flex items-center gap-1.5 cursor-pointer hover:bg-accent/5 w-auto px-3')}>
+    <Upload className="h-3.5 w-3.5" />
+    {newFile ? newFile.name : 'Choisir un fichier'}
+  </span>
+</label>
+{newFile && (
+  <Button variant="ghost" size="sm" className="h-8 px-2" onClick={() => {
+    if (newFileUrl) URL.revokeObjectURL(newFileUrl)
+    setNewFile(null); setNewFileUrl(null); setRemoveFichier(true)
+  }}>
+    <X className="h-3.5 w-3.5" />
+  </Button>
+)}
+```
+
+### Critical bits
+
+- **`onClick={(e) => { e.target.value = '' }}`** — without resetting the value, picking the *same* file twice in a row doesn't fire `onChange`. Easy to miss, infuriating to debug.
+- **`URL.createObjectURL` for instant preview** — shows the picked file in the viewer immediately, before the user clicks Save
+- **`X` button to clear** the selection. If replacing an existing document, also set a `removeFichier` flag so the save handler knows to delete the old blob even if the user backs out of uploading a new one
+- **Save MUST use raw `fetch` with `FormData`**, NOT `apiFetch` which forces `Content-Type: application/json`. The browser sets the multipart boundary automatically:
+  ```tsx
+  const formData = new FormData()
+  formData.append('nom', nom)
+  if (newFile) formData.append('fichier', newFile)
+  if (removeFichier && !newFile) formData.append('remove_fichier', '1')
+  const res = await fetch(url, { method: 'PUT', body: formData })
+  ```
+
+---
+
+## 23. Collapsible Section Cards
+
+The center detail body uses collapsible cards for groups of related items (Certificats, Refs de fil, Commandes in `Fournisseurs.tsx`).
+
+```tsx
+<Card className="card-premium">
+  <CardHeader
+    className="flex flex-row items-center gap-2 p-4 space-y-0 cursor-pointer select-none"
+    onClick={() => setOpen(!open)}
+  >
+    <Icon className="h-4 w-4 text-accent" />
+    <CardTitle className="text-sm font-semibold">Section Title</CardTitle>
+    {isEditing && (
+      <Button
+        size="sm" variant="ghost"
+        className="h-6 w-6 p-0 text-accent hover:text-accent hover:bg-accent/10"
+        onClick={(e) => { e.stopPropagation(); setCreating(true) }}
+      >
+        <Plus className="h-3.5 w-3.5" />
+      </Button>
+    )}
+    <Badge variant="secondary" className="text-xs ml-auto">{count}</Badge>
+    <ChevronDown className={cn('h-4 w-4 text-muted-foreground transition-transform', open && 'rotate-180')} />
+  </CardHeader>
+  {open && <CardContent className="space-y-2">
+    {/* Optional toggle for hidden items, e.g. expired */}
+    {hiddenCount > 0 && (
+      <button
+        onClick={() => setShowHidden(!showHidden)}
+        className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+      >
+        {showHidden ? 'Masquer expirés' : `Afficher expirés (${hiddenCount})`}
+      </button>
+    )}
+    {/* item cards */}
+  </CardContent>}
+</Card>
+```
+
+### Conventions
+
+- **`+` button on the header** (edit mode only) for creating items in this section. Always use `e.stopPropagation()` to prevent the header click from also toggling the card open/closed.
+- **Count badge**: shows the **active/valid** count, not the total. For example, the Certificats badge shows only valid certs, with a separate "Afficher expirés (N)" toggle inside the content.
+- **Chevron rotation**: `transition-transform` + conditional `rotate-180` for smooth expand/collapse animation.
+- **`select-none`** on the header so users can't accidentally select text when toggling.
+
+---
+
+## 24. Comment / Empty-Aware Display
+
+Pattern for showing optional comments under an item card, with a subtle icon to indicate "this has a note":
+
+```tsx
+{cmd.commentaire?.trim() && (
+  <div className="flex items-start gap-1.5 mt-2 ml-9">
+    <MessageSquare className="h-3 w-3 text-muted-foreground/50 flex-shrink-0 mt-0.5" />
+    <p className="text-[11px] text-muted-foreground italic">{cmd.commentaire.trim()}</p>
+  </div>
+)}
+```
+
+### Conventions
+
+- **Always `.trim()` before checking** — HFSQL stores `" "` (single space) for "no comment", which is truthy in JS. Without trimming, the icon would render for empty comments.
+- **`ml-9`** indents the comment under the parent card's icon box (matches title alignment perfectly: 7px icon box + gap-2 ≈ ml-9).
+- **`text-muted-foreground/50`** on the icon — intentionally subtle so it reads as metadata, not primary content.
+- **`mt-0.5`** on the icon to optically center it with the first line of italic text.
+- Wrap text in `<p className="text-[11px] text-muted-foreground italic">` to match the secondary-text hierarchy used elsewhere in cards.
+
+---
+
+## 25. Edit State: Global vs Per-Section
+
+Two layers of edit state work together in data screens.
+
+### Global `isEditing` (top-level page state)
+
+Lives at the page component (e.g. `Fournisseurs`). Toggled by the **"Modifier"** button in the detail header.
+
+When `true`:
+- Detail header shows the entity name as an `<input>` and adds the **"Mode edition"** badge
+- Header buttons swap from `[Modifier]` to `[Annuler] [Enregistrer]`
+- Sub-sections enable their action buttons (the `+` on collapsible card headers, hover-reveal pencil/trash on item cards)
+- Sidebar tabs (Info/Contacts/Adresses) enable their inline edit forms
+
+### Per-Section state
+
+Each sub-section (a collapsible card or a sidebar tab) has its own local state for which specific item is being edited.
+
+```tsx
+const [editingId, setEditingId] = useState<number | null>(null)  // which item is in edit form
+const [showForm, setShowForm] = useState(false)                  // show "add new" form
+const [form, setForm] = useState({ nom: '', tel: '', ... })      // form field values
+```
+
+Convention: opening one form/dialog should close any others — only one item is being edited at a time within a section.
+
+### Mutation pattern with onSuccess invalidation
+
+```tsx
+const updateMut = useMutation({
+  mutationFn: (id: number) => apiFetch(`/path/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(form),
+  }),
+  onSuccess: () => { onMutationSuccess(); setEditingId(null) },
+})
+```
+
+The page component passes an `invalidateAll` callback down to sub-sections so they can refresh both the list and detail queries after a mutation:
+
+```tsx
+const invalidateAll = useCallback(() => {
+  queryClient.invalidateQueries({ queryKey: ['fournisseurs'] })
+  queryClient.invalidateQueries({ queryKey: ['fournisseur', selectedId] })
+}, [queryClient, selectedId])
+```
+
+---
+
+## 26. HFSQL Date Helpers
+
+HFSQL stores dates as 8-character strings (`YYYYMMDD`), but HTML `<input type="date">` uses `YYYY-MM-DD`. These two helpers convert between the two formats and should be reused across screens — don't reinvent.
+
+```tsx
+// "20260403" → "2026-04-03"
+function hfsqlDateToInput(d: string | null): string {
+  if (!d || d.length !== 8) return ''
+  return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`
+}
+
+// "2026-04-03" → "20260403"
+function inputDateToHfsql(d: string): string {
+  return d.replace(/-/g, '')
+}
+```
+
+For **display** (not editing), use `formatHfsqlDate` which converts to French locale:
+
+```tsx
+function formatHfsqlDate(raw: string): string {
+  if (raw.length === 8) {
+    return new Date(`${raw.slice(0,4)}-${raw.slice(4,6)}-${raw.slice(6,8)}`).toLocaleDateString('fr-FR')
+  }
+  return new Date(raw).toLocaleDateString('fr-FR')
+}
+```
+
+These three helpers are currently defined locally in `Fournisseurs.tsx`. When a third screen needs them, lift them to a shared utilities file (e.g. `lib/dates.ts`).

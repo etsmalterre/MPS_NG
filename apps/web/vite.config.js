@@ -37,6 +37,7 @@ export default defineConfig({
             },
             workbox: {
                 globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
+                navigateFallbackDenylist: [/^\/api\//],
                 runtimeCaching: [
                     {
                         urlPattern: /^https:\/\/api\./i,
@@ -53,6 +54,9 @@ export default defineConfig({
             }
         })
     ],
+    server: {
+        port: 5174
+    },
     resolve: {
         alias: {
             '@': path.resolve(__dirname, './src')
