@@ -33,6 +33,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { BobineIcon } from '@/components/icons/BobineIcon'
 import { cn } from '@/lib/utils'
+import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -318,11 +319,6 @@ function DetailHeader({ fournisseur, isLoading, isEditing, editNom, onEditNomCha
 
 // ── Center: Detail Main ────────────────────────────────
 
-function formatHfsqlDate(raw: string): string {
-  if (raw.length === 8) return new Date(`${raw.substring(0, 4)}-${raw.substring(4, 6)}-${raw.substring(6, 8)}`).toLocaleDateString('fr-FR')
-  return new Date(raw).toLocaleDateString('fr-FR')
-}
-
 function isCertExpired(dateExp: string | null): boolean {
   if (!dateExp) return false
   const d = dateExp.length === 8 ? `${dateExp.substring(0, 4)}-${dateExp.substring(4, 6)}-${dateExp.substring(6, 8)}` : dateExp
@@ -600,14 +596,6 @@ function DetailMain({ fournisseur, isLoading, hasSelection, isEditing, fournisse
 }
 
 // ── Certificate Dialogs ───────────────────────────────
-
-function hfsqlDateToInput(d: string | null): string {
-  if (!d || d.length !== 8) return ''
-  return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`
-}
-function inputDateToHfsql(d: string): string {
-  return d.replace(/-/g, '')
-}
 
 function CertificatViewDialog({ cert, onClose }: { cert: Certificat | null; onClose: () => void }) {
   const [fichierOk, setFichierOk] = useState<boolean | null>(null)

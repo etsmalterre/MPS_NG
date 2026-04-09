@@ -39,7 +39,9 @@ const ClientsFacturationPage = createPlaceholder('Facturation', 'Gérez la factu
 const ClientsGestionPage = createPlaceholder('Gestion Clients', 'Gérez votre portefeuille clients', Users)
 
 // Fournisseurs pages
+const FournisseursReferencesPage = createPlaceholder('Références Fournisseurs', 'Catalogue des références fournisseurs', Tag)
 const FournisseursCommandesPage = createPlaceholder('Commandes Fournisseurs', 'Gérez les commandes fournisseurs', ShoppingCart)
+const FournisseursPrevisionsPage = createPlaceholder('Prévisions Fournisseurs', 'Prévisions d\'approvisionnement fournisseurs', FileText)
 
 // Sous-traitants pages
 const SousTraitantsCommandesPage = createPlaceholder('Commandes Sous-traitants', 'Gérez les commandes sous-traitants', ShoppingCart)
@@ -66,6 +68,7 @@ const TransportLivraisons = createPlaceholder('Livraisons', 'Suivi des livraison
 
 // Fournisseurs pages (real)
 import { Fournisseurs } from '@/pages/Fournisseurs'
+import { FournisseursStock } from '@/pages/FournisseursStock'
 
 // Réseau pages
 import { Entreprises } from '@/pages/Entreprises'
@@ -89,9 +92,12 @@ export const router = createBrowserRouter([
       { path: 'clients/gestion', element: <ClientsGestionPage /> },
 
       // Fournisseurs
-      { path: 'fournisseurs', element: <Navigate to="/fournisseurs/commandes" replace /> },
+      { path: 'fournisseurs', element: <Navigate to="/fournisseurs/references" replace /> },
+      { path: 'fournisseurs/references', element: <FournisseursReferencesPage /> },
+      { path: 'fournisseurs/stock', element: <FournisseursStock /> },
       { path: 'fournisseurs/commandes', element: <FournisseursCommandesPage /> },
       { path: 'fournisseurs/gestion', element: <Fournisseurs /> },
+      { path: 'fournisseurs/previsions', element: <FournisseursPrevisionsPage /> },
 
       // Sous-traitants
       { path: 'sous-traitants', element: <Navigate to="/sous-traitants/commandes" replace /> },

@@ -84,7 +84,8 @@ MPS_NG/
 │   │       │   └── hfsql.ts       # HFSQL ODBC connection singleton + encoding fix
 │   │       ├── routes/
 │   │       │   ├── entreprises.ts # Full CRUD: entreprises, contacts, adresses, competences, recommandations
-│   │       │   └── fournisseurs.ts # Full CRUD: fournisseurs, contacts, adresses + yarn refs, certificates, commandes
+│   │       │   ├── fournisseurs.ts # Full CRUD: fournisseurs, contacts, adresses + yarn refs, certificates, commandes
+│   │       │   └── stock.ts        # Yarn stock list/detail/patch + per-lot bio/recycle certificate blobs
 │   │       └── index.ts
 │   └── web/           # React frontend
 │       ├── src/
@@ -98,11 +99,13 @@ MPS_NG/
 │       │   ├── hooks/
 │       │   │   └── useResponsiveLayout.ts  # Responsive 3-panel layout (full/compact/stacked)
 │       │   ├── lib/
-│       │   │   └── utils.ts
+│       │   │   ├── utils.ts
+│       │   │   └── dates.ts  # HFSQL date helpers (formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql)
 │       │   ├── pages/
 │       │   │   ├── Dashboard.tsx
 │       │   │   ├── Entreprises.tsx  # First real data screen with edit mode
-│       │   │   └── Fournisseurs.tsx # Supplier management with yarn refs & certificates
+│       │   │   ├── Fournisseurs.tsx # Supplier management with yarn refs & certificates
+│       │   │   └── FournisseursStock.tsx # Yarn stock — table-centric layout with right slide-in drawer
 │       │   ├── main.tsx
 │       │   ├── router.tsx
 │       │   └── index.css
@@ -135,8 +138,11 @@ MPS_NG/
    - Facturation (`/clients/facturation`)
    - Gestion (`/clients/gestion`)
 3. **Fournisseurs** (`/fournisseurs`)
+   - Références (`/fournisseurs/references`)
+   - Stock (`/fournisseurs/stock`) — **table-centric screen, see Implemented Screens**
    - Commandes (`/fournisseurs/commandes`)
    - Gestion (`/fournisseurs/gestion`)
+   - Prévisions (`/fournisseurs/previsions`)
 4. **Sous-traitants** (`/sous-traitants`)
    - Commandes (`/sous-traitants/commandes`)
    - Gestion (`/sous-traitants/gestion`)
@@ -176,7 +182,7 @@ The MPS_NG web app connects to the HFSQL server via ODBC:
   - **No `RETURNING *`**: HFSQL SQL doesn't support it. Use follow-up SELECT after INSERT/UPDATE.
   - **Booleans as numbers**: HFSQL returns `0`/`1` not `true`/`false`. In React, always use `!!value &&` to avoid rendering `0` as text.
   - **BinMemo `IS NOT NULL`**: Unreliable for checking if a document is attached — empty blobs pass the check. For file-serving endpoints, return 404 if the buffer is empty. For UI, use a HEAD pre-check before rendering iframes.
-  - **Accented column names through bridge**: The Linux iODBC bridge mangles accented characters in column names (e.g. `recyclé` → `recyclb`). Handle all variants in frontend code: `(r as any)['recyclé'] || (r as any)['recyclb']`.
+  - **Accented column names through bridge**: The Linux iODBC bridge mangles accented characters in column names (e.g. `recyclé` → `recyclb`). Handle all variants in frontend code: `(r as any)['recyclé'] || (r as any)['recyclb']`. **Preferred**: alias the column in the SQL itself (`SELECT terminé AS termine, controlé AS controle, recyclé AS recycle ...`) — the alias is clean ASCII so the bridge cannot mangle it. The `stock.ts` route uses this approach throughout.
   - **Bridge binary blob support**: The C bridge (`hfsql_bridge`) outputs binary columns as base64 with `"b64:"` prefix. `hfsql-bridge.ts` has two decoders: `cleanRow()` decodes b64 to **UTF-8 strings** (used by `query()` for normal text/CONVERT results), while `cleanRowRaw()` decodes b64 to **raw Buffers** (used by `queryRaw()` for binary blob retrieval like PDFs). Without this split, JSON-serialized Buffers become `{type:"Buffer",data:[...]}` objects that crash React with error #31. To recompile the bridge: `gcc -o hfsql_bridge src/hfsql_bridge.c -I/usr/include/iodbc -liodbc -liodbcinst`
   - **Bridge auto-reconnect**: The bridge process holds a single ODBC connection that can die after long idle periods. `query()` and `queryRaw()` detect connection-lost errors (state `[01000]`, "Connection reset by peer", etc.), kill the bridge, and retry once — no manual restart needed.
 
@@ -229,7 +235,9 @@ className="bg-gradient-to-r from-gold/40 via-gold/15 to-transparent"
 
 ### Stale .js Build Artifacts (Resolved)
 
-Previously, `apps/web/src/` contained compiled `.js` files alongside `.tsx` source — Vite picked `.js` before `.tsx`, serving stale code. **Fixed**: all stale `.js`/`.js.map`/`.d.ts`/`.d.ts.map` files deleted; `.gitignore` now blocks `apps/web/src/**/*.js` etc. If stale `.js` files reappear (e.g. from an accidental `tsc`), delete them — they will cause production builds to use outdated code.
+Previously, `apps/web/src/` contained compiled `.js` files alongside `.tsx` source — Vite picked `.js` before `.tsx`, serving stale code. **Fixed**: all stale `.js`/`.js.map`/`.d.ts`/`.d.ts.map` files deleted; `.gitignore` now blocks `apps/web/src/**/*.js` etc. If stale `.js` files reappear (e.g. from an accidental `tsc -b` via `pnpm --filter @mps/web build`), delete them — they will cause production builds to use outdated code.
+
+**Important**: Running vite caches the resolved file extension in its module graph. If `tsc -b` creates `.js` files mid-session, vite will resolve `import { X } from '@/pages/X'` to `X.js` and keep that resolution even after the `.js` file is deleted — leading to a 404 white screen on next reload. **Fix**: kill the vite dev process and restart it (deleting `node_modules/.vite` is not enough). Symptom: console shows `Failed to load resource: 404` for a `*.js` file under `/src/pages/`.
 
 ### React Component Rules
 
@@ -326,6 +334,20 @@ First fully implemented data screen. 3-panel layout with:
 - **CRUD endpoints**: Full CRUD for fournisseurs + sub-entity CRUD under `/api/fournisseurs/:id/{contacts,adresses}`
 - **Edit mode**: Inline forms for contacts/adresses, commentaire editable in Info tab, certificate edit dialog with document viewer/upload
 - **HFSQL tables**: `fournisseur`, `adresse`, `contact`, `colori_fil`, `ref_fil`, `certificat`, `type_doc`, `commande_fil`, `ref_fil_commande`
+
+### Fournisseurs Stock (`/fournisseurs/stock`)
+**Reference for table-centric screens** — first screen in MPS_NG that does NOT use `MasterDetailLayout`. Mirrors the legacy `FEN_Stock_fil.wdw` window. Layout:
+- **Toolbar** (top): full-width search input + "Masquer les lots terminés" toggle pinned right (default ON)
+- **Table** (fills remaining height): rounded card with split header/body — header is a non-scrolling `<table>`, body is a separate `<table>` inside an `overflow-auto` div, both share the same `colgroup` with explicit percentage widths via `table-layout: fixed`. Sortable columns: Référence, Coloris, Lot interne, Lot fournisseur, Fournisseur, Stock (kg), Stock initial, Emplacement, Date entrée. Trailing icons: Bio (Leaf), Recyclé (Recycle), T (terminé).
+- **Right slide-in drawer** (`fixed right-0 top-14 bottom-0 w-[440px]`): opens on row click, contains Stock / Provenance / Stockage / Notes / Certificats cards. Modifier/Annuler/Enregistrer buttons sit in the top-right of the drawer header (no separate close X). Edit-mode whitelist: `commentaire`, `observation_freinte`, `emplacement`, `niveau`, `terminé`, `controlé`, `dernier_pointage`.
+- **Drawer dismissal**: click outside drawer (closes), click same row again (toggles), click another row (switches). Implemented via document `mousedown` listener that ignores clicks inside the drawer ref or on `tr[data-stock-row]`.
+- **API endpoints** (in `apps/api/src/routes/stock.ts`):
+  - `GET /api/stock/fil?fournisseur=<id>&termine=all&q=<text>` — list with joined display columns
+  - `GET /api/stock/fil/:id` — single row + `has_certif_bio` / `has_certif_recycle` flags
+  - `PATCH /api/stock/fil/:id` — whitelisted-field update
+  - `GET /api/stock/fil/:id/certif/:type` — serves bio/recycle blob with MIME detection (same pattern as fournisseurs cert serving)
+- **Accented columns**: aliased in SELECT (`terminé AS termine`, `controlé AS controle`, `recyclé AS recycle`) so the bridge cannot mangle output column names. The route also has a `repairAliased()` helper that runs targeted `CONVERT(col USING 'UTF-8')` on aliased text fields when U+FFFD is detected.
+- **HFSQL tables**: `stock_fil`, `ref_fil`, `colori_fil`, `fournisseur`
 
 ## Business Domain (Quick Reference)
 

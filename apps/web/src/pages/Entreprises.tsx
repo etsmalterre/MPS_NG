@@ -28,6 +28,7 @@ import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { cn } from '@/lib/utils'
+import { formatHfsqlDate, hfsqlDateToInput } from '@/lib/dates'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -83,17 +84,6 @@ interface Recommandation {
 // ── API helpers ────────────────────────────────────────
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002/api'
-
-function formatHfsqlDate(raw: string): string {
-  if (raw.length === 8) return new Date(`${raw.substring(0, 4)}-${raw.substring(4, 6)}-${raw.substring(6, 8)}`).toLocaleDateString('fr-FR')
-  return new Date(raw).toLocaleDateString('fr-FR')
-}
-
-function hfsqlDateToInput(raw: string | null): string {
-  if (!raw) return ''
-  if (raw.length === 8) return `${raw.substring(0, 4)}-${raw.substring(4, 6)}-${raw.substring(6, 8)}`
-  return raw
-}
 
 async function apiFetch(path: string, options?: RequestInit) {
   const res = await fetch(`${API_URL}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...options?.headers } })

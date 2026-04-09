@@ -63,8 +63,11 @@ export const mainNavigation: MainMenuItem[] = [
     icon: Package,
     href: '/fournisseurs',
     submenus: [
+      { title: 'Références', href: '/fournisseurs/references' },
+      { title: 'Stock', href: '/fournisseurs/stock' },
       { title: 'Commandes', href: '/fournisseurs/commandes' },
       { title: 'Gestion', href: '/fournisseurs/gestion' },
+      { title: 'Prévisions', href: '/fournisseurs/previsions' },
     ],
   },
   {
@@ -158,8 +161,11 @@ export const routeTitles: Record<string, string> = {
   '/clients/gestion': 'Gestion',
   // Fournisseurs
   '/fournisseurs': 'Fournisseurs',
+  '/fournisseurs/references': 'Références',
+  '/fournisseurs/stock': 'Stock',
   '/fournisseurs/commandes': 'Commandes',
   '/fournisseurs/gestion': 'Gestion',
+  '/fournisseurs/previsions': 'Prévisions',
   // Sous-traitants
   '/sous-traitants': 'Sous-traitants',
   '/sous-traitants/commandes': 'Commandes',

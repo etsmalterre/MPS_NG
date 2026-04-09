@@ -8,6 +8,7 @@ import cors from 'cors'
 import helmet from 'helmet'
 import { entreprisesRouter } from './routes/entreprises.js'
 import { fournisseursRouter } from './routes/fournisseurs.js'
+import { stockRouter } from './routes/stock.js'
 import { closeConnection } from './lib/hfsql-auto.js'
 
 const app = express()
@@ -23,6 +24,7 @@ app.get('/api/health', (_req, res) => {
 
 app.use('/api/entreprises', entreprisesRouter)
 app.use('/api/fournisseurs', fournisseursRouter)
+app.use('/api/stock', stockRouter)
 
 app.listen(PORT, () => {
   console.log(`MPS API running on port ${PORT} [${env}]`)
