@@ -711,11 +711,20 @@ className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm
 
 ### Select / Dropdown
 
+**MANDATORY**: every `<select>` must include `cursor-pointer` so the hand cursor appears on hover — this is how users recognise a dropdown is clickable. When the select can be disabled, also add `disabled:cursor-not-allowed` so the cursor switches to the forbidden icon instead of staying as a hand.
+
 ```tsx
+// Always-enabled select
 <select className={cn(inputClass, 'cursor-pointer')}>
+
+// Select that may be disabled (e.g. dependent dropdown)
+<select
+  disabled={...}
+  className="w-full h-9 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer disabled:bg-zinc-100 disabled:text-muted-foreground disabled:cursor-not-allowed"
+>
 ```
 
-Dropdowns always use `cursor-pointer` so the pointing finger icon shows on hover.
+Do not rely on the browser default — on Windows the default select cursor is an arrow, not a hand, so the class is required.
 
 ### Focus Ring
 
