@@ -148,6 +148,54 @@ stockRouter.get('/fil/:id', async (req: Request, res: Response) => {
   }
 })
 
+// POST /api/stock/fil - Create a new lot de fil
+stockRouter.post('/fil', async (req: Request, res: Response) => {
+  try {
+    const body = req.body ?? {}
+    const IDfournisseur = parseInt(String(body.IDfournisseur), 10)
+    const IDref_fil = parseInt(String(body.IDref_fil), 10)
+    const IDcolori_fil = parseInt(String(body.IDcolori_fil), 10)
+    const stock_initial = Number(body.stock_initial)
+
+    if (isNaN(IDfournisseur) || isNaN(IDref_fil) || isNaN(IDcolori_fil)) {
+      res.status(400).json({ error: 'IDfournisseur, IDref_fil and IDcolori_fil are required' })
+      return
+    }
+    if (isNaN(stock_initial) || stock_initial < 0) {
+      res.status(400).json({ error: 'stock_initial must be a positive number' })
+      return
+    }
+
+    const lot = typeof body.lot === 'string' ? body.lot : ''
+    const lot_frs = typeof body.lot_frs === 'string' ? body.lot_frs : ''
+    const emplacement = typeof body.emplacement === 'string' ? body.emplacement : ''
+    const commentaire = typeof body.commentaire === 'string' ? body.commentaire : ''
+    const niveau = typeof body.niveau === 'number' ? body.niveau : 1
+
+    // Default date_entree to today if not provided
+    let date_entree = typeof body.date_entree === 'string' && body.date_entree.length === 8 ? body.date_entree : ''
+    if (!date_entree) {
+      const d = new Date()
+      date_entree = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
+    }
+
+    await query(
+      `INSERT INTO stock_fil (IDfournisseur, IDref_fil, IDcolori_fil, stock, stock_initial, lot, lot_frs, emplacement, date_entree, commentaire, niveau, terminé, controlé) VALUES (${IDfournisseur}, ${IDref_fil}, ${IDcolori_fil}, ${stock_initial}, ${stock_initial}, '${esc(lot)}', '${esc(lot_frs)}', '${esc(emplacement)}', '${esc(date_entree)}', '${esc(commentaire)}', ${parseInt(String(niveau), 10) || 1}, 0, 0)`
+    )
+
+    // HFSQL does not support RETURNING — fetch the newly inserted row by max ID
+    const newRows = await query<{ IDstock_fil: number }>(
+      `SELECT IDstock_fil FROM stock_fil WHERE IDfournisseur = ${IDfournisseur} AND IDref_fil = ${IDref_fil} AND IDcolori_fil = ${IDcolori_fil} ORDER BY IDstock_fil DESC`
+    )
+    const newId = newRows[0]?.IDstock_fil ?? null
+
+    res.status(201).json({ IDstock_fil: newId })
+  } catch (err) {
+    console.error('Error creating stock_fil:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // PATCH /api/stock/fil/:id - Light edit (whitelisted fields only)
 stockRouter.patch('/fil/:id', async (req: Request, res: Response) => {
   try {

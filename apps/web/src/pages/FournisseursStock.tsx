@@ -6,6 +6,7 @@ import {
   Loader2,
   AlertCircle,
   Pencil,
+  Plus,
   X,
   Save,
   ArrowUp,
@@ -23,6 +24,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
 
@@ -59,6 +61,22 @@ interface StockRow {
 interface StockDetail extends StockRow {
   has_certif_bio: boolean
   has_certif_recycle: boolean
+}
+
+interface FournisseurOption {
+  IDfournisseur: number
+  nom: string
+}
+
+interface RefFilOption {
+  IDref_fil: number
+  IDcolori_fil: number
+  reference: string // ref_fil.reference (base yarn name)
+  colori_reference: string // colori_fil.reference (color name)
+  bio?: number | null
+  recycle?: number | null
+  // Bridge may mangle accented column name
+  [key: string]: unknown
 }
 
 // ── API helpers ────────────────────────────────────────
@@ -127,6 +145,7 @@ type SortKey =
   | 'stock_initial'
   | 'emplacement'
   | 'date_entree'
+  | 'commentaire'
 
 interface SortState {
   key: SortKey
@@ -135,15 +154,16 @@ interface SortState {
 
 // Column widths shared by header and body tables (must match for alignment)
 const COLUMNS: { key: SortKey; label: string; width: string; align?: 'left' | 'right' }[] = [
-  { key: 'ref_fil', label: 'Référence', width: '14%' },
-  { key: 'colori_reference', label: 'Coloris', width: '11%' },
-  { key: 'lot', label: 'Lot interne', width: '8%' },
-  { key: 'lot_frs', label: 'Lot fournisseur', width: '11%' },
-  { key: 'fournisseur_nom', label: 'Fournisseur', width: '15%' },
-  { key: 'stock', label: 'Stock', width: '9%', align: 'right' },
-  { key: 'stock_initial', label: 'Stock initial', width: '9%', align: 'right' },
-  { key: 'emplacement', label: 'Emplacement', width: '10%' },
-  { key: 'date_entree', label: 'Date entrée', width: '10%' },
+  { key: 'ref_fil', label: 'Référence', width: '12%' },
+  { key: 'colori_reference', label: 'Coloris', width: '10%' },
+  { key: 'lot', label: 'Lot interne', width: '7%' },
+  { key: 'lot_frs', label: 'Lot fournisseur', width: '9%' },
+  { key: 'fournisseur_nom', label: 'Fournisseur', width: '13%' },
+  { key: 'stock', label: 'Stock', width: '7%', align: 'right' },
+  { key: 'stock_initial', label: 'Stock initial', width: '7%', align: 'right' },
+  { key: 'emplacement', label: 'Emplacement', width: '9%' },
+  { key: 'date_entree', label: 'Date entrée', width: '9%' },
+  { key: 'commentaire', label: 'Commentaire', width: '14%' },
 ]
 const ICON_COL_WIDTH = '3%'
 
@@ -165,6 +185,7 @@ export function FournisseursStock() {
   const [hideFinished, setHideFinished] = useState(true)
   const [sort, setSort] = useState<SortState>({ key: 'date_entree', dir: 'desc' })
   const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [createOpen, setCreateOpen] = useState(false)
 
   const { data: rows, isLoading, isError, error } = useStockList({ hideFinished })
 
@@ -173,7 +194,7 @@ export function FournisseursStock() {
     const q = searchQuery.trim().toLowerCase()
     if (q) {
       out = out.filter((r) => {
-        const fields = [r.ref_fil, r.colori_reference, r.lot, r.lot_frs, r.emplacement, r.fournisseur_nom]
+        const fields = [r.ref_fil, r.colori_reference, r.lot, r.lot_frs, r.emplacement, r.fournisseur_nom, r.commentaire]
         return fields.some((f) => f && f.toLowerCase().includes(q))
       })
     }
@@ -205,7 +226,7 @@ export function FournisseursStock() {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Rechercher (réf, coloris, lot, fournisseur, emplacement…)"
+            placeholder="Rechercher (réf, coloris, lot, fournisseur, emplacement, commentaire…)"
             className="h-9 w-full pl-8 pr-3 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
           />
         </div>
@@ -219,6 +240,11 @@ export function FournisseursStock() {
           />
           <span>Masquer les lots terminés</span>
         </label>
+
+        <Button size="sm" onClick={() => setCreateOpen(true)} className="flex-shrink-0">
+          <Plus className="h-3.5 w-3.5 mr-1" />
+          Nouveau
+        </Button>
       </div>
 
       {/* Table */}
@@ -297,6 +323,12 @@ export function FournisseursStock() {
                         <td className="px-3 py-2 tabular-nums text-muted-foreground">
                           {r.date_entree ? formatHfsqlDate(r.date_entree) : '—'}
                         </td>
+                        <td
+                          className="px-3 py-2 text-muted-foreground truncate"
+                          title={r.commentaire ?? undefined}
+                        >
+                          {r.commentaire?.trim() || ''}
+                        </td>
                         <td className="px-3 py-2 text-right">
                           <div className="flex items-center justify-end gap-1">
                             {!!r.bio && <Leaf className="h-3.5 w-3.5 text-green-600" />}
@@ -315,6 +347,15 @@ export function FournisseursStock() {
       </div>
 
       <StockDetailDrawer id={selectedId} onClose={handleClose} onMutationSuccess={onMutationSuccess} />
+
+      <NewStockFilDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        onCreated={(newId) => {
+          onMutationSuccess()
+          setSelectedId(newId)
+        }}
+      />
     </div>
   )
 }
@@ -750,5 +791,291 @@ function KV({ label, value, mono }: { label: string; value: React.ReactNode; mon
       <span className="text-xs text-muted-foreground">{label}</span>
       <span className={cn('text-sm text-right truncate', mono && 'tabular-nums')}>{value}</span>
     </div>
+  )
+}
+
+// ── New lot dialog ─────────────────────────────────────
+
+interface NewStockFilDialogProps {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onCreated: (newId: number) => void
+}
+
+function todayInputDate(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function NewStockFilDialog({ open, onOpenChange, onCreated }: NewStockFilDialogProps) {
+  const [IDfournisseur, setIDfournisseur] = useState<number | ''>('')
+  const [IDref_fil, setIDrefFil] = useState<number | ''>('')
+  const [IDcolori_fil, setIDcolori] = useState<number | ''>('')
+  const [lot, setLot] = useState('')
+  const [lotFrs, setLotFrs] = useState('')
+  const [stockInitial, setStockInitial] = useState('')
+  const [emplacement, setEmplacement] = useState('')
+  const [dateEntree, setDateEntree] = useState(todayInputDate())
+  const [commentaire, setCommentaire] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
+  // Reset form when the dialog opens
+  useEffect(() => {
+    if (open) {
+      setIDfournisseur('')
+      setIDrefFil('')
+      setIDcolori('')
+      setLot('')
+      setLotFrs('')
+      setStockInitial('')
+      setEmplacement('')
+      setDateEntree(todayInputDate())
+      setCommentaire('')
+      setError(null)
+    }
+  }, [open])
+
+  const fournisseursQuery = useQuery<FournisseurOption[]>({
+    queryKey: ['fournisseurs', 'options'],
+    queryFn: () => apiFetch<FournisseurOption[]>('/fournisseurs'),
+    enabled: open,
+  })
+
+  const fournisseurDetailQuery = useQuery<{ refsFil: RefFilOption[] }>({
+    queryKey: ['fournisseur', 'detail', IDfournisseur],
+    queryFn: () => apiFetch<{ refsFil: RefFilOption[] }>(`/fournisseurs/${IDfournisseur}`),
+    enabled: open && typeof IDfournisseur === 'number',
+  })
+
+  const refs = fournisseurDetailQuery.data?.refsFil ?? []
+
+  // Unique ref_fil entries (one per IDref_fil) for the first select
+  const uniqueRefs = useMemo(() => {
+    const seen = new Map<number, { IDref_fil: number; reference: string }>()
+    for (const r of refs) {
+      if (!seen.has(r.IDref_fil)) {
+        seen.set(r.IDref_fil, { IDref_fil: r.IDref_fil, reference: r.reference })
+      }
+    }
+    return Array.from(seen.values()).sort((a, b) =>
+      a.reference.localeCompare(b.reference, 'fr', { sensitivity: 'base' })
+    )
+  }, [refs])
+
+  // Coloris options filtered by the chosen ref_fil
+  const colorisForRef = useMemo(() => {
+    if (typeof IDref_fil !== 'number') return []
+    return refs
+      .filter((r) => r.IDref_fil === IDref_fil)
+      .sort((a, b) =>
+        a.colori_reference.localeCompare(b.colori_reference, 'fr', { sensitivity: 'base' })
+      )
+  }, [refs, IDref_fil])
+
+  // Reset ref and coloris when fournisseur changes
+  useEffect(() => {
+    setIDrefFil('')
+    setIDcolori('')
+  }, [IDfournisseur])
+
+  // Reset coloris when ref changes
+  useEffect(() => {
+    setIDcolori('')
+  }, [IDref_fil])
+
+  const createMutation = useMutation({
+    mutationFn: async () => {
+      if (typeof IDref_fil !== 'number' || typeof IDcolori_fil !== 'number') {
+        throw new Error('Référence et coloris requis')
+      }
+      return apiFetch<{ IDstock_fil: number | null }>('/stock/fil', {
+        method: 'POST',
+        body: JSON.stringify({
+          IDfournisseur,
+          IDref_fil,
+          IDcolori_fil,
+          lot,
+          lot_frs: lotFrs,
+          stock_initial: parseFloat(stockInitial) || 0,
+          emplacement,
+          date_entree: inputDateToHfsql(dateEntree),
+          commentaire,
+        }),
+      })
+    },
+    onSuccess: (res) => {
+      onOpenChange(false)
+      if (res?.IDstock_fil) onCreated(res.IDstock_fil)
+      else onCreated(-1)
+    },
+    onError: (err: Error) => {
+      setError(err.message || 'Erreur lors de la création')
+    },
+  })
+
+  const canSubmit =
+    typeof IDfournisseur === 'number' &&
+    typeof IDref_fil === 'number' &&
+    typeof IDcolori_fil === 'number' &&
+    stockInitial.trim() !== '' &&
+    !isNaN(parseFloat(stockInitial))
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-xl" onClose={() => onOpenChange(false)}>
+        <DialogHeader>
+          <DialogTitle className="font-heading">Nouveau lot de fil</DialogTitle>
+        </DialogHeader>
+
+        <div className="grid grid-cols-2 gap-3 mt-3">
+          <div className="col-span-2">
+            <label className="text-xs text-muted-foreground mb-1 block">Fournisseur *</label>
+            <select
+              value={IDfournisseur}
+              onChange={(e) => setIDfournisseur(e.target.value ? parseInt(e.target.value, 10) : '')}
+              className="w-full h-9 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer"
+            >
+              <option value="">— Sélectionner —</option>
+              {fournisseursQuery.data?.map((f) => (
+                <option key={f.IDfournisseur} value={f.IDfournisseur}>
+                  {f.nom}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Référence *</label>
+            <select
+              value={IDref_fil}
+              onChange={(e) => setIDrefFil(e.target.value ? parseInt(e.target.value, 10) : '')}
+              disabled={typeof IDfournisseur !== 'number' || fournisseurDetailQuery.isLoading}
+              className="w-full h-9 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer disabled:bg-zinc-100 disabled:text-muted-foreground disabled:cursor-not-allowed"
+            >
+              <option value="">
+                {typeof IDfournisseur !== 'number'
+                  ? '— Choisir un fournisseur —'
+                  : fournisseurDetailQuery.isLoading
+                    ? 'Chargement…'
+                    : uniqueRefs.length === 0
+                      ? 'Aucune référence'
+                      : '— Sélectionner —'}
+              </option>
+              {uniqueRefs.map((r) => (
+                <option key={r.IDref_fil} value={r.IDref_fil}>
+                  {r.reference}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Coloris *</label>
+            <select
+              value={IDcolori_fil}
+              onChange={(e) => setIDcolori(e.target.value ? parseInt(e.target.value, 10) : '')}
+              disabled={typeof IDref_fil !== 'number'}
+              className="w-full h-9 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer disabled:bg-zinc-100 disabled:text-muted-foreground disabled:cursor-not-allowed"
+            >
+              <option value="">
+                {typeof IDref_fil !== 'number'
+                  ? '— Choisir une référence —'
+                  : colorisForRef.length === 0
+                    ? 'Aucun coloris'
+                    : '— Sélectionner —'}
+              </option>
+              {colorisForRef.map((r) => (
+                <option key={r.IDcolori_fil} value={r.IDcolori_fil}>
+                  {r.colori_reference}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Lot interne</label>
+            <input
+              type="text"
+              value={lot}
+              onChange={(e) => setLot(e.target.value)}
+              className="w-full h-9 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Lot fournisseur</label>
+            <input
+              type="text"
+              value={lotFrs}
+              onChange={(e) => setLotFrs(e.target.value)}
+              className="w-full h-9 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Stock initial (kg) *</label>
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              value={stockInitial}
+              onChange={(e) => setStockInitial(e.target.value)}
+              className="w-full h-9 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Date d'entrée</label>
+            <input
+              type="date"
+              value={dateEntree}
+              onChange={(e) => setDateEntree(e.target.value)}
+              className="w-full h-9 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+
+          <div className="col-span-2">
+            <label className="text-xs text-muted-foreground mb-1 block">Emplacement</label>
+            <input
+              type="text"
+              value={emplacement}
+              onChange={(e) => setEmplacement(e.target.value)}
+              className="w-full h-9 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+
+          <div className="col-span-2">
+            <label className="text-xs text-muted-foreground mb-1 block">Commentaire</label>
+            <textarea
+              value={commentaire}
+              onChange={(e) => setCommentaire(e.target.value)}
+              rows={2}
+              className="w-full px-2.5 py-1.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring resize-none"
+            />
+          </div>
+        </div>
+
+        {error && (
+          <div className="mt-3 flex items-center gap-2 text-sm text-destructive">
+            <AlertCircle className="h-4 w-4" />
+            {error}
+          </div>
+        )}
+
+        <DialogFooter className="mt-4 gap-2">
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={createMutation.isPending}>
+            Annuler
+          </Button>
+          <Button onClick={() => createMutation.mutate()} disabled={!canSubmit || createMutation.isPending}>
+            {createMutation.isPending ? (
+              <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+            ) : (
+              <Save className="h-3.5 w-3.5 mr-1.5" />
+            )}
+            Créer
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
