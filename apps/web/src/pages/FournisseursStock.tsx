@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Boxes,
@@ -392,6 +393,8 @@ interface DrawerProps {
 function StockDetailDrawer({ id, onClose, onMutationSuccess }: DrawerProps) {
   const { data: detail, isLoading } = useStockDetail(id)
   const drawerRef = useRef<HTMLDivElement>(null)
+  const [searchParams] = useSearchParams()
+  const embed = searchParams.get('embed') === 'true'
 
   const [isEditing, setIsEditing] = useState(false)
   const [editCommentaire, setEditCommentaire] = useState('')
@@ -452,7 +455,8 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess }: DrawerProps) {
     <div
       ref={drawerRef}
       className={cn(
-        'fixed right-0 top-14 bottom-0 w-[440px] bg-white border-l border-border/60 shadow-xl z-30 transition-transform duration-300 flex flex-col',
+        'fixed right-0 bottom-0 w-[440px] bg-white border-l border-border/60 shadow-xl z-30 transition-transform duration-300 flex flex-col',
+        embed ? 'top-0' : 'top-14',
         open ? 'translate-x-0' : 'translate-x-full'
       )}
     >
