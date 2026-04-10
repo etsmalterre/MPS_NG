@@ -4,9 +4,16 @@
 
 Design system for **MPS_NG**, the ERP system for **ETS Malterre** (French textile/knitting manufacturer). This document is the single source of truth for all visual patterns — follow it precisely when building new screens or modifying existing ones.
 
-## Reference implementation
+## Reference implementations
 
-The gold-standard reference for new data screens is **`apps/web/src/pages/Fournisseurs.tsx`** (the `/fournisseurs/gestion` route). It implements every pattern documented here: 3-panel `MasterDetailLayout`, collapsible card sections with status-colored items, side-by-side edit dialogs with file upload and PDF preview, sidebar tabs with inline edit forms, global vs per-section edit state, and HFSQL date helpers. When in doubt, look there.
+There are **two** gold-standard references in the codebase. Pick the one whose layout matches the use case before writing any code; do not invent a third layout pattern.
+
+| Screen | File | Use when |
+|---|---|---|
+| **`/fournisseurs/gestion`** (3-panel) | `apps/web/src/pages/Fournisseurs.tsx` | One entity at a time has rich nested data (contacts, addresses, sub-resources) and the user works on one record start-to-finish. Implements `MasterDetailLayout`, collapsible card sections with status-colored items, side-by-side edit dialogs with file upload + PDF preview, sidebar tabs with inline edit forms, global vs per-section edit state. **§4–§9, §18, §21–§25.** |
+| **`/fournisseurs/stock`** (table-centric + slide-in drawer) | `apps/web/src/pages/FournisseursStock.tsx` | The page is fundamentally a sortable / searchable list of many flat rows; selecting a row reveals a focused detail view, but the row-set is the primary working surface. Implements toolbar (search + filters + create), split-aligned sortable table, right slide-in drawer, embed-mode top-offset, "Nouveau" creation dialog, KV-row drawer cards. **§27.** |
+
+When in doubt about a single rule, look at both references. When in doubt about which *layout* to choose, ask the user — do NOT mix patterns from both into a hybrid third design.
 
 ---
 
@@ -172,6 +179,8 @@ className="px-4 py-1.5 text-sm font-medium rounded-md transition-colors whitespa
 
 Component: `apps/web/src/components/layout/MasterDetailLayout.tsx`
 Hook: `apps/web/src/hooks/useResponsiveLayout.ts`
+
+> **Don't use this for list-heavy screens.** If the page is fundamentally a sortable / searchable / filterable table of many flat rows, use the **table-centric pattern** in §27 instead — that's the layout used by `/fournisseurs/stock`.
 
 ### Props
 
@@ -1231,4 +1240,301 @@ function formatHfsqlDate(raw: string): string {
 }
 ```
 
-These three helpers are currently defined locally in `Fournisseurs.tsx`. When a third screen needs them, lift them to a shared utilities file (e.g. `lib/dates.ts`).
+These three helpers live in **`apps/web/src/lib/dates.ts`** — import from there, do not redefine. Both `Fournisseurs.tsx` and `FournisseursStock.tsx` consume them via `import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'`.
+
+---
+
+## 27. Table-Centric Screen Pattern
+
+Reference: **`apps/web/src/pages/FournisseursStock.tsx`** (`/fournisseurs/stock`).
+
+Use this pattern — never `MasterDetailLayout` — when the page is fundamentally a sortable / searchable list of many flat rows (e.g. stock lots, order lines, movements) and selecting a row reveals a focused detail view that the user reads/edits without leaving the table context.
+
+### 27.1 Page root structure
+
+```tsx
+return (
+  <div className="h-full flex flex-col gap-3 min-h-0">
+    {/* Toolbar */}             <-- §27.2
+    {/* Table card */}          <-- §27.3
+    <DetailDrawer ... />        <-- §27.5
+    <CreateDialog ... />        <-- §18.A
+  </div>
+)
+```
+
+`min-h-0` on the root is mandatory — without it the table body can't shrink to fit and the whole page scrolls instead of just the rows.
+
+### 27.2 Toolbar (top, full-width)
+
+A single horizontal flex row with:
+1. **Search input** — `flex-1 min-w-0`, with a `<Search>` Lucide icon absolutely positioned inside. Standard input height `h-9`, white background.
+2. **Filter toggles** — `<label>` wrappers around `<input type="checkbox">`, `flex-shrink-0`, label text follows the checkbox.
+3. **"Nouveau" button** — pinned right, `flex-shrink-0`. Use the **default `<Button>` variant** (no `variant=...` prop) — that gives `bg-primary text-primary-foreground` which is the brand navy `#143D6B`. Always pair with a leading `<Plus className="h-3.5 w-3.5 mr-1" />`. Do **not** override the background color.
+
+```tsx
+<div className="flex-shrink-0 flex items-center gap-3">
+  <div className="relative flex-1 min-w-0">
+    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+    <input
+      type="text"
+      value={searchQuery}
+      onChange={(e) => setSearchQuery(e.target.value)}
+      placeholder="Rechercher (...)"
+      className="h-9 w-full pl-8 pr-3 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+    />
+  </div>
+
+  <label className="flex items-center gap-2 text-sm cursor-pointer select-none flex-shrink-0">
+    <input type="checkbox" checked={hideFinished} onChange={...}
+      className="h-4 w-4 rounded border-input text-accent focus:ring-2 focus:ring-ring cursor-pointer" />
+    <span>Masquer les lots terminés</span>
+  </label>
+
+  <Button size="sm" onClick={() => setCreateOpen(true)} className="flex-shrink-0">
+    <Plus className="h-3.5 w-3.5 mr-1" />
+    Nouveau
+  </Button>
+</div>
+```
+
+### 27.3 Split header / body table (the alignment trick)
+
+Tables that scroll inside a fixed-height card need a non-scrolling header above a scrolling body. Use **two separate `<table>` elements** with **identical `<colgroup>` definitions** and `table-layout: fixed`. The shared `colgroup` is what keeps the columns aligned.
+
+```tsx
+const COLUMNS: { key: SortKey; label: string; width: string; align?: 'left' | 'right' }[] = [
+  { key: 'ref_fil',          label: 'Référence',       width: '12%' },
+  { key: 'colori_reference', label: 'Coloris',         width: '10%' },
+  { key: 'lot',              label: 'Lot interne',     width: '7%' },
+  // … widths must sum to 100% minus the trailing icon column
+]
+const ICON_COL_WIDTH = '3%'
+```
+
+```tsx
+<div className="flex-1 min-h-0 flex flex-col rounded-lg border border-border/60 bg-white shadow-sm overflow-hidden">
+  {/* Header table — does NOT scroll */}
+  <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
+    <colgroup>
+      {COLUMNS.map((c) => <col key={c.key} style={{ width: c.width }} />)}
+      <col style={{ width: ICON_COL_WIDTH }} />
+    </colgroup>
+    <thead className="bg-zinc-200/60 border-b border-border/60">
+      <tr className="text-xs uppercase tracking-wide text-muted-foreground">
+        {COLUMNS.map((c) => (
+          <SortHeader key={c.key} label={c.label} sortKey={c.key} sort={sort} onSort={handleSort} align={c.align} />
+        ))}
+        <th className="px-3 py-2.5 text-left font-semibold"></th>
+      </tr>
+    </thead>
+  </table>
+
+  {/* Body table — scrolls inside an overflow div */}
+  <div className="flex-1 min-h-0 overflow-auto scrollbar-transparent">
+    <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
+      <colgroup>
+        {COLUMNS.map((c) => <col key={c.key} style={{ width: c.width }} />)}
+        <col style={{ width: ICON_COL_WIDTH }} />
+      </colgroup>
+      <tbody>
+        {filteredSorted.map((r) => (
+          <tr
+            key={r.IDstock_fil}
+            data-stock-row
+            onClick={() => setSelectedId((prev) => prev === r.IDstock_fil ? null : r.IDstock_fil)}
+            className={cn(
+              'border-b border-border/40 cursor-pointer transition-colors',
+              isSelected ? 'bg-accent/10' : 'hover:bg-accent/5'
+            )}
+          >
+            …row cells…
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+</div>
+```
+
+Conventions:
+- **Row hover**: `hover:bg-accent/5`. **Selected**: `bg-accent/10`. Never both — selection wins via the `cn(... isSelected ? ... : hover...)` ternary.
+- **Clicking the same row again** toggles the selection off (`prev === id ? null : id`). Clicking a different row switches.
+- **`data-stock-row`** marker is mandatory — the drawer's outside-click handler reads it to differentiate "clicked another row" (switch) from "clicked outside the table" (close). See §27.5.
+- **Numeric cells**: `tabular-nums`, right-aligned via the column's `align: 'right'`.
+- **Trailing icon column**: small badges (Bio leaf, Recycle, Terminé "T") right-aligned in a `flex justify-end gap-1`.
+- **Truncation**: every text cell uses `truncate`. Long values get a `title={value}` for hover tooltip.
+
+### 27.4 Sortable column header
+
+```tsx
+function SortHeader({ label, sortKey, sort, onSort, align = 'left' }: SortHeaderProps) {
+  const active = sort.key === sortKey
+  return (
+    <th
+      onClick={() => onSort(sortKey)}
+      className={cn(
+        'px-3 py-2.5 font-semibold cursor-pointer select-none whitespace-nowrap',
+        align === 'right' ? 'text-right' : 'text-left',
+        active && 'text-accent'
+      )}
+    >
+      <span className="inline-flex items-center gap-1">
+        {label}
+        {active && (sort.dir === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
+      </span>
+    </th>
+  )
+}
+```
+
+The active sort column gets `text-accent` (gold) **and** a directional arrow icon. Clicking the same header toggles direction; clicking a different one resets to `asc`.
+
+### 27.5 Right slide-in drawer
+
+The drawer is `position: fixed`, width `440px`, slides in from the right edge. It is **separate** from the page flex layout — it overlays the table.
+
+#### Top offset (handles embed mode)
+
+```tsx
+const [searchParams] = useSearchParams()
+const embed = searchParams.get('embed') === 'true'
+
+<div
+  ref={drawerRef}
+  className={cn(
+    'fixed right-0 bottom-0 w-[440px] bg-white border-l border-border/60 shadow-xl z-30 transition-transform duration-300 flex flex-col',
+    embed ? 'top-0' : 'top-14',                       // critical — embed mode has no header
+    open ? 'translate-x-0' : 'translate-x-full'
+  )}
+>
+```
+
+`top-14` is the height of the standard app header. When `?embed=true` is set the AppShell hides the header, so the drawer must pin to `top-0` or it leaves an empty band at the top of the embed iframe.
+
+#### Three-tone background composition
+
+The drawer must match the Fournisseurs right panel exactly: an opaque white root, an inner zinc-100/80 layer, and a zinc-200/50 top band. These need to be **nested** divs, not stacked classes — `bg-zinc-100/80` is semi-transparent and only blends correctly when there is an opaque base behind it.
+
+```tsx
+<div className="fixed ... bg-white ...">                          {/* opaque base */}
+  <div className="flex-1 min-h-0 flex flex-col bg-zinc-100/80">  {/* inner panel */}
+    <div className="flex-shrink-0 px-4 pt-4 pb-3 border-b border-border/60 bg-zinc-200/50">
+      {/* Header band */}
+    </div>
+    <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3 scrollbar-transparent">
+      {/* Body — inherits zinc-100/80 from parent */}
+    </div>
+  </div>
+</div>
+```
+
+| Layer | Class | Why |
+|---|---|---|
+| Drawer root | `bg-white` | opaque base — drawer overlays the table, so the root must hide it |
+| Inner panel | `bg-zinc-100/80` | the lighter gray, blended over white |
+| Top band (header) | `bg-zinc-200/50` | the darker gray, blended over the inner zinc-100/80 |
+| DrawerCards inside body | `bg-card` | white cards |
+
+**Do not** put `bg-zinc-100/80` directly on the drawer root or `bg-zinc-200/50` directly over white — the colors will not match the Fournisseurs panel.
+
+#### Header content
+
+- **Icon** (`h-10 w-10` rounded square, `icon-box-gold` class normally / `bg-accent/15` when editing) containing a **`BobineIcon`** at `h-[25px] w-[25px]`. Always use `BobineIcon` for yarn-related screens (matches the inline icon used in `Fournisseurs.tsx` "Références de fil" section). Other domains get their domain-specific icon at the same frame size.
+- **Title row**: `<h2 className="text-base font-heading font-bold tracking-tight truncate">` followed by inline `Badge`s (Bio, Recyclé) — use the same green/blue badge palette as elsewhere.
+- **Subtitle**: `text-xs text-muted-foreground mt-0.5` — secondary identifier line (e.g. "coloris • Lot N").
+- **Action buttons** (right-aligned, `flex-shrink-0 -mt-0.5`): `outline` Modifier in view mode, `outline` Annuler + default Enregistrer in edit mode. Save button shows a `Loader2` spinner when `mutation.isPending`.
+
+#### Body cards
+
+Each section is a `DrawerCard` with `bg-card`, gold icon, title:
+
+```tsx
+function DrawerCard({ icon, title, highlight, children }) {
+  return (
+    <div className={cn(
+      'rounded-lg border border-border/60 bg-card p-3 shadow-sm',
+      highlight && 'border-l-4 border-l-accent/70 bg-accent/[0.03]'
+    )}>
+      <div className="flex items-center gap-2 mb-2">{icon}<h3 className="text-sm font-semibold">{title}</h3></div>
+      {children}
+    </div>
+  )
+}
+```
+
+**Edit highlight rule**: every card that the user might *visually associate* with editing — including read-only ones in the same logical group — gets `highlight={isEditing}`. The Provenance card on this screen is read-only but still gets the gold left edge in edit mode so the user perceives the whole drawer as "in edit mode", not just two cards out of four.
+
+#### KV row primitive
+
+Inside cards, every label/value pair uses the `KV` component — label on the left, value on the right, baseline-aligned, label small/muted, value `text-sm text-right truncate`:
+
+```tsx
+function KV({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) {
+  return (
+    <div className="flex items-baseline justify-between gap-2">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className={cn('text-sm text-right truncate', mono && 'tabular-nums')}>{value}</span>
+    </div>
+  )
+}
+```
+
+**Edit-mode inputs go in the value slot**, not below the label. The input height drops to `h-7` (smaller than the standard `h-9`) and gets `text-right` so its content visually aligns with the read-mode value text:
+
+```tsx
+<KV
+  label="Emplacement"
+  value={
+    isEditing ? (
+      <input type="text" value={editEmplacement} onChange={...}
+        className="h-7 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring text-right" />
+    ) : (
+      detail.emplacement || '—'
+    )
+  }
+/>
+```
+
+#### Outside-click dismissal
+
+Clicking anywhere outside the drawer closes it — *except* clicking another row in the table, which switches the selection. The handler reads the `data-stock-row` marker (§27.3):
+
+```tsx
+useEffect(() => {
+  if (id === null) return
+  function handleMouseDown(e: MouseEvent) {
+    const target = e.target as Node | null
+    if (!target) return
+    if (drawerRef.current?.contains(target)) return  // inside drawer → keep open
+    if ((target as Element).closest?.('tr[data-stock-row]')) return  // row click → table handles it
+    onClose()
+  }
+  document.addEventListener('mousedown', handleMouseDown)
+  return () => document.removeEventListener('mousedown', handleMouseDown)
+}, [id, onClose])
+```
+
+### 27.6 Foreign-key display columns
+
+When a table column is a foreign-key ID (e.g. `stock_fil.IDMagasin → sous_traitant`), **never display the bare `#${id}`** in the UI. Add a JOIN to the API query and select the human name as a derived column (e.g. `st.nom AS magasin_nom`), then surface `magasin_nom` in the drawer KV. The legacy IDs are implementation noise — the user thinks in supplier names, depot names, etc.
+
+### 27.7 Reference checklist for new table-centric screens
+
+When building a new screen of this type, the result must have:
+
+- [ ] Page root: `h-full flex flex-col gap-3 min-h-0`
+- [ ] Toolbar with search left, filters middle, **default-variant** `<Button>` "Nouveau" right
+- [ ] Split table with shared `<colgroup>` between header and body, both `tableLayout: fixed`
+- [ ] Sortable headers via `SortHeader`, active column gets `text-accent` + arrow icon
+- [ ] Row toggle selection on click (same row → close), `data-stock-row` marker, `bg-accent/10` selection / `hover:bg-accent/5` hover
+- [ ] Right slide-in drawer with `embed`-aware top offset
+- [ ] Three-tone background: `bg-white` root → `bg-zinc-100/80` inner → `bg-zinc-200/50` header
+- [ ] `BobineIcon` (or domain icon) at `h-[25px] w-[25px]` in the gold icon frame
+- [ ] All drawer rows use `KV` (label left / value right)
+- [ ] `highlight={isEditing}` on every section card, even read-only ones
+- [ ] FK columns rendered via joined display name, never `#${id}`
+- [ ] Outside-click closes drawer, ignoring clicks on `tr[data-stock-row]`
+- [ ] Create dialog wired through React Query mutation with `onMutationSuccess` invalidation, auto-selects the new row in the drawer
+
+If any box is unchecked, do not mark the screen complete.
