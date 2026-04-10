@@ -1,5 +1,7 @@
-import { useState, useMemo, useEffect, useCallback } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
+import { useUnsavedGuard } from '@/hooks/useUnsavedGuard'
 import {
   Globe,
   Building2,
@@ -115,6 +117,21 @@ export function Entreprises() {
   const [editNom, setEditNom] = useState('')
   const [editCommentaire, setEditCommentaire] = useState('')
 
+  const originalDraftRef = useRef<{ nom: string; commentaire: string } | null>(null)
+  // Per-key sub-form dirty registry. Each sub-form reports its own dirty bool
+  // under a unique key; the page aggregates by Set size so multiple forms can
+  // be dirty simultaneously without clobbering each other.
+  const [dirtyKeys, setDirtyKeys] = useState<Set<string>>(new Set())
+  const reportDirty = useCallback((key: string, dirty: boolean) => {
+    setDirtyKeys((prev) => {
+      if (dirty === prev.has(key)) return prev
+      const next = new Set(prev)
+      if (dirty) next.add(key); else next.delete(key)
+      return next
+    })
+  }, [])
+  const subFormsDirty = dirtyKeys.size > 0
+
   const { data: entreprises, isLoading, isError, error } = useEntreprises()
   const { data: detail, isLoading: detailLoading } = useEntrepriseDetail(selectedId)
 
@@ -123,10 +140,26 @@ export function Entreprises() {
   }, [entreprises, selectedId])
 
   const startEdit = useCallback(() => {
-    if (detail) { setEditNom(detail.nom); setEditCommentaire(detail.commentaire ?? ''); setIsEditing(true) }
+    if (detail) {
+      const snapshot = { nom: detail.nom, commentaire: detail.commentaire ?? '' }
+      setEditNom(snapshot.nom)
+      setEditCommentaire(snapshot.commentaire)
+      originalDraftRef.current = snapshot
+      setIsEditing(true)
+    }
   }, [detail])
 
   const cancelEdit = useCallback(() => setIsEditing(false), [])
+
+  const isDirty = useMemo(() => {
+    if (!isEditing) return false
+    const o = originalDraftRef.current
+    if (!o) return false
+    if (editNom !== o.nom) return true
+    if (editCommentaire !== o.commentaire) return true
+    if (subFormsDirty) return true
+    return false
+  }, [isEditing, editNom, editCommentaire, subFormsDirty])
 
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['entreprises'] })
@@ -146,7 +179,18 @@ export function Entreprises() {
     },
   })
 
-  const handleSelect = useCallback((id: number) => { if (isEditing) setIsEditing(false); setSelectedId(id) }, [isEditing])
+  const guard = useUnsavedGuard({
+    isDirty,
+    save: async () => { await saveMutation.mutateAsync() },
+    onDiscard: () => setIsEditing(false),
+  })
+
+  const handleSelect = useCallback((id: number) => {
+    guard.guardAction(() => {
+      setIsEditing(false)
+      setSelectedId(id)
+    })
+  }, [guard])
 
   const filtered = useMemo(() => {
     if (!entreprises) return []
@@ -167,11 +211,19 @@ export function Entreprises() {
         onEmailClick={() => setEmailModalOpen(true)} />}
       detail={<DetailMain entreprise={detail ?? null} isLoading={detailLoading && selectedId !== null}
         hasSelection={selectedId !== null} isEditing={isEditing} editCommentaire={editCommentaire}
-        onEditCommentaireChange={setEditCommentaire} entrepriseId={selectedId} onMutationSuccess={invalidateAll} />}
+        onEditCommentaireChange={setEditCommentaire} entrepriseId={selectedId} onMutationSuccess={invalidateAll}
+        reportDirty={reportDirty} />}
       sidebar={selectedId !== null ? <DetailSidebar entreprise={detail ?? null} isLoading={detailLoading}
-        isEditing={isEditing} entrepriseId={selectedId} onMutationSuccess={invalidateAll} /> : null}
+        isEditing={isEditing} entrepriseId={selectedId} onMutationSuccess={invalidateAll}
+        reportDirty={reportDirty} /> : null}
       sidebarTitle="Informations" hasSelection={selectedId !== null}
-      onBack={() => { setIsEditing(false); setSelectedId(null) }}
+      onBack={() => guard.guardAction(() => { setIsEditing(false); setSelectedId(null) })}
+    />
+
+    <UnsavedChangesDialog
+      open={guard.showDialog}
+      onAction={guard.handleAction}
+      isSaving={guard.isSaving}
     />
 
     <Dialog open={emailModalOpen} onOpenChange={setEmailModalOpen}>
@@ -296,9 +348,10 @@ function DetailHeader({ entreprise, isLoading, isEditing, editNom, onEditNomChan
 
 // ── Center: Detail Main ────────────────────────────────
 
-function DetailMain({ entreprise, isLoading, hasSelection, isEditing, editCommentaire, onEditCommentaireChange, entrepriseId, onMutationSuccess }: {
+function DetailMain({ entreprise, isLoading, hasSelection, isEditing, editCommentaire, onEditCommentaireChange, entrepriseId, onMutationSuccess, reportDirty }: {
   entreprise: EntrepriseDetail | null; isLoading: boolean; hasSelection: boolean; isEditing: boolean
   editCommentaire: string; onEditCommentaireChange: (v: string) => void; entrepriseId: number | null; onMutationSuccess: () => void
+  reportDirty: (key: string, dirty: boolean) => void
 }) {
   if (!hasSelection) return (
     <div className="flex-1 flex items-center justify-center">
@@ -327,7 +380,7 @@ function DetailMain({ entreprise, isLoading, hasSelection, isEditing, editCommen
       </Card>
 
       <CompetencesCard competences={entreprise.competences} isEditing={isEditing} entrepriseId={entrepriseId!} onMutationSuccess={onMutationSuccess} />
-      <RecommandationsCard recommandations={entreprise.recommandations} isEditing={isEditing} entrepriseId={entrepriseId!} onMutationSuccess={onMutationSuccess} />
+      <RecommandationsCard recommandations={entreprise.recommandations} isEditing={isEditing} entrepriseId={entrepriseId!} onMutationSuccess={onMutationSuccess} reportDirty={reportDirty} />
     </div>
   )
 }
@@ -394,12 +447,20 @@ function CompetencesCard({ competences, isEditing, entrepriseId, onMutationSucce
 
 // ── Recommandations Card ───────────────────────────────
 
-function RecommandationsCard({ recommandations, isEditing, entrepriseId, onMutationSuccess }: {
+function RecommandationsCard({ recommandations, isEditing, entrepriseId, onMutationSuccess, reportDirty }: {
   recommandations: Recommandation[]; isEditing: boolean; entrepriseId: number; onMutationSuccess: () => void
+  reportDirty: (key: string, dirty: boolean) => void
 }) {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState({ société: '', contact: '', besoin: '', date_reco: '' })
+
+  const reportDirtyRef = useRef(reportDirty)
+  useEffect(() => { reportDirtyRef.current = reportDirty })
+  useEffect(() => {
+    reportDirtyRef.current('recommandations', showForm || editingId !== null)
+  }, [showForm, editingId])
+  useEffect(() => () => { reportDirtyRef.current('recommandations', false) }, [])
 
   const createMut = useMutation({
     mutationFn: () => apiFetch(`/entreprises/${entrepriseId}/recommandations`, { method: 'POST', body: JSON.stringify(form) }),
@@ -522,8 +583,9 @@ function InlineForm({ title, children, onSave, onCancel, isSaving }: {
 
 type SidebarTab = 'contacts' | 'adresses'
 
-function DetailSidebar({ entreprise, isLoading, isEditing, entrepriseId, onMutationSuccess }: {
+function DetailSidebar({ entreprise, isLoading, isEditing, entrepriseId, onMutationSuccess, reportDirty }: {
   entreprise: EntrepriseDetail | null; isLoading: boolean; isEditing: boolean; entrepriseId: number; onMutationSuccess: () => void
+  reportDirty: (key: string, dirty: boolean) => void
 }) {
   const [activeTab, setActiveTab] = useState<SidebarTab>('contacts')
   if (isLoading) return (
@@ -554,8 +616,8 @@ function DetailSidebar({ entreprise, isLoading, isEditing, entrepriseId, onMutat
         })}
       </div>
       <div className="flex-1 overflow-y-auto p-3 space-y-2">
-        {activeTab === 'contacts' && <ContactsTab contacts={entreprise.contacts} isEditing={isEditing} entrepriseId={entrepriseId} onMutationSuccess={onMutationSuccess} />}
-        {activeTab === 'adresses' && <AdressesTab adresses={entreprise.adresses} isEditing={isEditing} entrepriseId={entrepriseId} onMutationSuccess={onMutationSuccess} />}
+        {activeTab === 'contacts' && <ContactsTab contacts={entreprise.contacts} isEditing={isEditing} entrepriseId={entrepriseId} onMutationSuccess={onMutationSuccess} reportDirty={reportDirty} />}
+        {activeTab === 'adresses' && <AdressesTab adresses={entreprise.adresses} isEditing={isEditing} entrepriseId={entrepriseId} onMutationSuccess={onMutationSuccess} reportDirty={reportDirty} />}
       </div>
     </div>
   )
@@ -563,12 +625,20 @@ function DetailSidebar({ entreprise, isLoading, isEditing, entrepriseId, onMutat
 
 // ── Sidebar Tab: Contacts ──────────────────────────────
 
-function ContactsTab({ contacts, isEditing, entrepriseId, onMutationSuccess }: {
+function ContactsTab({ contacts, isEditing, entrepriseId, onMutationSuccess, reportDirty }: {
   contacts: Contact[]; isEditing: boolean; entrepriseId: number; onMutationSuccess: () => void
+  reportDirty: (key: string, dirty: boolean) => void
 }) {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState({ nom: '', prenom: '', tel: '', mail: '' })
   const [showForm, setShowForm] = useState(false)
+
+  const reportDirtyRef = useRef(reportDirty)
+  useEffect(() => { reportDirtyRef.current = reportDirty })
+  useEffect(() => {
+    reportDirtyRef.current('ent-contacts', showForm || editingId !== null)
+  }, [showForm, editingId])
+  useEffect(() => () => { reportDirtyRef.current('ent-contacts', false) }, [])
 
   const createMut = useMutation({
     mutationFn: () => apiFetch(`/entreprises/${entrepriseId}/contacts`, { method: 'POST', body: JSON.stringify(form) }),
@@ -648,12 +718,20 @@ function ContactsTab({ contacts, isEditing, entrepriseId, onMutationSuccess }: {
 
 // ── Sidebar Tab: Adresses ──────────────────────────────
 
-function AdressesTab({ adresses, isEditing, entrepriseId, onMutationSuccess }: {
+function AdressesTab({ adresses, isEditing, entrepriseId, onMutationSuccess, reportDirty }: {
   adresses: Adresse[]; isEditing: boolean; entrepriseId: number; onMutationSuccess: () => void
+  reportDirty: (key: string, dirty: boolean) => void
 }) {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState({ nom: '', adresse1: '', cp: '', ville: '', pays: '' })
   const [showForm, setShowForm] = useState(false)
+
+  const reportDirtyRef = useRef(reportDirty)
+  useEffect(() => { reportDirtyRef.current = reportDirty })
+  useEffect(() => {
+    reportDirtyRef.current('ent-adresses', showForm || editingId !== null)
+  }, [showForm, editingId])
+  useEffect(() => () => { reportDirtyRef.current('ent-adresses', false) }, [])
 
   const createMut = useMutation({
     mutationFn: () => apiFetch(`/entreprises/${entrepriseId}/adresses`, { method: 'POST', body: JSON.stringify(form) }),

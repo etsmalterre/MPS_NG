@@ -1,5 +1,7 @@
-import { useState, useMemo, useEffect, useCallback } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
+import { useUnsavedGuard } from '@/hooks/useUnsavedGuard'
 import {
   Factory,
   Search,
@@ -167,6 +169,11 @@ export function Fournisseurs() {
   const [editNom, setEditNom] = useState('')
   const [editCommentaire, setEditCommentaire] = useState('')
 
+  // Snapshot of header draft at edit-start for dirty computation
+  const originalDraftRef = useRef<{ nom: string; commentaire: string } | null>(null)
+  // Dirty state from sub-forms (Contacts, Adresses tabs — surfaced via callback)
+  const [subFormsDirty, setSubFormsDirty] = useState(false)
+
   const { data: fournisseurs, isLoading, isError, error } = useFournisseurs()
   const { data: detail, isLoading: detailLoading } = useFournisseurDetail(selectedId)
 
@@ -175,10 +182,26 @@ export function Fournisseurs() {
   }, [fournisseurs, selectedId])
 
   const startEdit = useCallback(() => {
-    if (detail) { setEditNom(detail.nom); setEditCommentaire(detail.commentaire ?? ''); setIsEditing(true) }
+    if (detail) {
+      const snapshot = { nom: detail.nom, commentaire: detail.commentaire ?? '' }
+      setEditNom(snapshot.nom)
+      setEditCommentaire(snapshot.commentaire)
+      originalDraftRef.current = snapshot
+      setIsEditing(true)
+    }
   }, [detail])
 
   const cancelEdit = useCallback(() => setIsEditing(false), [])
+
+  const isDirty = useMemo(() => {
+    if (!isEditing) return false
+    const o = originalDraftRef.current
+    if (!o) return false
+    if (editNom !== o.nom) return true
+    if (editCommentaire !== o.commentaire) return true
+    if (subFormsDirty) return true
+    return false
+  }, [isEditing, editNom, editCommentaire, subFormsDirty])
 
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['fournisseurs'] })
@@ -198,7 +221,18 @@ export function Fournisseurs() {
     },
   })
 
-  const handleSelect = useCallback((id: number) => { if (isEditing) setIsEditing(false); setSelectedId(id) }, [isEditing])
+  const guard = useUnsavedGuard({
+    isDirty,
+    save: async () => { await saveMutation.mutateAsync() },
+    onDiscard: () => setIsEditing(false),
+  })
+
+  const handleSelect = useCallback((id: number) => {
+    guard.guardAction(() => {
+      setIsEditing(false)
+      setSelectedId(id)
+    })
+  }, [guard])
 
   const filtered = useMemo(() => {
     if (!fournisseurs) return []
@@ -208,21 +242,29 @@ export function Fournisseurs() {
   }, [fournisseurs, searchQuery])
 
   return (
-    <MasterDetailLayout
-      list={<FournisseurList fournisseurs={filtered} isLoading={isLoading} isError={isError} error={error as Error | null}
-        selectedId={selectedId} onSelect={handleSelect} searchQuery={searchQuery} onSearchChange={setSearchQuery}
-        onNew={() => createMutation.mutate()} isCreating={createMutation.isPending} isEditing={isEditing} />}
-      detailHeader={<DetailHeader fournisseur={detail ?? null} isLoading={detailLoading && selectedId !== null}
-        isEditing={isEditing} editNom={editNom} onEditNomChange={setEditNom}
-        onStartEdit={startEdit} onCancelEdit={cancelEdit} onSave={() => saveMutation.mutate()} isSaving={saveMutation.isPending} />}
-      detail={<DetailMain fournisseur={detail ?? null} isLoading={detailLoading && selectedId !== null}
-        hasSelection={selectedId !== null} isEditing={isEditing} fournisseurId={selectedId} onMutationSuccess={invalidateAll} />}
-      sidebar={selectedId !== null ? <DetailSidebar fournisseur={detail ?? null} isLoading={detailLoading}
-        isEditing={isEditing} fournisseurId={selectedId} onMutationSuccess={invalidateAll}
-        editCommentaire={editCommentaire} onEditCommentaireChange={setEditCommentaire} /> : null}
-      sidebarTitle="Informations" hasSelection={selectedId !== null}
-      onBack={() => { setIsEditing(false); setSelectedId(null) }}
-    />
+    <>
+      <MasterDetailLayout
+        list={<FournisseurList fournisseurs={filtered} isLoading={isLoading} isError={isError} error={error as Error | null}
+          selectedId={selectedId} onSelect={handleSelect} searchQuery={searchQuery} onSearchChange={setSearchQuery}
+          onNew={() => createMutation.mutate()} isCreating={createMutation.isPending} isEditing={isEditing} />}
+        detailHeader={<DetailHeader fournisseur={detail ?? null} isLoading={detailLoading && selectedId !== null}
+          isEditing={isEditing} editNom={editNom} onEditNomChange={setEditNom}
+          onStartEdit={startEdit} onCancelEdit={cancelEdit} onSave={() => saveMutation.mutate()} isSaving={saveMutation.isPending} />}
+        detail={<DetailMain fournisseur={detail ?? null} isLoading={detailLoading && selectedId !== null}
+          hasSelection={selectedId !== null} isEditing={isEditing} fournisseurId={selectedId} onMutationSuccess={invalidateAll} />}
+        sidebar={selectedId !== null ? <DetailSidebar fournisseur={detail ?? null} isLoading={detailLoading}
+          isEditing={isEditing} fournisseurId={selectedId} onMutationSuccess={invalidateAll}
+          editCommentaire={editCommentaire} onEditCommentaireChange={setEditCommentaire}
+          onSubFormsDirtyChange={setSubFormsDirty} /> : null}
+        sidebarTitle="Informations" hasSelection={selectedId !== null}
+        onBack={() => guard.guardAction(() => { setIsEditing(false); setSelectedId(null) })}
+      />
+      <UnsavedChangesDialog
+        open={guard.showDialog}
+        onAction={guard.handleAction}
+        isSaving={guard.isSaving}
+      />
+    </>
   )
 }
 
@@ -842,9 +884,10 @@ function InlineForm({ title, children, onSave, onCancel, isSaving }: {
 
 type SidebarTab = 'info' | 'contacts' | 'adresses'
 
-function DetailSidebar({ fournisseur, isLoading, isEditing, fournisseurId, onMutationSuccess, editCommentaire, onEditCommentaireChange }: {
+function DetailSidebar({ fournisseur, isLoading, isEditing, fournisseurId, onMutationSuccess, editCommentaire, onEditCommentaireChange, onSubFormsDirtyChange }: {
   fournisseur: FournisseurDetail | null; isLoading: boolean; isEditing: boolean; fournisseurId: number; onMutationSuccess: () => void
   editCommentaire: string; onEditCommentaireChange: (v: string) => void
+  onSubFormsDirtyChange: (dirty: boolean) => void
 }) {
   const [activeTab, setActiveTab] = useState<SidebarTab>('info')
   if (isLoading) return (
@@ -877,8 +920,8 @@ function DetailSidebar({ fournisseur, isLoading, isEditing, fournisseurId, onMut
       </div>
       <div className="flex-1 overflow-y-auto p-3 space-y-2">
         {activeTab === 'info' && <InfoTab fournisseur={fournisseur} isEditing={isEditing} editCommentaire={editCommentaire} onEditCommentaireChange={onEditCommentaireChange} />}
-        {activeTab === 'contacts' && <ContactsTab contacts={fournisseur.contacts} isEditing={isEditing} fournisseurId={fournisseurId} onMutationSuccess={onMutationSuccess} />}
-        {activeTab === 'adresses' && <AdressesTab adresses={fournisseur.adresses} isEditing={isEditing} fournisseurId={fournisseurId} onMutationSuccess={onMutationSuccess} />}
+        {activeTab === 'contacts' && <ContactsTab contacts={fournisseur.contacts} isEditing={isEditing} fournisseurId={fournisseurId} onMutationSuccess={onMutationSuccess} onDirtyChange={onSubFormsDirtyChange} />}
+        {activeTab === 'adresses' && <AdressesTab adresses={fournisseur.adresses} isEditing={isEditing} fournisseurId={fournisseurId} onMutationSuccess={onMutationSuccess} onDirtyChange={onSubFormsDirtyChange} />}
       </div>
     </div>
   )
@@ -914,12 +957,22 @@ const ENVOI_FLAGS = [
   { key: 'envoi_soumission' as const, label: 'Soumission', icon: Send },
 ]
 
-function ContactsTab({ contacts, isEditing, fournisseurId, onMutationSuccess }: {
+function ContactsTab({ contacts, isEditing, fournisseurId, onMutationSuccess, onDirtyChange }: {
   contacts: Contact[]; isEditing: boolean; fournisseurId: number; onMutationSuccess: () => void
+  onDirtyChange: (dirty: boolean) => void
 }) {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState({ nom: '', prenom: '', tel: '', mail: '', envoi_bl: false, envoi_facture: false, envoi_commande: false, envoi_soumission: false })
   const [showForm, setShowForm] = useState(false)
+
+  // Surface dirty state to the page-level guard. Keep the callback in a ref
+  // so the unmount cleanup always uses the latest reference.
+  const onDirtyChangeRef = useRef(onDirtyChange)
+  useEffect(() => { onDirtyChangeRef.current = onDirtyChange })
+  useEffect(() => {
+    onDirtyChangeRef.current(showForm || editingId !== null)
+  }, [showForm, editingId])
+  useEffect(() => () => { onDirtyChangeRef.current(false) }, [])
 
   const createMut = useMutation({
     mutationFn: () => apiFetch(`/fournisseurs/${fournisseurId}/contacts`, { method: 'POST', body: JSON.stringify(form) }),
@@ -1020,12 +1073,20 @@ function ContactsTab({ contacts, isEditing, fournisseurId, onMutationSuccess }: 
 
 // ── Sidebar Tab: Adresses ──────────────────────────────
 
-function AdressesTab({ adresses, isEditing, fournisseurId, onMutationSuccess }: {
+function AdressesTab({ adresses, isEditing, fournisseurId, onMutationSuccess, onDirtyChange }: {
   adresses: Adresse[]; isEditing: boolean; fournisseurId: number; onMutationSuccess: () => void
+  onDirtyChange: (dirty: boolean) => void
 }) {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState({ nom: '', adresse1: '', adresse2: '', adresse3: '', cp: '', ville: '', pays: '', commentaire: '', est_defaut_facturation: false, est_defaut_livraison: false })
   const [showForm, setShowForm] = useState(false)
+
+  const onDirtyChangeRef = useRef(onDirtyChange)
+  useEffect(() => { onDirtyChangeRef.current = onDirtyChange })
+  useEffect(() => {
+    onDirtyChangeRef.current(showForm || editingId !== null)
+  }, [showForm, editingId])
+  useEffect(() => () => { onDirtyChangeRef.current(false) }, [])
 
   const createMut = useMutation({
     mutationFn: () => apiFetch(`/fournisseurs/${fournisseurId}/adresses`, { method: 'POST', body: JSON.stringify(form) }),

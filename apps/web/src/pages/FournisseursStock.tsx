@@ -1,6 +1,8 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
+import { useUnsavedGuard } from '@/hooks/useUnsavedGuard'
 import {
   Boxes,
   Search,
@@ -203,7 +205,26 @@ export function FournisseursStock() {
     setSort((prev) => (prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }))
   }, [])
 
-  const handleClose = useCallback(() => setSelectedId(null), [])
+  // Drawer dirty tracking — populated by the drawer via refs.
+  const [drawerDirty, setDrawerDirty] = useState(false)
+  const drawerSaveRef = useRef<() => Promise<void>>(async () => {})
+  const drawerDiscardRef = useRef<() => void>(() => {})
+
+  const guard = useUnsavedGuard({
+    isDirty: drawerDirty,
+    save: async () => { await drawerSaveRef.current() },
+    onDiscard: () => drawerDiscardRef.current(),
+  })
+
+  const handleClose = useCallback(() => {
+    guard.guardAction(() => setSelectedId(null))
+  }, [guard])
+
+  const handleRowClick = useCallback((rowId: number) => {
+    guard.guardAction(() => {
+      setSelectedId((prev) => (prev === rowId ? null : rowId))
+    })
+  }, [guard])
 
   const onMutationSuccess = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['stock-fil'] })
@@ -300,7 +321,7 @@ export function FournisseursStock() {
                       <tr
                         key={r.IDstock_fil}
                         data-stock-row
-                        onClick={() => setSelectedId((prev) => (prev === r.IDstock_fil ? null : r.IDstock_fil))}
+                        onClick={() => handleRowClick(r.IDstock_fil)}
                         className={cn(
                           'border-b border-border/40 cursor-pointer transition-colors',
                           isSelected ? 'bg-accent/10' : 'hover:bg-accent/5'
@@ -340,7 +361,20 @@ export function FournisseursStock() {
         )}
       </div>
 
-      <StockDetailDrawer id={selectedId} onClose={handleClose} onMutationSuccess={onMutationSuccess} />
+      <StockDetailDrawer
+        id={selectedId}
+        onClose={handleClose}
+        onMutationSuccess={onMutationSuccess}
+        onDirtyChange={setDrawerDirty}
+        saveRef={drawerSaveRef}
+        discardRef={drawerDiscardRef}
+      />
+
+      <UnsavedChangesDialog
+        open={guard.showDialog}
+        onAction={guard.handleAction}
+        isSaving={guard.isSaving}
+      />
 
       <NewStockFilDialog
         open={createOpen}
@@ -388,9 +422,12 @@ interface DrawerProps {
   id: number | null
   onClose: () => void
   onMutationSuccess: () => void
+  onDirtyChange: (dirty: boolean) => void
+  saveRef: React.MutableRefObject<() => Promise<void>>
+  discardRef: React.MutableRefObject<() => void>
 }
 
-function StockDetailDrawer({ id, onClose, onMutationSuccess }: DrawerProps) {
+function StockDetailDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRef, discardRef }: DrawerProps) {
   const { data: detail, isLoading } = useStockDetail(id)
   const drawerRef = useRef<HTMLDivElement>(null)
   const [searchParams] = useSearchParams()
@@ -401,6 +438,14 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess }: DrawerProps) {
   const [editFreinte, setEditFreinte] = useState('')
   const [editEmplacement, setEditEmplacement] = useState('')
   const [editPointage, setEditPointage] = useState('')
+
+  // Snapshot for dirty comparison
+  const originalDraftRef = useRef<{
+    commentaire: string
+    freinte: string
+    emplacement: string
+    pointage: string
+  } | null>(null)
 
   // Reset edit state when selecting a different lot
   useEffect(() => {
@@ -424,10 +469,17 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess }: DrawerProps) {
 
   const startEdit = useCallback(() => {
     if (!detail) return
-    setEditCommentaire(detail.commentaire ?? '')
-    setEditFreinte(detail.observation_freinte ?? '')
-    setEditEmplacement(detail.emplacement ?? '')
-    setEditPointage(hfsqlDateToInput(detail.dernier_pointage))
+    const snapshot = {
+      commentaire: detail.commentaire ?? '',
+      freinte: detail.observation_freinte ?? '',
+      emplacement: detail.emplacement ?? '',
+      pointage: hfsqlDateToInput(detail.dernier_pointage),
+    }
+    setEditCommentaire(snapshot.commentaire)
+    setEditFreinte(snapshot.freinte)
+    setEditEmplacement(snapshot.emplacement)
+    setEditPointage(snapshot.pointage)
+    originalDraftRef.current = snapshot
     setIsEditing(true)
   }, [detail])
 
@@ -446,6 +498,30 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess }: DrawerProps) {
       onMutationSuccess()
       setIsEditing(false)
     },
+  })
+
+  // Compute dirty state and surface it to the page via callback + refs.
+  const isDirty = useMemo(() => {
+    if (!isEditing) return false
+    const o = originalDraftRef.current
+    if (!o) return false
+    if (editCommentaire !== o.commentaire) return true
+    if (editFreinte !== o.freinte) return true
+    if (editEmplacement !== o.emplacement) return true
+    if (editPointage !== o.pointage) return true
+    return false
+  }, [isEditing, editCommentaire, editFreinte, editEmplacement, editPointage])
+
+  useEffect(() => { onDirtyChange(isDirty) }, [isDirty, onDirtyChange])
+  useEffect(() => () => { onDirtyChange(false) }, [onDirtyChange])
+
+  // Keep save + discard callbacks up-to-date so the page-level guard can
+  // invoke them from the unsaved-changes dialog.
+  useEffect(() => {
+    saveRef.current = async () => { await saveMutation.mutateAsync() }
+  })
+  useEffect(() => {
+    discardRef.current = () => setIsEditing(false)
   })
 
   const open = id !== null

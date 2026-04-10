@@ -15,6 +15,8 @@ There are **two** gold-standard references in the codebase. Pick the one whose l
 
 When in doubt about a single rule, look at both references. When in doubt about which *layout* to choose, ask the user — do NOT mix patterns from both into a hybrid third design.
 
+**Every edit-mode screen — regardless of layout — must also plug into the unsaved-changes guard (§28).** This is not optional; it applies to both patterns above.
+
 ---
 
 ## 1. Brand Colors
@@ -1538,3 +1540,244 @@ When building a new screen of this type, the result must have:
 - [ ] Create dialog wired through React Query mutation with `onMutationSuccess` invalidation, auto-selects the new row in the drawer
 
 If any box is unchecked, do not mark the screen complete.
+
+---
+
+## 28. Unsaved Changes Guard (mandatory on every edit-mode screen)
+
+Any screen with a "Modifier → edit → Enregistrer" flow **must** plug into the shared unsaved-changes guard. The guard intercepts navigation (route changes, left-list item clicks, back-button, drawer dismissal) while the form is dirty and pops a 3-button dialog: **Annuler** (stay) / **Abandonner** (discard) / **Enregistrer** (save then continue). Without this, users lose half-typed work the moment they misclick — we already had this bug on every edit screen before porting the pattern from MFProd.
+
+**Apply this to every single edit-mode screen.** There is no screen where it's "optional".
+
+### 28.1 The shared pieces — never re-implement, always import
+
+| File | Purpose |
+|---|---|
+| `apps/web/src/components/shared/UnsavedChangesDialog.tsx` | The 3-button `AlertDialog`. Pure presentation — takes `open`, `onAction('save'\|'discard'\|'cancel')`, `isSaving`. |
+| `apps/web/src/hooks/useUnsavedGuard.ts` | Wraps `useBlocker` for route nav, `guardAction(fn)` for in-page nav, dialog state, 3-way action handler. |
+
+```tsx
+import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
+import { useUnsavedGuard } from '@/hooks/useUnsavedGuard'
+```
+
+Do **not** copy/paste `useBlocker` into pages. Always go through `useUnsavedGuard`.
+
+### 28.2 Page-level integration (5 moving parts)
+
+Every edit-mode page has the same five pieces. The order matters — `originalDraftRef` + `isDirty` must come before `useUnsavedGuard`, and `useUnsavedGuard` must come before `handleSelect` (which depends on `guard`).
+
+```tsx
+// (1) snapshot ref — set in startEdit, compared in isDirty
+const originalDraftRef = useRef<{ nom: string; commentaire: string; /* ... */ } | null>(null)
+
+// (2) sub-form dirty surfaced from child components (see §28.3)
+const [subFormsDirty, setSubFormsDirty] = useState(false)
+// OR the per-key registry for screens with multiple concurrent sub-forms (see §28.3)
+
+// (3) startEdit captures the snapshot
+const startEdit = useCallback(() => {
+  if (!detail) return
+  const snapshot = { nom: detail.nom, commentaire: detail.commentaire ?? '', /* ... */ }
+  setEditNom(snapshot.nom)
+  setEditCommentaire(snapshot.commentaire)
+  originalDraftRef.current = snapshot
+  setIsEditing(true)
+}, [detail])
+
+// (4) isDirty is a useMemo that ORs header-diff with sub-form-dirty
+const isDirty = useMemo(() => {
+  if (!isEditing) return false
+  const o = originalDraftRef.current
+  if (!o) return false
+  if (editNom !== o.nom) return true
+  if (editCommentaire !== o.commentaire) return true
+  if (subFormsDirty) return true
+  return false
+}, [isEditing, editNom, editCommentaire, subFormsDirty])
+
+// (5) the guard — depends on isDirty and the existing saveMutation
+const guard = useUnsavedGuard({
+  isDirty,
+  save: async () => { await saveMutation.mutateAsync() },
+  onDiscard: () => setIsEditing(false),
+})
+```
+
+The `save` callback must call the existing top-level save mutation. Do **not** duplicate save logic — reuse whatever the "Enregistrer" button in the detail header already runs.
+
+### 28.3 Surfacing sub-form dirty state from child components
+
+Sub-sections (Contacts tab, Adresses tab, Lignes card, Recommandations card, etc.) own their own `showForm` / `editingId` state. The page needs to know when any of those are open so `isDirty` returns true. Two patterns depending on concurrency:
+
+#### 28.3.a Single-source callback (use when sub-forms are mutually exclusive)
+
+When only **one** sub-form can be open at a time in the whole screen — e.g. Fournisseurs where tab content is conditionally mounted so Contacts and Adresses can never be dirty at the same instant — pass a single `onDirtyChange: (dirty: boolean) => void` through the tree.
+
+```tsx
+// In the child (ContactsTab, LignesSection, etc.)
+const onDirtyChangeRef = useRef(onDirtyChange)
+useEffect(() => { onDirtyChangeRef.current = onDirtyChange })
+useEffect(() => {
+  onDirtyChangeRef.current(showForm || editingId !== null)
+}, [showForm, editingId])
+useEffect(() => () => { onDirtyChangeRef.current(false) }, [])  // reset on unmount
+```
+
+The ref indirection is **mandatory**: the unmount cleanup fires `false` so that when a tab is switched (unmounting the old tab), the parent correctly sees the dirty flag clear. A naked callback closure would crash on strict-mode double-invoke or lose the latest reference.
+
+#### 28.3.b Per-key dirty registry (use when multiple sub-forms can be dirty simultaneously)
+
+When the screen has sub-sections in **both** the center panel and the sidebar — e.g. Entreprises where `RecommandationsCard` lives in the center and `ContactsTab` / `AdressesTab` live in the sidebar — a single setter would let the last caller clobber the others. Use a key-based registry:
+
+```tsx
+// In the page
+const [dirtyKeys, setDirtyKeys] = useState<Set<string>>(new Set())
+const reportDirty = useCallback((key: string, dirty: boolean) => {
+  setDirtyKeys((prev) => {
+    if (dirty === prev.has(key)) return prev
+    const next = new Set(prev)
+    if (dirty) next.add(key); else next.delete(key)
+    return next
+  })
+}, [])
+const subFormsDirty = dirtyKeys.size > 0
+```
+
+Pass `reportDirty` down. Each child reports under a **unique string key**:
+
+```tsx
+// In the child
+const reportDirtyRef = useRef(reportDirty)
+useEffect(() => { reportDirtyRef.current = reportDirty })
+useEffect(() => {
+  reportDirtyRef.current('ent-contacts', showForm || editingId !== null)
+}, [showForm, editingId])
+useEffect(() => () => { reportDirtyRef.current('ent-contacts', false) }, [])
+```
+
+Key naming: prefix with the screen (e.g. `ent-contacts`, `ent-adresses`, `ent-recommandations`) to avoid collisions if the same component is reused across screens later.
+
+#### 28.3.c Drawer-based screens (FournisseursStock pattern)
+
+When the edit form lives inside a right-side drawer child component (per §27), the drawer owns its own edit state. Surface `isDirty` to the page via a callback + expose `save` and `onDiscard` via mutable refs so the page-level guard can invoke them:
+
+```tsx
+// Page
+const [drawerDirty, setDrawerDirty] = useState(false)
+const drawerSaveRef = useRef<() => Promise<void>>(async () => {})
+const drawerDiscardRef = useRef<() => void>(() => {})
+
+const guard = useUnsavedGuard({
+  isDirty: drawerDirty,
+  save: async () => { await drawerSaveRef.current() },
+  onDiscard: () => drawerDiscardRef.current(),
+})
+
+<StockDetailDrawer
+  onDirtyChange={setDrawerDirty}
+  saveRef={drawerSaveRef}
+  discardRef={drawerDiscardRef}
+  onClose={handleClose}  // guarded — see §28.4
+/>
+```
+
+```tsx
+// Drawer
+const isDirty = useMemo(() => { /* compare edit state to originalDraftRef */ }, [...])
+useEffect(() => { onDirtyChange(isDirty) }, [isDirty, onDirtyChange])
+useEffect(() => () => { onDirtyChange(false) }, [onDirtyChange])  // reset on unmount
+
+useEffect(() => {
+  saveRef.current = async () => { await saveMutation.mutateAsync() }
+})
+useEffect(() => {
+  discardRef.current = () => setIsEditing(false)
+})
+```
+
+The `useEffect(() => { ref.current = ... })` with no dep array runs on every render, keeping the ref up-to-date with the latest closure. The page's guard reads `drawerSaveRef.current` at click time, always getting the fresh function.
+
+### 28.4 Guarding in-page navigation — `guardAction` wraps everything
+
+Three in-page navigation points must go through `guard.guardAction`:
+
+```tsx
+// 1. Left list click (MasterDetailLayout pattern)
+const handleSelect = useCallback((id: number) => {
+  guard.guardAction(() => {
+    setIsEditing(false)
+    setSelectedId(id)
+  })
+}, [guard])
+
+// 2. Back button (MasterDetailLayout stacked mode)
+onBack={() => guard.guardAction(() => { setIsEditing(false); setSelectedId(null) })}
+
+// 3. Drawer close / outside-click dismissal (table-centric §27 pattern)
+const handleClose = useCallback(() => {
+  guard.guardAction(() => setSelectedId(null))
+}, [guard])
+
+// In the table row (§27.3):
+onClick={() => handleRowClick(r.IDstock_fil)}
+// where handleRowClick = (id) => guard.guardAction(() => setSelectedId(prev => prev === id ? null : id))
+```
+
+**Route-level navigation** (sidebar clicks, submenu tabs, programmatic `navigate()`) is **automatically** intercepted by `useBlocker` inside the hook — no extra wiring needed. The only thing left to render is the dialog:
+
+```tsx
+<UnsavedChangesDialog
+  open={guard.showDialog}
+  onAction={guard.handleAction}
+  isSaving={guard.isSaving}
+/>
+```
+
+Place it as a sibling of the `MasterDetailLayout` (wrap in a `<>...</>` fragment if necessary), **not** inside it — dialogs should always be top-level siblings of the screen's main JSX.
+
+### 28.5 Delete bypass
+
+Header delete buttons (trash icon → confirm → mutate) must **reset `isEditing` before calling the mutation** so the guard doesn't block the follow-up list re-render:
+
+```tsx
+onDelete={() => {
+  if (confirm('Supprimer ... ?')) {
+    setIsEditing(false)  // <-- critical: makes isDirty false so guard doesn't fire
+    deleteMut.mutate()
+  }
+}}
+```
+
+Deleting is a valid exit path that implicitly discards. The guard should never ask "save or discard?" when the user is deleting the record entirely.
+
+### 28.6 Hooks-before-returns (CLAUDE.md rule reinforced)
+
+`useBlocker` is a React hook called from inside `useUnsavedGuard`. Since pages call `useUnsavedGuard` at their top level, this is fine in normal flow. But: **every hook in the page component (including `useState`, `useRef`, `useMemo`, `useCallback`, `useMutation`, `useQuery`, `useUnsavedGuard`) must be declared before any early `return`**. Violating this crashes production builds with React error #310 (dev builds may appear to work).
+
+The 4 current reference screens all satisfy this — mirror their layout. When in doubt, put every hook at the top of the component body and only put early returns (`if (!detail) return null`) after the last hook call.
+
+### 28.7 Reference checklist for new edit-mode screens
+
+Every screen with an edit mode must have:
+
+- [ ] `UnsavedChangesDialog` and `useUnsavedGuard` imported from the shared paths (§28.1)
+- [ ] `originalDraftRef` captured in `startEdit`, containing every editable header field
+- [ ] `isDirty` `useMemo` comparing current header state to the snapshot, OR'd with sub-form dirty flag(s)
+- [ ] Sub-form dirty surfaced via **single-callback** (§28.3.a) OR **per-key registry** (§28.3.b) OR **ref-based** (§28.3.c) depending on architecture
+- [ ] Every child component with its own form state uses the `useRef(callback)` + `useEffect` + unmount-cleanup trio (§28.3.a) — never a naked closure
+- [ ] `useUnsavedGuard({ isDirty, save, onDiscard })` called at the page top level, with `save` awaiting the existing save mutation
+- [ ] `handleSelect`, `onBack`, `handleClose`, and any row-click handler routed through `guard.guardAction(...)`
+- [ ] `<UnsavedChangesDialog open={guard.showDialog} onAction={guard.handleAction} isSaving={guard.isSaving} />` rendered as a top-level sibling
+- [ ] Delete button resets `setIsEditing(false)` **before** calling the delete mutation (§28.5)
+- [ ] All hooks declared before any early `return` (§28.6)
+- [ ] `tsc --noEmit` clean and `pnpm --filter @mps/web build` completes without errors
+
+Manual test that must pass on every edit-mode screen:
+1. Enter edit mode, change a field, click a different row in the list → dialog appears
+2. Click **Annuler** → stays on current, edit state preserved
+3. Click **Abandonner** → switches to new row, discarding changes
+4. Click **Enregistrer** → saves, then switches
+5. Enter edit mode, change a field, click a different sidebar route → same 3 outcomes
+6. Enter edit mode with no changes, click another row → switches immediately, no dialog
+7. Click delete → no dialog, deletion proceeds
