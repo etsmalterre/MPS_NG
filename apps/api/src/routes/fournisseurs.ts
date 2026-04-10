@@ -213,7 +213,7 @@ fournisseursRouter.get('/:id', async (req: Request, res: Response) => {
     const [adresses, contacts, refsFil, certificats, commandes] = await Promise.all([
       query(`SELECT * FROM adresse WHERE IDfournisseur = ${id} ORDER BY est_defaut DESC, IDadresse`),
       query(`SELECT * FROM contact WHERE IDfournisseur = ${id} ORDER BY est_defaut DESC, IDcontact`),
-      query(`SELECT cf.IDcolori_fil, cf.reference as colori_reference, cf.prix_kg as colori_prix_kg, rf.* FROM colori_fil cf, ref_fil rf WHERE cf.IDfournisseur = ${id} AND cf.IDref_fil = rf.IDref_fil ORDER BY rf.reference, cf.reference`),
+      query(`SELECT cf.IDcolori_fil, cf.reference as colori_reference, cf.prix_kg as colori_prix_kg, rf.* FROM asso_colorisfil_frs a JOIN colori_fil cf ON a.IDcolori_fil = cf.IDcolori_fil JOIN ref_fil rf ON cf.IDref_fil = rf.IDref_fil WHERE a.IDfournisseur = ${id} ORDER BY rf.reference, cf.reference`),
       query(`SELECT c.IDcertificat, c.nom, c.numero_ref, c.debut_validite, c.date_expiration, c.IDtype_doc, t.nom as type_doc FROM certificat c LEFT JOIN type_doc t ON c.IDtype_doc = t.IDtype_doc WHERE c.IDfournisseur = ${id} ORDER BY c.date_expiration DESC`),
       query(`SELECT IDcommande_fil, date_commande, etat, commentaire FROM commande_fil WHERE IDfournisseur = ${id} ORDER BY date_commande DESC`),
     ])
