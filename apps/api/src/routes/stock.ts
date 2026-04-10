@@ -28,10 +28,10 @@ function esc(value: string): string {
 const IS_WINDOWS = process.platform === 'win32'
 
 const STOCK_SELECT = IS_WINDOWS
-  ? `sf.IDstock_fil, sf.IDfournisseur, sf.IDref_fil, sf.IDcolori_fil, sf.IDref_fil_commande, sf.IDMagasin, sf.stock, sf.stock_initial, sf.lot, sf.lot_frs, sf.emplacement, sf.date_entree, sf.dernier_mouvement, sf.dernier_pointage, sf.niveau, sf.terminé AS termine, sf.controlé AS controle, sf.commentaire, sf.observation_freinte, rf.reference AS ref_fil, rf.titrage, rf.bio, rf.recyclé AS recycle, cf.reference AS colori_reference, f.nom AS fournisseur_nom`
-  : `sf.*, rf.reference AS ref_fil, rf.titrage, rf.bio, cf.reference AS colori_reference, f.nom AS fournisseur_nom`
+  ? `sf.IDstock_fil, sf.IDfournisseur, sf.IDref_fil, sf.IDcolori_fil, sf.IDref_fil_commande, sf.IDMagasin, sf.stock, sf.stock_initial, sf.lot, sf.lot_frs, sf.emplacement, sf.date_entree, sf.dernier_mouvement, sf.dernier_pointage, sf.niveau, sf.terminé AS termine, sf.controlé AS controle, sf.commentaire, sf.observation_freinte, rf.reference AS ref_fil, rf.titrage, rf.bio, rf.recyclé AS recycle, cf.reference AS colori_reference, f.nom AS fournisseur_nom, st.nom AS magasin_nom`
+  : `sf.*, rf.reference AS ref_fil, rf.titrage, rf.bio, cf.reference AS colori_reference, f.nom AS fournisseur_nom, st.nom AS magasin_nom`
 
-const STOCK_JOINS = `FROM stock_fil sf LEFT JOIN ref_fil rf ON sf.IDref_fil = rf.IDref_fil LEFT JOIN colori_fil cf ON sf.IDcolori_fil = cf.IDcolori_fil LEFT JOIN fournisseur f ON sf.IDfournisseur = f.IDfournisseur`
+const STOCK_JOINS = `FROM stock_fil sf LEFT JOIN ref_fil rf ON sf.IDref_fil = rf.IDref_fil LEFT JOIN colori_fil cf ON sf.IDcolori_fil = cf.IDcolori_fil LEFT JOIN fournisseur f ON sf.IDfournisseur = f.IDfournisseur LEFT JOIN sous_traitant st ON sf.IDMagasin = st.IDsous_traitant`
 
 interface RefFilFlags {
   recycle: number

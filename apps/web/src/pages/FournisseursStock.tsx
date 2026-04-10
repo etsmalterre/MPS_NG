@@ -13,7 +13,6 @@ import {
   ArrowDown,
   Leaf,
   Recycle,
-  CheckCircle2,
   ShieldCheck,
   Calendar,
   MapPin,
@@ -24,6 +23,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { BobineIcon } from '@/components/icons/BobineIcon'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
@@ -56,6 +56,7 @@ interface StockRow {
   recycle: number | null
   colori_reference: string | null
   fournisseur_nom: string | null
+  magasin_nom: string | null
 }
 
 interface StockDetail extends StockRow {
@@ -124,14 +125,6 @@ function ageDays(dateEntree: string | null): number | null {
   const diff = Date.now() - d.getTime()
   return Math.floor(diff / (1000 * 60 * 60 * 24))
 }
-
-const niveauLabel = (n: number | null) => (n === 0 ? 'Bas' : n === 2 ? 'Haut' : 'Normal')
-const niveauClass = (n: number | null) =>
-  n === 0
-    ? 'bg-amber-100 text-amber-700 border-amber-200'
-    : n === 2
-      ? 'bg-blue-100 text-blue-700 border-blue-200'
-      : 'bg-green-100 text-green-700 border-green-200'
 
 // ── Sort handling ──────────────────────────────────────
 
@@ -404,9 +397,6 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess }: DrawerProps) {
   const [editCommentaire, setEditCommentaire] = useState('')
   const [editFreinte, setEditFreinte] = useState('')
   const [editEmplacement, setEditEmplacement] = useState('')
-  const [editNiveau, setEditNiveau] = useState<number>(1)
-  const [editTermine, setEditTermine] = useState(false)
-  const [editControle, setEditControle] = useState(false)
   const [editPointage, setEditPointage] = useState('')
 
   // Reset edit state when selecting a different lot
@@ -434,9 +424,6 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess }: DrawerProps) {
     setEditCommentaire(detail.commentaire ?? '')
     setEditFreinte(detail.observation_freinte ?? '')
     setEditEmplacement(detail.emplacement ?? '')
-    setEditNiveau(detail.niveau ?? 1)
-    setEditTermine(!!detail.termine)
-    setEditControle(!!detail.controle)
     setEditPointage(hfsqlDateToInput(detail.dernier_pointage))
     setIsEditing(true)
   }, [detail])
@@ -449,9 +436,6 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess }: DrawerProps) {
           commentaire: editCommentaire,
           observation_freinte: editFreinte,
           emplacement: editEmplacement,
-          niveau: editNiveau,
-          termine: editTermine,
-          controle: editControle,
           dernier_pointage: editPointage ? inputDateToHfsql(editPointage) : '',
         }),
       }),
@@ -472,8 +456,11 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess }: DrawerProps) {
         open ? 'translate-x-0' : 'translate-x-full'
       )}
     >
+      {/* Inner bg layer — matches the Fournisseurs right panel composition:
+          zinc-100/80 over white; header gets an additional zinc-200/50 overlay. */}
+      <div className="flex-1 min-h-0 flex flex-col bg-zinc-100/80">
       {/* Header */}
-      <div className="flex-shrink-0 px-4 pt-4 pb-3 border-b border-border/60 bg-zinc-100/60">
+      <div className="flex-shrink-0 px-4 pt-4 pb-3 border-b border-border/60 bg-zinc-200/50">
         <div className="flex items-start gap-3">
           <div
             className={cn(
@@ -481,7 +468,7 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess }: DrawerProps) {
               isEditing ? 'bg-accent/15' : 'icon-box-gold'
             )}
           >
-            <Package className="h-4.5 w-4.5" />
+            <BobineIcon className="h-[25px] w-[25px]" />
           </div>
           <div className="min-w-0 flex-1">
             {isLoading || !detail ? (
@@ -547,74 +534,14 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess }: DrawerProps) {
           <>
             {/* Stock card */}
             <DrawerCard icon={<Package className="h-4 w-4 text-accent" />} title="Stock" highlight={isEditing}>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1.5">
                 <KV label="Stock actuel" value={<span className="font-semibold tabular-nums">{formatKg(detail.stock)}</span>} />
                 <KV label="Stock initial" value={<span className="tabular-nums">{formatKg(detail.stock_initial)}</span>} />
-              </div>
-              <div className="grid grid-cols-2 gap-2 mt-2">
-                <div>
-                  <p className="text-xs text-muted-foreground mb-1">Niveau</p>
-                  {isEditing ? (
-                    <select
-                      value={editNiveau}
-                      onChange={(e) => setEditNiveau(parseInt(e.target.value, 10))}
-                      className="w-full h-8 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer"
-                    >
-                      <option value={0}>Bas</option>
-                      <option value={1}>Normal</option>
-                      <option value={2}>Haut</option>
-                    </select>
-                  ) : (
-                    <Badge className={cn('border', niveauClass(detail.niveau))}>{niveauLabel(detail.niveau)}</Badge>
-                  )}
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground mb-1">État</p>
-                  {isEditing ? (
-                    <div className="flex flex-col gap-1">
-                      <label className="flex items-center gap-2 text-xs cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={editTermine}
-                          onChange={(e) => setEditTermine(e.target.checked)}
-                          className="h-3.5 w-3.5"
-                        />
-                        Terminé
-                      </label>
-                      <label className="flex items-center gap-2 text-xs cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={editControle}
-                          onChange={(e) => setEditControle(e.target.checked)}
-                          className="h-3.5 w-3.5"
-                        />
-                        Contrôlé
-                      </label>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2 flex-wrap">
-                      {!!detail.termine && (
-                        <Badge variant="outline" className="text-[10px] py-0">
-                          Terminé
-                        </Badge>
-                      )}
-                      {!!detail.controle && (
-                        <Badge className="bg-green-100 text-green-700 border-green-200 gap-1 text-[10px] py-0">
-                          <CheckCircle2 className="h-2.5 w-2.5" />
-                          Contrôlé
-                        </Badge>
-                      )}
-                      {!detail.termine && !detail.controle && (
-                        <span className="text-xs text-muted-foreground italic">—</span>
-                      )}
-                    </div>
-                  )}
-                </div>
               </div>
             </DrawerCard>
 
             {/* Provenance */}
-            <DrawerCard icon={<Factory className="h-4 w-4 text-accent" />} title="Provenance">
+            <DrawerCard icon={<Factory className="h-4 w-4 text-accent" />} title="Provenance" highlight={isEditing}>
               <div className="space-y-1.5">
                 <KV label="Fournisseur" value={detail.fournisseur_nom ?? '—'} />
                 <KV label="Lot fournisseur" value={detail.lot_frs ?? '—'} mono />
@@ -631,39 +558,44 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess }: DrawerProps) {
             {/* Stockage */}
             <DrawerCard icon={<MapPin className="h-4 w-4 text-accent" />} title="Stockage" highlight={isEditing}>
               <div className="space-y-1.5">
-                <div>
-                  <p className="text-xs text-muted-foreground mb-1">Emplacement</p>
-                  {isEditing ? (
-                    <input
-                      type="text"
-                      value={editEmplacement}
-                      onChange={(e) => setEditEmplacement(e.target.value)}
-                      className="w-full h-8 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
-                    />
-                  ) : (
-                    <p className="text-sm">{detail.emplacement || '—'}</p>
-                  )}
-                </div>
-                <KV label="Magasin" value={detail.IDMagasin ? `#${detail.IDMagasin}` : '—'} />
+                <KV
+                  label="Emplacement"
+                  value={
+                    isEditing ? (
+                      <input
+                        type="text"
+                        value={editEmplacement}
+                        onChange={(e) => setEditEmplacement(e.target.value)}
+                        className="h-7 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring text-right"
+                      />
+                    ) : (
+                      detail.emplacement || '—'
+                    )
+                  }
+                />
+                <KV label="Magasin" value={detail.magasin_nom ?? '—'} />
                 <KV
                   label="Dernier mouvement"
                   value={detail.dernier_mouvement ? formatHfsqlDate(detail.dernier_mouvement) : '—'}
                 />
-                <div>
-                  <p className="text-xs text-muted-foreground mb-1">Dernier pointage</p>
-                  {isEditing ? (
-                    <input
-                      type="date"
-                      value={editPointage}
-                      onChange={(e) => setEditPointage(e.target.value)}
-                      className="w-full h-8 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
-                    />
-                  ) : (
-                    <p className="text-sm">
-                      {detail.dernier_pointage ? formatHfsqlDate(detail.dernier_pointage) : '—'}
-                    </p>
-                  )}
-                </div>
+                <KV
+                  label="Dernier pointage"
+                  value={
+                    isEditing ? (
+                      <input
+                        type="date"
+                        value={editPointage}
+                        onChange={(e) => setEditPointage(e.target.value)}
+                        className="h-7 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+                      />
+                    ) : detail.dernier_pointage ? (
+                      formatHfsqlDate(detail.dernier_pointage)
+                    ) : (
+                      '—'
+                    )
+                  }
+                />
+
                 {age != null && (
                   <KV
                     label="Âge"
@@ -752,6 +684,7 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess }: DrawerProps) {
           </>
         )}
       </div>
+      </div>
     </div>
   )
 }
@@ -772,7 +705,7 @@ function DrawerCard({
   return (
     <div
       className={cn(
-        'rounded-lg border border-border/60 bg-white p-3 shadow-sm',
+        'rounded-lg border border-border/60 bg-card p-3 shadow-sm',
         highlight && 'border-l-4 border-l-accent/70 bg-accent/[0.03]'
       )}
     >
