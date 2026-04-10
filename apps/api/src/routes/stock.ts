@@ -10,13 +10,84 @@ function esc(value: string): string {
   return value.replace(/'/g, "''")
 }
 
-// Common SELECT used by list and detail. Aliases accented columns so the
-// bridge cannot mangle them downstream (terminé→termine, controlé→controle).
-// Kept on a single line because the Linux iODBC bridge escapes newlines
-// literally when forwarding SQL, which breaks HFSQL's alias parser.
-const STOCK_SELECT = `sf.IDstock_fil, sf.IDfournisseur, sf.IDref_fil, sf.IDcolori_fil, sf.IDref_fil_commande, sf.IDMagasin, sf.stock, sf.stock_initial, sf.lot, sf.lot_frs, sf.emplacement, sf.date_entree, sf.dernier_mouvement, sf.dernier_pointage, sf.niveau, sf.terminé AS termine, sf.controlé AS controle, sf.commentaire, sf.observation_freinte, rf.reference AS ref_fil, rf.titrage, rf.bio, rf.recyclé AS recycle, cf.reference AS colori_reference, f.nom AS fournisseur_nom`
+// stock_fil has accented column names (terminé, controlé, certif_recyclé) and
+// ref_fil has recyclé. Windows and Linux HFSQL ODBC paths have OPPOSITE quirks:
+//
+// • Linux (iODBC bridge → wd310hfo64.so): accepts `alias.*` expansion, but any
+//   reference to an accented identifier token (UTF-8 é) blows up the tokenizer.
+//   Workaround: use `sf.*` to pull accented columns back with their last char
+//   truncated (terminé→termin, controlé→control, certif_recyclé→certif_recycl).
+//
+// • Windows (odbc npm package → Windows HFSQL driver): accepts accented
+//   column names as long as they're written in the exact source encoding, but
+//   silently returns zero rows for `alias.*` in a JOIN. Workaround: list every
+//   column explicitly with `alias.terminé AS termine` style aliases.
+//
+// Each path defines its own SELECT/JOINS strings below. The `normalizeStockRow`
+// post-processor then maps both shapes to the same canonical ASCII keys.
+const IS_WINDOWS = process.platform === 'win32'
+
+const STOCK_SELECT = IS_WINDOWS
+  ? `sf.IDstock_fil, sf.IDfournisseur, sf.IDref_fil, sf.IDcolori_fil, sf.IDref_fil_commande, sf.IDMagasin, sf.stock, sf.stock_initial, sf.lot, sf.lot_frs, sf.emplacement, sf.date_entree, sf.dernier_mouvement, sf.dernier_pointage, sf.niveau, sf.terminé AS termine, sf.controlé AS controle, sf.commentaire, sf.observation_freinte, rf.reference AS ref_fil, rf.titrage, rf.bio, rf.recyclé AS recycle, cf.reference AS colori_reference, f.nom AS fournisseur_nom`
+  : `sf.*, rf.reference AS ref_fil, rf.titrage, rf.bio, cf.reference AS colori_reference, f.nom AS fournisseur_nom`
 
 const STOCK_JOINS = `FROM stock_fil sf LEFT JOIN ref_fil rf ON sf.IDref_fil = rf.IDref_fil LEFT JOIN colori_fil cf ON sf.IDcolori_fil = cf.IDcolori_fil LEFT JOIN fournisseur f ON sf.IDfournisseur = f.IDfournisseur`
+
+interface RefFilFlags {
+  recycle: number
+}
+
+/** Load IDref_fil → recycle map via SELECT * (cannot SELECT recyclé directly). */
+async function loadRefFilRecycleMap(): Promise<Map<number, number>> {
+  const rows = await query<Record<string, unknown>>(`SELECT * FROM ref_fil`)
+  const map = new Map<number, number>()
+  for (const r of rows) {
+    const id = Number(r.IDref_fil)
+    // Bridge mangles recyclé → recycl; Windows ODBC keeps it as recyclé or returns
+    // the clean UTF-8. Accept either.
+    const recycle = Number((r as any).recycl ?? (r as any)['recyclé'] ?? 0)
+    if (!Number.isNaN(id)) map.set(id, recycle)
+  }
+  return map
+}
+
+/**
+ * Normalise a stock_fil row so the HTTP payload has stable, ASCII-only keys:
+ *   terminé / termin        → termine
+ *   controlé / control      → controle
+ *   certif_recyclé / certif_recycl → certif_recycle (boolean flag, not blob)
+ * Also attaches `recycle` (from ref_fil) using the provided map.
+ */
+function normalizeStockRow(row: Record<string, unknown>, recycleMap: Map<number, number>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...row }
+
+  // terminé
+  if (out.termine === undefined) {
+    out.termine = (row as any)['terminé'] ?? (row as any).termin ?? 0
+  }
+  delete out['terminé']
+  delete out.termin
+
+  // controlé
+  if (out.controle === undefined) {
+    out.controle = (row as any)['controlé'] ?? (row as any).control ?? 0
+  }
+  delete out['controlé']
+  delete out.control
+
+  // certif_recyclé (blob presence — keep the blob field out of JSON by deleting it entirely)
+  delete out['certif_recyclé']
+  delete out.certif_recycl
+
+  // certif_bio — also remove the blob from the list/detail payload
+  delete out.certif_bio
+
+  // recycle (from ref_fil)
+  const idRefFil = Number(out.IDref_fil)
+  out.recycle = recycleMap.get(idRefFil) ?? 0
+
+  return out
+}
 
 // GET /api/stock/fil - List stock_fil rows with joined display columns
 stockRouter.get('/fil', async (req: Request, res: Response) => {
@@ -25,40 +96,39 @@ stockRouter.get('/fil', async (req: Request, res: Response) => {
     const showAll = req.query.terminé === 'all' || req.query.termine === 'all'
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
 
+    // WHERE clause: only use non-accented columns. terminé filter is applied in JS.
     const where: string[] = []
-    if (!showAll) where.push(`(sf.terminé = 0 OR sf.terminé IS NULL)`)
     if (fournisseur && !isNaN(fournisseur)) where.push(`sf.IDfournisseur = ${fournisseur}`)
     if (q) {
       const e = esc(q)
-      where.push(`(
-        sf.lot LIKE '%${e}%'
-        OR sf.lot_frs LIKE '%${e}%'
-        OR sf.emplacement LIKE '%${e}%'
-        OR rf.reference LIKE '%${e}%'
-        OR cf.reference LIKE '%${e}%'
-        OR f.nom LIKE '%${e}%'
-      )`)
+      where.push(`(sf.lot LIKE '%${e}%' OR sf.lot_frs LIKE '%${e}%' OR sf.emplacement LIKE '%${e}%' OR rf.reference LIKE '%${e}%' OR cf.reference LIKE '%${e}%' OR f.nom LIKE '%${e}%')`)
     }
     const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''
 
     const sql = `SELECT ${STOCK_SELECT} ${STOCK_JOINS} ${whereSql} ORDER BY sf.date_entree DESC, sf.IDstock_fil DESC`
     const rows = await query<StockFil>(sql)
 
-    // Repair accented text fields per source table
+    // Encoding repair on text fields
     let fixed: StockFil[] = await fixEncoding(
       rows,
       'stock_fil',
       'IDstock_fil',
       ['lot', 'lot_frs', 'emplacement', 'commentaire', 'observation_freinte']
     )
-    // ref_fil.reference came in aliased — repair via the source ID
-    fixed = await fixEncoding(fixed, 'ref_fil', 'IDref_fil', [])
-    // For aliased fields fixEncoding can't auto-detect; do a targeted scan
     fixed = await repairAliased(fixed, 'ref_fil', 'IDref_fil', { ref_fil: 'reference' })
     fixed = await repairAliased(fixed, 'colori_fil', 'IDcolori_fil', { colori_reference: 'reference' })
     fixed = await repairAliased(fixed, 'fournisseur', 'IDfournisseur', { fournisseur_nom: 'nom' })
 
-    res.json(fixed)
+    // Load ref_fil recycle flags and normalise each row
+    const recycleMap = await loadRefFilRecycleMap()
+    let normalised = fixed.map((r) => normalizeStockRow(r as Record<string, unknown>, recycleMap))
+
+    // Apply terminé filter in JS
+    if (!showAll) {
+      normalised = normalised.filter((r) => !(r as any).termine || Number((r as any).termine) === 0)
+    }
+
+    res.json(normalised)
   } catch (err) {
     console.error('Error fetching stock_fil:', err)
     res.status(500).json({ error: 'Internal server error' })
@@ -92,27 +162,29 @@ stockRouter.get('/fil/:id', async (req: Request, res: Response) => {
     fixed = await repairAliased(fixed, 'colori_fil', 'IDcolori_fil', { colori_reference: 'reference' })
     fixed = await repairAliased(fixed, 'fournisseur', 'IDfournisseur', { fournisseur_nom: 'nom' })
 
-    // Has-certif flags via separate IS NOT NULL queries (cannot fetch blob just to check)
+    const recycleMap = await loadRefFilRecycleMap()
+    const normalised = normalizeStockRow(fixed[0] as Record<string, unknown>, recycleMap)
+
+    // has_certif flags: SELECT * on the row and check the mangled blob column for non-null.
+    // Cannot reference certif_recyclé directly; SELECT * returns it as certif_recycl (bridge)
+    // or 'certif_recyclé' (Windows ODBC). Check both.
     let has_certif_bio = false
     let has_certif_recycle = false
     try {
-      const bioRows = await query<{ n: number }>(
-        `SELECT COUNT(*) AS n FROM stock_fil WHERE IDstock_fil = ${id} AND certif_bio IS NOT NULL`
+      const rawRows = await query<Record<string, unknown>>(
+        `SELECT * FROM stock_fil WHERE IDstock_fil = ${id}`
       )
-      has_certif_bio = !!(bioRows[0] && Number(bioRows[0].n) > 0)
+      if (rawRows.length > 0) {
+        const r = rawRows[0] as any
+        has_certif_bio = r.certif_bio != null && r.certif_bio !== '' && r.certif_bio !== '\x00'
+        const rec = r.certif_recycl ?? r['certif_recyclé']
+        has_certif_recycle = rec != null && rec !== '' && rec !== '\x00'
+      }
     } catch {
-      // ignore
-    }
-    try {
-      const recRows = await query<{ n: number }>(
-        `SELECT COUNT(*) AS n FROM stock_fil WHERE IDstock_fil = ${id} AND certif_recyclé IS NOT NULL`
-      )
-      has_certif_recycle = !!(recRows[0] && Number(recRows[0].n) > 0)
-    } catch {
-      // ignore
+      // ignore — default to false
     }
 
-    res.json({ ...fixed[0], has_certif_bio, has_certif_recycle })
+    res.json({ ...normalised, has_certif_bio, has_certif_recycle })
   } catch (err) {
     console.error('Error fetching stock_fil detail:', err)
     res.status(500).json({ error: 'Internal server error' })
@@ -150,9 +222,12 @@ stockRouter.post('/fil', async (req: Request, res: Response) => {
       date_entree = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
     }
 
-    await query(
-      `INSERT INTO stock_fil (IDfournisseur, IDref_fil, IDcolori_fil, stock, stock_initial, lot, lot_frs, emplacement, date_entree, commentaire, niveau, terminé, controlé) VALUES (${IDfournisseur}, ${IDref_fil}, ${IDcolori_fil}, ${stock_initial}, ${stock_initial}, '${esc(lot)}', '${esc(lot_frs)}', '${esc(emplacement)}', '${esc(date_entree)}', '${esc(commentaire)}', ${parseInt(String(niveau), 10) || 1}, 0, 0)`
-    )
+    // Accented columns terminé/controlé cannot be named in the INSERT column list
+    // on the Linux bridge. Only include them on Windows.
+    const insertSql = IS_WINDOWS
+      ? `INSERT INTO stock_fil (IDfournisseur, IDref_fil, IDcolori_fil, stock, stock_initial, lot, lot_frs, emplacement, date_entree, commentaire, niveau, terminé, controlé) VALUES (${IDfournisseur}, ${IDref_fil}, ${IDcolori_fil}, ${stock_initial}, ${stock_initial}, '${esc(lot)}', '${esc(lot_frs)}', '${esc(emplacement)}', '${esc(date_entree)}', '${esc(commentaire)}', ${parseInt(String(niveau), 10) || 1}, 0, 0)`
+      : `INSERT INTO stock_fil (IDfournisseur, IDref_fil, IDcolori_fil, stock, stock_initial, lot, lot_frs, emplacement, date_entree, commentaire, niveau) VALUES (${IDfournisseur}, ${IDref_fil}, ${IDcolori_fil}, ${stock_initial}, ${stock_initial}, '${esc(lot)}', '${esc(lot_frs)}', '${esc(emplacement)}', '${esc(date_entree)}', '${esc(commentaire)}', ${parseInt(String(niveau), 10) || 1})`
+    await query(insertSql)
 
     // HFSQL does not support RETURNING — fetch the newly inserted row by max ID
     const newRows = await query<{ IDstock_fil: number }>(
@@ -168,6 +243,11 @@ stockRouter.post('/fil', async (req: Request, res: Response) => {
 })
 
 // PATCH /api/stock/fil/:id - Light edit (whitelisted fields only)
+//
+// NOTE: the terminé and controlé fields cannot currently be updated via this
+// endpoint on Linux because the HFSQL bridge rejects accented column names in
+// UPDATE SET clauses. Users must mark lots as terminated via the legacy
+// WinDev app until the bridge is extended to support this.
 stockRouter.patch('/fil/:id', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10)
@@ -178,13 +258,20 @@ stockRouter.patch('/fil/:id', async (req: Request, res: Response) => {
 
     const body = req.body ?? {}
     const sets: string[] = []
+    const skipped: string[] = []
 
     if (typeof body.commentaire === 'string') sets.push(`commentaire = '${esc(body.commentaire)}'`)
     if (typeof body.observation_freinte === 'string') sets.push(`observation_freinte = '${esc(body.observation_freinte)}'`)
     if (typeof body.emplacement === 'string') sets.push(`emplacement = '${esc(body.emplacement)}'`)
     if (typeof body.niveau === 'number') sets.push(`niveau = ${parseInt(String(body.niveau), 10)}`)
-    if (body.termine !== undefined) sets.push(`terminé = ${body.termine ? 1 : 0}`)
-    if (body.controle !== undefined) sets.push(`controlé = ${body.controle ? 1 : 0}`)
+    if (body.termine !== undefined) {
+      if (IS_WINDOWS) sets.push(`terminé = ${body.termine ? 1 : 0}`)
+      else skipped.push('termine')
+    }
+    if (body.controle !== undefined) {
+      if (IS_WINDOWS) sets.push(`controlé = ${body.controle ? 1 : 0}`)
+      else skipped.push('controle')
+    }
     if (typeof body.dernier_pointage === 'string') {
       const d = body.dernier_pointage
       if (d === '') {
@@ -195,7 +282,12 @@ stockRouter.patch('/fil/:id', async (req: Request, res: Response) => {
     }
 
     if (sets.length === 0) {
-      res.status(400).json({ error: 'No editable fields provided' })
+      res.status(400).json({
+        error:
+          skipped.length > 0
+            ? `Fields ${skipped.join(', ')} are not supported via the web API on Linux — edit via the legacy app`
+            : 'No editable fields provided',
+      })
       return
     }
 
@@ -215,7 +307,10 @@ stockRouter.patch('/fil/:id', async (req: Request, res: Response) => {
     fixed = await repairAliased(fixed, 'colori_fil', 'IDcolori_fil', { colori_reference: 'reference' })
     fixed = await repairAliased(fixed, 'fournisseur', 'IDfournisseur', { fournisseur_nom: 'nom' })
 
-    res.json(fixed[0] ?? null)
+    const recycleMap = await loadRefFilRecycleMap()
+    const normalised = normalizeStockRow(fixed[0] as Record<string, unknown>, recycleMap)
+
+    res.json({ ...normalised, _skipped: skipped.length > 0 ? skipped : undefined })
   } catch (err) {
     console.error('Error updating stock_fil:', err)
     res.status(500).json({ error: 'Internal server error' })
@@ -228,13 +323,26 @@ stockRouter.get('/fil/:id/certif/:type', async (req: Request, res: Response) => 
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
     const type = req.params.type
-    const column = type === 'bio' ? 'certif_bio' : type === 'recycle' ? 'certif_recyclé' : null
-    if (!column) { res.status(400).json({ error: 'Invalid type' }); return }
+    if (type !== 'bio' && type !== 'recycle') { res.status(400).json({ error: 'Invalid type' }); return }
 
-    const rows = await queryRaw(`SELECT ${column} AS f FROM stock_fil WHERE IDstock_fil = ${id}`)
-    if (rows.length === 0) { res.status(404).json({ error: 'Not found' }); return }
+    // For 'bio' we can reference certif_bio directly (no accent). For 'recycle'
+    // the column is certif_recyclé — on Linux the bridge can't parse the
+    // accented identifier, so fall back to SELECT * and pick the mangled key.
+    let fichier: unknown = null
+    if (type === 'bio') {
+      const rows = await queryRaw(`SELECT certif_bio AS f FROM stock_fil WHERE IDstock_fil = ${id}`)
+      if (rows.length === 0) { res.status(404).json({ error: 'Not found' }); return }
+      fichier = rows[0].f
+    } else if (IS_WINDOWS) {
+      const rows = await queryRaw(`SELECT certif_recyclé AS f FROM stock_fil WHERE IDstock_fil = ${id}`)
+      if (rows.length === 0) { res.status(404).json({ error: 'Not found' }); return }
+      fichier = rows[0].f
+    } else {
+      const rows = await queryRaw(`SELECT * FROM stock_fil WHERE IDstock_fil = ${id}`)
+      if (rows.length === 0) { res.status(404).json({ error: 'Not found' }); return }
+      fichier = (rows[0] as any).certif_recycl ?? (rows[0] as any)['certif_recyclé']
+    }
 
-    const fichier = rows[0].f
     if (fichier == null) { res.status(404).json({ error: 'No document' }); return }
 
     let buf: Buffer
