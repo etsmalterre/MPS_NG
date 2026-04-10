@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
 import { z } from 'zod'
-import { query, fixEncoding } from '../lib/hfsql.js'
+import { query, fixEncoding } from '../lib/hfsql-auto.js'
 
 export const entreprisesRouter: RouterType = Router()
 
@@ -57,13 +57,13 @@ entreprisesRouter.get('/:id', async (req: Request, res: Response) => {
       query(`SELECT * FROM adresse WHERE IDentreprise = ${id} ORDER BY est_defaut DESC, IDadresse`),
       query(`SELECT * FROM contact WHERE IDentreprise = ${id} ORDER BY est_defaut DESC, IDcontact`),
       query(`SELECT c.IDcompetence, c.reference FROM entreprise_competence ec, competence c WHERE ec.IDentreprise = ${id} AND ec.IDcompetence = c.IDcompetence ORDER BY c.reference`),
-      query(`SELECT IDrecommandation, DATE as date_reco, société, contact, besoin FROM recommandation WHERE IDentreprise = ${id} ORDER BY DATE DESC`),
+      query(`SELECT * FROM recommandation WHERE IDentreprise = ${id} ORDER BY DATE DESC`),
     ])
 
     const fixedAdresses = await fixEncoding(adresses, 'adresse', 'IDadresse', ['nom', 'adresse1', 'adresse2', 'adresse3', 'ville', 'pays', 'commentaire'])
     const fixedContacts = await fixEncoding(contacts, 'contact', 'IDcontact', ['nom', 'prenom', 'tel', 'mail', 'commentaire'])
     const fixedCompetences = await fixEncoding(competenceLinks, 'competence', 'IDcompetence', ['reference'])
-    const fixedRecommandations = await fixEncoding(recommandations, 'recommandation', 'IDrecommandation', ['société', 'contact', 'besoin'])
+    const fixedRecommandations = await fixEncoding(recommandations, 'recommandation', 'IDrecommandation', ['soci', 'contact', 'besoin'])
 
     res.json({
       ...fixed[0],
