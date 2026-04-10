@@ -12,40 +12,11 @@ function esc(value: string): string {
 
 // Common SELECT used by list and detail. Aliases accented columns so the
 // bridge cannot mangle them downstream (terminé→termine, controlé→controle).
-const STOCK_SELECT = `
-  sf.IDstock_fil,
-  sf.IDfournisseur,
-  sf.IDref_fil,
-  sf.IDcolori_fil,
-  sf.IDref_fil_commande,
-  sf.IDMagasin,
-  sf.stock,
-  sf.stock_initial,
-  sf.lot,
-  sf.lot_frs,
-  sf.emplacement,
-  sf.date_entree,
-  sf.dernier_mouvement,
-  sf.dernier_pointage,
-  sf.niveau,
-  sf.terminé AS termine,
-  sf.controlé AS controle,
-  sf.commentaire,
-  sf.observation_freinte,
-  rf.reference AS ref_fil,
-  rf.titrage,
-  rf.bio,
-  rf.recyclé AS recycle,
-  cf.reference AS colori_reference,
-  f.nom AS fournisseur_nom
-`
+// Kept on a single line because the Linux iODBC bridge escapes newlines
+// literally when forwarding SQL, which breaks HFSQL's alias parser.
+const STOCK_SELECT = `sf.IDstock_fil, sf.IDfournisseur, sf.IDref_fil, sf.IDcolori_fil, sf.IDref_fil_commande, sf.IDMagasin, sf.stock, sf.stock_initial, sf.lot, sf.lot_frs, sf.emplacement, sf.date_entree, sf.dernier_mouvement, sf.dernier_pointage, sf.niveau, sf.terminé AS termine, sf.controlé AS controle, sf.commentaire, sf.observation_freinte, rf.reference AS ref_fil, rf.titrage, rf.bio, rf.recyclé AS recycle, cf.reference AS colori_reference, f.nom AS fournisseur_nom`
 
-const STOCK_JOINS = `
-  FROM stock_fil sf
-  LEFT JOIN ref_fil rf ON sf.IDref_fil = rf.IDref_fil
-  LEFT JOIN colori_fil cf ON sf.IDcolori_fil = cf.IDcolori_fil
-  LEFT JOIN fournisseur f ON sf.IDfournisseur = f.IDfournisseur
-`
+const STOCK_JOINS = `FROM stock_fil sf LEFT JOIN ref_fil rf ON sf.IDref_fil = rf.IDref_fil LEFT JOIN colori_fil cf ON sf.IDcolori_fil = cf.IDcolori_fil LEFT JOIN fournisseur f ON sf.IDfournisseur = f.IDfournisseur`
 
 // GET /api/stock/fil - List stock_fil rows with joined display columns
 stockRouter.get('/fil', async (req: Request, res: Response) => {
