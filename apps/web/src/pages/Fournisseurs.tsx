@@ -36,6 +36,7 @@ import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { BobineIcon } from '@/components/icons/BobineIcon'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
+import { apiFetch, API_URL } from '@/lib/api'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -137,14 +138,7 @@ interface Contact {
 }
 
 // ── API helpers ────────────────────────────────────────
-
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002/api'
-
-async function apiFetch(path: string, options?: RequestInit) {
-  const res = await fetch(`${API_URL}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...options?.headers } })
-  if (!res.ok) throw new Error('Erreur API')
-  return res.json()
-}
+// Shared apiFetch + API_URL — see apps/web/src/lib/api.ts
 
 function useFournisseurs() {
   return useQuery<Fournisseur[]>({ queryKey: ['fournisseurs'], queryFn: () => apiFetch('/fournisseurs') })
@@ -349,7 +343,7 @@ function DetailHeader({ fournisseur, isLoading, isEditing, editNom, onEditNomCha
                 </Button>
               </>
             ) : (
-              <Button variant="outline" size="sm" onClick={onStartEdit}><Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier</Button>
+              <Button variant="gold" size="sm" onClick={onStartEdit}><Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier</Button>
             )}
           </div>
         )}

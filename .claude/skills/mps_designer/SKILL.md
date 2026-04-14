@@ -358,6 +358,37 @@ Position: flex-shrink-0 at top of center panel.
 - **Gold accent line**: `h-1 w-24 mt-3 rounded-full`, gradient in view mode, solid in edit mode
 - **Buttons**: `size="sm"` for text buttons, `size="icon" className="h-9 w-9"` for icon-only
 
+### 6.1 Standard view-mode action buttons (Print + Email + Modifier)
+
+Every detail screen should surface the same canonical set of view-mode action buttons, in this order, right-aligned in the header row:
+
+1. **Imprimer** — `<Printer>` icon, opens a placeholder Dialog (see §18 "En developpement")
+2. **Envoyer un email** — `<AtSign>` icon (**not** `<Mail>`), opens a placeholder Dialog (see §18 "En developpement")
+3. **Modifier** — `<Pencil>` icon + "Modifier" text, switches to edit mode. **Always `variant="gold"`** — the gold CTA is the canonical "enter edit mode" affordance across the whole app.
+
+```tsx
+// Inside the view-mode branch of the button row
+<>
+  <Button variant="outline" size="icon" className="h-9 w-9" title="Imprimer" onClick={onPrintClick}>
+    <Printer className="h-4 w-4" />
+  </Button>
+  <Button variant="outline" size="icon" className="h-9 w-9" title="Envoyer un email" onClick={onEmailClick}>
+    <AtSign className="h-4 w-4" />
+  </Button>
+  <Button variant="gold" size="sm" onClick={onStartEdit}>
+    <Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier
+  </Button>
+</>
+```
+
+**Icon choice is canonical**: use `AtSign` for the email *trigger* button (it's the recognisable "@" symbol and reads as an action, not a field label). `Mail` is reserved for the Dialog's large central icon and for contact-card sub-rows showing an email address inline. Do NOT swap them.
+
+**Modifier button colour is canonical**: always `variant="gold"`. Never `variant="outline"`, never `variant="default"` (which is primary blue). The gold CTA across all screens reinforces "this is THE primary action on a view-mode screen — enter edit mode".
+
+`onPrintClick` and `onEmailClick` flip page-level state (`setPrintModalOpen(true)` / `setEmailModalOpen(true)`) that opens the corresponding placeholder Dialog (§18). Both Dialogs are always mounted at the page root as siblings of the `MasterDetailLayout`, alongside any other top-level dialogs (`UnsavedChangesDialog`, `CreateXxxDialog`, etc.).
+
+Reference implementations: `apps/web/src/pages/Entreprises.tsx`, `apps/web/src/pages/Fournisseurs.tsx`, `apps/web/src/pages/FournisseursStock.tsx`, and `apps/web/src/pages/FournisseursCommandes.tsx` — all four use `<Button variant="gold">` for the Modifier action.
+
 ---
 
 ## 7. Center Panel: Detail Body
@@ -747,11 +778,21 @@ All inputs: `focus:ring-2 focus:ring-ring` where `--ring: 42 80% 55%` (gold).
 
 | Variant | Usage | Example |
 |---------|-------|---------|
-| Default (`<Button>`) | Primary actions: Enregistrer | `bg-primary text-primary-foreground` |
-| `variant="outline"` | Secondary: Annuler, Modifier | Border + text |
+| Default (`<Button>`) | Primary in-form actions: Enregistrer | `bg-primary text-primary-foreground` |
+| `variant="gold"` | **Canonical "Modifier" / enter-edit-mode CTA** on every detail screen header (§6.1) | `bg-gold text-gold-foreground` |
+| `variant="outline"` | Secondary: Annuler, header icon buttons (Imprimer, Email) | Border + text |
 | `variant="ghost"` | Tertiary: +, edit/delete icons | No border, hover bg |
+| `variant="destructive"` | Dangerous full-text actions (rare — usually use ghost+text-destructive) | `bg-destructive` |
 | `size="sm"` | Text buttons with icon: `<Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier` |
 | `size="icon"` | Icon-only: `className="h-9 w-9"` for header, `className="h-6 w-6"` for inline |
+
+The `gold` variant is defined in `apps/web/src/components/ui/button.tsx`:
+
+```tsx
+gold: 'bg-gold text-gold-foreground shadow hover:bg-gold/90',
+```
+
+Always use `variant="gold"` for the "Modifier" button at the top right of every detail screen — never `variant="outline"` or `variant="default"`. The gold CTA is the canonical "enter edit mode" affordance and stays consistent across the whole app. See §6.1 for the full Print + Email + Modifier header trio.
 
 ### Delete Button Pattern
 
@@ -891,6 +932,38 @@ For simple forms — use `DialogContent` with header, body, and footer.
   </DialogContent>
 </Dialog>
 ```
+
+### A-bis. "En developpement" Placeholder Dialog (canonical)
+
+Any feature that's wired up in the UI but not yet implemented (email send, print, export, etc.) must open this exact placeholder Dialog. Reference: `Entreprises.tsx` email button, `FournisseursCommandes.tsx` print + email buttons.
+
+```tsx
+<Dialog open={placeholderOpen} onOpenChange={setPlaceholderOpen}>
+  <DialogContent>
+    <DialogHeader>
+      <DialogTitle className="flex items-center gap-2">
+        <TriggerIcon className="h-5 w-5 text-accent" />
+        {actionLabel}
+      </DialogTitle>
+    </DialogHeader>
+    <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+      <CenterIcon className="h-12 w-12 mb-3 opacity-40" />
+      <p className="text-sm font-medium">En developpement</p>
+      <p className="text-xs mt-1">Cette fonctionnalite sera disponible prochainement.</p>
+    </div>
+  </DialogContent>
+</Dialog>
+```
+
+**Rules — do not deviate**:
+- Title `<DialogTitle>` uses the **same icon as the trigger button** (`AtSign` for email, `Printer` for print, etc.) with `h-5 w-5 text-accent`
+- Centre `<div>` uses `py-8 text-muted-foreground`, `opacity-40` on the large icon, `h-12 w-12 mb-3`
+- Primary copy: **exactly** `"En developpement"` (no accent on the "é" — matches existing screens for grep consistency) in `text-sm font-medium`
+- Secondary copy: **exactly** `"Cette fonctionnalite sera disponible prochainement."` in `text-xs mt-1`
+- No footer, no buttons — user dismisses via the built-in `X` or overlay click
+- The **centre icon** (`h-12 w-12`) can differ from the title icon when it reinforces the action. Example: email dialog uses `AtSign` in the title + `Mail` (envelope) in the centre, because both symbols read as "email" but the envelope is more visually recognisable at size 12. Print dialog uses `Printer` for both.
+
+Always use the literal strings above so a global search for `"En developpement"` finds every placeholder in one shot when we're ready to implement them.
 
 ### B. Full-Bleed Viewer Dialog (chrome-free)
 
@@ -1243,6 +1316,41 @@ function formatHfsqlDate(raw: string): string {
 ```
 
 These three helpers live in **`apps/web/src/lib/dates.ts`** — import from there, do not redefine. Both `Fournisseurs.tsx` and `FournisseursStock.tsx` consume them via `import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'`.
+
+---
+
+## 26bis. Number Formatting (`fmtNum`)
+
+All numeric values displayed in the UI (weights in kg, prices in €, stock counts, totals) must use **`fmtNum`** from `apps/web/src/lib/format.ts`. It produces French-style formatting with a **plain ASCII space** as the thousand separator — e.g. `12345.6` → `12 345,6`.
+
+```tsx
+import { fmtNum } from '@/lib/format'
+
+fmtNum(12345)          // "12 345"
+fmtNum(12345.67, 2)    // "12 345,67"
+fmtNum(0.5, 1)         // "0,5"
+fmtNum(null)           // ""  (null/undefined/NaN safe)
+```
+
+### Why not raw `toLocaleString('fr-FR')`?
+
+The `fr-FR` locale emits `\u202f` (narrow no-break space) or `\u00a0` (non-breaking space) for groups depending on the browser/Node version. `fmtNum` normalizes both to a regular space so (a) UI spacing is predictable across environments, (b) copy-paste produces text the user can re-type, and (c) tests match on simple string literals.
+
+### Conventions
+
+- **Weights (kg)**: `fmtNum(value, 1)` for line/detail displays, `fmtNum(value)` (0 decimals) for list-card summaries where space is tight
+- **Prices (€)**: `fmtNum(value, 2)` everywhere — always show cents
+- **Unit prices (€/kg)**: `fmtNum(value, 2)`
+- **Counts / integers**: `fmtNum(value)` (0 decimals)
+- **Always pair with `tabular-nums`** on the containing element so columns align — matches the existing pattern in list cards and totals footers
+
+### Do not
+
+- Do not use `value.toFixed(n)` in JSX — it skips the thousand separator
+- Do not redefine a local `fmtNum` inside a page file — import the shared one
+- Do not hardcode the separator character in tests or snapshots; the helper guarantees a plain space but read the output through `fmtNum` if you need to assert
+
+Reference: `FournisseursCommandes.tsx` uses `fmtNum` for list card kg/€, totals footer, and line card quantite/prix/total.
 
 ---
 
@@ -1781,3 +1889,379 @@ Manual test that must pass on every edit-mode screen:
 5. Enter edit mode, change a field, click a different sidebar route → same 3 outcomes
 6. Enter edit mode with no changes, click another row → switches immediately, no dialog
 7. Click delete → no dialog, deletion proceeds
+
+---
+
+## 29. Sidebar Status Footer (binary state + toggle action)
+
+Reference: **`apps/web/src/pages/FournisseursCommandes.tsx`** → `StatusFooter`.
+
+For entities with a **binary primary state** that the user toggles (open/closed, en cours/terminée, active/archivé…), render the current state as a **solid-colored bar pinned at the bottom of the right sidebar panel** — not as a small badge in the header. The bar is both the status display and the toggle control, combined into a single visual unit.
+
+### 29.1 Why the sidebar footer, not the header
+
+- The detail header is already dense with title, date, edit/delete buttons, and "Mode édition" chip — adding a badge there competes for attention
+- A bar pinned at the bottom of the right panel sits in a predictable spot across screens, so users always know where to look for / change status
+- Giving the state its own bold, colored surface communicates its importance more than a pastel pill
+
+### 29.2 Structure
+
+```tsx
+{/* Placed as the last child of the sidebar's outer flex-col, AFTER the scrollable tab body */}
+<StatusFooter
+  etat={commande.etat}
+  onToggle={onToggleEtat}
+  isToggling={isTogglingEtat}
+  disabled={isEditing}
+/>
+```
+
+The parent sidebar container must be `flex flex-col overflow-hidden` so the footer can use `flex-shrink-0` and stay visible while the tab body scrolls above it.
+
+```tsx
+function StatusFooter({
+  etat, onToggle, isToggling, disabled,
+}: {
+  etat: number | null
+  onToggle: () => void
+  isToggling: boolean
+  disabled: boolean
+}) {
+  const isDone = etat === 1
+  const Icon = isDone ? CheckCircle2 : Clock
+  const label = isDone ? 'Terminée' : 'En cours'
+  const actionLabel = isDone ? 'Rouvrir' : 'Clôturer'
+  const ActionIcon = isDone ? Clock : CheckCircle2
+
+  return (
+    <div className="flex-shrink-0 border-t bg-zinc-200/50 rounded-b-xl p-3">
+      <div
+        className={cn(
+          'rounded-lg shadow-sm overflow-hidden flex items-stretch h-11',
+          isDone ? 'bg-success' : 'bg-primary'
+        )}
+      >
+        {/* Left half: icon + state label */}
+        <div className="flex items-center gap-2 px-3 flex-1 text-white min-w-0">
+          <Icon className="h-4 w-4 flex-shrink-0" />
+          <span className="text-sm font-bold uppercase tracking-wide truncate">{label}</span>
+        </div>
+        {/* Right half: toggle action, split by a white divider */}
+        <button
+          type="button"
+          onClick={onToggle}
+          disabled={disabled || isToggling}
+          title={isDone ? 'Marquer en cours' : 'Marquer terminée'}
+          className="px-3.5 bg-white/15 hover:bg-white/25 active:bg-white/30 disabled:bg-white/5 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-semibold border-l border-white/25 flex items-center gap-1.5 transition-colors"
+        >
+          <ActionIcon className="h-3.5 w-3.5" />
+          {actionLabel}
+        </button>
+      </div>
+    </div>
+  )
+}
+```
+
+### 29.3 Conventions
+
+- **Colors**: `bg-primary` (MPS deep blue) for the "in progress / active" state, `bg-success` for the "done / validated" state. Do NOT use `bg-amber`/`bg-yellow` for active — amber is reserved for warnings/alerts. Do NOT use pastel transparent colors (`bg-primary/10`) — the bar must be solid and bold to match the left-list badge aesthetic.
+- **Height**: fixed `h-11` — visually substantial without dominating the sidebar.
+- **Typography**: `text-sm font-bold uppercase tracking-wide` for the state label, `text-xs font-semibold` for the action button text. White foreground throughout.
+- **Action button as inset split**: the toggle button lives **inside** the colored bar, separated by `border-l border-white/25` and a `bg-white/15` hover-tinted surface. It is not an outlined shadcn `<Button>` — use a raw `<button>` so it can share the bar's background.
+- **Disabled during edit mode**: pass `disabled={isEditing}` so users cannot toggle the state while a header edit is mid-flight. Also disable while the mutation is in-flight (`isTogglingEtat`).
+- **Placement**: always `flex-shrink-0 border-t bg-zinc-200/50 rounded-b-xl p-3` — the `rounded-b-xl` matches the sidebar's outer border radius, and the `bg-zinc-200/50` matches the tab-bar top strip for symmetry.
+- **No "Statut" label above the bar**: the bold colored bar speaks for itself. Adding a label above makes it feel like a form field and eats vertical space.
+
+### 29.4 When to use this pattern vs a badge in the header
+
+| Situation | Pattern |
+|---|---|
+| Binary primary state (open/closed, active/done) that the user explicitly toggles | **StatusFooter** at the bottom of the sidebar |
+| Computed / derived state shown for reference only (e.g. "en retard" from due date) | Badge in the detail header |
+| Multi-valued state (draft / sent / paid / overdue / cancelled) | Header badge, potentially with a state-transition menu instead of a single toggle |
+
+The StatusFooter is the right tool **only** for binary, user-toggled states. For multi-step workflows use a header badge + menu.
+
+### 29.5 Gotcha: `<Badge variant='default'>` is primary blue, not grey
+
+When building related status indicators elsewhere, note that the shadcn `<Badge>` component in this project defaults to `variant='default'` which is `bg-primary text-primary-foreground` — **solid deep blue**, not a neutral grey. If you append a `badge-warning` / `badge-success` utility via `className`, the variant's `bg-primary` will usually win because both classes sit in the same CSS layer. Always pass an explicit `variant` (`variant='default'`, `variant='success'`, `variant='warning'`, `variant='secondary'`) when building status badges. This is how `CommandeEtatBadge` in `FournisseursCommandes.tsx` is written: `<Badge variant="success">Terminée</Badge>` / `<Badge variant="default">En cours</Badge>`.
+
+---
+
+## 30. List Card Deadline / Urgency Indicator
+
+Reference: **`apps/web/src/pages/FournisseursCommandes.tsx`** → `deliveryUrgency()` helper + left-list card.
+
+For any entity that has a **deadline** (delivery date, due date, échéance, expected ship date…), the left-list card should visually flag how urgent that deadline is. The pattern:
+
+- **Red left edge + red selection ring** → deadline is today or already past, OR no deadline is set
+- **Amber left edge + amber selection ring** → deadline is within the next 3 days
+- **No decoration** → deadline is further out, OR the entity is in a terminal state (`terminée`, `livrée`, `payée`, `annulée`…)
+
+This makes the "what do I need to deal with first?" question answerable at a glance without reading any date values.
+
+### 30.1 Urgency helper
+
+```tsx
+// Urgency flag based on a YYYYMMDD deadline (HFSQL date string).
+// 'late' = today >= deadline, OR no deadline specified (red)
+// 'soon' = deadline within the next 3 days (amber)
+// null   = not urgent, or entity is in a terminal state
+function deliveryUrgency(deadlineHfsql: string | null, etat: number | null): 'late' | 'soon' | null {
+  if (etat === 1) return null // terminal state — no urgency color
+  if (!deadlineHfsql || !/^\d{8}$/.test(deadlineHfsql)) return 'late' // missing date = problem
+  const y = Number(deadlineHfsql.slice(0, 4))
+  const m = Number(deadlineHfsql.slice(4, 6)) - 1
+  const d = Number(deadlineHfsql.slice(6, 8))
+  const target = new Date(y, m, d); target.setHours(0, 0, 0, 0)
+  const today = new Date(); today.setHours(0, 0, 0, 0)
+  const diffDays = Math.round((target.getTime() - today.getTime()) / 86_400_000)
+  if (diffDays <= 0) return 'late'
+  if (diffDays <= 3) return 'soon'
+  return null
+}
+```
+
+The three-day window and the "missing date = late" rule are deliberate — a missing deadline is almost always a data-quality problem the user should see as red rather than silently hide.
+
+### 30.2 Rendering the indicator on the card
+
+Two visual cues, applied together:
+
+1. **Left-edge strip** via an inset `box-shadow` (not `border-l`) — see §30.3 for why
+2. **Matching selection ring + border** when the card is the selected one — so the urgency color dominates the selection color instead of fighting it
+
+```tsx
+{rows.map((row) => {
+  const isSelected = selectedId === row.id
+  const urgency = deliveryUrgency(row.earliest_delivery, row.etat)
+  const selectedRingClass =
+    urgency === 'late' ? 'border-red-500 ring-1 ring-red-500'
+    : urgency === 'soon' ? 'border-amber-500 ring-1 ring-amber-500'
+    : 'border-accent ring-1 ring-accent'
+
+  return (
+    <div
+      key={row.id}
+      onClick={() => onSelect(row.id)}
+      className={cn(
+        'p-3 border rounded-lg cursor-pointer transition-all bg-white',
+        isSelected ? selectedRingClass : 'border-border hover:border-accent/50',
+        // Inset left-edge strip — uses --tw-shadow so it coexists with --tw-ring-shadow
+        urgency === 'late' && 'shadow-[inset_4px_0_0_0_rgb(239_68_68)]',
+        urgency === 'soon' && 'shadow-[inset_4px_0_0_0_rgb(245_158_11)]'
+      )}
+    >
+      {/* …card contents… */}
+    </div>
+  )
+})}
+```
+
+### 30.3 Why `shadow-[inset_...]` and not `border-l-4 border-l-red-500`
+
+The left list cards already use `border border-accent` + `ring-1 ring-accent` to mark the selected row. Mixing that with `border-l-<color>` causes two problems:
+
+1. `border-accent` is a shorthand (sets all four sides) and `border-l-red-500` is a longhand for the left side — the winner depends on Tailwind's stylesheet ordering, which is not stable across class combinations
+2. The selection ring and the urgency strip are two separate visual concepts, and coupling them to the same `border-l` property makes it hard to keep the ring color consistent with the urgency color independently
+
+`shadow-[inset_4px_0_0_0_<color>]` sidesteps both issues. Tailwind compiles arbitrary-value shadows to `--tw-shadow`, while `ring-1 ring-accent` compiles to `--tw-ring-shadow`. The final `box-shadow` property composes both variables, so a selected urgent row gets the ring **and** the inset left strip at the same time, with no ordering gymnastics. `cn()` (twMerge) also doesn't know about arbitrary shadow values, so nothing gets deduped away.
+
+### 30.4 Color palette
+
+Always use the same raw RGB values for consistency across screens:
+
+| State | Fill color (inset shadow) | Ring / border class |
+|---|---|---|
+| `late` | `rgb(239 68 68)` (red-500) | `ring-red-500 border-red-500` |
+| `soon` | `rgb(245 158 11)` (amber-500) | `ring-amber-500 border-amber-500` |
+| normal | — | `ring-accent border-accent` |
+
+Do NOT use the semantic `destructive` / `warning` tokens here — those vary slightly between light and dark themes, and deadline urgency should remain stable regardless of theme. Raw Tailwind red-500 / amber-500 is the right choice.
+
+### 30.5 When this pattern applies
+
+Apply it to any list card that carries a deadline the user cares about. Candidates in MPS_NG:
+
+- Fournisseurs → Commandes (implemented) — earliest line `date_livraison`
+- Clients → Commandes — earliest line `date_livraison`
+- Clients → Facturation — `date_echeance`
+- Sous-traitants → Commandes — `date_retour_prevue`
+- Production → Tricotage / Teinture / Confection — `date_prevue`
+- Transport → Expéditions / Livraisons — `date_expedition` / `date_livraison`
+
+The three-day window can be tuned per domain, but the visual language (red = late/missing, amber = soon, no decoration = normal) stays constant across the whole app so users don't have to re-learn it per screen.
+
+---
+
+## 31. In-Screen Contained Drawer (click-a-row → slides up inside the center panel)
+
+Reference: **`apps/web/src/pages/FournisseursCommandes.tsx`** → `StockLinkDrawer` + the split inside `LignesSection`.
+
+When a user clicks a row in the center panel's main list (e.g. an order line), a drawer should slide up inside that same panel — **not** as a full-screen `Sheet` overlay. The rows shrink to make room; the drawer fills the bottom. Nothing outside the center panel is covered.
+
+This pattern already exists in **MFProd** (`C:\dev\mfprod\mfprod_erp` → `src/features/commandes/components/OrderDetail.tsx` + `AffectationPanel.tsx`) and should be used in MPS_NG for the same "drill into a row without losing context" interactions. It is distinct from:
+- **§27 Table-centric screens** — those use a `fixed` right-side drawer that overlays the table body
+- **§29 Sidebar status footer** — that is a pinned element, never hidden
+- **shadcn `<Sheet>`** — that is a full-screen modal with an overlay backdrop
+
+### 31.1 Core mechanic — flexbox sibling, no `position: fixed`
+
+The drawer is a **flex sibling** of the rows-scrollable div, not a positioned overlay. The parent is already `flex-1 min-h-0 flex flex-col` (§7 detail body pattern). When the drawer is open, the rows div capitulates to `flex-shrink-0 max-h-[40%]` and the drawer gets `flex-1 min-h-0`. Flexbox handles the height split with no explicit calc.
+
+```tsx
+function LignesSection({ commande, stockDrawerLineId, onOpenStockDrawer, isEditing, ... }: Props) {
+  // Drawer is closed whenever we enter edit mode — the line-card click is
+  // reserved for the existing edit-mode buttons.
+  const drawerOpen = stockDrawerLineId !== null && !isEditing
+  const drawerLigne = drawerOpen
+    ? commande.lignes.find((l) => l.IDref_fil_commande === stockDrawerLineId) ?? null
+    : null
+
+  return (
+    <div className="flex-1 min-h-0 flex flex-col">
+      {/* Rows list: shrinks to 40% when drawer is open, full height otherwise */}
+      <div
+        className={cn(
+          'overflow-auto space-y-2 p-1 scrollbar-transparent',
+          drawerOpen ? 'flex-shrink-0 max-h-[40%]' : 'flex-1 min-h-0'
+        )}
+      >
+        {commande.lignes.map((l) => (
+          <LineCard
+            key={l.IDref_fil_commande}
+            line={l}
+            isStockDrawerOpen={stockDrawerLineId === l.IDref_fil_commande}
+            onOpenStockDrawer={onOpenStockDrawer}
+            /* ...other props */
+          />
+        ))}
+      </div>
+
+      {/* Drawer: fills the remaining space, animated slide-in */}
+      {drawerOpen && drawerLigne && (
+        <div className="flex-1 min-h-0 flex flex-col mt-3 rounded-lg border border-border/60 overflow-hidden bg-zinc-50/80 animate-in slide-in-from-bottom-4 fade-in-0 duration-200">
+          <StockLinkDrawer
+            commandeId={commande.IDcommande_fil}
+            ligne={drawerLigne}
+            onClose={() => onOpenStockDrawer(null)}
+            onSuccess={onMutationSuccess}
+          />
+        </div>
+      )}
+
+      {/* Existing totals footer stays pinned at the bottom */}
+      {commande.lignes.length > 0 && (
+        <div className="flex-shrink-0 mt-3 pt-3 border-t ...">…</div>
+      )}
+    </div>
+  )
+}
+```
+
+### 31.2 Toggle-on-reclick + selected-row highlight
+
+The click behavior is a **toggle**: clicking the already-open row closes the drawer, clicking a different row switches it. The open row also gets a subtle highlight so the user always knows which row the drawer belongs to.
+
+```tsx
+// Inside LineCard
+<div
+  className={cn(
+    'group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3',
+    etatBorder,
+    clickable && 'cursor-pointer hover:bg-zinc-100 hover:border-accent/40 transition-colors',
+    isStockDrawerOpen && 'ring-1 ring-accent bg-accent/[0.06] border-accent/50' // selected-row cue
+  )}
+  onClick={clickable ? () => onOpenStockDrawer(isStockDrawerOpen ? null : line.IDref_fil_commande) : undefined}
+>
+```
+
+State lives at the **page root** (`const [stockDrawerLineId, setStockDrawerLineId] = useState<number | null>(null)`), threaded down through `DetailMain → LignesSection → LineCard`. This keeps the drawer state outside the React Query cache and lets the page-level `startEdit` callback close it imperatively when the user switches to edit mode.
+
+### 31.3 Auto-close when entering edit mode
+
+Edit mode hides the drawer because the same line-card click is reserved for the inline edit UI. Close the drawer in `startEdit`, not just conditionally in the render:
+
+```tsx
+const startEdit = useCallback(() => {
+  // …snapshot header draft…
+  setStockDrawerLineId(null) // Edit mode hides the stock drawer
+  setIsEditing(true)
+}, [detail])
+```
+
+This means the drawer's `drawerOpen` guard (`stockDrawerLineId !== null && !isEditing`) is belt-and-suspenders — but the imperative close is what actually drops the state so it doesn't silently reopen when the user cancels the edit.
+
+### 31.4 Drawer content chrome
+
+Because the drawer sits **inside** the panel and the selected row is already highlighted right above it, **do NOT repeat the row's info at the top of the drawer**. The user can see it without scrolling. Keep the drawer header minimal — a thin strip with just an `X` close button on the right is plenty:
+
+```tsx
+<div className="flex flex-col h-full min-h-0 overflow-hidden">
+  {/* Minimal top bar: close button only — row info is already visible in the list above */}
+  <div className="flex-shrink-0 px-2 py-1 border-b bg-zinc-200/50 flex items-center justify-end">
+    <Button variant="ghost" size="icon" onClick={onClose} className="h-7 w-7" title="Fermer">
+      <X className="h-3.5 w-3.5" />
+    </Button>
+  </div>
+  <div className="flex-1 overflow-y-auto p-3 space-y-4 scrollbar-transparent">
+    {/* sections, row items, etc. */}
+  </div>
+</div>
+```
+
+If the drawer's content has multiple sections, use the same `text-[10px] uppercase tracking-wide text-muted-foreground font-semibold` section heading convention (§5, §7).
+
+### 31.5 Gotcha: `overflow-auto` clips ring-based highlights
+
+The shrunk rows container has `overflow-auto`, which **clips the `ring-1` + `border-accent` highlight on the selected row** if there's no padding between the cards and the scrollable edge. Always add `p-1` (or wider) to the scrollable div:
+
+```tsx
+// WRONG — ring gets clipped on top/left edges
+<div className="overflow-auto space-y-2 pr-1 ...">
+
+// RIGHT — 4px of breathing room all around the cards
+<div className="overflow-auto space-y-2 p-1 ...">
+```
+
+This same fix applies anywhere else in the app where a scrollable container holds cards with outer rings.
+
+### 31.6 Data pattern: mutations return the full refreshed payload
+
+Drawer contents usually show two lists that move items between themselves (linked ↔ available, selected ↔ candidate, etc.). Rather than invalidating and refetching after every mutation, have the **mutation endpoint return the full refreshed `{listA, listB}` payload** and hydrate it directly via `queryClient.setQueryData`. No round-trip, no flicker:
+
+```tsx
+const queryKey = ['commande-fil-stock', commandeId, ligne.IDref_fil_commande]
+
+const linkMut = useMutation({
+  mutationFn: (stockId: number) => apiFetch(`/commandes-fil/${commandeId}/lignes/${ligne.IDref_fil_commande}/stock/${stockId}`, { method: 'PUT' }),
+  onSuccess: (payload: LineStockPayload) => {
+    queryClient.setQueryData(queryKey, payload)
+    onSuccess() // also invalidate the parent detail query so indicators on the row outside refresh
+  },
+})
+```
+
+The `onSuccess` callback bubbles up to the page so the parent `['commande-fil', id]` query (which drives the row's aggregate indicator, e.g. "N lots · X kg") also refreshes.
+
+### 31.7 When to use this vs other drawer patterns
+
+| Situation | Pattern |
+|---|---|
+| Click a row in a list to drill into a related sub-list / pick child items, without navigating away | **§31 in-screen drawer** (this section) |
+| Edit a single entity's full form / certificate viewer / anything where the user needs the full screen | shadcn `<Sheet>` or `<Dialog>` |
+| Stock-fil style "big table with a side panel for the selected row" | **§27 fixed right-side drawer** |
+| Pinned always-visible state display | **§29 sidebar status footer** |
+
+### 31.8 Candidate screens in MPS_NG
+
+This pattern will recur wherever the user needs to "drill into a row to pick related items". Candidates:
+
+- Fournisseurs → Commandes (implemented) — pick stock_fil lots for a ref_fil_commande line
+- Clients → Commandes — pick finished-product lots for a client order line (same shape)
+- Sous-traitants → Commandes — pick semi-finished batches for a subcontract return
+- Production → Tricotage / Teinture / Confection — pick inputs to consume for a production order line
+- Transport → Expéditions — pick ready-to-ship parcels for a delivery line
+
+Every case has the same mechanic: a list of rows in the center panel, and each row needs an ad-hoc sub-picker against another table. This pattern is the canonical answer.

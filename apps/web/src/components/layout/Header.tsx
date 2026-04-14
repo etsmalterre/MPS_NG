@@ -1,10 +1,10 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useLocation, NavLink } from 'react-router-dom'
-import { Menu, Maximize2, Minimize2 } from 'lucide-react'
+import { Menu, Maximize2, Minimize2, LogOut } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Avatar } from '@/components/ui/avatar'
 import { getActiveMenu } from '@/config/navigation'
 import { cn } from '@/lib/utils'
+import { useUser, canSwitchUser } from '@/contexts/UserContext'
 
 interface HeaderProps {
   onMenuClick: () => void
@@ -15,6 +15,36 @@ export function Header({ onMenuClick }: HeaderProps) {
   const location = useLocation()
   const activeMenu = getActiveMenu(location.pathname)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const { user, logout } = useUser()
+  const allowSwitch = canSwitchUser(user)
+  const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const userMenuRef = useRef<HTMLDivElement | null>(null)
+
+  // Close the user menu when clicking outside
+  useEffect(() => {
+    if (!userMenuOpen) return
+    const onClick = (e: MouseEvent) => {
+      if (!userMenuRef.current) return
+      if (!userMenuRef.current.contains(e.target as Node)) {
+        setUserMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onClick)
+    return () => document.removeEventListener('mousedown', onClick)
+  }, [userMenuOpen])
+
+  const userInitials = (() => {
+    if (!user) return '?'
+    const p = (user.prenom?.trim() ?? '')[0] ?? ''
+    const n = (user.nom?.trim() ?? '')[0] ?? ''
+    return (`${p}${n}`.toUpperCase()) || '?'
+  })()
+  const userDisplay = (() => {
+    if (!user) return ''
+    const p = user.prenom?.trim() ?? ''
+    const n = user.nom?.trim() ?? ''
+    return [p, n].filter(Boolean).join(' ') || '—'
+  })()
 
   // Track fullscreen state changes (e.g., when user presses Escape)
   useEffect(() => {
@@ -94,14 +124,42 @@ export function Header({ onMenuClick }: HeaderProps) {
           </span>
         </Button>
 
-        {/* User menu */}
-        <Button variant="ghost" size="icon" className="rounded-full">
-          <Avatar
-            fallback="U"
-            alt="Utilisateur"
-            className="h-8 w-8"
-          />
-        </Button>
+        {/* User menu — avatar with initials, click to reveal name + logout */}
+        <div className="relative" ref={userMenuRef}>
+          <button
+            onClick={() => setUserMenuOpen((o) => !o)}
+            title={userDisplay || 'Utilisateur'}
+            className={cn(
+              'h-9 w-9 rounded-full flex items-center justify-center font-heading font-bold text-sm shadow-sm transition-all',
+              'bg-gold text-gold-foreground',
+              'hover:ring-2 hover:ring-gold/40 hover:shadow-md'
+            )}
+          >
+            {userInitials}
+          </button>
+          {userMenuOpen && user && (
+            <div className="absolute right-0 top-full mt-2 w-56 rounded-lg border border-border bg-white shadow-lg p-3 z-50">
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 rounded-full bg-gold flex items-center justify-center text-gold-foreground font-heading font-bold shadow-sm flex-shrink-0">
+                  {userInitials}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-bold text-primary truncate">{userDisplay}</p>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Utilisateur actif</p>
+                </div>
+              </div>
+              {allowSwitch && (
+                <button
+                  onClick={() => { setUserMenuOpen(false); void logout() }}
+                  className="mt-3 w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-accent/10 hover:text-accent transition-colors border-t border-border/60 pt-3"
+                >
+                  <LogOut className="h-3 w-3" />
+                  Changer d'utilisateur
+                </button>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </header>
   )

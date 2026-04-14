@@ -31,6 +31,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput } from '@/lib/dates'
+import { apiFetch } from '@/lib/api'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -84,14 +85,7 @@ interface Recommandation {
 }
 
 // ── API helpers ────────────────────────────────────────
-
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002/api'
-
-async function apiFetch(path: string, options?: RequestInit) {
-  const res = await fetch(`${API_URL}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...options?.headers } })
-  if (!res.ok) throw new Error('Erreur API')
-  return res.json()
-}
+// Shared apiFetch (credentials: 'include' for cookie auth) — see apps/web/src/lib/api.ts
 
 function useEntreprises() {
   return useQuery<Entreprise[]>({ queryKey: ['entreprises'], queryFn: () => apiFetch('/entreprises') })
@@ -335,7 +329,7 @@ function DetailHeader({ entreprise, isLoading, isEditing, editNom, onEditNomChan
             ) : (
               <>
                 <Button variant="outline" size="icon" className="h-9 w-9" title="Envoyer un email" onClick={onEmailClick}><AtSign className="h-4 w-4" /></Button>
-                <Button variant="outline" size="sm" onClick={onStartEdit}><Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier</Button>
+                <Button variant="gold" size="sm" onClick={onStartEdit}><Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier</Button>
               </>
             )}
           </div>

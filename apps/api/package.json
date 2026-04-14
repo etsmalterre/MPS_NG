@@ -22,7 +22,9 @@
   },
   "dependencies": {
     "@mps/db": "workspace:*",
+    "@react-pdf/renderer": "^4.4.1",
     "@types/multer": "^2.1.0",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
@@ -30,12 +32,15 @@
     "multer": "^2.1.1",
     "odbc": "^2.4.9",
     "postgres": "^3.4.5",
+    "react": "^18.3.1",
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.5",
+    "@types/react": "^18.3.18",
     "@types/supertest": "^6.0.3",
     "cross-env": "^10.1.0",
     "rimraf": "^6.0.1",

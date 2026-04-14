@@ -15,6 +15,10 @@ import {
 export interface SubMenuItem {
   title: string
   href: string
+  /** When true, the entry is only shown to admin users (Vincent Malterre).
+   *  Filtered out of the sidebar render when !user.isAdmin. The page itself
+   *  also enforces the same check, so direct URL access is blocked. */
+  adminOnly?: boolean
 }
 
 export interface MainMenuItem {
@@ -40,7 +44,9 @@ export const settingsItem: MainMenuItem = {
   title: 'Paramètres',
   icon: Settings,
   href: '/settings',
-  submenus: [],
+  submenus: [
+    { title: 'Utilisateurs', href: '/settings/utilisateurs', adminOnly: true },
+  ],
 }
 
 // Main navigation items (between dashboard and settings)
@@ -194,4 +200,5 @@ export const routeTitles: Record<string, string> = {
   '/reseau/entreprises': 'Entreprises',
   // Settings
   '/settings': 'Paramètres',
+  '/settings/utilisateurs': 'Utilisateurs',
 }

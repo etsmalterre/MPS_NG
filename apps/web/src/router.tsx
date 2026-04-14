@@ -21,7 +21,6 @@ import {
   Boxes,
   Box,
   ArrowRightLeft,
-  Settings,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -74,7 +73,7 @@ import { FournisseursCommandes } from '@/pages/FournisseursCommandes'
 import { Entreprises } from '@/pages/Entreprises'
 
 // Settings
-const SettingsPage = createPlaceholder('Paramètres', 'Configuration de l\'application', Settings)
+import { SettingsUtilisateurs } from '@/pages/SettingsUtilisateurs'
 
 export const router = createBrowserRouter([
   {
@@ -131,8 +130,9 @@ export const router = createBrowserRouter([
       { path: 'reseau', element: <Navigate to="/reseau/entreprises" replace /> },
       { path: 'reseau/entreprises', element: <Entreprises /> },
 
-      // Settings
-      { path: 'settings', element: <SettingsPage /> },
+      // Settings (admin-only sub-routes)
+      { path: 'settings', element: <Navigate to="/settings/utilisateurs" replace /> },
+      { path: 'settings/utilisateurs', element: <SettingsUtilisateurs /> },
     ],
   },
 ])

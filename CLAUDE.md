@@ -72,6 +72,8 @@ Implement features screen by screen:
 | API | Express |
 | Database | HFSQL Client/Server (via ODBC) |
 | DB Client | odbc (npm package) |
+| Auth | Cookie-based (HMAC-signed, no JWT lib) — `cookie-parser` |
+| PDF | `@react-pdf/renderer` (server-side, Lato fonts bundled) |
 
 ## Project Structure
 
@@ -79,34 +81,57 @@ Implement features screen by screen:
 MPS_NG/
 ├── apps/
 │   ├── api/           # Express API server
+│   │   ├── data/      # Runtime JSON data (gitignored) — currently permissions.json
 │   │   └── src/
+│   │       ├── assets/
+│   │       │   ├── logo-malterre.png       # Gold-bg script logo (PDF use)
+│   │       │   ├── logo-malterre-wide.png  # Wide horizontal logo (PDF header)
+│   │       │   └── fonts/                  # Lato Light/Regular/Bold/Black TTFs (PDF)
 │   │       ├── lib/
-│   │       │   └── hfsql.ts       # HFSQL ODBC connection singleton + encoding fix
+│   │       │   ├── hfsql.ts                # HFSQL ODBC connection singleton + encoding fix
+│   │       │   ├── auth.ts                 # HMAC cookie sign/verify, attachUser middleware, requireAdmin, isEffectiveAdmin
+│   │       │   ├── permissions.ts          # JSON-file-backed per-user permissions (TODO: migrate to DB)
+│   │       │   ├── permission-keys.ts      # Catalog of permission keys (e.g. create_stock_fil)
+│   │       │   └── pdf/
+│   │       │       ├── theme.ts            # PDF colors (gold #EFA633, French blue, etc.)
+│   │       │       ├── MalterreDocument.tsx       # Reusable doc frame: yellow header, flag stripe, footer
+│   │       │       └── CommandeFournisseurPdf.tsx # Bon de commande layout
 │   │       ├── routes/
 │   │       │   ├── entreprises.ts # Full CRUD: entreprises, contacts, adresses, competences, recommandations
 │   │       │   ├── fournisseurs.ts # Full CRUD: fournisseurs, contacts, adresses + yarn refs, certificates, commandes
-│   │       │   └── stock.ts        # Yarn stock list/detail/patch + per-lot bio/recycle certificate blobs
+│   │       │   ├── stock.ts        # Yarn stock list/detail/patch + per-lot bio/recycle certificate blobs (gated: create_stock_fil)
+│   │       │   ├── commandes-fil.ts # Commandes fournisseurs CRUD + PDF endpoint + stock-link sub-routes + delivery-line aggregates
+│   │       │   ├── auth.ts         # /users (deduped picker list), /me, /login, /logout (admin cookie persistence)
+│   │       │   └── permissions.ts  # /me, /keys, admin /users + PUT /users/:id (per-user permissions)
 │   │       └── index.ts
 │   └── web/           # React frontend
 │       ├── src/
 │       │   ├── components/
+│       │   │   ├── auth/      # UserPickerGate, UserPicker (fullscreen first-visit picker)
 │       │   │   ├── icons/     # Custom SVG icon components (BobineIcon)
 │       │   │   ├── layout/    # AppShell, Sidebar, Header, MobileNav, MasterDetailLayout
 │       │   │   ├── shared/    # PagePlaceholder, etc.
-│       │   │   └── ui/        # Radix-based components
+│       │   │   └── ui/        # Radix-based components (Button has 'gold' variant)
 │       │   ├── config/
-│       │   │   └── navigation.ts
+│       │   │   └── navigation.ts          # SubMenuItem.adminOnly flag for admin-only entries
+│       │   ├── contexts/
+│       │   │   ├── UserContext.tsx        # Cookie auth: useUser, login/logout, canSwitchUser
+│       │   │   └── PermissionsContext.tsx # usePermissions, useHasPermission (effective-admin bypass)
 │       │   ├── hooks/
 │       │   │   └── useResponsiveLayout.ts  # Responsive 3-panel layout (full/compact/stacked)
 │       │   ├── lib/
+│       │   │   ├── api.ts    # SHARED apiFetch with credentials: 'include' — DO NOT duplicate per page
 │       │   │   ├── utils.ts
-│       │   │   └── dates.ts  # HFSQL date helpers (formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql)
+│       │   │   ├── dates.ts  # HFSQL date helpers (formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql)
+│       │   │   └── format.ts # fmtNum (French number formatting with space separator)
 │       │   ├── pages/
 │       │   │   ├── Dashboard.tsx
-│       │   │   ├── Entreprises.tsx  # First real data screen with edit mode
-│       │   │   ├── Fournisseurs.tsx # Supplier management with yarn refs & certificates
-│       │   │   └── FournisseursStock.tsx # Yarn stock — table-centric layout with right slide-in drawer
-│       │   ├── main.tsx
+│       │   │   ├── Entreprises.tsx        # First real data screen with edit mode
+│       │   │   ├── Fournisseurs.tsx       # Supplier management with yarn refs & certificates
+│       │   │   ├── FournisseursStock.tsx  # Yarn stock — table-centric layout (gated: create_stock_fil)
+│       │   │   ├── FournisseursCommandes.tsx # Bons de commande with in-screen drawer + PDF print
+│       │   │   └── SettingsUtilisateurs.tsx  # Admin-only per-user permissions editor
+│       │   ├── main.tsx                   # QueryClient → UserProvider → PermissionsProvider → UserPickerGate → RouterProvider
 │       │   ├── router.tsx
 │       │   └── index.css
 │       ├── tailwind.config.js
@@ -163,7 +188,8 @@ MPS_NG/
    - Livraisons (`/transport/livraisons`)
 9. **Réseau** (`/reseau`)
    - Entreprises (`/reseau/entreprises`) — **first implemented data screen**
-10. **Paramètres** (`/parametres`)
+10. **Paramètres** (`/settings`)
+    - Utilisateurs (`/settings/utilisateurs`) — **admin-only**, per-user permission editor
 
 ## HFSQL ODBC Connection (Web App → HFSQL)
 
@@ -211,7 +237,25 @@ The MPS_NG web app connects to the HFSQL server via ODBC:
 - **Comments**: English
 
 ### Design System
-Follow the MPS design system defined in `.claude/skills/mps_designer/SKILL.md`:
+
+**CRITICAL — read before any UI/UX work**: Before building or modifying any user-facing screen, component, button, tab, card, dialog, or interaction pattern, you MUST invoke the `mps_designer` skill via the Skill tool (`Skill(skill: "mps_designer")`). This is not optional. The skill encodes every UI/UX convention the project has accumulated — colors, layouts, detail-header button trios, placeholder dialogs, drawer patterns, deadline indicators, status footers, etc. — and new additions must conform to it, not reinvent it.
+
+**Invoke the skill when**:
+- Building a new screen or page
+- Adding a button, tab, card, section, badge, or dialog to an existing screen
+- Touching anything the user describes in visual / interaction terms ("add a print button", "make it red", "slide a drawer in", "show a tab for X")
+- Deciding on a color, icon, font size, spacing value, or component shape
+- The user says something like "should we…", "make it look…", or "how should I display…"
+
+**Before inventing a pattern, grep the gold-standard reference screens first**:
+- `apps/web/src/pages/Entreprises.tsx` — first data screen, canonical MasterDetail + edit mode
+- `apps/web/src/pages/Fournisseurs.tsx` — gold-standard for every data-screen pattern (see §2 of the skill)
+- `apps/web/src/pages/FournisseursStock.tsx` — canonical table-centric screen
+- `apps/web/src/pages/FournisseursCommandes.tsx` — canonical in-screen drawer + deadline indicator
+
+If the user asks for something like "add a print button" or "add an email action", always `Grep` for the same action verb across these files **before** writing new code. Existing screens almost always have the pattern — use the exact same icon, the exact same strings, the exact same dialog structure. Do not invent.
+
+**Core visual language** (the skill has the full list):
 - Vivid Gold accent (`#F2B80A`), not orange
 - Medium-dark Blue primary (`#143D6B`), not dark navy
 - Premium card styles with gold borders
@@ -248,6 +292,8 @@ Previously, `apps/web/src/` contained compiled `.js` files alongside `.tsx` sour
 
 - **Hooks before early returns**: All `useState`, `useMutation`, `useMemo`, `useQuery` calls must come before any conditional `return`. React requires stable hook order across renders — violating this causes "Rendered more hooks" crashes in production builds (minified error #310).
 - **Service Worker**: The PWA service worker has a `navigateFallbackDenylist` for `/api/`. Never remove this — without it, the SW intercepts iframe/fetch navigations to `/api/` and serves `index.html`, causing React Router 404 errors.
+- **Shared `apiFetch`**: All fetch calls go through `apps/web/src/lib/api.ts` (sets `credentials: 'include'` for cookie auth). NEVER duplicate `apiFetch` per page file — the cookie won't be sent if `credentials: 'include'` is missing.
+- **Modifier button**: The view-mode "Modifier" button on every detail screen MUST use `<Button variant="gold">`. The gold CTA is the canonical "enter edit mode" affordance — never `variant="outline"` or `variant="default"`. Documented in mps_designer §6.1 + §12.
 
 ### Screen Layout Pattern (MasterDetailLayout)
 
@@ -340,6 +386,16 @@ First fully implemented data screen. 3-panel layout with:
 - **Edit mode**: Inline forms for contacts/adresses, commentaire editable in Info tab, certificate edit dialog with document viewer/upload
 - **HFSQL tables**: `fournisseur`, `adresse`, `contact`, `colori_fil`, `ref_fil`, `certificat`, `type_doc`, `commande_fil`, `ref_fil_commande`
 
+### Fournisseurs Commandes (`/fournisseurs/commandes`)
+**Reference for the in-screen contained drawer pattern** (mps_designer §31). Bons de commande fournisseurs management screen, 3-panel layout with:
+- **Left**: Searchable commandes list with delivery-urgency left edge (red = past/missing date, amber = within 3 days, none = normal). Selection ring + hover ring use the same urgency color or zinc-400 for normal.
+- **Center**: Header (N°/fournisseur, Print + Email gold + **Modifier (gold)** buttons), commande lignes section. Click a line in view mode → in-screen drawer slides up below shrunk lines list (40%) and fills the bottom 60%, listing linked + available stock_fil lots for that ref/colori/fournisseur. Drawer click-to-toggle. Auto-closes when entering edit mode.
+- **Right sidebar**: 4 tabs — Info, Adresses, **Docs** (placeholder), Journal — with `StatusFooter` at the bottom (solid colored bar: blue "En cours" / green "Terminée" with toggle button).
+- **Detail API**: `GET /api/commandes-fil/:id` returns commande + adresses + lignes (with `nb_lots_lies`/`total_kg_lie` aggregates from stock_fil)
+- **Stock linkage endpoints**: `GET /commandes-fil/:cId/lignes/:lId/stock`, `PUT .../stock/:stockId` (link), `DELETE .../stock/:stockId` (unlink) — strict ref/colori/fournisseur matching, single-FK `stock_fil.IDref_fil_commande`
+- **PDF endpoint**: `GET /api/commandes-fil/:id/pdf` — see "PDF generation" section below
+- **HFSQL tables**: `commande_fil`, `ref_fil_commande`, `stock_fil` (linkage), `mode_paiement`, `echeance`, `adresse`, `fournisseur`
+
 ### Fournisseurs Stock (`/fournisseurs/stock`)
 **Reference for table-centric screens** — first screen in MPS_NG that does NOT use `MasterDetailLayout`. Mirrors the legacy `FEN_Stock_fil.wdw` window. Layout:
 - **Toolbar** (top): full-width search input + "Masquer les lots terminés" toggle pinned right (default ON)
@@ -353,6 +409,50 @@ First fully implemented data screen. 3-panel layout with:
   - `GET /api/stock/fil/:id/certif/:type` — serves bio/recycle blob with MIME detection (same pattern as fournisseurs cert serving)
 - **Accented columns (platform-specific SQL)**: Linux uses `SELECT sf.*` and accepts the truncated column names (`termin`/`control`/`certif_recycl`), Windows uses explicit `alias.terminé AS termine` aliases. Both paths are post-processed by `normalizeStockRow()` to the same ASCII keys. See the "Accented column names through bridge" note above for the full picture. The route also has a `repairAliased()` helper that runs targeted `CONVERT(col USING 'UTF-8')` on aliased text fields when U+FFFD is detected.
 - **HFSQL tables**: `stock_fil`, `ref_fil`, `colori_fil`, `fournisseur`
+
+## Authentication (cookie-based picker)
+
+Replaces the legacy WinDev hostname → user lookup. Browsers cannot read the client hostname, so we use a **fullscreen first-visit picker** that lists every user from `utilisateur` (deduped by `(prenom, nom)` to one tile per person) and stores the picked `IDutilisateur` in a signed HttpOnly cookie. Subsequent visits are zero-click.
+
+- **Cookie helpers**: `apps/api/src/lib/auth.ts` — `signUserId`, `verifyUserCookie`, `attachUser()` middleware (best-effort: attaches `req.userId` and `req.adminId`, never 401s), `requireAdmin(req, res)` route guard, `isEffectiveAdmin(req)` helper, `isAdminUtilisateur(u)` (currently hardcoded to Vincent Malterre).
+- **Cookies**: `mps_uid` (current acting user) + `mps_uid_admin` (original admin user — persists across switches so an admin can always switch back). Both signed with HMAC-SHA256 + `AUTH_COOKIE_SECRET` (env var, required at runtime; lazy-read because ESM imports hoist before `dotenv.config()`).
+- **Routes**: `apps/api/src/routes/auth.ts` — `GET /api/auth/users` (deduped picker list, public), `GET /api/auth/me` (current user + `isAdmin` flag), `POST /api/auth/login` (sets both cookies; admin cookie persists if already present, else established only when picked user is admin), `POST /api/auth/logout` (clears `mps_uid` only, **preserves `mps_uid_admin`** so admins return to admin mode after the next pick).
+- **Frontend context**: `apps/web/src/contexts/UserContext.tsx` — `useUser()` hook + `canSwitchUser(user)` helper (checks `user.isAdmin === true`).
+- **First-visit picker**: `apps/web/src/components/auth/UserPicker.tsx` — fullscreen takeover with the gold Malterre header. `UserPickerGate` mounts inside `main.tsx` between `UserProvider` and `RouterProvider`.
+- **Sidebar/header**: User info + initials avatar lives in the **top-right header** popover (avatar uses `bg-gold` + `text-gold-foreground`). The sidebar has NO user chip. The avatar popover shows the name + a "Changer d'utilisateur" button **only when `canSwitchUser(user)` is true** (admin-only — Vincent).
+- **Effective vs session admin**: `isAdmin` (session-level, admin cookie present) is true even when an admin impersonates another user — keeps the "Changer d'utilisateur" button visible. `isEffectiveAdmin` (`req.userId === req.adminId`) is **false during impersonation** — this is what gates permission bypasses, the Settings menu, and the `requireAdmin` middleware. Impersonation = "see exactly what they see".
+- **CORS**: `index.ts` reads `CORS_ORIGIN` env var (comma-separated origin list), passes to `cors({ origin: [...], credentials: true })`. **Cannot be `*` with credentials.** Default dev = `http://localhost:5174`.
+- **CRITICAL — shared `apiFetch`**: All web fetch calls MUST go through `apps/web/src/lib/api.ts` which sets `credentials: 'include'`. **Never duplicate `apiFetch` per page.** The shared helper has `<T = any>` so existing untyped call sites keep working.
+
+## Permissions (per-user, JSON-backed)
+
+Per-user action permissions managed from the admin-only **Settings → Utilisateurs** screen. **Default closed** — non-admins with no permission record cannot perform gated actions. **Effective admins (Vincent acting as himself, NOT impersonating)** bypass all checks automatically.
+
+- **Storage**: `apps/api/data/permissions.json` (gitignored). Shape: `{ version: 1, users: { [IDutilisateur]: PermissionKey[] } }`. Created lazily on first write, cached in memory at module load, atomic writes via `.tmp` + rename.
+- **⚠️ TODO migration**: Once the data migration phase is complete, move this to a real DB table. The plan + migration recipe live in the user's plan file (`zesty-singing-waterfall.md`) and `apps/api/src/lib/permissions.ts` has a `// TODO migration:` comment at the top.
+- **Catalog**: `apps/api/src/lib/permission-keys.ts` exports `PERMISSION_KEYS = [{ key, label, description, category }]`. **Adding a new gated action requires 3 edits**: (1) append to `PERMISSION_KEYS`, (2) gate the API route via `userHasPermission(req.userId, isEffectiveAdmin(req), 'key')`, (3) hide the UI element via `useHasPermission('key')`.
+- **Currently gated**: `create_stock_fil` only. The **`POST /api/stock/fil`** endpoint and the **"Nouveau" button** in `FournisseursStock.tsx` are both gated.
+- **Lib helpers**: `apps/api/src/lib/permissions.ts` — `loadPermissions`, `getUserPermissions`, `setUserPermissions`, `userHasPermission(userId, isEffectiveAdmin, key)` (admin bypass inside), `getAllPermissions`.
+- **Routes**: `apps/api/src/routes/permissions.ts` — `GET /me` (returns `{ isAdmin, isEffectiveAdmin, granted }`), `GET /keys` (catalog), `GET /users` (admin-only), `PUT /users/:id` (admin-only).
+- **Frontend context**: `apps/web/src/contexts/PermissionsContext.tsx` — `usePermissions()` exposes `granted`, `isAdmin`, `isEffectiveAdmin`, `has(key)`, `refresh()`. `useHasPermission('key')` is the convenience hook for gated UI. **`has()` uses `isEffectiveAdmin` for bypass — admins who impersonate lose their bypass**, matching the "see as user X" UX.
+- **Admin guard**: `requireAdmin` middleware checks `isEffectiveAdmin(req)` (NOT just `req.adminId !== undefined`). Sidebar `visibleSettings` filter and the `SettingsUtilisateurs` page guard both use `isEffectiveAdmin` from `usePermissions()` — when Vincent impersonates someone, the Settings menu vanishes and direct URL hits redirect to `/`.
+- **adminOnly submenu flag**: `SubMenuItem.adminOnly?: boolean` in `apps/web/src/config/navigation.ts`. Sidebar filters them out when `!isEffectiveAdmin`. Settings menu hides entirely when no submenus remain.
+
+## PDF generation
+
+Server-side PDF rendering for documents (`Bon de commande` shipped, `Devis` / `Facture` / `Bon de livraison` slot in next).
+
+- **Library**: `@react-pdf/renderer` (pure Node, no Chromium). Lato fonts (Light/Regular/Bold/Black) bundled in `apps/api/src/assets/fonts/`. Logo bundled in `apps/api/src/assets/logo-malterre-wide.png`.
+- **Reusable base**: `apps/api/src/lib/pdf/MalterreDocument.tsx` — every MPS PDF wraps content in this. Provides yellow Malterre header band (`#EFA633`) with logo + document title block (top-right, white text), thin dark-blue separator, content area, footer band with horizontal tricolore stripe + legal info.
+- **Specific docs**: `apps/api/src/lib/pdf/CommandeFournisseurPdf.tsx` — line items table (framed, rounded), totals box, conditions de paiement metadata card, optional commentaire card, Adresse de Livraison card. Uses the reusable `AddressCard` and `MetadataCard` exported from `MalterreDocument.tsx` (which also exports inline icon SVGs: `MailIcon`, `CreditCardIcon`, `CalendarIcon`, `ClockIcon`, `TruckIcon`, `FactoryIcon`, `HashIcon`, `MapPinIcon`, `MessageSquareIcon`).
+- **Endpoint**: `GET /api/commandes-fil/:id/pdf` — fetches the commande detail, renders via `renderToBuffer`, streams as `application/pdf` inline. The frontend Print button calls `window.open(${API_URL}/commandes-fil/${id}/pdf, '_blank')`.
+- **Theme**: `apps/api/src/lib/pdf/theme.ts` — gold `#EFA633`, French blue `#002395`, plus `bgCream`, `bgFlagWhite`, etc. Company info (legal name, address, SIRET, TVA, capital, RCS, payment notice) lives here too.
+- **Critical gotchas**:
+  - **`Font.register` needs file path strings, not Buffers** — `tsx watch` + ESM hoists imports before `dotenv.config()`, so any auth/font loading that depends on env vars must read them lazily.
+  - **`textTransform: 'uppercase'` strips accents** in `@react-pdf/renderer` — pre-uppercase strings (`'RÉFÉRENCE'`) instead of relying on the CSS transform.
+  - **Stacking `<Text>` with very different font sizes overlaps** — wrap each in its own `<View>` with `width: '100%'` to force clean stacking.
+  - **`<Page paddingBottom>` is respected by the wrap engine; inner `<View paddingBottom>` is not** — for absolute footers, set padding on the Page so flow content stops before the footer area.
+  - **`textTransform` accent stripping affects every label** — the canonical pattern is to pre-uppercase strings + drop the textTransform style. See `MalterreDocument.tsx`.
 
 ## Business Domain (Quick Reference)
 

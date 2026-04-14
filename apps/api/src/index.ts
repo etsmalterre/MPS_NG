@@ -6,23 +6,42 @@ dotenv.config({ path: '.env' }) // fallback / overrides
 import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
+import cookieParser from 'cookie-parser'
 import { entreprisesRouter } from './routes/entreprises.js'
 import { fournisseursRouter } from './routes/fournisseurs.js'
 import { commandesFilRouter } from './routes/commandes-fil.js'
 import { stockRouter } from './routes/stock.js'
+import { authRouter } from './routes/auth.js'
+import { permissionsRouter } from './routes/permissions.js'
+import { attachUser } from './lib/auth.js'
 import { closeConnection } from './lib/hfsql-auto.js'
 
 const app = express()
 const PORT = process.env.PORT || 8080
+// CORS_ORIGIN accepts a single URL or a comma-separated list. With
+// `credentials: true`, we cannot use '*' — every allowed origin must be
+// explicit, so we parse the list and pass an array to the cors middleware.
+const CORS_ORIGINS = (process.env.CORS_ORIGIN || 'http://localhost:5174')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
 
 app.use(helmet())
-app.use(cors())
+// CORS must set `credentials: true` for the browser to send/receive cookies
+// cross-origin. With credentials, `origin` must be explicit (not '*').
+app.use(cors({ origin: CORS_ORIGINS, credentials: true }))
 app.use(express.json())
+app.use(cookieParser())
+// Best-effort: attaches req.userId when a valid signed cookie is present.
+// Never 401s — routes keep working without a cookie, same as before.
+app.use(attachUser())
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', app: 'MPS API', version: '0.1.0' })
 })
 
+app.use('/api/auth', authRouter)
+app.use('/api/permissions', permissionsRouter)
 app.use('/api/entreprises', entreprisesRouter)
 app.use('/api/fournisseurs', fournisseursRouter)
 app.use('/api/commandes-fil', commandesFilRouter)

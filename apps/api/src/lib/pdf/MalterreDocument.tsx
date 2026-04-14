@@ -1,0 +1,522 @@
+// Reusable Malterre-branded PDF document frame. Every MPS document PDF
+// (commande fournisseur, devis, facture, bon de livraison, etc.) renders its
+// content inside this wrapper so the header, footer, and brand chrome stay
+// identical across the company.
+//
+// Design language matches the HTML template the user approved:
+//  - Full-width yellow header band with logo + company info on white text
+//  - French flag stripe (bleu-blanc-rouge) at the bottom of the header
+//  - Gold-accent document title in the body
+//  - Cream-tinted address block with a gold left border
+//  - Centered legal footer at the bottom of the page
+
+import React from 'react'
+import { Document, Page, View, Text, Image, StyleSheet, Font, Svg, Path } from '@react-pdf/renderer'
+import * as path from 'path'
+import * as fs from 'fs'
+import { fileURLToPath } from 'url'
+import { colors, company, sizes } from './theme.js'
+
+// ── Inline icon components (lucide-style line SVGs) ─────
+// Reusable from any specific document via the named exports below.
+
+interface IconProps {
+  size?: number
+  color?: string
+  strokeWidth?: number
+}
+
+export function MessageSquareIcon({ size = 11, color = colors.primary, strokeWidth = 1.8 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <Path
+        d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"
+        stroke={color}
+        strokeWidth={strokeWidth}
+        fill="none"
+      />
+    </Svg>
+  )
+}
+
+export function CreditCardIcon({ size = 11, color = colors.primary, strokeWidth = 1.8 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <Path d="M2 5h20a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z" stroke={color} strokeWidth={strokeWidth} fill="none" />
+      <Path d="M1 10h22" stroke={color} strokeWidth={strokeWidth} fill="none" />
+    </Svg>
+  )
+}
+
+export function CalendarIcon({ size = 11, color = colors.primary, strokeWidth = 1.8 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <Path d="M3 5h18a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z" stroke={color} strokeWidth={strokeWidth} fill="none" />
+      <Path d="M2 10h20" stroke={color} strokeWidth={strokeWidth} fill="none" />
+      <Path d="M8 3v4" stroke={color} strokeWidth={strokeWidth} fill="none" />
+      <Path d="M16 3v4" stroke={color} strokeWidth={strokeWidth} fill="none" />
+    </Svg>
+  )
+}
+
+export function ClockIcon({ size = 11, color = colors.primary, strokeWidth = 1.8 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <Path
+        d="M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0z"
+        stroke={color}
+        strokeWidth={strokeWidth}
+        fill="none"
+      />
+      <Path d="M12 6v6l4 2" stroke={color} strokeWidth={strokeWidth} fill="none" />
+    </Svg>
+  )
+}
+
+export function TruckIcon({ size = 12, color = colors.primary, strokeWidth = 1.8 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <Path d="M1 4h13v12H1z" stroke={color} strokeWidth={strokeWidth} fill="none" />
+      <Path d="M14 8h4l4 5v3h-8" stroke={color} strokeWidth={strokeWidth} fill="none" />
+      <Path d="M7 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0z" stroke={color} strokeWidth={strokeWidth} fill="none" />
+      <Path d="M19 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0z" stroke={color} strokeWidth={strokeWidth} fill="none" />
+    </Svg>
+  )
+}
+
+export function FactoryIcon({ size = 12, color = colors.primary, strokeWidth = 1.8 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <Path
+        d="M2 20a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8l-7 5V8l-7 5V4a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2z"
+        stroke={color}
+        strokeWidth={strokeWidth}
+        fill="none"
+      />
+      <Path d="M7 18h1" stroke={color} strokeWidth={strokeWidth} fill="none" />
+      <Path d="M12 18h1" stroke={color} strokeWidth={strokeWidth} fill="none" />
+      <Path d="M17 18h1" stroke={color} strokeWidth={strokeWidth} fill="none" />
+    </Svg>
+  )
+}
+
+// Maps a metadata icon kind to the right SVG component.
+type IconKind = 'card' | 'calendar' | 'clock' | 'truck' | 'message' | 'factory'
+function ResolveIcon({ kind, ...props }: { kind: IconKind } & IconProps) {
+  switch (kind) {
+    case 'card': return <CreditCardIcon {...props} />
+    case 'calendar': return <CalendarIcon {...props} />
+    case 'clock': return <ClockIcon {...props} />
+    case 'truck': return <TruckIcon {...props} />
+    case 'message': return <MessageSquareIcon {...props} />
+    case 'factory': return <FactoryIcon {...props} />
+  }
+}
+
+// ── Asset loading ────────────────────────────────────────
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const ASSETS = path.resolve(__dirname, '../../assets')
+
+// Wide horizontal logo (white text on transparent) — designed to sit on the
+// yellow header band.
+const LOGO_BUFFER: Buffer = fs.readFileSync(path.join(ASSETS, 'logo-malterre-wide.png'))
+
+// Register Lato (matches the app's body font in apps/web/src/index.css).
+Font.register({
+  family: 'Lato',
+  fonts: [
+    { src: path.join(ASSETS, 'fonts/Lato-Light.ttf'), fontWeight: 300 },
+    { src: path.join(ASSETS, 'fonts/Lato-Regular.ttf'), fontWeight: 400 },
+    { src: path.join(ASSETS, 'fonts/Lato-Bold.ttf'), fontWeight: 700 },
+    { src: path.join(ASSETS, 'fonts/Lato-Black.ttf'), fontWeight: 900 },
+  ],
+})
+
+Font.registerHyphenationCallback((word) => [word])
+
+// ── Styles ───────────────────────────────────────────────
+
+const styles = StyleSheet.create({
+  page: {
+    // Page padding: 0 top/horizontal so the yellow header band reaches the
+    // edges, and 100pt bottom so flow content stops before the absolute
+    // footer area. The Page's bottom padding IS respected by the wrapping
+    // engine, unlike inner padding which just adds visual whitespace.
+    paddingTop: 0,
+    paddingBottom: 100,
+    paddingHorizontal: 0,
+    fontSize: sizes.fontBase,
+    color: colors.text,
+    fontFamily: 'Lato',
+    fontWeight: 400,
+    lineHeight: 1.45,
+    flexDirection: 'column',
+  },
+
+  // ── Yellow header band ──────────────────────────────
+  header: {
+    backgroundColor: colors.gold,
+    paddingHorizontal: 36,
+    paddingTop: 18,
+    paddingBottom: 14,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  logo: {
+    width: 160,
+    height: 50,
+    objectFit: 'contain',
+  },
+  // Document title block sits in the top-right of the yellow header band.
+  // White text on the gold background. Each line is wrapped in its own View
+  // so @react-pdf stacks them cleanly — flex-stacking Text children with very
+  // different font sizes causes them to overlap into the same Y-line.
+  headerDocBlock: {
+    flexDirection: 'column',
+    alignItems: 'flex-end',
+    width: 280,
+  },
+  headerDocTypeRow: {
+    width: '100%',
+  },
+  headerDocType: {
+    width: '100%',
+    textAlign: 'right',
+    fontSize: 18,
+    fontWeight: 900,
+    color: colors.white,
+    letterSpacing: 1.2,
+    lineHeight: 1.15,
+  },
+  headerDocRefRow: {
+    width: '100%',
+    marginTop: 4,
+  },
+  headerDocRef: {
+    width: '100%',
+    textAlign: 'right',
+    fontSize: 16,
+    fontWeight: 900,
+    color: colors.white,
+    letterSpacing: 0.6,
+  },
+  headerDocDateRow: {
+    width: '100%',
+    marginTop: 8,
+  },
+  headerDocDate: {
+    width: '100%',
+    textAlign: 'right',
+    fontSize: sizes.fontSm,
+    color: colors.white,
+  },
+
+
+  // Thin dark blue bar at the bottom of the yellow header band
+  topDarkBar: {
+    height: 1.5,
+    backgroundColor: colors.primaryDark,
+  },
+
+  // ── Content area ────────────────────────────────────
+  content: {
+    paddingHorizontal: 36,
+    paddingTop: 32,
+    flexGrow: 1,
+    flexDirection: 'column',
+  },
+
+
+  // ── Top row: two card slots side-by-side ────────────
+  topRow: {
+    flexDirection: 'row',
+    gap: 14,
+    marginBottom: 32,
+    alignItems: 'stretch',
+  },
+  topRowSlot: {
+    flex: 1,
+    flexDirection: 'column',
+  },
+
+  // Reusable card frame — cream bg, gold left edge, thin border on all
+  // sides, rounded corners. Used by AddressCard and MetadataCard.
+  card: {
+    backgroundColor: colors.bgCream,
+    borderWidth: 0.75,
+    borderColor: colors.borderStrong,
+    borderStyle: 'solid',
+    borderLeftWidth: 2,
+    borderLeftColor: colors.gold,
+    borderLeftStyle: 'solid',
+    borderRadius: 6,
+    padding: 14,
+  },
+  // Applied when the card sits inside a flex row that needs equal heights —
+  // the card grows to fill the slot's available space.
+  cardStretch: {
+    flexGrow: 1,
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 6,
+  },
+  cardTitle: {
+    fontSize: sizes.fontXs,
+    color: colors.primary,
+    fontWeight: 900,
+    letterSpacing: 0.5,
+  },
+  cardName: {
+    fontSize: sizes.fontBase,
+    fontWeight: 900,
+    color: colors.text,
+    marginBottom: 1,
+  },
+  cardLine: {
+    fontSize: sizes.fontBase,
+    color: colors.text,
+    lineHeight: 1.4,
+  },
+
+  // Metadata card rows: icon · label · value, vertically stacked
+  metaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 3,
+  },
+  metaIconBox: {
+    width: 14,
+    height: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  metaLabel: {
+    fontSize: sizes.fontBase,
+    color: colors.muted,
+    fontWeight: 700,
+    flex: 1,
+  },
+  metaValue: {
+    fontSize: sizes.fontBase,
+    color: colors.text,
+    fontWeight: 700,
+    textAlign: 'right',
+  },
+  // ── Footer ──────────────────────────────────────────
+  // Full-width gray band at the bottom of every page. A thin tricolore strip
+  // sits at the very top of the band, with a transparent middle so the gray
+  // footer background shows through as the "white" of the French flag.
+  // `fixed` so it appears on every page of a multi-page document.
+  footer: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: colors.bgMuted,
+    flexDirection: 'column',
+    alignItems: 'stretch',
+  },
+  footerStripe: {
+    flexDirection: 'row',
+    height: 3,
+  },
+  footerStripeBlue: {
+    flex: 1,
+    backgroundColor: colors.flagBlue,
+  },
+  footerStripeMiddle: {
+    flex: 1,
+    backgroundColor: colors.bgFlagWhite,
+  },
+  footerStripeRed: {
+    flex: 1,
+    backgroundColor: colors.flagRed,
+  },
+  footerInner: {
+    paddingHorizontal: 36,
+    paddingTop: 10,
+    paddingBottom: 14,
+    alignItems: 'center',
+  },
+  footerCompany: {
+    fontSize: 7.5,
+    color: colors.text,
+    fontWeight: 900,
+    textAlign: 'center',
+    marginBottom: 1,
+  },
+  footerLegal: {
+    fontSize: 7.5,
+    color: colors.muted,
+    textAlign: 'center',
+    lineHeight: 1.45,
+  },
+  footerNotice: {
+    fontSize: 7,
+    color: colors.subtle,
+    textAlign: 'center',
+    marginTop: 2,
+  },
+})
+
+// ── Types ────────────────────────────────────────────────
+
+export interface AddressBlockData {
+  /** Section heading e.g. "Fournisseur", "Adresse de Livraison" */
+  title: string
+  /** Strong first line — usually the company name */
+  name: string
+  /** Address lines below the name */
+  lines: string[]
+  /** Optional icon for the card title */
+  icon?: IconKind
+}
+
+export interface MetadataCardData {
+  /** Section heading e.g. "Conditions" */
+  title: string
+  /** Rows: { icon, label, value } */
+  items: Array<{
+    icon: IconKind
+    label: string
+    value: string
+  }>
+}
+
+export interface MalterreDocumentProps {
+  /** Title-cased doc type rendered in the body, e.g. "Bon de commande" */
+  documentType: string
+  /** Reference label, e.g. "BC-672" */
+  reference: string
+  /** Free-text date (long form, e.g. "14 Avril 2026") */
+  documentDate: string
+  /** Top-left card — typically the supplier or client address */
+  topLeftAddress: AddressBlockData
+  /** Top-right card — metadata icon list (paiement, échéance, etc.) */
+  topRightInfo: MetadataCardData
+  /** PDF document title (browser tab) */
+  title?: string
+  /** Body sections — table, totals, etc. */
+  children: React.ReactNode
+}
+
+// ── Reusable card components (exported) ────────────────
+// Both accept an optional `stretch` prop that applies `flex: 1` so the card
+// fills its parent flex slot (used in the top row to equalize card heights).
+
+export function AddressCard({ data, stretch }: { data: AddressBlockData; stretch?: boolean }) {
+  return (
+    <View style={[styles.card, stretch ? styles.cardStretch : null]}>
+      <View style={styles.cardHeader}>
+        {data.icon ? <ResolveIcon kind={data.icon} /> : null}
+        <Text style={styles.cardTitle}>{data.title.toUpperCase()}</Text>
+      </View>
+      <Text style={styles.cardName}>{data.name}</Text>
+      {data.lines.map((l, i) => (
+        <Text key={i} style={styles.cardLine}>{l}</Text>
+      ))}
+    </View>
+  )
+}
+
+export function MetadataCard({ data, stretch }: { data: MetadataCardData; stretch?: boolean }) {
+  return (
+    <View style={[styles.card, stretch ? styles.cardStretch : null]}>
+      {data.items.map((item, i) => (
+        <View key={i} style={styles.metaRow}>
+          <View style={styles.metaIconBox}>
+            <ResolveIcon kind={item.icon} />
+          </View>
+          <Text style={styles.metaLabel}>{item.label}</Text>
+          <Text style={styles.metaValue}>{item.value}</Text>
+        </View>
+      ))}
+    </View>
+  )
+}
+
+// ── Component ────────────────────────────────────────────
+
+export function MalterreDocument({
+  documentType,
+  reference,
+  documentDate,
+  topLeftAddress,
+  topRightInfo,
+  title,
+  children,
+}: MalterreDocumentProps) {
+  return (
+    <Document
+      title={title ?? `${documentType} ${reference}`}
+      author={company.legalName}
+    >
+      <Page size="A4" style={styles.page}>
+        {/* Yellow header band: logo on the left, document title in the
+            top-right (on the gold background, in white text). Each line is
+            wrapped in its own View so they stack cleanly without overlapping. */}
+        <View style={styles.header}>
+          <Image src={LOGO_BUFFER} style={styles.logo} />
+          <View style={styles.headerDocBlock}>
+            <View style={styles.headerDocTypeRow}>
+              <Text style={styles.headerDocType}>{documentType.toUpperCase()}</Text>
+            </View>
+            <View style={styles.headerDocRefRow}>
+              <Text style={styles.headerDocRef}>{reference}</Text>
+            </View>
+            {documentDate ? (
+              <View style={styles.headerDocDateRow}>
+                <Text style={styles.headerDocDate}>Date : {documentDate}</Text>
+              </View>
+            ) : null}
+          </View>
+        </View>
+
+        {/* Thin dark blue bar separating the yellow header from the body */}
+        <View style={styles.topDarkBar} />
+
+        {/* Content body */}
+        <View style={styles.content}>
+          {/* Top row: address card on the left, metadata card on the right.
+              Both cards stretch to the height of the taller one. */}
+          <View style={styles.topRow}>
+            <View style={styles.topRowSlot}>
+              <AddressCard data={topLeftAddress} stretch />
+            </View>
+            <View style={styles.topRowSlot}>
+              <MetadataCard data={topRightInfo} stretch />
+            </View>
+          </View>
+
+          {/* Body — specific document content (table + totals) */}
+          {children}
+        </View>
+
+        {/* Footer: gray band with thin tricolore strip at the very top.
+            Hairline borders above and below the strip frame it cleanly. */}
+        <View style={styles.footer} fixed>
+          <View style={styles.footerStripe}>
+            <View style={styles.footerStripeBlue} />
+            <View style={styles.footerStripeMiddle} />
+            <View style={styles.footerStripeRed} />
+          </View>
+          <View style={styles.footerInner}>
+            <Text style={styles.footerCompany}>
+              {company.legalName} - Au capital de {company.capital} - RCS {company.rcs}
+            </Text>
+            <Text style={styles.footerLegal}>
+              SIRET : {company.siret} - N° TVA Intracommunautaire : {company.vat}
+            </Text>
+            <Text style={styles.footerNotice}>{company.paymentNotice}</Text>
+          </View>
+        </View>
+      </Page>
+    </Document>
+  )
+}

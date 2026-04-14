@@ -44,3 +44,6 @@ tmpclaude-*
 data_migration/data/
 data_migration/schemas/
 data_migration/logs/
+
+# API runtime data (permissions JSON, future config files, etc.)
+apps/api/data/

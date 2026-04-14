@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -5,6 +6,8 @@ import { mainNavigation, dashboardItem, settingsItem, type MainMenuItem } from '
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { ContextMenu, type ContextMenuItem } from '@/components/ui/context-menu'
+import { useUser } from '@/contexts/UserContext'
+import { usePermissions } from '@/contexts/PermissionsContext'
 
 interface SidebarProps {
   collapsed: boolean
@@ -83,10 +86,24 @@ function NavItem({ item, collapsed, pathname, onNavigate }: NavItemProps) {
 export function Sidebar({ collapsed, onToggle, className }: SidebarProps) {
   const location = useLocation()
   const navigate = useNavigate()
+  useUser() // ensures the sidebar re-renders when the user context updates
+  const { isEffectiveAdmin } = usePermissions()
 
   const handleNavigate = (href: string) => {
     navigate(href)
   }
+
+  // Filter out adminOnly submenus when the current user is not the EFFECTIVE
+  // admin (i.e. they are NOT currently acting as the admin). When an admin
+  // impersonates another user, this drops to false and the Settings menu
+  // disappears — matching the "see exactly what they see" UX. The admin can
+  // still switch back to themselves via the header avatar's "Changer
+  // d'utilisateur" button to regain access.
+  const visibleSettings = useMemo<MainMenuItem | null>(() => {
+    const visible = settingsItem.submenus.filter((s) => isEffectiveAdmin || !s.adminOnly)
+    if (visible.length === 0) return null
+    return { ...settingsItem, submenus: visible }
+  }, [isEffectiveAdmin])
 
   return (
     <aside
@@ -135,15 +152,18 @@ export function Sidebar({ collapsed, onToggle, className }: SidebarProps) {
         </nav>
       </ScrollArea>
 
-      {/* Settings at bottom */}
-      <div className="border-t border-white/10 px-2 py-2">
-        <NavItem
-          item={settingsItem}
-          collapsed={collapsed}
-          pathname={location.pathname}
-          onNavigate={handleNavigate}
-        />
-      </div>
+      {/* Settings at bottom — only rendered when at least one submenu is
+          visible to the current user (admin-only entries are hidden for non-admins) */}
+      {visibleSettings && (
+        <div className="border-t border-white/10 px-2 py-2">
+          <NavItem
+            item={visibleSettings}
+            collapsed={collapsed}
+            pathname={location.pathname}
+            onNavigate={handleNavigate}
+          />
+        </div>
+      )}
 
       {/* Collapse Toggle */}
       <div className="border-t border-white/10 p-2">

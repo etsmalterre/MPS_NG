@@ -1,5 +1,7 @@
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
 import { query, queryRaw, fixEncoding } from '../lib/hfsql-auto.js'
+import { userHasPermission } from '../lib/permissions.js'
+import { isEffectiveAdmin } from '../lib/auth.js'
 
 export const stockRouter: RouterType = Router()
 
@@ -193,6 +195,23 @@ stockRouter.get('/fil/:id', async (req: Request, res: Response) => {
 
 // POST /api/stock/fil - Create a new lot de fil
 stockRouter.post('/fil', async (req: Request, res: Response) => {
+  // Permission gate: must have create_stock_fil (effective admins bypass).
+  // An admin who is impersonating another user does NOT bypass — they see
+  // exactly what the impersonated user sees.
+  if (req.userId === undefined) {
+    res.status(401).json({ error: 'not authenticated' })
+    return
+  }
+  const allowed = await userHasPermission(
+    req.userId,
+    isEffectiveAdmin(req),
+    'create_stock_fil',
+  )
+  if (!allowed) {
+    res.status(403).json({ error: 'permission denied: create_stock_fil' })
+    return
+  }
+
   try {
     const body = req.body ?? {}
     const IDfournisseur = parseInt(String(body.IDfournisseur), 10)

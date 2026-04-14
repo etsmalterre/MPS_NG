@@ -19,6 +19,13 @@ import {
   Leaf,
   CheckCircle2,
   Clock,
+  Package,
+  Link2,
+  Unlink,
+  Printer,
+  Mail,
+  AtSign,
+  FileText,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -27,6 +34,8 @@ import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { BobineIcon } from '@/components/icons/BobineIcon'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
+import { fmtNum } from '@/lib/format'
+import { apiFetch, API_URL } from '@/lib/api'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -40,6 +49,7 @@ interface CommandeListRow {
   total_kg: number
   total_eur: number
   nb_lignes: number
+  earliest_delivery: string | null
 }
 
 interface LigneCommande {
@@ -55,6 +65,34 @@ interface LigneCommande {
   ref_fil: string | null
   colori_reference: string | null
   ref_fil_bio: number | null
+  nb_lots_lies?: number
+  total_kg_lie?: number
+}
+
+interface StockLotLite {
+  IDstock_fil: number
+  IDfournisseur: number
+  IDref_fil: number
+  IDcolori_fil: number
+  IDref_fil_commande: number | null
+  stock: number | null
+  stock_initial: number | null
+  lot: string | null
+  lot_frs: string | null
+  emplacement: string | null
+  date_entree: string | null
+  niveau: number | null
+  termine: number | null
+  controle: number | null
+  bio: number | null
+  ref_fil: string | null
+  colori_reference: string | null
+  fournisseur_nom: string | null
+}
+
+interface LineStockPayload {
+  linked: StockLotLite[]
+  available: StockLotLite[]
 }
 
 interface AdresseLite {
@@ -120,14 +158,7 @@ interface AdresseLookup extends AdresseLite {
 }
 
 // ── API helpers ────────────────────────────────────────
-
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002/api'
-
-async function apiFetch(path: string, options?: RequestInit) {
-  const res = await fetch(`${API_URL}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...options?.headers } })
-  if (!res.ok) throw new Error('Erreur API')
-  return res.json()
-}
+// Shared apiFetch + API_URL — see apps/web/src/lib/api.ts
 
 // ── Shared styling ─────────────────────────────────────
 
@@ -137,8 +168,28 @@ const editSectionClass = 'border-l-4 border-l-accent/70 bg-accent/[0.03]'
 // ── Status helpers ─────────────────────────────────────
 
 function CommandeEtatBadge({ etat, className }: { etat: number | null; className?: string }) {
-  if (etat === 1) return <Badge className={cn('badge-success text-[10px] py-0 gap-1', className)}><CheckCircle2 className="h-2.5 w-2.5" />Terminée</Badge>
-  return <Badge className={cn('badge-warning text-[10px] py-0 gap-1', className)}><Clock className="h-2.5 w-2.5" />En cours</Badge>
+  if (etat === 1) return <Badge variant="success" className={cn('text-[10px] py-0 gap-1', className)}><CheckCircle2 className="h-2.5 w-2.5" />Terminée</Badge>
+  return <Badge variant="default" className={cn('text-[10px] py-0 gap-1', className)}><Clock className="h-2.5 w-2.5" />En cours</Badge>
+}
+
+// Returns a delivery-urgency flag based on the earliest line delivery date.
+// 'late'  = today >= delivery date, OR no delivery date specified (red left edge)
+// 'soon'  = delivery date is within the next 3 days (amber left edge)
+// null    = not urgent, or commande is terminée
+function deliveryUrgency(earliestHfsql: string | null, etat: number | null): 'late' | 'soon' | null {
+  if (etat === 1) return null
+  if (!earliestHfsql || !/^\d{8}$/.test(earliestHfsql)) return 'late'
+  const y = Number(earliestHfsql.slice(0, 4))
+  const m = Number(earliestHfsql.slice(4, 6)) - 1
+  const d = Number(earliestHfsql.slice(6, 8))
+  const target = new Date(y, m, d)
+  target.setHours(0, 0, 0, 0)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const diffDays = Math.round((target.getTime() - today.getTime()) / 86_400_000)
+  if (diffDays <= 0) return 'late'
+  if (diffDays <= 3) return 'soon'
+  return null
 }
 
 function etatColors(etat: number | null) {
@@ -165,6 +216,8 @@ export function FournisseursCommandes() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'en_cours' | 'terminee'>('en_cours')
   const [isEditing, setIsEditing] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
+  const [stockDrawerLineId, setStockDrawerLineId] = useState<number | null>(null)
+  const [emailModalOpen, setEmailModalOpen] = useState(false)
 
   // Edit-mode draft state for the header
   const [editDateCommande, setEditDateCommande] = useState('')
@@ -231,6 +284,7 @@ export function FournisseursCommandes() {
     setEditIDAdresseFacturation(snapshot.IDadresseFact)
     setEditIDAdresseLivraison(snapshot.IDadresseLiv)
     originalDraftRef.current = snapshot
+    setStockDrawerLineId(null) // Edit mode hides the stock drawer
     setIsEditing(true)
   }, [detail])
 
@@ -303,6 +357,15 @@ export function FournisseursCommandes() {
     })
   }, [guard])
 
+  const handleStatusFilterChange = useCallback((s: 'all' | 'en_cours' | 'terminee') => {
+    guard.guardAction(() => {
+      setIsEditing(false)
+      setStatusFilter(s)
+      // Clear selection so the auto-select effect picks the first row of the new list
+      setSelectedId(null)
+    })
+  }, [guard])
+
   const filtered = useMemo(() => {
     if (!commandes) return []
     if (!searchQuery.trim()) return commandes
@@ -328,7 +391,7 @@ export function FournisseursCommandes() {
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
             statusFilter={statusFilter}
-            onStatusFilterChange={setStatusFilter}
+            onStatusFilterChange={handleStatusFilterChange}
             onNew={() => setCreateOpen(true)}
           />
         }
@@ -349,7 +412,12 @@ export function FournisseursCommandes() {
                 deleteMut.mutate()
               }
             }}
-            onToggleEtat={() => toggleEtatMut.mutate(detail?.etat === 1 ? 0 : 1)}
+            onPrintClick={() => {
+              if (selectedId !== null) {
+                window.open(`${API_URL}/commandes-fil/${selectedId}/pdf`, '_blank')
+              }
+            }}
+            onEmailClick={() => setEmailModalOpen(true)}
           />
         }
         detail={
@@ -360,6 +428,8 @@ export function FournisseursCommandes() {
             isEditing={isEditing}
             onMutationSuccess={invalidateAll}
             onLinesDirtyChange={setLinesDirty}
+            stockDrawerLineId={stockDrawerLineId}
+            onOpenStockDrawer={setStockDrawerLineId}
           />
         }
         sidebar={selectedId !== null ? (
@@ -381,6 +451,8 @@ export function FournisseursCommandes() {
             onEditIDAdresseFacturationChange={setEditIDAdresseFacturation}
             editIDAdresseLivraison={editIDAdresseLivraison}
             onEditIDAdresseLivraisonChange={setEditIDAdresseLivraison}
+            onToggleEtat={() => toggleEtatMut.mutate(detail?.etat === 1 ? 0 : 1)}
+            isTogglingEtat={toggleEtatMut.isPending}
           />
         ) : null}
         sidebarTitle="Informations"
@@ -403,6 +475,22 @@ export function FournisseursCommandes() {
           setSelectedId(newId)
         }}
       />
+
+      <Dialog open={emailModalOpen} onOpenChange={setEmailModalOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AtSign className="h-5 w-5 text-accent" />
+              Envoyer un email
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+            <Mail className="h-12 w-12 mb-3 opacity-40" />
+            <p className="text-sm font-medium">En developpement</p>
+            <p className="text-xs mt-1">Cette fonctionnalite sera disponible prochainement.</p>
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
   )
 }
@@ -481,15 +569,25 @@ function CommandeList({
           </div>
         ) : rows.map((row) => {
           const isSelected = selectedId === row.IDcommande_fil
+          const urgency = deliveryUrgency(row.earliest_delivery, row.etat)
+          const selectedRingClass =
+            urgency === 'late' ? 'border-red-500 ring-1 ring-red-500'
+            : urgency === 'soon' ? 'border-amber-500 ring-1 ring-amber-500'
+            : 'border-zinc-400 ring-1 ring-zinc-400'
+          const hoverClass =
+            urgency === 'late' ? 'border-border hover:border-red-500/50'
+            : urgency === 'soon' ? 'border-border hover:border-amber-500/50'
+            : 'border-border hover:border-zinc-400/60'
           return (
             <div
               key={row.IDcommande_fil}
               onClick={() => onSelect(row.IDcommande_fil)}
               className={cn(
-                'p-3 border rounded-lg cursor-pointer transition-all',
-                isSelected
-                  ? 'border-accent bg-white ring-1 ring-accent'
-                  : 'border-border bg-white hover:border-accent/50'
+                'p-3 border rounded-lg cursor-pointer transition-all bg-white',
+                isSelected ? selectedRingClass : hoverClass,
+                // Inset left-edge strip via box-shadow — coexists with ring via --tw-shadow
+                urgency === 'late' && 'shadow-[inset_4px_0_0_0_rgb(239_68_68)]',
+                urgency === 'soon' && 'shadow-[inset_4px_0_0_0_rgb(245_158_11)]'
               )}
             >
               <div className="flex items-center gap-2">
@@ -502,12 +600,12 @@ function CommandeList({
                 {row.date_commande && <span>{formatHfsqlDate(row.date_commande)}</span>}
                 {row.total_kg > 0 && (
                   <span className="ml-auto px-1.5 py-0.5 rounded bg-zinc-200/80 tabular-nums">
-                    {row.total_kg.toFixed(0)} kg
+                    {fmtNum(row.total_kg)} kg
                   </span>
                 )}
                 {row.total_eur > 0 && (
                   <span className="px-1.5 py-0.5 rounded bg-accent/10 font-medium text-foreground tabular-nums">
-                    {row.total_eur.toFixed(0)} €
+                    {fmtNum(row.total_eur)} €
                   </span>
                 )}
               </div>
@@ -532,7 +630,7 @@ function CommandeList({
 function DetailHeader({
   commande, isLoading, isEditing,
   onStartEdit, onCancelEdit, onSave, isSaving,
-  onDelete, onToggleEtat,
+  onDelete, onPrintClick, onEmailClick,
 }: {
   commande: CommandeDetail | null
   isLoading: boolean
@@ -542,7 +640,8 @@ function DetailHeader({
   onSave: () => void
   isSaving: boolean
   onDelete: () => void
-  onToggleEtat: () => void
+  onPrintClick: () => void
+  onEmailClick: () => void
 }) {
   if (!commande && !isLoading) return null
 
@@ -565,7 +664,6 @@ function DetailHeader({
                 {commande?.date_commande && (
                   <Badge variant="secondary" className="text-xs">{formatHfsqlDate(commande.date_commande)}</Badge>
                 )}
-                <CommandeEtatBadge etat={commande?.etat ?? null} />
                 {isEditing && (
                   <Badge className="bg-accent text-accent-foreground gap-1 shadow-sm">
                     <Pencil className="h-3 w-3" />Mode edition
@@ -592,19 +690,13 @@ function DetailHeader({
               </>
             ) : (
               <>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={onToggleEtat}
-                  title={commande.etat === 1 ? 'Marquer en cours' : 'Marquer terminée'}
-                >
-                  {commande.etat === 1 ? (
-                    <><Clock className="h-3.5 w-3.5 mr-1.5" />Rouvrir</>
-                  ) : (
-                    <><CheckCircle2 className="h-3.5 w-3.5 mr-1.5" />Clôturer</>
-                  )}
+                <Button variant="outline" size="icon" className="h-9 w-9" title="Imprimer" onClick={onPrintClick}>
+                  <Printer className="h-4 w-4" />
                 </Button>
-                <Button variant="outline" size="sm" onClick={onStartEdit}>
+                <Button variant="outline" size="icon" className="h-9 w-9" title="Envoyer un email" onClick={onEmailClick}>
+                  <AtSign className="h-4 w-4" />
+                </Button>
+                <Button variant="gold" size="sm" onClick={onStartEdit}>
                   <Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier
                 </Button>
               </>
@@ -620,7 +712,7 @@ function DetailHeader({
 // ── Center: Detail Main ────────────────────────────────
 
 function DetailMain({
-  commande, isLoading, hasSelection, isEditing, onMutationSuccess, onLinesDirtyChange,
+  commande, isLoading, hasSelection, isEditing, onMutationSuccess, onLinesDirtyChange, stockDrawerLineId, onOpenStockDrawer,
 }: {
   commande: CommandeDetail | null
   isLoading: boolean
@@ -628,6 +720,8 @@ function DetailMain({
   isEditing: boolean
   onMutationSuccess: () => void
   onLinesDirtyChange: (dirty: boolean) => void
+  stockDrawerLineId: number | null
+  onOpenStockDrawer: (lineId: number | null) => void
 }) {
   if (!hasSelection) return (
     <div className="flex-1 flex items-center justify-center">
@@ -651,6 +745,8 @@ function DetailMain({
       totalEur={totalEur}
       onMutationSuccess={onMutationSuccess}
       onLinesDirtyChange={onLinesDirtyChange}
+      stockDrawerLineId={stockDrawerLineId}
+      onOpenStockDrawer={onOpenStockDrawer}
     />
   )
 }
@@ -658,7 +754,7 @@ function DetailMain({
 // ── Center: Lignes Section ─────────────────────────────
 
 function LignesSection({
-  commande, isEditing, totalKg, totalEur, onMutationSuccess, onLinesDirtyChange,
+  commande, isEditing, totalKg, totalEur, onMutationSuccess, onLinesDirtyChange, stockDrawerLineId, onOpenStockDrawer,
 }: {
   commande: CommandeDetail
   isEditing: boolean
@@ -666,6 +762,8 @@ function LignesSection({
   totalEur: number
   onMutationSuccess: () => void
   onLinesDirtyChange: (dirty: boolean) => void
+  stockDrawerLineId: number | null
+  onOpenStockDrawer: (lineId: number | null) => void
 }) {
   const [editingLineId, setEditingLineId] = useState<number | null>(null)
   const [showLineForm, setShowLineForm] = useState(false)
@@ -783,9 +881,19 @@ function LignesSection({
     setShowLineForm(true)
   }
 
+  const drawerOpen = stockDrawerLineId !== null && !isEditing
+  const drawerLigne = drawerOpen
+    ? commande.lignes.find((l) => l.IDref_fil_commande === stockDrawerLineId) ?? null
+    : null
+
   return (
     <div className="flex-1 min-h-0 flex flex-col">
-      <div className="flex-1 min-h-0 overflow-auto space-y-2 pr-1 scrollbar-transparent">
+      <div
+        className={cn(
+          'overflow-auto space-y-2 p-1 scrollbar-transparent',
+          drawerOpen ? 'flex-shrink-0 max-h-[40%]' : 'flex-1 min-h-0'
+        )}
+      >
         {commande.lignes.length === 0 && !showLineForm ? (
           <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
             <BobineIcon className="h-12 w-12 mb-3 opacity-40" />
@@ -816,9 +924,11 @@ function LignesSection({
                 key={l.IDref_fil_commande}
                 line={l}
                 isEditing={isEditing}
+                isStockDrawerOpen={stockDrawerLineId === l.IDref_fil_commande}
                 onEdit={() => startEditLine(l)}
                 onDelete={() => { if (confirm('Supprimer cette ligne ?')) deleteLineMut.mutate(l.IDref_fil_commande) }}
                 onToggleEtat={() => toggleLineEtatMut.mutate({ lineId: l.IDref_fil_commande, etat: l.etat === 1 ? 0 : 1 })}
+                onOpenStockDrawer={onOpenStockDrawer}
               />
             )
           })
@@ -847,6 +957,18 @@ function LignesSection({
         )}
       </div>
 
+      {/* In-screen stock linkage drawer — grows into the center panel below the lines list */}
+      {drawerOpen && drawerLigne && (
+        <div className="flex-1 min-h-0 flex flex-col mt-3 rounded-lg border border-border/60 overflow-hidden bg-zinc-50/80 animate-in slide-in-from-bottom-4 fade-in-0 duration-200">
+          <StockLinkDrawer
+            commandeId={commande.IDcommande_fil}
+            ligne={drawerLigne}
+            onClose={() => onOpenStockDrawer(null)}
+            onSuccess={onMutationSuccess}
+          />
+        </div>
+      )}
+
       {/* Totals footer pinned at bottom */}
       {commande.lignes.length > 0 && (
         <div className="flex-shrink-0 mt-3 pt-3 border-t border-border/60 flex items-center justify-between text-sm font-medium">
@@ -854,8 +976,8 @@ function LignesSection({
             Total · {commande.lignes.length} ligne{commande.lignes.length > 1 ? 's' : ''}
           </span>
           <div className="flex items-center gap-4 tabular-nums">
-            <span>{totalKg.toFixed(1)} kg</span>
-            <span className="text-accent text-base">{totalEur.toFixed(2)} €</span>
+            <span>{fmtNum(totalKg, 1)} kg</span>
+            <span className="text-accent text-base">{fmtNum(totalEur, 2)} €</span>
           </div>
         </div>
       )}
@@ -864,19 +986,32 @@ function LignesSection({
 }
 
 function LineCard({
-  line, isEditing, onEdit, onDelete, onToggleEtat,
+  line, isEditing, isStockDrawerOpen, onEdit, onDelete, onToggleEtat, onOpenStockDrawer,
 }: {
   line: LigneCommande
   isEditing: boolean
+  isStockDrawerOpen: boolean
   onEdit: () => void
   onDelete: () => void
   onToggleEtat: () => void
+  onOpenStockDrawer: (lineId: number | null) => void
 }) {
   const { border, iconBg, iconColor } = etatColors(line.etat)
   const lineTotal = (Number(line.quantite) || 0) * (Number(line.prix_unitaire) || 0)
+  const nbLotsLies = line.nb_lots_lies ?? 0
+  const totalKgLie = line.total_kg_lie ?? 0
+  const clickable = !isEditing
 
   return (
-    <div className={cn('group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3', border)}>
+    <div
+      className={cn(
+        'group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3',
+        border,
+        clickable && 'cursor-pointer hover:bg-zinc-100 hover:border-accent/40 transition-colors',
+        isStockDrawerOpen && 'ring-1 ring-accent bg-accent/[0.06] border-accent/50'
+      )}
+      onClick={clickable ? () => onOpenStockDrawer(isStockDrawerOpen ? null : line.IDref_fil_commande) : undefined}
+    >
       {/* Top row: icon + ref/coloris + badges/actions */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
@@ -896,20 +1031,27 @@ function LineCard({
               <Leaf className="h-2.5 w-2.5" />Bio
             </Badge>
           )}
+          {!isEditing && nbLotsLies > 0 && (
+            <Badge variant="secondary" className="text-[10px] py-0 px-1.5 gap-0.5">
+              <Package className="h-2.5 w-2.5" />
+              {nbLotsLies} lot{nbLotsLies > 1 ? 's' : ''}
+              {totalKgLie > 0 ? ` · ${fmtNum(totalKgLie, 1)} kg` : ''}
+            </Badge>
+          )}
           <CommandeEtatBadge etat={line.etat} />
           {isEditing && (
             <div className="flex gap-0.5">
               <Button
                 variant="ghost" size="icon" className="h-6 w-6"
-                onClick={onToggleEtat}
+                onClick={(e) => { e.stopPropagation(); onToggleEtat() }}
                 title={line.etat === 1 ? 'Marquer en cours' : 'Marquer livrée'}
               >
                 {line.etat === 1 ? <Clock className="h-3 w-3" /> : <CheckCircle2 className="h-3 w-3" />}
               </Button>
-              <Button variant="ghost" size="icon" className="h-6 w-6" onClick={onEdit}>
+              <Button variant="ghost" size="icon" className="h-6 w-6" onClick={(e) => { e.stopPropagation(); onEdit() }}>
                 <Pencil className="h-3 w-3" />
               </Button>
-              <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive hover:text-destructive" onClick={onDelete}>
+              <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive hover:text-destructive" onClick={(e) => { e.stopPropagation(); onDelete() }}>
                 <Trash2 className="h-3 w-3" />
               </Button>
             </div>
@@ -918,17 +1060,218 @@ function LineCard({
       </div>
       {/* Bottom row: quantite · prix · total · livraison */}
       <div className="flex items-center gap-3 mt-2 ml-9 text-[11px] text-muted-foreground tabular-nums">
-        {line.quantite != null && <span>{Number(line.quantite).toFixed(1)} kg</span>}
+        {line.quantite != null && <span>{fmtNum(Number(line.quantite), 1)} kg</span>}
         {line.prix_unitaire != null && Number(line.prix_unitaire) > 0 && (
-          <span>× {Number(line.prix_unitaire).toFixed(2)} €/kg</span>
+          <span>× {fmtNum(Number(line.prix_unitaire), 2)} €/kg</span>
         )}
         {lineTotal > 0 && (
-          <span className="font-medium text-foreground">→ {lineTotal.toFixed(2)} €</span>
+          <span className="font-medium text-foreground">→ {fmtNum(lineTotal, 2)} €</span>
         )}
-        {line.date_livraison && (
-          <span className="ml-auto">liv. {formatHfsqlDate(line.date_livraison)}</span>
+        {line.date_livraison && (() => {
+          const lineUrgency = deliveryUrgency(line.date_livraison, line.etat)
+          return (
+            <span
+              className={cn(
+                'ml-auto',
+                lineUrgency === 'late' && 'font-bold text-red-600',
+                lineUrgency === 'soon' && 'font-bold text-amber-600'
+              )}
+            >
+              Livraison {formatHfsqlDate(line.date_livraison)}
+            </span>
+          )
+        })()}
+      </div>
+    </div>
+  )
+}
+
+// ── Stock linkage drawer ───────────────────────────────
+
+function StockLinkDrawer({
+  commandeId, ligne, onClose, onSuccess,
+}: {
+  commandeId: number
+  ligne: LigneCommande
+  onClose: () => void
+  onSuccess: () => void
+}) {
+  const queryClient = useQueryClient()
+  const queryKey = ['commande-fil-stock', commandeId, ligne.IDref_fil_commande]
+
+  const { data, isLoading, isError } = useQuery<LineStockPayload>({
+    queryKey,
+    queryFn: () => apiFetch(`/commandes-fil/${commandeId}/lignes/${ligne.IDref_fil_commande}/stock`),
+  })
+
+  const linkMut = useMutation({
+    mutationFn: (stockId: number) => apiFetch(
+      `/commandes-fil/${commandeId}/lignes/${ligne.IDref_fil_commande}/stock/${stockId}`,
+      { method: 'PUT' }
+    ),
+    onSuccess: (payload: LineStockPayload) => {
+      queryClient.setQueryData(queryKey, payload)
+      onSuccess()
+    },
+  })
+
+  const unlinkMut = useMutation({
+    mutationFn: (stockId: number) => apiFetch(
+      `/commandes-fil/${commandeId}/lignes/${ligne.IDref_fil_commande}/stock/${stockId}`,
+      { method: 'DELETE' }
+    ),
+    onSuccess: (payload: LineStockPayload) => {
+      queryClient.setQueryData(queryKey, payload)
+      onSuccess()
+    },
+  })
+
+  const linked = data?.linked ?? []
+  const available = data?.available ?? []
+
+  return (
+    <div className="flex flex-col h-full min-h-0 overflow-hidden">
+      {/* Minimal top bar: close button only — line info is already visible in the list above */}
+      <div className="flex-shrink-0 px-2 py-1 border-b bg-zinc-200/50 flex items-center justify-end">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onClose}
+          className="h-7 w-7"
+          title="Fermer"
+        >
+          <X className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto p-3 space-y-4 scrollbar-transparent">
+        {isLoading && (
+          <div className="space-y-2">
+            {[1, 2, 3].map((i) => <div key={i} className="h-14 bg-muted animate-pulse rounded-lg" />)}
+          </div>
+        )}
+        {isError && (
+          <div className="flex flex-col items-center justify-center py-6 text-destructive">
+            <AlertCircle className="h-6 w-6 mb-2" />
+            <p className="text-sm">Erreur de chargement</p>
+          </div>
+        )}
+        {!isLoading && !isError && linked.length === 0 && available.length === 0 && (
+          <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+            <Package className="h-8 w-8 mb-2 opacity-50" />
+            <p className="text-sm font-medium">Aucun lot en stock</p>
+            <p className="text-xs mt-1">Aucun lot de fil correspondant à cette ligne n'est encore entré en stock.</p>
+          </div>
+        )}
+
+        {linked.length > 0 && (
+          <section>
+            <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
+              Lots liés ({linked.length})
+            </h3>
+            <div className="space-y-1.5">
+              {linked.map((lot) => (
+                <StockLotRow
+                  key={lot.IDstock_fil}
+                  lot={lot}
+                  action="unlink"
+                  onAction={() => unlinkMut.mutate(lot.IDstock_fil)}
+                  isBusy={unlinkMut.isPending && unlinkMut.variables === lot.IDstock_fil}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
+        {available.length > 0 && (
+          <section>
+            <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
+              Lots disponibles ({available.length})
+            </h3>
+            <div className="space-y-1.5">
+              {available.map((lot) => (
+                <StockLotRow
+                  key={lot.IDstock_fil}
+                  lot={lot}
+                  action="link"
+                  onAction={() => linkMut.mutate(lot.IDstock_fil)}
+                  isBusy={linkMut.isPending && linkMut.variables === lot.IDstock_fil}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
+        {!isLoading && !isError && linked.length > 0 && available.length === 0 && (
+          <p className="text-xs text-muted-foreground italic text-center">
+            Aucun lot supplémentaire disponible pour ce fournisseur.
+          </p>
         )}
       </div>
+    </div>
+  )
+}
+
+function StockLotRow({
+  lot, action, onAction, isBusy,
+}: {
+  lot: StockLotLite
+  action: 'link' | 'unlink'
+  onAction: () => void
+  isBusy: boolean
+}) {
+  const stockKg = Number(lot.stock) || 0
+  const initialKg = Number(lot.stock_initial) || 0
+  return (
+    <div className="rounded-lg border border-border/60 bg-white p-3 flex items-center gap-3">
+      <div className="h-8 w-8 rounded-md bg-zinc-100 flex items-center justify-center flex-shrink-0">
+        <BobineIcon className="h-4 w-4 text-muted-foreground" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-semibold truncate">Lot {lot.lot || '—'}</span>
+          {lot.lot_frs && (
+            <span className="text-xs text-muted-foreground truncate">· frs: {lot.lot_frs}</span>
+          )}
+          {!!lot.bio && (
+            <Badge className="bg-green-500/10 text-green-700 text-[10px] py-0 px-1.5 gap-0.5">
+              <Leaf className="h-2.5 w-2.5" />Bio
+            </Badge>
+          )}
+          {!!lot.termine && (
+            <Badge variant="secondary" className="text-[10px] py-0 px-1.5">Terminé</Badge>
+          )}
+        </div>
+        <div className="flex items-center gap-3 mt-1 text-[11px] text-muted-foreground tabular-nums">
+          <span className="font-medium text-foreground">{fmtNum(stockKg, 1)} kg</span>
+          {initialKg > 0 && initialKg !== stockKg && (
+            <span>/ {fmtNum(initialKg, 1)} kg initial</span>
+          )}
+          {lot.emplacement && (
+            <span className="flex items-center gap-0.5"><MapPin className="h-2.5 w-2.5" />{lot.emplacement}</span>
+          )}
+          {lot.date_entree && (
+            <span>entré {formatHfsqlDate(lot.date_entree)}</span>
+          )}
+        </div>
+      </div>
+      <Button
+        size="sm"
+        variant={action === 'link' ? 'default' : 'outline'}
+        onClick={onAction}
+        disabled={isBusy}
+        className="flex-shrink-0"
+      >
+        {isBusy ? (
+          <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+        ) : action === 'link' ? (
+          <Link2 className="h-3.5 w-3.5 mr-1.5" />
+        ) : (
+          <Unlink className="h-3.5 w-3.5 mr-1.5" />
+        )}
+        {action === 'link' ? 'Lier' : 'Dissocier'}
+      </Button>
     </div>
   )
 }
@@ -983,7 +1326,7 @@ function LineFormFields({
 
 // ── Right Panel: Sidebar with Tabs ─────────────────────
 
-type SidebarTab = 'info' | 'adresses' | 'journal'
+type SidebarTab = 'info' | 'adresses' | 'docs' | 'journal'
 
 function DetailSidebar({
   commande, isLoading, isEditing,
@@ -994,6 +1337,7 @@ function DetailSidebar({
   editIDEcheance, onEditIDEcheanceChange,
   editIDAdresseFacturation, onEditIDAdresseFacturationChange,
   editIDAdresseLivraison, onEditIDAdresseLivraisonChange,
+  onToggleEtat, isTogglingEtat,
 }: {
   commande: CommandeDetail | null
   isLoading: boolean
@@ -1012,6 +1356,8 @@ function DetailSidebar({
   onEditIDAdresseFacturationChange: (v: number) => void
   editIDAdresseLivraison: number
   onEditIDAdresseLivraisonChange: (v: number) => void
+  onToggleEtat: () => void
+  isTogglingEtat: boolean
 }) {
   const [activeTab, setActiveTab] = useState<SidebarTab>('info')
 
@@ -1046,6 +1392,7 @@ function DetailSidebar({
   const tabs: { key: SidebarTab; label: string; icon: React.ElementType }[] = [
     { key: 'info', label: 'Info', icon: Info },
     { key: 'adresses', label: 'Adresses', icon: MapPin },
+    { key: 'docs', label: 'Docs', icon: FileText },
     { key: 'journal', label: 'Journal', icon: BookOpen },
   ]
 
@@ -1098,6 +1445,9 @@ function DetailSidebar({
             onEditIDAdresseLivraisonChange={onEditIDAdresseLivraisonChange}
           />
         )}
+        {activeTab === 'docs' && (
+          <DocsTab commande={commande} />
+        )}
         {activeTab === 'journal' && (
           <JournalTab
             commande={commande}
@@ -1106,6 +1456,55 @@ function DetailSidebar({
             onEditJournalChange={onEditJournalChange}
           />
         )}
+      </div>
+      <StatusFooter
+        etat={commande.etat}
+        onToggle={onToggleEtat}
+        isToggling={isTogglingEtat}
+        disabled={isEditing}
+      />
+    </div>
+  )
+}
+
+// ── Sidebar Status Footer ──────────────────────────────
+
+function StatusFooter({
+  etat, onToggle, isToggling, disabled,
+}: {
+  etat: number | null
+  onToggle: () => void
+  isToggling: boolean
+  disabled: boolean
+}) {
+  const isTerminee = etat === 1
+  const Icon = isTerminee ? CheckCircle2 : Clock
+  const label = isTerminee ? 'Terminée' : 'En cours'
+  const actionLabel = isTerminee ? 'Rouvrir' : 'Clôturer'
+  const ActionIcon = isTerminee ? Clock : CheckCircle2
+
+  return (
+    <div className="flex-shrink-0 border-t bg-zinc-200/50 rounded-b-xl p-3">
+      <div
+        className={cn(
+          'rounded-lg shadow-sm overflow-hidden flex items-stretch h-11',
+          isTerminee ? 'bg-success' : 'bg-primary'
+        )}
+      >
+        <div className="flex items-center gap-2 px-3 flex-1 text-white min-w-0">
+          <Icon className="h-4 w-4 flex-shrink-0" />
+          <span className="text-sm font-bold uppercase tracking-wide truncate">{label}</span>
+        </div>
+        <button
+          type="button"
+          onClick={onToggle}
+          disabled={disabled || isToggling}
+          title={isTerminee ? 'Marquer en cours' : 'Marquer terminée'}
+          className="px-3.5 bg-white/15 hover:bg-white/25 active:bg-white/30 disabled:bg-white/5 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-semibold border-l border-white/25 flex items-center gap-1.5 transition-colors"
+        >
+          <ActionIcon className="h-3.5 w-3.5" />
+          {actionLabel}
+        </button>
       </div>
     </div>
   )
@@ -1372,6 +1771,25 @@ function AdressePickerDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// ── Sidebar Tab: Docs ──────────────────────────────────
+
+function DocsTab({ commande: _commande }: { commande: CommandeDetail }) {
+  return (
+    <div className="p-3 rounded-lg border bg-card shadow-sm">
+      <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
+        <FileText className="h-3.5 w-3.5" />Documents
+      </p>
+      <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+        <FileText className="h-10 w-10 mb-3 opacity-40" />
+        <p className="text-sm font-medium">Aucun document</p>
+        <p className="text-[11px] mt-1 text-center">
+          Les bons de commande, accusés de réception et autres documents liés à cette commande apparaîtront ici.
+        </p>
+      </div>
+    </div>
   )
 }
 

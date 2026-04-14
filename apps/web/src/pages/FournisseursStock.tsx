@@ -30,6 +30,8 @@ import { BobineIcon } from '@/components/icons/BobineIcon'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
+import { apiFetch, API_URL } from '@/lib/api'
+import { useHasPermission } from '@/contexts/PermissionsContext'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -84,17 +86,7 @@ interface RefFilOption {
 }
 
 // ── API helpers ────────────────────────────────────────
-
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002/api'
-
-async function apiFetch<T = unknown>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-  })
-  if (!res.ok) throw new Error('Erreur API')
-  return res.json() as Promise<T>
-}
+// Shared apiFetch + API_URL — see apps/web/src/lib/api.ts
 
 function useStockList(filters: { hideFinished: boolean }) {
   const params = new URLSearchParams()
@@ -182,6 +174,8 @@ export function FournisseursStock() {
   const [sort, setSort] = useState<SortState>({ key: 'date_entree', dir: 'desc' })
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
+  // Permission gate — admins always pass; non-admins need create_stock_fil
+  const canCreate = useHasPermission('create_stock_fil')
 
   const { data: rows, isLoading, isError, error } = useStockList({ hideFinished })
 
@@ -256,10 +250,12 @@ export function FournisseursStock() {
           <span>Masquer les lots terminés</span>
         </label>
 
-        <Button size="sm" onClick={() => setCreateOpen(true)} className="flex-shrink-0">
-          <Plus className="h-3.5 w-3.5 mr-1" />
-          Nouveau
-        </Button>
+        {canCreate && (
+          <Button size="sm" onClick={() => setCreateOpen(true)} className="flex-shrink-0">
+            <Plus className="h-3.5 w-3.5 mr-1" />
+            Nouveau
+          </Button>
+        )}
       </div>
 
       {/* Table */}
@@ -594,7 +590,7 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess, onDirtyChange, save
                   </Button>
                 </>
               ) : (
-                <Button variant="outline" size="sm" onClick={startEdit}>
+                <Button variant="gold" size="sm" onClick={startEdit}>
                   <Pencil className="h-3.5 w-3.5 mr-1.5" />
                   Modifier
                 </Button>
