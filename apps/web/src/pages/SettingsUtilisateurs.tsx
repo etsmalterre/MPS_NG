@@ -8,11 +8,12 @@
 import { useState, useMemo, useEffect } from 'react'
 import { Navigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Search, Loader2, AlertCircle, Shield, Check } from 'lucide-react'
+import { Search, Loader2, AlertCircle, Shield, Check, Mail, Save } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
 import { useUser } from '@/contexts/UserContext'
 import { usePermissions } from '@/contexts/PermissionsContext'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
 // ── Types ──────────────────────────────────────────────
@@ -23,6 +24,13 @@ interface PermissionUser {
   nom: string | null
   roleHint: string | null
   granted: string[]
+}
+
+interface UserEmailRow {
+  IDutilisateur: number
+  prenom: string | null
+  nom: string | null
+  email: string | null
 }
 
 interface PermissionKeyDef {
@@ -90,6 +98,31 @@ export function SettingsUtilisateurs() {
     staleTime: Infinity,
   })
 
+  // Fetched in parallel with the permissions list; used to pre-fill the
+  // email editor card in the detail view.
+  const { data: emails } = useQuery<UserEmailRow[]>({
+    queryKey: ['user-emails'],
+    queryFn: () => apiFetch<UserEmailRow[]>('/user-emails/users'),
+    enabled: viewerIsAdmin,
+  })
+
+  const emailByUserId = useMemo(() => {
+    const map = new Map<number, string>()
+    if (emails) for (const e of emails) map.set(e.IDutilisateur, e.email ?? '')
+    return map
+  }, [emails])
+
+  const setEmailMut = useMutation({
+    mutationFn: ({ id, email }: { id: number; email: string }) =>
+      apiFetch<{ IDutilisateur: number; email: string | null }>(
+        `/user-emails/users/${id}`,
+        { method: 'PUT', body: JSON.stringify({ email }) },
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['user-emails'] })
+    },
+  })
+
   // Auto-select first user once loaded
   useEffect(() => {
     if (users && users.length > 0 && selectedId === null) {
@@ -151,6 +184,13 @@ export function SettingsUtilisateurs() {
       detail={
         <DetailBody
           user={selected}
+          currentEmail={selected ? emailByUserId.get(selected.IDutilisateur) ?? '' : ''}
+          onSaveEmail={(email) => {
+            if (!selected) return
+            setEmailMut.mutate({ id: selected.IDutilisateur, email })
+          }}
+          isSavingEmail={setEmailMut.isPending}
+          emailSaveError={setEmailMut.error instanceof Error ? setEmailMut.error.message : null}
           keys={keys ?? []}
           isUpdating={updateMut.isPending}
           onToggle={(key, nextValue) => {
@@ -299,13 +339,30 @@ function DetailHeader({ user }: { user: PermissionUser | null }) {
 // ── Center: Detail Body (permission toggles) ──────────
 
 function DetailBody({
-  user, keys, isUpdating, onToggle,
+  user, currentEmail, onSaveEmail, isSavingEmail, emailSaveError,
+  keys, isUpdating, onToggle,
 }: {
   user: PermissionUser | null
+  currentEmail: string
+  onSaveEmail: (email: string) => void
+  isSavingEmail: boolean
+  emailSaveError: string | null
   keys: PermissionKeyDef[]
   isUpdating: boolean
   onToggle: (key: string, nextValue: boolean) => void
 }) {
+  // Group keys by category. Hooks must run before the early return below,
+  // so this useMemo lives here even though `user` may be null.
+  const grouped = useMemo(() => {
+    const g = new Map<string, PermissionKeyDef[]>()
+    for (const k of keys) {
+      const cat = k.category || 'Général'
+      if (!g.has(cat)) g.set(cat, [])
+      g.get(cat)!.push(k)
+    }
+    return Array.from(g.entries())
+  }, [keys])
+
   if (!user) return (
     <div className="flex-1 flex items-center justify-center">
       <div className="text-center space-y-3">
@@ -318,19 +375,16 @@ function DetailBody({
   const isVin = isVincent(user)
   const grantedSet = new Set(user.granted)
 
-  // Group keys by category
-  const grouped = useMemo(() => {
-    const g = new Map<string, PermissionKeyDef[]>()
-    for (const k of keys) {
-      const cat = k.category || 'Général'
-      if (!g.has(cat)) g.set(cat, [])
-      g.get(cat)!.push(k)
-    }
-    return Array.from(g.entries())
-  }, [keys])
-
   return (
     <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-auto pr-1 scrollbar-transparent">
+      <EmailEditor
+        userId={user.IDutilisateur}
+        currentEmail={currentEmail}
+        onSave={onSaveEmail}
+        isSaving={isSavingEmail}
+        saveError={emailSaveError}
+      />
+
       {isVin && (
         <div className="flex items-start gap-3 p-3 rounded-lg border border-accent/40 bg-accent/[0.06]">
           <Shield className="h-4 w-4 text-accent flex-shrink-0 mt-0.5" />
@@ -375,6 +429,82 @@ function DetailBody({
           </div>
         </div>
       ))}
+    </div>
+  )
+}
+
+// ── Email editor card ─────────────────────────────────
+// Local draft state so the user can type freely; Enregistrer is enabled
+// only when the draft differs from the persisted value. Empty string
+// clears the mapping.
+
+function EmailEditor({
+  userId, currentEmail, onSave, isSaving, saveError,
+}: {
+  userId: number
+  currentEmail: string
+  onSave: (email: string) => void
+  isSaving: boolean
+  saveError: string | null
+}) {
+  const [draft, setDraft] = useState(currentEmail)
+
+  // Reset draft whenever the selected user changes, OR when the persisted
+  // value changes after a save. Keyed on userId + currentEmail so both
+  // cases trigger the reset.
+  useEffect(() => {
+    setDraft(currentEmail)
+  }, [userId, currentEmail])
+
+  const trimmed = draft.trim()
+  const isDirty = trimmed !== (currentEmail ?? '').trim()
+  const looksValid = trimmed === '' || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)
+
+  return (
+    <div className="rounded-lg border border-border/60 bg-white shadow-sm">
+      <div className="px-4 py-2 border-b border-border/60 bg-zinc-100/80 rounded-t-lg flex items-center gap-2">
+        <Mail className="h-3.5 w-3.5 text-accent" />
+        <p className="text-xs font-bold text-primary uppercase tracking-wide">Adresse email</p>
+      </div>
+      <div className="p-4 space-y-2">
+        <div className="flex items-center gap-2">
+          <input
+            type="email"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="prenom.nom@etsmalterre.com"
+            autoComplete="off"
+            className="flex-1 h-9 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+          <Button
+            size="sm"
+            onClick={() => onSave(trimmed)}
+            disabled={!isDirty || !looksValid || isSaving}
+          >
+            {isSaving ? (
+              <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Enregistrement…</>
+            ) : (
+              <><Save className="h-3.5 w-3.5 mr-1.5" />Enregistrer</>
+            )}
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Adresse utilisée pour envoyer les emails (bon de commande, etc.) depuis l'application.
+          Laisser vide pour désactiver l'envoi d'email par cet utilisateur.
+        </p>
+        {!looksValid && trimmed !== '' && (
+          <p className="text-xs text-destructive flex items-center gap-1">
+            <AlertCircle className="h-3 w-3" />
+            Adresse email invalide
+          </p>
+        )}
+        {saveError && (
+          <p className="text-xs text-destructive flex items-center gap-1">
+            <AlertCircle className="h-3 w-3" />
+            {saveError}
+          </p>
+        )}
+      </div>
     </div>
   )
 }

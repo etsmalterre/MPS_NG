@@ -476,22 +476,244 @@ export function FournisseursCommandes() {
         }}
       />
 
-      <Dialog open={emailModalOpen} onOpenChange={setEmailModalOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <AtSign className="h-5 w-5 text-accent" />
-              Envoyer un email
-            </DialogTitle>
-          </DialogHeader>
-          <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-            <Mail className="h-12 w-12 mb-3 opacity-40" />
-            <p className="text-sm font-medium">En developpement</p>
-            <p className="text-xs mt-1">Cette fonctionnalite sera disponible prochainement.</p>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <EmailCommandeDialog
+        open={emailModalOpen}
+        commandeId={selectedId}
+        onClose={() => setEmailModalOpen(false)}
+      />
     </>
+  )
+}
+
+// ── Email Dialog ──────────────────────────────────────
+//
+// Real send form: pre-fills To from the fournisseur's contacts with
+// envoi_commande=1, editable subject/body, optional PDF attachment. Submits
+// via POST /api/commandes-fil/:id/email which impersonates the acting user
+// via Gmail domain-wide delegation.
+
+interface EmailDefaults {
+  to: string[]
+  subject: string
+  body: string
+  fournisseurNom: string
+  numero: string
+}
+
+function parseEmailList(raw: string): string[] {
+  return raw
+    .split(/[,;\n]/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+}
+
+function EmailCommandeDialog({
+  open, commandeId, onClose,
+}: {
+  open: boolean
+  commandeId: number | null
+  onClose: () => void
+}) {
+  const [to, setTo] = useState('')
+  const [cc, setCc] = useState('')
+  const [subject, setSubject] = useState('')
+  const [body, setBody] = useState('')
+  const [attachPdf, setAttachPdf] = useState(true)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [successMessage, setSuccessMessage] = useState<string | null>(null)
+  const [hydrated, setHydrated] = useState(false)
+
+  // Fetch defaults only when dialog opens — keeps the query off the page's
+  // default load and avoids stale data if the user edits contacts in-between.
+  const { data: defaults, isLoading: loadingDefaults, isError: defaultsError } = useQuery<EmailDefaults>({
+    queryKey: ['commande-fil-email-defaults', commandeId],
+    queryFn: () => apiFetch<EmailDefaults>(`/commandes-fil/${commandeId}/email-defaults`),
+    enabled: open && commandeId !== null,
+  })
+
+  // Hydrate the form fields once defaults arrive, then leave them editable.
+  useEffect(() => {
+    if (!open) return
+    if (!defaults) return
+    if (hydrated) return
+    setTo(defaults.to.join(', '))
+    setCc('')
+    setSubject(defaults.subject)
+    setBody(defaults.body)
+    setHydrated(true)
+  }, [open, defaults, hydrated])
+
+  // Reset all local state when the dialog closes so re-opening fetches fresh
+  // defaults and starts from a clean slate.
+  useEffect(() => {
+    if (open) return
+    setTo('')
+    setCc('')
+    setSubject('')
+    setBody('')
+    setAttachPdf(true)
+    setErrorMessage(null)
+    setSuccessMessage(null)
+    setHydrated(false)
+  }, [open])
+
+  // apiFetch drops the error body; for cleaner error messages we use raw
+  // fetch here and extract the JSON error.message field if present.
+  const [isSending, setIsSending] = useState(false)
+  const handleSend = useCallback(async () => {
+    setErrorMessage(null)
+    setSuccessMessage(null)
+    const toList = parseEmailList(to)
+    const ccList = parseEmailList(cc)
+    if (toList.length === 0) {
+      setErrorMessage('Ajoutez au moins un destinataire dans le champ « À »')
+      return
+    }
+    if (!subject.trim()) {
+      setErrorMessage("L'objet ne peut pas être vide")
+      return
+    }
+    setIsSending(true)
+    try {
+      const res = await fetch(`${API_URL}/commandes-fil/${commandeId}/email`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: toList,
+          cc: ccList.length > 0 ? ccList : undefined,
+          subject: subject.trim(),
+          body,
+          attach_pdf: attachPdf,
+        }),
+      })
+      if (!res.ok) {
+        let message = `Erreur HTTP ${res.status}`
+        try {
+          const json = await res.json()
+          if (typeof json?.message === 'string') message = json.message
+          else if (typeof json?.error === 'string') message = json.error
+        } catch { /* non-JSON body */ }
+        setErrorMessage(message)
+        return
+      }
+      setSuccessMessage('Email envoyé avec succès')
+      setTimeout(() => { onClose() }, 1200)
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : "Échec de l'envoi")
+    } finally {
+      setIsSending(false)
+    }
+  }, [to, cc, subject, body, attachPdf, commandeId, onClose])
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent className="max-w-2xl" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <AtSign className="h-5 w-5 text-accent" />
+            Envoyer un email
+          </DialogTitle>
+        </DialogHeader>
+
+        {loadingDefaults ? (
+          <div className="flex items-center justify-center py-10">
+            <Loader2 className="h-6 w-6 animate-spin text-accent" />
+          </div>
+        ) : defaultsError ? (
+          <div className="flex flex-col items-center justify-center py-8 text-destructive">
+            <AlertCircle className="h-8 w-8 mb-2" />
+            <p className="text-sm">Impossible de charger les destinataires par défaut</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">À</label>
+              <input
+                type="text"
+                value={to}
+                onChange={(e) => setTo(e.target.value)}
+                placeholder="nom@exemple.com, autre@exemple.com"
+                className="w-full h-9 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+                autoComplete="off"
+              />
+              <p className="text-[10px] text-muted-foreground">Séparez les adresses par une virgule</p>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Cc (facultatif)</label>
+              <input
+                type="text"
+                value={cc}
+                onChange={(e) => setCc(e.target.value)}
+                placeholder="copie@exemple.com"
+                className="w-full h-9 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+                autoComplete="off"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Objet</label>
+              <input
+                type="text"
+                value={subject}
+                onChange={(e) => setSubject(e.target.value)}
+                className="w-full h-9 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+                autoComplete="off"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Message</label>
+              <textarea
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                rows={8}
+                className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y font-sans"
+              />
+            </div>
+
+            <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={attachPdf}
+                onChange={(e) => setAttachPdf(e.target.checked)}
+                className="h-4 w-4 rounded border-input text-accent focus:ring-2 focus:ring-ring cursor-pointer"
+              />
+              <FileText className="h-4 w-4 text-accent" />
+              <span>Joindre le bon de commande (PDF)</span>
+            </label>
+
+            {errorMessage && (
+              <div className="flex items-start gap-2 p-3 rounded-md border border-destructive/30 bg-destructive/5 text-destructive text-xs">
+                <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                <p className="flex-1">{errorMessage}</p>
+              </div>
+            )}
+
+            {successMessage && (
+              <div className="flex items-start gap-2 p-3 rounded-md border border-green-500/30 bg-green-500/5 text-green-700 text-xs">
+                <CheckCircle2 className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                <p className="flex-1">{successMessage}</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={isSending}>
+            Annuler
+          </Button>
+          <Button onClick={handleSend} disabled={isSending || loadingDefaults || !!successMessage}>
+            {isSending ? (
+              <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Envoi…</>
+            ) : (
+              <><Mail className="h-3.5 w-3.5 mr-1.5" />Envoyer</>
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

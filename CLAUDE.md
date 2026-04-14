@@ -74,6 +74,7 @@ Implement features screen by screen:
 | DB Client | odbc (npm package) |
 | Auth | Cookie-based (HMAC-signed, no JWT lib) — `cookie-parser` |
 | PDF | `@react-pdf/renderer` (server-side, Lato fonts bundled) |
+| Email | Gmail API via `googleapis` + domain-wide delegation (service account impersonates the acting user) |
 
 ## Project Structure
 
@@ -92,6 +93,8 @@ MPS_NG/
 │   │       │   ├── auth.ts                 # HMAC cookie sign/verify, attachUser middleware, requireAdmin, isEffectiveAdmin
 │   │       │   ├── permissions.ts          # JSON-file-backed per-user permissions (TODO: migrate to DB)
 │   │       │   ├── permission-keys.ts      # Catalog of permission keys (e.g. create_stock_fil)
+│   │       │   ├── user-emails.ts          # JSON-file-backed per-user email map (for Gmail impersonation; TODO: migrate to DB)
+│   │       │   ├── gmail.ts                # Gmail API send helper — JWT + domain-wide delegation, MIME builder, PDF attachments
 │   │       │   └── pdf/
 │   │       │       ├── theme.ts            # PDF colors (gold #EFA633, French blue, etc.)
 │   │       │       ├── MalterreDocument.tsx       # Reusable doc frame: yellow header, flag stripe, footer
@@ -102,7 +105,8 @@ MPS_NG/
 │   │       │   ├── stock.ts        # Yarn stock list/detail/patch + per-lot bio/recycle certificate blobs (gated: create_stock_fil)
 │   │       │   ├── commandes-fil.ts # Commandes fournisseurs CRUD + PDF endpoint + stock-link sub-routes + delivery-line aggregates
 │   │       │   ├── auth.ts         # /users (deduped picker list), /me, /login, /logout (admin cookie persistence)
-│   │       │   └── permissions.ts  # /me, /keys, admin /users + PUT /users/:id (per-user permissions)
+│   │       │   ├── permissions.ts  # /me, /keys, admin /users + PUT /users/:id (per-user permissions)
+│   │       │   └── user-emails.ts  # /me + admin /users + PUT /users/:id (per-user email mapping for Gmail sends)
 │   │       └── index.ts
 │   └── web/           # React frontend
 │       ├── src/
@@ -189,7 +193,7 @@ MPS_NG/
 9. **Réseau** (`/reseau`)
    - Entreprises (`/reseau/entreprises`) — **first implemented data screen**
 10. **Paramètres** (`/settings`)
-    - Utilisateurs (`/settings/utilisateurs`) — **admin-only**, per-user permission editor
+    - Utilisateurs (`/settings/utilisateurs`) — **admin-only**, per-user permission editor + per-user email address editor (for Gmail impersonation)
 
 ## HFSQL ODBC Connection (Web App → HFSQL)
 
@@ -394,6 +398,7 @@ First fully implemented data screen. 3-panel layout with:
 - **Detail API**: `GET /api/commandes-fil/:id` returns commande + adresses + lignes (with `nb_lots_lies`/`total_kg_lie` aggregates from stock_fil)
 - **Stock linkage endpoints**: `GET /commandes-fil/:cId/lignes/:lId/stock`, `PUT .../stock/:stockId` (link), `DELETE .../stock/:stockId` (unlink) — strict ref/colori/fournisseur matching, single-FK `stock_fil.IDref_fil_commande`
 - **PDF endpoint**: `GET /api/commandes-fil/:id/pdf` — see "PDF generation" section below
+- **Email endpoints** (Gmail API via domain-wide delegation — see "Email send" section): `GET /api/commandes-fil/:id/email-defaults` returns pre-filled `{ to, subject, body }` (To pre-filled from contacts with `envoi_commande=1`); `POST /api/commandes-fil/:id/email` body `{ to, cc?, subject, body, attach_pdf? }` sends impersonating the acting user. PDF generation refactored into shared `buildCommandePdfData` + `renderCommandePdfBuffer` helpers consumed by both `/pdf` and `/email`.
 - **HFSQL tables**: `commande_fil`, `ref_fil_commande`, `stock_fil` (linkage), `mode_paiement`, `echeance`, `adresse`, `fournisseur`
 
 ### Fournisseurs Stock (`/fournisseurs/stock`)
@@ -453,6 +458,21 @@ Server-side PDF rendering for documents (`Bon de commande` shipped, `Devis` / `F
   - **Stacking `<Text>` with very different font sizes overlaps** — wrap each in its own `<View>` with `width: '100%'` to force clean stacking.
   - **`<Page paddingBottom>` is respected by the wrap engine; inner `<View paddingBottom>` is not** — for absolute footers, set padding on the Page so flow content stops before the footer area.
   - **`textTransform` accent stripping affects every label** — the canonical pattern is to pre-uppercase strings + drop the textTransform style. See `MalterreDocument.tsx`.
+
+## Email send (Gmail API via domain-wide delegation)
+
+Document-centric screens (bons de commande shipped; devis / facture / BL / expédition to follow) send email from within the app using a single Google service account with domain-wide delegation — no per-user OAuth flow. Full pattern documented in `.claude/skills/mps_designer/SKILL.md` §32.
+
+- **GCP setup (one-time, already in place)**: project **MPS-Desktop**, service account **OAuth_Sender** (`oauth-sender@mps-desktop.iam.gserviceaccount.com`), domain-wide delegation authorised in Google Workspace Admin Console (Client ID `106332337770635660405`) for scope `https://www.googleapis.com/auth/gmail.send`. The service account has no mailbox — every send specifies the impersonated subject.
+- **Env var**: `GOOGLE_SERVICE_ACCOUNT_KEY_FILE` in `apps/api/.env.{development,production}` — absolute path to the JSON key. Read lazily inside `gmail.ts` because dotenv runs inside `index.ts` and ESM imports hoist before `dotenv.config()`. Key file lives in `apps/api/secrets/` locally (gitignored via `secrets/` rule) and `/home/debian/mps_api/secrets/oauth-sender.json` on the prod API server.
+- **Lib**: `apps/api/src/lib/gmail.ts` exports `sendMail({ from, fromName, to, cc, bcc, subject, body, attachments })`. Builds an RFC 2822 multipart/mixed MIME message manually (text part + base64-wrapped attachments), base64url-encodes it, and sends via `google.gmail('v1').users.messages.send()`. One `JWT` instance cached per impersonated email (`clientCache`) so each user's access token is reused. MIME encoded-word for non-ASCII headers via `encodeHeader`.
+- **User → email mapping**: `apps/api/src/lib/user-emails.ts` + `apps/api/data/user-emails.json` (gitignored). JSON-file backed, mirrors `permissions.ts` shape. ⚠️ **TODO migration**: move to a real DB column on `utilisateur` (or a dedicated table) once the data migration phase completes.
+- **Admin routes**: `apps/api/src/routes/user-emails.ts` — `GET /me` (current user's mapped email), admin-gated `GET /users` (every deduped user + email) and `PUT /users/:id` (set/clear one user's email with regex validation).
+- **Per-document endpoints** (template to follow for every document screen): `GET /:id/email-defaults` returns `{ to, subject, body, fournisseurNom, numero }` — the `to` array is pre-filled from contacts with the relevant `envoi_*` flag (= 1), a non-empty mail, passing `/^[^\s@]+@[^\s@]+\.[^\s@]+$/`, deduped lowercase. `POST /:id/email` body `{ to, cc?, subject, body, attach_pdf? }` validates, looks up the acting user's mapped email (400 `no_sender_email` with user-facing French message if missing), re-renders the PDF via the shared helper, and calls `sendMail`. From header is formatted as `"Prénom Nom — ETS Malterre" <email>` using `utilisateur.prenom + nom`.
+- **PDF helper refactor (mandatory pattern)**: every document type that gains email endpoints must split its PDF rendering into `buildXxxPdfData(id)` + `renderXxxPdfBuffer(data)` helpers so both `/pdf` and `/email` reuse the same pipeline. See `commandes-fil.ts` for the reference.
+- **Frontend dialog**: `EmailCommandeDialog` in `apps/web/src/pages/FournisseursCommandes.tsx` is the reference. Per-screen forks (not an abstraction yet — wait for 3+ copies). `max-w-2xl`, `AtSign` in the title + `Mail` on the Send button. Comma-separated To/Cc inputs via `parseEmailList`. Pre-fill once on first defaults load via a `hydrated` flag. State resets on close. **Uses raw `fetch` with `credentials: 'include'`**, not `apiFetch`, because `apiFetch` drops the error body and the server's 400 message (`"Aucune adresse email n'est associée à votre compte..."`) is exactly what the user needs to see. Success banner auto-closes after 1.2s.
+- **Admin UI for the mapping**: `SettingsUtilisateurs.tsx` has an `EmailEditor` card above the permission list — draft state, client-side regex check, Enregistrer disabled when the draft equals the persisted value or is invalid. Non-admins don't see Settings at all.
+- **Contact flag → document map**: `envoi_commande` → commande_fil, `envoi_facture` → facture, `envoi_bl` → bon de livraison, `envoi_soumission` → devis.
 
 ## Business Domain (Quick Reference)
 

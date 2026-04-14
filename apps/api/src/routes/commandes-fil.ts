@@ -4,6 +4,8 @@ import { renderToBuffer } from '@react-pdf/renderer'
 import React from 'react'
 import { query, fixEncoding } from '../lib/hfsql-auto.js'
 import { CommandeFournisseurPdf, type CommandeFournisseurPdfData } from '../lib/pdf/CommandeFournisseurPdf.js'
+import { sendMail } from '../lib/gmail.js'
+import { getUserEmail } from '../lib/user-emails.js'
 
 export const commandesFilRouter: RouterType = Router()
 
@@ -386,67 +388,80 @@ function cleanAddress(a: any | null): {
   }
 }
 
+/** Load all data for a commande_fil and build the PDF data object. Used by
+ *  both the /pdf download route and the /email send route. Returns null if
+ *  the commande doesn't exist. */
+async function buildCommandePdfData(id: number): Promise<CommandeFournisseurPdfData | null> {
+  const rows = await query<CommandeFil>(`SELECT * FROM commande_fil WHERE IDcommande_fil = ${id}`)
+  if (rows.length === 0) return null
+  const fixedHeader = await fixEncoding(rows, 'commande_fil', 'IDcommande_fil', ['commentaire', 'journal'])
+  const header = fixedHeader[0] as any
+
+  const [fournisseurRows, modePaiementRows, echeanceRows, adresseFournisseurRows, adresseLivRows, lignes] = await Promise.all([
+    query(`SELECT IDfournisseur, nom FROM fournisseur WHERE IDfournisseur = ${n(header.IDfournisseur)}`),
+    header.IDmode_paiement ? query(`SELECT IDmode_paiement, libelle FROM mode_paiement WHERE IDmode_paiement = ${n(header.IDmode_paiement)}`) : Promise.resolve([]),
+    header.IDecheance ? query(`SELECT IDecheance, libelle FROM echeance WHERE IDecheance = ${n(header.IDecheance)}`) : Promise.resolve([]),
+    header.IDadresse_fournisseur ? query(`SELECT * FROM adresse WHERE IDadresse = ${n(header.IDadresse_fournisseur)}`) : Promise.resolve([]),
+    header.IDadresse_livraison ? query(`SELECT * FROM adresse WHERE IDadresse = ${n(header.IDadresse_livraison)}`) : Promise.resolve([]),
+    query(
+      `SELECT rfc.IDref_fil_commande, rfc.quantite, rfc.unite, rfc.prix_unitaire, rfc.date_livraison, rfc.etat, rf.reference as ref_fil, rf.bio as ref_fil_bio, cf.reference as colori_reference FROM ref_fil_commande rfc LEFT JOIN ref_fil rf ON rfc.IDref_fil = rf.IDref_fil LEFT JOIN colori_fil cf ON rfc.IDcolori_fil = cf.IDcolori_fil WHERE rfc.IDcommande_fil = ${id} ORDER BY rfc.IDref_fil_commande`
+    ),
+  ])
+
+  const fixedFournisseur = await fixEncoding(fournisseurRows, 'fournisseur', 'IDfournisseur', ['nom'])
+  const fixedModePaiement = await fixEncoding(modePaiementRows, 'mode_paiement', 'IDmode_paiement', ['libelle'])
+  const fixedEcheance = await fixEncoding(echeanceRows, 'echeance', 'IDecheance', ['libelle'])
+  const fixedAdresseFrs = await fixEncoding(adresseFournisseurRows, 'adresse', 'IDadresse', ['nom', 'adresse1', 'adresse2', 'adresse3', 'ville', 'pays'])
+  const fixedAdresseLiv = await fixEncoding(adresseLivRows, 'adresse', 'IDadresse', ['nom', 'adresse1', 'adresse2', 'adresse3', 'ville', 'pays'])
+  const fixedLignes = await fixEncoding(lignes, 'ref_fil_commande', 'IDref_fil_commande', ['ref_fil', 'colori_reference'])
+
+  // Earliest line delivery date — drives the "Délai de livraison" metadata.
+  const earliestDelivery = ((fixedLignes as any[])
+    .map((l) => (typeof l.date_livraison === 'string' ? l.date_livraison : ''))
+    .filter((s) => /^\d{8}$/.test(s)) as string[])
+    .sort()[0] ?? null
+
+  return {
+    numero: String(header.IDcommande_fil),
+    dateCommande: formatHfsqlDateLongFr(header.date_commande),
+    fournisseurNom: ((fixedFournisseur[0] as any)?.nom ?? '').toString() || '—',
+    fournisseurAdresse: cleanAddress(fixedAdresseFrs[0] as any),
+    adresseLivraison: cleanAddress(fixedAdresseLiv[0] as any),
+    modePaiement: ((fixedModePaiement[0] as any)?.libelle ?? null) as string | null,
+    echeance: ((fixedEcheance[0] as any)?.libelle ?? null) as string | null,
+    delaiLivraison: earliestDelivery ? formatHfsqlDateLongFr(earliestDelivery) : null,
+    commentaire: (header.commentaire ?? null) as string | null,
+    lignes: (fixedLignes as any[]).map((l) => ({
+      ref_fil: l.ref_fil ?? null,
+      colori_reference: l.colori_reference ?? null,
+      bio: Number(l.ref_fil_bio) === 1,
+      quantite: l.quantite == null ? null : Number(l.quantite),
+      prix_unitaire: l.prix_unitaire == null ? null : Number(l.prix_unitaire),
+      date_livraison: formatHfsqlDateFr(l.date_livraison) || null,
+    })),
+  }
+}
+
+/** Render a commande_fil PDF as a Buffer. */
+async function renderCommandePdfBuffer(data: CommandeFournisseurPdfData): Promise<Buffer> {
+  // CommandeFournisseurPdf returns a <Document> tree via MalterreDocument;
+  // renderToBuffer's type demands a DocumentProps element explicitly, so cast.
+  return renderToBuffer(
+    React.createElement(CommandeFournisseurPdf, { data }) as unknown as React.ReactElement<
+      import('@react-pdf/renderer').DocumentProps
+    >
+  )
+}
+
 commandesFilRouter.get('/:id/pdf', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
 
-    const rows = await query<CommandeFil>(`SELECT * FROM commande_fil WHERE IDcommande_fil = ${id}`)
-    if (rows.length === 0) { res.status(404).json({ error: 'Commande not found' }); return }
-    const fixedHeader = await fixEncoding(rows, 'commande_fil', 'IDcommande_fil', ['commentaire', 'journal'])
-    const header = fixedHeader[0] as any
+    const data = await buildCommandePdfData(id)
+    if (!data) { res.status(404).json({ error: 'Commande not found' }); return }
 
-    const [fournisseurRows, modePaiementRows, echeanceRows, adresseFournisseurRows, adresseLivRows, lignes] = await Promise.all([
-      query(`SELECT IDfournisseur, nom FROM fournisseur WHERE IDfournisseur = ${n(header.IDfournisseur)}`),
-      header.IDmode_paiement ? query(`SELECT IDmode_paiement, libelle FROM mode_paiement WHERE IDmode_paiement = ${n(header.IDmode_paiement)}`) : Promise.resolve([]),
-      header.IDecheance ? query(`SELECT IDecheance, libelle FROM echeance WHERE IDecheance = ${n(header.IDecheance)}`) : Promise.resolve([]),
-      header.IDadresse_fournisseur ? query(`SELECT * FROM adresse WHERE IDadresse = ${n(header.IDadresse_fournisseur)}`) : Promise.resolve([]),
-      header.IDadresse_livraison ? query(`SELECT * FROM adresse WHERE IDadresse = ${n(header.IDadresse_livraison)}`) : Promise.resolve([]),
-      query(
-        `SELECT rfc.IDref_fil_commande, rfc.quantite, rfc.unite, rfc.prix_unitaire, rfc.date_livraison, rfc.etat, rf.reference as ref_fil, rf.bio as ref_fil_bio, cf.reference as colori_reference FROM ref_fil_commande rfc LEFT JOIN ref_fil rf ON rfc.IDref_fil = rf.IDref_fil LEFT JOIN colori_fil cf ON rfc.IDcolori_fil = cf.IDcolori_fil WHERE rfc.IDcommande_fil = ${id} ORDER BY rfc.IDref_fil_commande`
-      ),
-    ])
-
-    const fixedFournisseur = await fixEncoding(fournisseurRows, 'fournisseur', 'IDfournisseur', ['nom'])
-    const fixedModePaiement = await fixEncoding(modePaiementRows, 'mode_paiement', 'IDmode_paiement', ['libelle'])
-    const fixedEcheance = await fixEncoding(echeanceRows, 'echeance', 'IDecheance', ['libelle'])
-    const fixedAdresseFrs = await fixEncoding(adresseFournisseurRows, 'adresse', 'IDadresse', ['nom', 'adresse1', 'adresse2', 'adresse3', 'ville', 'pays'])
-    const fixedAdresseLiv = await fixEncoding(adresseLivRows, 'adresse', 'IDadresse', ['nom', 'adresse1', 'adresse2', 'adresse3', 'ville', 'pays'])
-    const fixedLignes = await fixEncoding(lignes, 'ref_fil_commande', 'IDref_fil_commande', ['ref_fil', 'colori_reference'])
-
-    // Earliest line delivery date — drives the "Délai de livraison" metadata.
-    const earliestDelivery = ((fixedLignes as any[])
-      .map((l) => (typeof l.date_livraison === 'string' ? l.date_livraison : ''))
-      .filter((s) => /^\d{8}$/.test(s)) as string[])
-      .sort()[0] ?? null
-
-    const data: CommandeFournisseurPdfData = {
-      numero: String(header.IDcommande_fil),
-      dateCommande: formatHfsqlDateLongFr(header.date_commande),
-      fournisseurNom: ((fixedFournisseur[0] as any)?.nom ?? '').toString() || '—',
-      fournisseurAdresse: cleanAddress(fixedAdresseFrs[0] as any),
-      adresseLivraison: cleanAddress(fixedAdresseLiv[0] as any),
-      modePaiement: ((fixedModePaiement[0] as any)?.libelle ?? null) as string | null,
-      echeance: ((fixedEcheance[0] as any)?.libelle ?? null) as string | null,
-      delaiLivraison: earliestDelivery ? formatHfsqlDateLongFr(earliestDelivery) : null,
-      commentaire: (header.commentaire ?? null) as string | null,
-      lignes: (fixedLignes as any[]).map((l) => ({
-        ref_fil: l.ref_fil ?? null,
-        colori_reference: l.colori_reference ?? null,
-        bio: Number(l.ref_fil_bio) === 1,
-        quantite: l.quantite == null ? null : Number(l.quantite),
-        prix_unitaire: l.prix_unitaire == null ? null : Number(l.prix_unitaire),
-        date_livraison: formatHfsqlDateFr(l.date_livraison) || null,
-      })),
-    }
-
-    // CommandeFournisseurPdf returns a <Document> tree via MalterreDocument;
-    // renderToBuffer's type demands a DocumentProps element explicitly, so cast.
-    const buffer = await renderToBuffer(
-      React.createElement(CommandeFournisseurPdf, { data }) as unknown as React.ReactElement<
-        import('@react-pdf/renderer').DocumentProps
-      >
-    )
+    const buffer = await renderCommandePdfBuffer(data)
 
     res.setHeader('Content-Type', 'application/pdf')
     res.setHeader(
@@ -457,6 +472,154 @@ commandesFilRouter.get('/:id/pdf', async (req: Request, res: Response) => {
   } catch (err) {
     console.error('Error rendering commande-fil PDF:', err)
     res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Email the commande (Gmail API via domain-wide delegation) ───────────
+//
+// Two endpoints:
+//   GET  /:id/email-defaults  — returns pre-filled recipients + subject +
+//                               body, so the frontend dialog opens with
+//                               reasonable defaults
+//   POST /:id/email           — sends the email, impersonating the acting
+//                               user's mapped @etsmalterre.com address
+
+/** Build the default recipient list (contacts with envoi_commande=1 and a
+ *  non-empty mail), the default subject, and the default plain-text body
+ *  for a commande_fil. */
+async function buildEmailDefaults(id: number): Promise<
+  | { to: string[]; subject: string; body: string; fournisseurNom: string; numero: string }
+  | null
+> {
+  const rows = await query<CommandeFil>(`SELECT IDfournisseur FROM commande_fil WHERE IDcommande_fil = ${id}`)
+  if (rows.length === 0) return null
+  const header = rows[0] as any
+  const idFrs = n(header.IDfournisseur)
+
+  const [frsRows, contactRows] = await Promise.all([
+    query<{ IDfournisseur: number; nom: string }>(
+      `SELECT IDfournisseur, nom FROM fournisseur WHERE IDfournisseur = ${idFrs}`
+    ),
+    query<{ mail: string | null; envoi_commande: number | null; est_visible: number | null }>(
+      `SELECT mail, envoi_commande, est_visible FROM contact WHERE IDfournisseur = ${idFrs} AND envoi_commande = 1`
+    ),
+  ])
+  const fixedFrs = await fixEncoding(frsRows, 'fournisseur', 'IDfournisseur', ['nom'])
+  const fixedContacts = await fixEncoding(contactRows, 'contact', 'IDcontact', ['mail'])
+
+  const fournisseurNom = ((fixedFrs[0] as any)?.nom ?? '').toString() || ''
+  const to: string[] = []
+  const seen = new Set<string>()
+  for (const c of fixedContacts as any[]) {
+    if (c.est_visible === 0) continue
+    const raw = (c.mail ?? '').toString().trim()
+    if (!raw) continue
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) continue
+    const key = raw.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    to.push(raw)
+  }
+
+  const numero = String(id)
+  const subject = `Bon de commande N°${numero} — ETS Malterre`
+  const body =
+    `Bonjour,\n\n` +
+    `Veuillez trouver ci-joint notre bon de commande N°${numero}${fournisseurNom ? ` à destination de ${fournisseurNom}` : ''}.\n\n` +
+    `Merci de bien vouloir nous confirmer la bonne réception de cette commande.\n\n` +
+    `Cordialement,\n` +
+    `ETS Malterre`
+
+  return { to, subject, body, fournisseurNom, numero }
+}
+
+commandesFilRouter.get('/:id/email-defaults', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const defaults = await buildEmailDefaults(id)
+    if (!defaults) { res.status(404).json({ error: 'Commande not found' }); return }
+    res.json(defaults)
+  } catch (err) {
+    console.error('Error building email defaults:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+const emailBody = z.object({
+  to: z.array(z.string().email()).min(1, 'At least one recipient is required'),
+  cc: z.array(z.string().email()).optional(),
+  subject: z.string().min(1).max(500),
+  body: z.string().min(1).max(20000),
+  attach_pdf: z.boolean().optional(),
+})
+
+commandesFilRouter.post('/:id/email', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    if (req.userId === undefined) {
+      res.status(401).json({ error: 'not authenticated' })
+      return
+    }
+
+    const parsed = emailBody.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Validation failed', details: parsed.error.issues })
+      return
+    }
+
+    // Look up the acting user's corporate email — required to impersonate.
+    const senderEmail = await getUserEmail(req.userId)
+    if (!senderEmail) {
+      res.status(400).json({
+        error: 'no_sender_email',
+        message:
+          "Aucune adresse email n'est associée à votre compte. Un administrateur doit en définir une dans Paramètres › Utilisateurs.",
+      })
+      return
+    }
+
+    // Look up the user's display name so the From header reads nicely.
+    const userRows = await query<{ prenom: string | null; nom: string | null }>(
+      `SELECT prenom, nom FROM utilisateur WHERE IDutilisateur = ${req.userId}`
+    )
+    const fixedUser = await fixEncoding(userRows, 'utilisateur', 'IDutilisateur', ['prenom', 'nom'])
+    const u = (fixedUser[0] as any) ?? null
+    const displayName = u
+      ? [u.prenom, u.nom].filter((s: string | null) => s && s.trim()).map((s: string) => s.trim()).join(' ')
+      : ''
+    const fromName = displayName ? `${displayName} — ETS Malterre` : 'ETS Malterre'
+
+    // Build the attachment if requested.
+    const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
+    if (parsed.data.attach_pdf !== false) {
+      const data = await buildCommandePdfData(id)
+      if (!data) { res.status(404).json({ error: 'Commande not found' }); return }
+      const buffer = await renderCommandePdfBuffer(data)
+      attachments.push({
+        filename: `commande-fournisseur-${data.numero}.pdf`,
+        content: buffer,
+        contentType: 'application/pdf',
+      })
+    }
+
+    const messageId = await sendMail({
+      from: senderEmail,
+      fromName,
+      to: parsed.data.to,
+      cc: parsed.data.cc,
+      subject: parsed.data.subject,
+      body: parsed.data.body,
+      attachments: attachments.length > 0 ? attachments : undefined,
+    })
+
+    res.json({ ok: true, messageId })
+  } catch (err) {
+    console.error('Error sending commande-fil email:', err)
+    const message = err instanceof Error ? err.message : 'Internal server error'
+    res.status(500).json({ error: 'send_failed', message })
   }
 })
 

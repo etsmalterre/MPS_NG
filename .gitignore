@@ -29,6 +29,10 @@ desktop.ini
 .env
 .env.*
 
+# Service account keys / secrets — never commit these
+apps/api/secrets/
+secrets/
+
 # Test coverage
 coverage/
 

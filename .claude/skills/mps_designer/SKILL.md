@@ -2265,3 +2265,140 @@ This pattern will recur wherever the user needs to "drill into a row to pick rel
 - Transport → Expéditions — pick ready-to-ship parcels for a delivery line
 
 Every case has the same mechanic: a list of rows in the center panel, and each row needs an ad-hoc sub-picker against another table. This pattern is the canonical answer.
+
+---
+
+## 32. Email Send Dialog (Gmail API via domain-wide delegation)
+
+Reference: **`apps/web/src/pages/FournisseursCommandes.tsx`** → `EmailCommandeDialog` + **`apps/api/src/routes/commandes-fil.ts`** → `/:id/email-defaults` + `/:id/email`.
+
+Every document-centric screen (bons de commande, devis, factures, bons de livraison, bons d'expédition...) needs an "Envoyer un email" action that attaches the PDF and sends from the acting user's `@etsmalterre.com` address. Backed by a single service account with Google Workspace domain-wide delegation — there is no per-user OAuth flow.
+
+### 32.1 Infrastructure (one-time, already in place)
+
+| Piece | File | Role |
+|---|---|---|
+| JWT impersonation + MIME builder | `apps/api/src/lib/gmail.ts` | `sendMail({ from, fromName, to, cc, subject, body, attachments })` — builds a RFC 2822 multipart/mixed message and sends via `google.gmail('v1').users.messages.send()`. One `JWT` instance per impersonated `subject`, cached across sends. |
+| User→email map | `apps/api/src/lib/user-emails.ts` + `apps/api/data/user-emails.json` | JSON-file-backed, mirrors `permissions.ts`. Admin-editable via `/api/user-emails/users`. The `utilisateur` table has no `email` column, so the mapping lives outside HFSQL. |
+| Admin editor | `apps/web/src/pages/SettingsUtilisateurs.tsx` → `EmailEditor` card | Lives above the permission list on each user. Local draft state, client-side regex check, Enregistrer disabled when empty-to-empty or invalid. |
+| Env var | `GOOGLE_SERVICE_ACCOUNT_KEY_FILE` in `apps/api/.env.{development,production}` | Absolute path to the service account JSON key. Read lazily inside `gmail.ts` (dotenv runs in `index.ts`, ESM import hoisting forbids reading at module load). Key file lives in `apps/api/secrets/` locally (gitignored) and `/home/debian/mps_api/secrets/` on the prod API server. |
+
+The GCP project is **MPS-Desktop**, the service account is **OAuth_Sender** (`oauth-sender@mps-desktop.iam.gserviceaccount.com`), and its Client ID (`106332337770635660405`) is authorised in Google Workspace Admin → Security → API controls → Domain-wide Delegation for scope `https://www.googleapis.com/auth/gmail.send`.
+
+### 32.2 Two-endpoint backend pattern per document type
+
+For each document type that needs email, add **two** endpoints next to the existing `/:id/pdf` endpoint:
+
+- `GET /:id/email-defaults` — returns `{ to, subject, body, ... }`. Computes the default recipient list (contacts with the relevant `envoi_*` flag + a non-empty mail), a templated subject, and a templated body. Returns 404 if the parent record doesn't exist.
+- `POST /:id/email` — body `{ to: string[], cc?: string[], subject, body, attach_pdf? }`. Validates, looks up the acting user's mapped email, generates the PDF via the same helper used by `/:id/pdf`, calls `sendMail()`. Responses:
+  - `200 { ok: true, messageId }`
+  - `400 no_sender_email` — acting user has no mapped email yet
+  - `404` — record not found
+  - `500 send_failed` — bubble the `error.message` for the UI toast
+
+The PDF generation **must be refactored into a reusable helper** the moment a document type gains an email endpoint — `buildCommandePdfData(id)` + `renderCommandePdfBuffer(data)` in `commandes-fil.ts` is the pattern. Both `/pdf` and `/email` call the same two helpers, so the attachment is byte-identical to the downloadable PDF.
+
+Contacts filtering convention — `envoi_*` flags in the `contact` table drive which contacts pre-fill the To field:
+
+| Document | Contact flag |
+|---|---|
+| Bon de commande (commande_fil) | `envoi_commande = 1` |
+| Facture | `envoi_facture = 1` |
+| Bon de livraison | `envoi_bl = 1` |
+| Devis / Soumission | `envoi_soumission = 1` |
+
+Always additionally filter out `est_visible = 0` contacts and dedupe by lower-cased email, and skip entries that don't match the simple regex `/^[^\s@]+@[^\s@]+\.[^\s@]+$/`. Legacy data has `"-"`, `"."`, single-char mail fields that must not pollute the pre-filled recipient list.
+
+### 32.3 Frontend dialog — `EmailDocDialog` shape
+
+Every document screen gets its own copy of the email dialog alongside `CreateXxxDialog` — **do not try to abstract** into a shared component yet. The differences (default body wording, which record ID, which endpoints) make it cleaner to fork per screen until we have 3+ working examples.
+
+Canonical structure based on `EmailCommandeDialog`:
+
+```tsx
+<Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+  <DialogContent className="max-w-2xl" onClose={onClose}>
+    <DialogHeader>
+      <DialogTitle className="flex items-center gap-2">
+        <AtSign className="h-5 w-5 text-accent" />
+        Envoyer un email
+      </DialogTitle>
+    </DialogHeader>
+
+    {loadingDefaults ? <Loader2 /> : defaultsError ? <AlertCircle /> : (
+      <div className="space-y-3">
+        {/* À — comma-separated text input + helper text */}
+        {/* Cc — comma-separated, facultatif */}
+        {/* Objet — single line */}
+        {/* Message — textarea rows={8}, font-sans */}
+        {/* Checkbox — "Joindre le bon de commande (PDF)" with FileText icon, checked by default */}
+        {/* Error banner — border-destructive/30 bg-destructive/5 with AlertCircle */}
+        {/* Success banner — border-green-500/30 bg-green-500/5 with CheckCircle2 */}
+      </div>
+    )}
+
+    <DialogFooter>
+      <Button variant="outline" onClick={onClose} disabled={isSending}>Annuler</Button>
+      <Button onClick={handleSend} disabled={isSending || loadingDefaults || !!successMessage}>
+        {isSending ? <><Loader2 className="animate-spin" />Envoi…</> : <><Mail />Envoyer</>}
+      </Button>
+    </DialogFooter>
+  </DialogContent>
+</Dialog>
+```
+
+### 32.4 Conventions — do not deviate
+
+- **Icon in the DialogTitle** is `AtSign` (the "@" action symbol), consistent with the view-mode header button (§6.1). Never `Mail` — that's reserved for inline email-address indicators and for the centre icon of the placeholder `"En developpement"` dialog (§18 A-bis).
+- **Send button icon** is `Mail` (envelope) — different from the title icon, same distinction as the §18 placeholder pattern.
+- **Width**: `max-w-2xl`. Wider than the default `max-w-md` so the textarea has breathing room, narrower than `max-w-5xl` so it doesn't feel like a page-replacing form.
+- **To/Cc inputs are comma-separated plain text**, not a chip-based multiselect. The `parseEmailList` helper splits on `,`, `;`, or newline and trims. Keep it simple — users can edit freely and Gmail's own compose uses the same pattern.
+- **Pre-fill hydration** runs once on first `defaults` load, then leaves the fields editable. Use a `hydrated` state flag + `useEffect` so re-renders don't clobber edits in progress.
+- **All dialog state resets on close**, via a second `useEffect` keyed on `open`. Re-opening re-fetches defaults.
+- **Client-side validation before sending**: at least one recipient, non-empty subject. Surface as a red banner, don't throw.
+- **Use raw `fetch` with `credentials: 'include'` inside `handleSend`**, not `apiFetch`. The shared helper discards the response body on error, which means you lose the server's `message` field — and the server's 400 `no_sender_email` message is exactly the text the user needs to see. Raw fetch lets you `res.json()` on failure.
+- **Success banner then auto-close** after ~1.2s via `setTimeout(() => onClose(), 1200)`. Disable the Envoyer button while `successMessage` is set so a double-click can't send twice.
+- **PDF attachment checkbox default = true**. There is never a case where the user wants to send a bon de commande without the PDF.
+
+### 32.5 Body template conventions
+
+Keep the default body **short, polite, French, and signed "ETS Malterre"**. Pattern from `buildEmailDefaults` in `commandes-fil.ts`:
+
+```
+Bonjour,
+
+Veuillez trouver ci-joint notre bon de commande N°{numero}
+[à destination de {fournisseurNom}].
+
+Merci de bien vouloir nous confirmer la bonne réception de cette commande.
+
+Cordialement,
+ETS Malterre
+```
+
+Per document type, only the second line changes (the document reference). Do NOT generate elaborate multi-paragraph templates — users will edit the body when they need something specific, and a terse default is easier to personalise than a verbose one to delete.
+
+### 32.6 From header convention
+
+The API resolves the acting user's display name from `utilisateur.prenom + nom` and formats the From header as `Prénom Nom — ETS Malterre <mapped-email@etsmalterre.com>`. Never send with a bare email in the From header — Gmail will render it with the `mapped-email` local part as the display name, which looks clinical. The " — ETS Malterre" suffix makes the sender instantly recognisable in the recipient's inbox. MIME-encode the display name via the `encodeHeader` helper in `gmail.ts` so accented characters survive.
+
+### 32.7 Error handling — map 400s to friendly French
+
+The server's `400 no_sender_email` response includes a `message` field in French: `"Aucune adresse email n'est associée à votre compte. Un administrateur doit en définir une dans Paramètres › Utilisateurs."`
+
+The frontend must surface this message verbatim — it directs the user to the exact fix. The `handleSend` raw-fetch path does this automatically by reading `json.message` before falling back to `json.error`. Do not strip or rephrase it in the dialog.
+
+Any other 4xx/5xx falls through to the generic `Erreur HTTP {status}` banner.
+
+### 32.8 Candidate screens
+
+Apply this pattern to every document screen that needs email delivery:
+
+- Fournisseurs → Commandes ✅ implemented
+- Sous-traitants → Commandes — contact flag `envoi_commande`
+- Clients → Commandes — contact flag `envoi_commande`
+- Clients → Devis — contact flag `envoi_soumission`
+- Clients → Facturation — contact flag `envoi_facture`
+- Transport → Expéditions / Livraisons — contact flag `envoi_bl`
+
+Each one needs: (a) a PDF renderer in `apps/api/src/lib/pdf/`, (b) a reusable `buildXxxPdfData` + `renderXxxPdfBuffer` helper pair, (c) the two endpoints `/:id/email-defaults` and `/:id/email`, (d) the forked `EmailXxxDialog` component, and (e) the `@` button on the view-mode header trio (§6.1).

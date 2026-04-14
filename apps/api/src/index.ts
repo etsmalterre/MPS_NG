@@ -13,6 +13,7 @@ import { commandesFilRouter } from './routes/commandes-fil.js'
 import { stockRouter } from './routes/stock.js'
 import { authRouter } from './routes/auth.js'
 import { permissionsRouter } from './routes/permissions.js'
+import { userEmailsRouter } from './routes/user-emails.js'
 import { attachUser } from './lib/auth.js'
 import { closeConnection } from './lib/hfsql-auto.js'
 
@@ -42,6 +43,7 @@ app.get('/api/health', (_req, res) => {
 
 app.use('/api/auth', authRouter)
 app.use('/api/permissions', permissionsRouter)
+app.use('/api/user-emails', userEmailsRouter)
 app.use('/api/entreprises', entreprisesRouter)
 app.use('/api/fournisseurs', fournisseursRouter)
 app.use('/api/commandes-fil', commandesFilRouter)
