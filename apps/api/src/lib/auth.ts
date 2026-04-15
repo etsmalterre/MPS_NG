@@ -90,18 +90,27 @@ export function verifyUserCookie(raw: string | undefined | null): number | null 
 /** Cookie options used by both login and logout responses. */
 export function cookieOptions(): {
   httpOnly: true
-  sameSite: 'lax'
+  sameSite: 'lax' | 'none'
   path: '/'
   secure: boolean
 } {
+  const isProd = process.env.NODE_ENV === 'production'
   return {
     httpOnly: true,
-    sameSite: 'lax',
+    // SameSite=None in production so the cookie persists when the app is
+    // embedded in a third-party context — specifically the WinDev HTML
+    // control, which loads the site inside a WebView2 that the browser
+    // treats as a third-party iframe. Chromium refuses to persist
+    // SameSite=Lax cookies in that context across sessions, so every
+    // WinDev app restart would re-trigger the UserPickerGate. SameSite=None
+    // requires Secure, which we already set in production. In dev we stay
+    // on Lax because plain-HTTP localhost rejects SameSite=None.
+    sameSite: isProd ? 'none' : 'lax',
     path: '/',
     // Secure in production so browsers only send the cookie over HTTPS. In
     // dev we run on plain HTTP localhost, which is allowed to set non-secure
     // cookies.
-    secure: process.env.NODE_ENV === 'production',
+    secure: isProd,
   }
 }
 
