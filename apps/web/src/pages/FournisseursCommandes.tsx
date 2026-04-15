@@ -268,6 +268,15 @@ export function FournisseursCommandes() {
     }
   }, [commandes, selectedId])
 
+  // Reset the stock-linkage drawer every time the active commande changes.
+  // Without this the previous commande's drawer state leaks into the next
+  // one: the rows container stays shrunk to max-h-[40%], no drawer renders
+  // (the new commande has no matching line id), and the totals footer
+  // floats up next to the rows list instead of staying pinned at the bottom.
+  useEffect(() => {
+    setStockDrawerLineId(null)
+  }, [selectedId])
+
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['commandes-fil'] })
     queryClient.invalidateQueries({ queryKey: ['commande-fil', selectedId] })
