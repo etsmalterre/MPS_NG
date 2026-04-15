@@ -468,6 +468,11 @@ commandesFilRouter.get('/:id/pdf', async (req: Request, res: Response) => {
       'Content-Disposition',
       `inline; filename="commande-fournisseur-${data.numero}.pdf"`
     )
+    // Strip helmet's restrictive headers so the web app (different origin/port
+    // in dev) can embed the PDF in an <iframe>. See mps_designer §21.
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
     res.send(buffer)
   } catch (err) {
     console.error('Error rendering commande-fil PDF:', err)
@@ -484,13 +489,32 @@ commandesFilRouter.get('/:id/pdf', async (req: Request, res: Response) => {
 //   POST /:id/email           — sends the email, impersonating the acting
 //                               user's mapped @etsmalterre.com address
 
-/** Build the default recipient list (contacts with envoi_commande=1 and a
- *  non-empty mail), the default subject, and the default plain-text body
- *  for a commande_fil. */
-async function buildEmailDefaults(id: number): Promise<
-  | { to: string[]; subject: string; body: string; fournisseurNom: string; numero: string }
-  | null
-> {
+/** Recipient entry returned to the frontend SendEmailDialog. `selected`
+ *  contacts are rendered as pre-checked chips on open; `suggestions` are
+ *  shown beneath, clickable to move into selected. */
+interface EmailRecipientPayload {
+  email: string
+  name?: string
+  source: 'contact'
+  contactId: number
+}
+
+interface EmailDefaultsPayload {
+  recipients: {
+    selected: EmailRecipientPayload[]
+    suggestions: EmailRecipientPayload[]
+  }
+  subject: string
+  body: string
+  fournisseurNom: string
+  numero: string
+}
+
+/** Build default email form state for a commande_fil. Splits the fournisseur's
+ *  visible contacts with a valid email into two buckets: those flagged
+ *  envoi_commande=1 go into `selected` (pre-filled chips), the rest into
+ *  `suggestions` (clickable to add). */
+async function buildEmailDefaults(id: number): Promise<EmailDefaultsPayload | null> {
   const rows = await query<CommandeFil>(`SELECT IDfournisseur FROM commande_fil WHERE IDcommande_fil = ${id}`)
   if (rows.length === 0) return null
   const header = rows[0] as any
@@ -500,15 +524,17 @@ async function buildEmailDefaults(id: number): Promise<
     query<{ IDfournisseur: number; nom: string }>(
       `SELECT IDfournisseur, nom FROM fournisseur WHERE IDfournisseur = ${idFrs}`
     ),
-    query<{ mail: string | null; envoi_commande: number | null; est_visible: number | null }>(
-      `SELECT mail, envoi_commande, est_visible FROM contact WHERE IDfournisseur = ${idFrs} AND envoi_commande = 1`
+    query<{ IDcontact: number; nom: string | null; prenom: string | null; mail: string | null; envoi_commande: number | null; est_visible: number | null }>(
+      `SELECT IDcontact, nom, prenom, mail, envoi_commande, est_visible FROM contact WHERE IDfournisseur = ${idFrs}`
     ),
   ])
   const fixedFrs = await fixEncoding(frsRows, 'fournisseur', 'IDfournisseur', ['nom'])
-  const fixedContacts = await fixEncoding(contactRows, 'contact', 'IDcontact', ['mail'])
+  const fixedContacts = await fixEncoding(contactRows, 'contact', 'IDcontact', ['nom', 'prenom', 'mail'])
 
   const fournisseurNom = ((fixedFrs[0] as any)?.nom ?? '').toString() || ''
-  const to: string[] = []
+
+  const selected: EmailRecipientPayload[] = []
+  const suggestions: EmailRecipientPayload[] = []
   const seen = new Set<string>()
   for (const c of fixedContacts as any[]) {
     if (c.est_visible === 0) continue
@@ -518,7 +544,18 @@ async function buildEmailDefaults(id: number): Promise<
     const key = raw.toLowerCase()
     if (seen.has(key)) continue
     seen.add(key)
-    to.push(raw)
+    const displayName = [c.prenom, c.nom]
+      .map((s: string | null) => (s ?? '').toString().trim())
+      .filter((s: string) => s.length > 0)
+      .join(' ')
+    const recipient: EmailRecipientPayload = {
+      email: raw,
+      source: 'contact',
+      contactId: n(c.IDcontact),
+    }
+    if (displayName) recipient.name = displayName
+    if (c.envoi_commande === 1) selected.push(recipient)
+    else suggestions.push(recipient)
   }
 
   const numero = String(id)
@@ -530,7 +567,13 @@ async function buildEmailDefaults(id: number): Promise<
     `Cordialement,\n` +
     `ETS Malterre`
 
-  return { to, subject, body, fournisseurNom, numero }
+  return {
+    recipients: { selected, suggestions },
+    subject,
+    body,
+    fournisseurNom,
+    numero,
+  }
 }
 
 commandesFilRouter.get('/:id/email-defaults', async (req: Request, res: Response) => {
@@ -546,12 +589,19 @@ commandesFilRouter.get('/:id/email-defaults', async (req: Request, res: Response
   }
 })
 
+const extraAttachmentSchema = z.object({
+  filename: z.string().min(1).max(255),
+  content_base64: z.string().min(1),
+  content_type: z.string().min(1).max(100),
+})
+
 const emailBody = z.object({
   to: z.array(z.string().email()).min(1, 'At least one recipient is required'),
   cc: z.array(z.string().email()).optional(),
   subject: z.string().min(1).max(500),
   body: z.string().min(1).max(20000),
   attach_pdf: z.boolean().optional(),
+  extra_attachments: z.array(extraAttachmentSchema).optional(),
 })
 
 commandesFilRouter.post('/:id/email', async (req: Request, res: Response) => {
@@ -592,7 +642,8 @@ commandesFilRouter.post('/:id/email', async (req: Request, res: Response) => {
       : ''
     const fromName = displayName ? `${displayName} — ETS Malterre` : 'ETS Malterre'
 
-    // Build the attachment if requested.
+    // Build the server-rendered PDF first (if requested), then append any
+    // user-uploaded attachments the dialog sent along.
     const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
     if (parsed.data.attach_pdf !== false) {
       const data = await buildCommandePdfData(id)
@@ -602,6 +653,13 @@ commandesFilRouter.post('/:id/email', async (req: Request, res: Response) => {
         filename: `commande-fournisseur-${data.numero}.pdf`,
         content: buffer,
         contentType: 'application/pdf',
+      })
+    }
+    for (const a of parsed.data.extra_attachments ?? []) {
+      attachments.push({
+        filename: a.filename,
+        content: Buffer.from(a.content_base64, 'base64'),
+        contentType: a.content_type,
       })
     }
 

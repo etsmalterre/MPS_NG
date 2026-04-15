@@ -2,9 +2,6 @@
 @tailwind components;
 @tailwind utilities;
 
-/* MPS/ETS Malterre Brand Fonts - Premium Selection */
-@import url('https://fonts.googleapis.com/css2?family=Anton&family=Lato:wght@300;400;500;600;700&display=swap');
-
 @layer base {
   :root {
     /* MPS/ETS Malterre Brand Colors */

@@ -27,11 +27,12 @@ import {
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { SendEmailDialog } from '@/components/email/SendEmailDialog'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput } from '@/lib/dates'
-import { apiFetch } from '@/lib/api'
+import { apiFetch, API_URL } from '@/lib/api'
+import { postEmail } from '@/lib/email'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -220,21 +221,16 @@ export function Entreprises() {
       isSaving={guard.isSaving}
     />
 
-    <Dialog open={emailModalOpen} onOpenChange={setEmailModalOpen}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <AtSign className="h-5 w-5 text-accent" />
-            Envoyer un email
-          </DialogTitle>
-        </DialogHeader>
-        <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-          <Mail className="h-12 w-12 mb-3 opacity-40" />
-          <p className="text-sm font-medium">En developpement</p>
-          <p className="text-xs mt-1">Cette fonctionnalite sera disponible prochainement.</p>
-        </div>
-      </DialogContent>
-    </Dialog>
+    {selectedId !== null && (
+      <SendEmailDialog
+        open={emailModalOpen}
+        onClose={() => setEmailModalOpen(false)}
+        contextLabel={detail?.nom ?? undefined}
+        queryKey={['entreprise-email-defaults', selectedId]}
+        loadDefaults={() => apiFetch(`/entreprises/${selectedId}/email-defaults`)}
+        onSend={(p) => postEmail(`${API_URL}/entreprises/${selectedId}/email`, p)}
+      />
+    )}
     </>
   )
 }

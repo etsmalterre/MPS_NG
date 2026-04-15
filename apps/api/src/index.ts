@@ -31,7 +31,11 @@ app.use(helmet())
 // CORS must set `credentials: true` for the browser to send/receive cookies
 // cross-origin. With credentials, `origin` must be explicit (not '*').
 app.use(cors({ origin: CORS_ORIGINS, credentials: true }))
-app.use(express.json())
+// 25 MB body limit — the email endpoints accept base64-encoded user
+// attachments inline, and Gmail's hard ceiling per message is 25 MB raw
+// (~33 MB base64'd). 25 MB here gives enough room for the largest practical
+// attachment payload while keeping runaway bodies bounded.
+app.use(express.json({ limit: '25mb' }))
 app.use(cookieParser())
 // Best-effort: attaches req.userId when a valid signed cookie is present.
 // Never 401s — routes keep working without a cookie, same as before.

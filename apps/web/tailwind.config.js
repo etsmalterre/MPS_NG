@@ -14,10 +14,14 @@ export default {
       },
     },
     extend: {
+      // Both stacks resolve to the OS default UI font (Segoe UI on Windows,
+      // San Francisco on macOS, Roboto on Android/Linux). `font-heading` is
+      // kept as a separate utility so existing className="font-heading" call
+      // sites stay valid — it just resolves to the same system stack as
+      // `font-sans`, which is what the app has actually been rendering.
       fontFamily: {
-        sans: ["Lato", "system-ui", "sans-serif"],
-        heading: ["Anton", "system-ui", "sans-serif"],
-        display: ["Anton", "system-ui", "sans-serif"],
+        sans: ["system-ui", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "Roboto", "Helvetica Neue", "Arial", "sans-serif"],
+        heading: ["system-ui", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "Roboto", "Helvetica Neue", "Arial", "sans-serif"],
       },
       colors: {
         border: "hsl(var(--border))",

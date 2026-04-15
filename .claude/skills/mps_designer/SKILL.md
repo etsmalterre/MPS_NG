@@ -71,22 +71,37 @@ All shadows have a soft blue tint from `rgb(20 61 107)`:
 
 ## 2. Typography
 
-### Fonts (loaded via `@import` in `index.css`)
+### Fonts (OS system stack)
 
-| Font | Tailwind Class | Usage |
-|------|----------------|-------|
-| **Anton** | `font-heading` | All headings (h1-h6), applied automatically via base CSS |
-| **Lato** (300-700) | `font-sans` | Body text (default) |
+The app intentionally uses the **OS default UI font** for everything — Segoe UI on Windows, San Francisco on macOS, Roboto on Android/Linux — via the `system-ui` CSS keyword. No web fonts are loaded. No `@import` in `index.css`, no `<link>` tags in `index.html`, no `@font-face`.
 
-**Important**: Do NOT add `<link>` tags for Google Fonts in `index.html` — use CSS `@import` only.
+| Tailwind Class | Resolves to | Usage |
+|----------------|-------------|-------|
+| `font-sans` | system-ui stack | Body text (default) |
+| `font-heading` | system-ui stack | Headings (h1-h6), applied automatically via base CSS |
+
+Both utilities map to the same stack in `tailwind.config.js`:
+
+```js
+fontFamily: {
+  sans: ["system-ui", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "Roboto", "Helvetica Neue", "Arial", "sans-serif"],
+  heading: ["system-ui", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "Roboto", "Helvetica Neue", "Arial", "sans-serif"],
+}
+```
+
+`font-heading` is kept as a separate utility (identical resolution) because many call sites already use `className="font-heading"` on headings and we want room to swap in a real display font later if needed.
+
+**Historical note**: earlier iterations of this project tried to load Anton (display) + Lato (body) from Google Fonts via `@import`. The `@import` statement was placed after `@tailwind base` in `index.css`, which is invalid per the CSS spec (`@import` must come before any style rule), so browsers silently dropped it and the fonts never loaded. The app rendered in the system stack the entire time, which is the look the project has grown into and kept. The broken `@import` and the Anton/Lato references were removed in April 2026 — do NOT re-add `@import url('https://fonts.googleapis.com/...')` to `index.css` without an explicit design decision to swap the heading font, because it will silently change every screen.
 
 ### Heading Pattern
 
-All h1-h6 automatically get `font-heading tracking-tight` via base CSS. For explicit usage:
+All h1-h6 automatically get `font-heading tracking-tight` via base CSS in `index.css`. For explicit usage:
 
 ```tsx
 <h1 className="text-2xl font-heading font-bold tracking-tight">Page Title</h1>
 ```
+
+Because `font-heading` currently resolves to the same stack as `font-sans`, `font-heading` has no *visual* effect on its own — weight/size/tracking do the lifting. Keep the className on headings anyway so the swap is a one-line config change if we ever pick a real display font.
 
 ### Text Hierarchy
 
@@ -2270,9 +2285,15 @@ Every case has the same mechanic: a list of rows in the center panel, and each r
 
 ## 32. Email Send Dialog (Gmail API via domain-wide delegation)
 
-Reference: **`apps/web/src/pages/FournisseursCommandes.tsx`** → `EmailCommandeDialog` + **`apps/api/src/routes/commandes-fil.ts`** → `/:id/email-defaults` + `/:id/email`.
+References:
+- **Shared component**: `apps/web/src/components/email/SendEmailDialog.tsx` — the single reusable two-pane dialog used by every email button in the app.
+- **Shared lib**: `apps/web/src/lib/email.ts` — types (`EmailRecipient`, `EmailDefaults`, `SendPayload`), `parseEmailList`, `formatFileSize`, `MAX_TOTAL_ATTACHMENT_BYTES`, `postEmail(url, payload, opts)`.
+- **Call sites**: `apps/web/src/pages/FournisseursCommandes.tsx` (with PDF preview) and `apps/web/src/pages/Entreprises.tsx` (no PDF → empty viewer).
+- **Backend reference**: `apps/api/src/routes/commandes-fil.ts` → `/:id/email-defaults` + `/:id/email` (with server-rendered PDF + user attachments). `apps/api/src/routes/entreprises.ts` has the minus-PDF variant.
 
-Every document-centric screen (bons de commande, devis, factures, bons de livraison, bons d'expédition...) needs an "Envoyer un email" action that attaches the PDF and sends from the acting user's `@etsmalterre.com` address. Backed by a single service account with Google Workspace domain-wide delegation — there is no per-user OAuth flow.
+Every document-centric screen (bons de commande, devis, factures, bons de livraison, bons d'expédition…) plus "plain" email-enabled screens like Entreprises use the same `SendEmailDialog` component. Backed by a single Google service account with Workspace domain-wide delegation — there is no per-user OAuth flow.
+
+**Historical note**: through April 2026 the plan was per-screen `EmailXxxDialog` forks until 3+ copies justified abstracting. The actual abstraction landed earlier: `FournisseursCommandes.tsx` got a working `EmailCommandeDialog`, then `Entreprises.tsx` needed one, then a bunch of other screens were queued — so the shared component was built directly, the local `EmailCommandeDialog` was deleted, and both call sites were wired through `<SendEmailDialog>`. **Do not re-fork per screen**. Add props to the shared component or lift state up if a screen needs something custom.
 
 ### 32.1 Infrastructure (one-time, already in place)
 
@@ -2287,80 +2308,213 @@ The GCP project is **MPS-Desktop**, the service account is **OAuth_Sender** (`oa
 
 ### 32.2 Two-endpoint backend pattern per document type
 
-For each document type that needs email, add **two** endpoints next to the existing `/:id/pdf` endpoint:
+For each document type (or plain entity) that needs email, add **two** endpoints next to the existing `/:id/pdf` endpoint (if any):
 
-- `GET /:id/email-defaults` — returns `{ to, subject, body, ... }`. Computes the default recipient list (contacts with the relevant `envoi_*` flag + a non-empty mail), a templated subject, and a templated body. Returns 404 if the parent record doesn't exist.
-- `POST /:id/email` — body `{ to: string[], cc?: string[], subject, body, attach_pdf? }`. Validates, looks up the acting user's mapped email, generates the PDF via the same helper used by `/:id/pdf`, calls `sendMail()`. Responses:
-  - `200 { ok: true, messageId }`
-  - `400 no_sender_email` — acting user has no mapped email yet
-  - `404` — record not found
-  - `500 send_failed` — bubble the `error.message` for the UI toast
+**`GET /:id/email-defaults`** — returns the shared `EmailDefaults` shape:
 
-The PDF generation **must be refactored into a reusable helper** the moment a document type gains an email endpoint — `buildCommandePdfData(id)` + `renderCommandePdfBuffer(data)` in `commandes-fil.ts` is the pattern. Both `/pdf` and `/email` call the same two helpers, so the attachment is byte-identical to the downloadable PDF.
+```ts
+{
+  recipients: {
+    selected:    Array<{ email, name?, source: 'contact', contactId }>,  // pre-checked chips
+    suggestions: Array<{ email, name?, source: 'contact', contactId }>,  // clickable to add
+  },
+  subject: string,
+  body: string,
+  // ...plus screen-specific context fields (fournisseurNom, entrepriseNom, numero, etc.)
+}
+```
 
-Contacts filtering convention — `envoi_*` flags in the `contact` table drive which contacts pre-fill the To field:
+Filter every contact on the parent record: skip `est_visible = 0`, require a non-empty `mail` matching `/^[^\s@]+@[^\s@]+\.[^\s@]+$/`, dedupe lowercase. Build `name` from `prenom + nom`. Split into two lists by the relevant `envoi_*` flag (for documents) or `est_defaut` (for entreprises, which have no `envoi_*`). Returns 404 if the parent record doesn't exist.
 
-| Document | Contact flag |
+**`POST /:id/email`** — body:
+
+```ts
+{
+  to: string[],                     // required, min 1, Zod .email()
+  cc?: string[],
+  subject: string,                  // min 1, max 500
+  body: string,                     // min 1, max 20000
+  attach_pdf?: boolean,             // default true; omit if there's no server PDF
+  extra_attachments?: Array<{       // user-uploaded files from the dialog
+    filename:       string,
+    content_base64: string,
+    content_type:   string,
+  }>,
+}
+```
+
+Validates via Zod, looks up the acting user's mapped email via `getUserEmail(req.userId)`, generates the server PDF via the shared helper (if `attach_pdf !== false`), decodes each `extra_attachments[].content_base64` to a Buffer, merges both into one `attachments` array, calls `sendMail()`. Responses:
+- `200 { ok: true, messageId }`
+- `400 no_sender_email` — acting user has no mapped email yet (see §32.7)
+- `400 Validation failed` — Zod issues
+- `404` — record not found
+- `500 send_failed` — bubble `err.message` for the UI banner
+
+**Body size**: `apps/api/src/index.ts` sets `express.json({ limit: '25mb' })`. Required — user attachments travel inline as base64 and the default 100 KB limit would reject anything non-trivial.
+
+**PDF helper refactor (mandatory)** — the moment a document type gains an email endpoint, split its PDF rendering into a reusable `buildXxxPdfData(id)` + `renderXxxPdfBuffer(data)` pair. Both `/pdf` and `/email` call them so the attachment is byte-identical to the downloadable PDF. Reference: `commandes-fil.ts`.
+
+**Iframe-embedding header strip (mandatory for any `/pdf` endpoint)** — see §21. The `SendEmailDialog` viewer iframes the `/pdf` endpoint, and helmet's default headers block cross-origin embedding. Every PDF endpoint MUST:
+```ts
+res.removeHeader('X-Frame-Options')
+res.removeHeader('Content-Security-Policy')
+res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+```
+Without this the right pane silently falls back to the empty state. Already applied in `commandes-fil.ts`.
+
+**Contacts filtering convention** — flags in the `contact` table drive which contacts go into `recipients.selected` vs `suggestions`:
+
+| Document | Flag determining `selected` bucket |
 |---|---|
 | Bon de commande (commande_fil) | `envoi_commande = 1` |
 | Facture | `envoi_facture = 1` |
 | Bon de livraison | `envoi_bl = 1` |
 | Devis / Soumission | `envoi_soumission = 1` |
+| **Entreprise (no document)** | `est_defaut = 1` (fallback — entreprise contacts lack `envoi_*`) |
 
-Always additionally filter out `est_visible = 0` contacts and dedupe by lower-cased email, and skip entries that don't match the simple regex `/^[^\s@]+@[^\s@]+\.[^\s@]+$/`. Legacy data has `"-"`, `"."`, single-char mail fields that must not pollute the pre-filled recipient list.
+Everything that doesn't match the flag but still has a valid email goes into `suggestions` so the user can click-to-add.
 
-### 32.3 Frontend dialog — `EmailDocDialog` shape
+### 32.3 Frontend — using the shared `SendEmailDialog`
 
-Every document screen gets its own copy of the email dialog alongside `CreateXxxDialog` — **do not try to abstract** into a shared component yet. The differences (default body wording, which record ID, which endpoints) make it cleaner to fork per screen until we have 3+ working examples.
-
-Canonical structure based on `EmailCommandeDialog`:
+Every screen mounts the same component. Do NOT fork it. Call site shape:
 
 ```tsx
-<Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
-  <DialogContent className="max-w-2xl" onClose={onClose}>
-    <DialogHeader>
-      <DialogTitle className="flex items-center gap-2">
-        <AtSign className="h-5 w-5 text-accent" />
-        Envoyer un email
-      </DialogTitle>
-    </DialogHeader>
-
-    {loadingDefaults ? <Loader2 /> : defaultsError ? <AlertCircle /> : (
-      <div className="space-y-3">
-        {/* À — comma-separated text input + helper text */}
-        {/* Cc — comma-separated, facultatif */}
-        {/* Objet — single line */}
-        {/* Message — textarea rows={8}, font-sans */}
-        {/* Checkbox — "Joindre le bon de commande (PDF)" with FileText icon, checked by default */}
-        {/* Error banner — border-destructive/30 bg-destructive/5 with AlertCircle */}
-        {/* Success banner — border-green-500/30 bg-green-500/5 with CheckCircle2 */}
-      </div>
-    )}
-
-    <DialogFooter>
-      <Button variant="outline" onClick={onClose} disabled={isSending}>Annuler</Button>
-      <Button onClick={handleSend} disabled={isSending || loadingDefaults || !!successMessage}>
-        {isSending ? <><Loader2 className="animate-spin" />Envoi…</> : <><Mail />Envoyer</>}
-      </Button>
-    </DialogFooter>
-  </DialogContent>
-</Dialog>
+<SendEmailDialog
+  open={emailModalOpen}
+  onClose={() => setEmailModalOpen(false)}
+  contextLabel={detail?.fournisseur_nom ?? undefined}
+  queryKey={['commande-fil-email-defaults', selectedId]}
+  loadDefaults={() => apiFetch(`/commandes-fil/${selectedId}/email-defaults`)}
+  pdfUrl={`${API_URL}/commandes-fil/${selectedId}/pdf`}
+  pdfAttachmentLabel={`commande-fournisseur-${selectedId}.pdf`}
+  onSend={(p) => postEmail(
+    `${API_URL}/commandes-fil/${selectedId}/email`,
+    p,
+    { includeAttachPdf: true },
+  )}
+/>
 ```
 
-### 32.4 Conventions — do not deviate
+For a screen without a document (Entreprises), drop `pdfUrl` + `pdfAttachmentLabel` and pass `postEmail(..., p)` without `includeAttachPdf`. The right pane shows the empty state until the user attaches a file.
 
-- **Icon in the DialogTitle** is `AtSign` (the "@" action symbol), consistent with the view-mode header button (§6.1). Never `Mail` — that's reserved for inline email-address indicators and for the centre icon of the placeholder `"En developpement"` dialog (§18 A-bis).
-- **Send button icon** is `Mail` (envelope) — different from the title icon, same distinction as the §18 placeholder pattern.
-- **Width**: `max-w-2xl`. Wider than the default `max-w-md` so the textarea has breathing room, narrower than `max-w-5xl` so it doesn't feel like a page-replacing form.
-- **To/Cc inputs are comma-separated plain text**, not a chip-based multiselect. The `parseEmailList` helper splits on `,`, `;`, or newline and trims. Keep it simple — users can edit freely and Gmail's own compose uses the same pattern.
-- **Pre-fill hydration** runs once on first `defaults` load, then leaves the fields editable. Use a `hydrated` state flag + `useEffect` so re-renders don't clobber edits in progress.
-- **All dialog state resets on close**, via a second `useEffect` keyed on `open`. Re-opening re-fetches defaults.
-- **Client-side validation before sending**: at least one recipient, non-empty subject. Surface as a red banner, don't throw.
-- **Use raw `fetch` with `credentials: 'include'` inside `handleSend`**, not `apiFetch`. The shared helper discards the response body on error, which means you lose the server's `message` field — and the server's 400 `no_sender_email` message is exactly the text the user needs to see. Raw fetch lets you `res.json()` on failure.
-- **Success banner then auto-close** after ~1.2s via `setTimeout(() => onClose(), 1200)`. Disable the Envoyer button while `successMessage` is set so a double-click can't send twice.
-- **PDF attachment checkbox default = true**. There is never a case where the user wants to send a bon de commande without the PDF.
+**Props**:
 
-### 32.5 Body template conventions
+| Prop | Type | Notes |
+|---|---|---|
+| `open` / `onClose` | `boolean` / `() => void` | Standard dialog visibility |
+| `contextLabel` | `string?` | Header suffix (e.g. fournisseur / entreprise name) |
+| `queryKey` | `readonly unknown[]` | React-query cache key for the defaults fetch — must be stable per open id |
+| `loadDefaults` | `() => Promise<EmailDefaults>` | Called on open (guarded by `enabled: open`) |
+| `onSend` | `(payload: SendPayload) => Promise<void>` | Caller wires the endpoint via `postEmail(url, p, opts)` |
+| `pdfUrl` | `string?` | Optional; when omitted, the right pane shows the empty state and no server PDF chip is added to the attachment list |
+| `pdfAttachmentLabel` | `string?` | Filename-like label shown on the server PDF chip (default `'document.pdf'`) |
+
+**`postEmail` helper** (`apps/web/src/lib/email.ts`) does three things the caller should not reinvent:
+1. Uses raw `fetch` with `credentials: 'include'` (NOT `apiFetch`) so the server's French `no_sender_email` message is preserved in the response body.
+2. Serializes `payload.userAttachments` (`File[]`) to base64 via a binary-safe chunked `Uint8Array` → `btoa` loop, sends as `extra_attachments: [{ filename, content_base64, content_type }]`.
+3. When `opts.includeAttachPdf` is true, forwards `attachPdf` as the `attach_pdf` body field.
+
+### 32.4 Layout — the two-pane dialog
+
+```
+┌───────────────────────────────────────────────────────────┐
+│  [@] Envoyer un email — {contextLabel}             [X]   │ ← flex-shrink-0 header, gold gradient
+├─────────────────────────────┬─────────────────────────────┤
+│ À                           │                             │
+│ ┌─────────────────────────┐ │                             │
+│ │ [👤 Jean D. ✕] [✕]      │ │                             │
+│ │ + [Paul M.] [Marc T.]   │ │                             │
+│ │ [ajouter une adresse] + │ │       <iframe #view=FitH>   │
+│ └─────────────────────────┘ │       OR <img object-contain>│
+│ Cc                          │       OR "Aperçu non         │
+│ [__________________]        │          disponible"         │
+│ Objet                       │       OR empty state         │
+│ [__________________]        │                             │
+│ Message                     │                             │
+│ ┌─────────────────────────┐ │                             │
+│ │ (flex-1, min-h-0,        │ │                             │
+│ │  resize-none,            │ │                             │
+│ │  anchored to bottom)     │ │                             │
+│ └─────────────────────────┘ │                             │
+├─────────────────────────────│─────────────────────────────│
+│ [errors/success banner]     │ [📎 server.pdf ✕] [file ✕]  │
+│       [Annuler] [Envoyer]   │ [+ Ajouter un fichier]      │
+└─────────────────────────────┴─────────────────────────────┘
+```
+
+- Outer: `<DialogContent className="max-w-6xl w-[92vw] h-[85vh] flex flex-col p-0 overflow-hidden">`
+- Header: `flex-shrink-0 px-6 py-4 border-b bg-gradient-to-r from-gold/25 via-gold/10 to-transparent`
+- Body split: `flex-1 min-h-0 flex` → left `w-1/2 border-r flex flex-col`, right `w-1/2 bg-zinc-200/50 flex flex-col`
+- **Left pane is a flex column**, NOT a scrollable container:
+  - À / Cc / Objet blocks are each `space-y-1 flex-shrink-0` — preserve natural height
+  - Message block is `flex-1 min-h-0 flex flex-col gap-1` with a `flex-shrink-0` label and the textarea at `flex-1 min-h-0 w-full resize-none scrollbar-transparent` — it fills all remaining space down to the footer
+  - Footer (`flex-shrink-0 p-4 border-t bg-zinc-200/50`) holds the error/success banners and the Annuler + Envoyer buttons
+- **Right pane is a flex column** with the viewer at `flex-1 min-h-0` and the attachment strip at `flex-shrink-0 border-t bg-white/70 px-3 py-2.5`, leading `Paperclip` icon
+
+### 32.5 Recipient chip UX (left pane, À block)
+
+Inside a bordered card, stacked vertically with `border-t border-border/40` dividers:
+
+1. **Selected chips** — `<span>` elements with `bg-accent/10 border-accent/30 text-accent`, optional 👤 `User` icon for `source: 'contact'`, name-or-email, and a `<button>` ✕ that removes. Removing a contact-sourced chip moves it back to suggestions; removing a manual-sourced chip just drops it.
+2. **Suggestion chips** — `<button>` elements with `bg-zinc-100 border-border/60 text-muted-foreground hover:bg-accent/10`, leading `+` icon. Click moves the recipient to the selected list.
+3. **Manual entry** — `<input type="email">` + ghost `+` button. On Enter or button click, validate via `EMAIL_REGEX`, dedupe case-insensitive against both lists, push as `{ source: 'manual', email }`.
+
+### 32.6 Attachment strip + clickable pills (right pane, bottom)
+
+Strip layout: `flex items-start gap-2` with a leading muted `Paperclip`, then `flex-1 min-w-0 flex flex-wrap gap-1.5 items-center`.
+
+**Pill types** (all keyed on stable ids):
+- **Server-rendered PDF pill** — rendered when `pdfUrl && attachPdf`. Click body → `selectPreview('server')`. Click inner ✕ → `removeServerPdf()` (sets `attachPdf=false` + falls through the preview).
+- **User-uploaded file pills** — one per entry in the internal `userAttachments: UserAttachment[] = { id, file, blobUrl }[]` state. Click body → `selectPreview(a.id)`. Click inner ✕ → `removeUserAttachment(a.id)` (revokes blob URL + filters + falls through preview). Shows filename + `formatFileSize(file.size)`.
+- **"Ajouter un fichier" button** — dashed-border `<button>`, triggers a hidden multi-file `<input type="file">`. Mandatory `onClick={(e) => (e.target.value = '')}` reset from §22 so the same file can be picked twice.
+
+**Pills are `<div role="button" tabIndex={0}>`, not `<button>`** — HTML forbids nested `<button>`s and each pill has an inner ✕ `<button>`. `onKeyDown` handles Enter/Space for keyboard. Inner ✕ uses `e.stopPropagation()` so removal doesn't also fire `selectPreview`.
+
+**Active pill styling**: `border-accent ring-2 ring-accent/60` (gold ring). Inactive: `border-border/60 hover:bg-zinc-50`.
+
+**Size cap**: the strip rejects additions that would push total user-attachment bytes above `MAX_TOTAL_ATTACHMENT_BYTES` (18 MB) and surfaces a French error banner. The total is shown inline as `X MB / 18.0 MB` on the right end of the strip when at least one user file is present.
+
+### 32.7 Viewer preview state + render kinds
+
+Internal state:
+- `previewedId: 'server' | string | null` — currently shown in the viewer. Hydration effect sets it to `'server'` when a `pdfUrl` is passed, otherwise `null`.
+- Resolved into an `ActivePreview` tagged union via `useMemo`:
+
+```ts
+type ActivePreview =
+  | { kind: 'server-pdf';       url: string }
+  | { kind: 'user-pdf';         url: string; name: string }
+  | { kind: 'user-image';       url: string; name: string }
+  | { kind: 'user-unsupported'; name: string; type: string }
+  | { kind: 'empty' }
+```
+
+Render branch:
+- `server-pdf` / `user-pdf` → `<iframe src={url} />` with `url = '...#view=FitH'`
+- `user-image` → centered `<img className="max-w-full max-h-full object-contain" />`
+- `user-unsupported` (anything not `application/pdf` or `image/*`) → `FileText h-12 w-12 opacity-30` + `"Aperçu non disponible pour ce type de fichier"` + truncated filename
+- `empty` → `FileText h-12 w-12 opacity-30` + `"Aucun document à prévisualiser"`
+
+**Preview auto-selection rules** (keep the viewer in sync with what's in the send queue):
+- First hydration with pdfUrl → `'server'`; without pdfUrl → `null`.
+- First user file added when preview is `null` → auto-select the new file.
+- Server PDF removed + it was active → fall through to first user attachment, else `null`.
+- User attachment removed + it was active → fall through to next user attachment, else back to server PDF (if still in list), else `null`.
+
+**Blob URL lifecycle**: created in `handleFilePick` (`URL.createObjectURL(file)`), revoked in `removeUserAttachment` AND in the dialog-close cleanup effect (`setUserAttachments(prev => { prev.forEach(a => URL.revokeObjectURL(a.blobUrl)); return [] })`). If an addition is rejected by the size cap, the brand-new blob URLs are revoked too — no leaks on the reject path.
+
+### 32.8 Conventions — do not deviate
+
+- **Envoyer button variant = default (primary blue)**, NOT gold. `variant="gold"` is reserved for the canonical Modifier/enter-edit-mode CTA (§6.1/§12). In-form actions like Enregistrer/Envoyer use the default variant.
+- **Icon in the DialogTitle** is `AtSign`. Send button icon is `Mail` (envelope). Never swap them.
+- **Width**: `max-w-6xl w-[92vw] h-[85vh]`. Fixed, not responsive to content — the PDF preview needs room.
+- **Pre-fill hydration runs once** on first defaults arrival via a `hydrated` flag so editing-in-progress isn't clobbered.
+- **Cleanup effect on `open → false`** resets all state and revokes all blob URLs.
+- **Validation before send**: at least one chip in `selectedRecipients`, non-empty `subject.trim()`. Surface errors in the red banner — don't throw.
+- **Success banner → auto-close** after 1.2s via `setTimeout(onClose, 1200)`. Envoyer is disabled while `successMessage` is set.
+- **When adding a new call site** the default shape is: screen-specific `queryKey`, `loadDefaults` via `apiFetch`, `onSend` via `postEmail(url, p, { includeAttachPdf: hasServerPdf })`. Everything else is already handled inside the shared component.
+
+### 32.9 Body template conventions
 
 Keep the default body **short, polite, French, and signed "ETS Malterre"**. Pattern from `buildEmailDefaults` in `commandes-fil.ts`:
 
@@ -2378,11 +2532,11 @@ ETS Malterre
 
 Per document type, only the second line changes (the document reference). Do NOT generate elaborate multi-paragraph templates — users will edit the body when they need something specific, and a terse default is easier to personalise than a verbose one to delete.
 
-### 32.6 From header convention
+### 32.10 From header convention
 
 The API resolves the acting user's display name from `utilisateur.prenom + nom` and formats the From header as `Prénom Nom — ETS Malterre <mapped-email@etsmalterre.com>`. Never send with a bare email in the From header — Gmail will render it with the `mapped-email` local part as the display name, which looks clinical. The " — ETS Malterre" suffix makes the sender instantly recognisable in the recipient's inbox. MIME-encode the display name via the `encodeHeader` helper in `gmail.ts` so accented characters survive.
 
-### 32.7 Error handling — map 400s to friendly French
+### 32.11 Error handling — map 400s to friendly French
 
 The server's `400 no_sender_email` response includes a `message` field in French: `"Aucune adresse email n'est associée à votre compte. Un administrateur doit en définir une dans Paramètres › Utilisateurs."`
 
@@ -2390,15 +2544,25 @@ The frontend must surface this message verbatim — it directs the user to the e
 
 Any other 4xx/5xx falls through to the generic `Erreur HTTP {status}` banner.
 
-### 32.8 Candidate screens
+### 32.12 Candidate screens
 
-Apply this pattern to every document screen that needs email delivery:
+The shared `SendEmailDialog` covers every email-enabled screen. Apply to:
 
-- Fournisseurs → Commandes ✅ implemented
+- Fournisseurs → Commandes ✅ implemented (with server PDF)
+- Réseau → Entreprises ✅ implemented (no server PDF — plain message with user attachments)
 - Sous-traitants → Commandes — contact flag `envoi_commande`
 - Clients → Commandes — contact flag `envoi_commande`
 - Clients → Devis — contact flag `envoi_soumission`
 - Clients → Facturation — contact flag `envoi_facture`
 - Transport → Expéditions / Livraisons — contact flag `envoi_bl`
 
-Each one needs: (a) a PDF renderer in `apps/api/src/lib/pdf/`, (b) a reusable `buildXxxPdfData` + `renderXxxPdfBuffer` helper pair, (c) the two endpoints `/:id/email-defaults` and `/:id/email`, (d) the forked `EmailXxxDialog` component, and (e) the `@` button on the view-mode header trio (§6.1).
+A new document screen needs:
+1. A PDF renderer in `apps/api/src/lib/pdf/`
+2. A `buildXxxPdfData(id)` + `renderXxxPdfBuffer(data)` helper pair reused by both `/pdf` and `/email`
+3. The PDF endpoint with the iframe header strip (§21 + §32.2)
+4. `GET /:id/email-defaults` returning the `recipients: { selected, suggestions }` shape
+5. `POST /:id/email` accepting `extra_attachments`
+6. The `@` button on the view-mode header trio (§6.1)
+7. A `<SendEmailDialog>` mount at the page root passing `pdfUrl`, `pdfAttachmentLabel`, `queryKey`, `loadDefaults`, and `onSend` via `postEmail(..., { includeAttachPdf: true })`
+
+A plain non-document screen (like Entreprises) skips steps 1–3 and omits `pdfUrl` / `pdfAttachmentLabel` from the `<SendEmailDialog>` props. The `onSend` call drops `includeAttachPdf`.
