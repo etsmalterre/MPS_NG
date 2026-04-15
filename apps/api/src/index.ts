@@ -9,6 +9,7 @@ import helmet from 'helmet'
 import cookieParser from 'cookie-parser'
 import { entreprisesRouter } from './routes/entreprises.js'
 import { fournisseursRouter } from './routes/fournisseurs.js'
+import { referencesFilRouter } from './routes/references-fil.js'
 import { commandesFilRouter } from './routes/commandes-fil.js'
 import { stockRouter } from './routes/stock.js'
 import { authRouter } from './routes/auth.js'
@@ -50,6 +51,7 @@ app.use('/api/permissions', permissionsRouter)
 app.use('/api/user-emails', userEmailsRouter)
 app.use('/api/entreprises', entreprisesRouter)
 app.use('/api/fournisseurs', fournisseursRouter)
+app.use('/api/references-fil', referencesFilRouter)
 app.use('/api/commandes-fil', commandesFilRouter)
 app.use('/api/stock', stockRouter)
 

@@ -53,3 +53,22 @@ First fully implemented data screen. 3-panel layout with:
   - `GET /api/stock/fil/:id/certif/:type` — serves bio/recycle blob with MIME detection (same pattern as fournisseurs cert serving)
 - **Accented columns (platform-specific SQL)**: see `claude_doc/hfsql_odbc.md § Accented column names`. The route has a `repairAliased()` helper that runs targeted `CONVERT(col USING 'UTF-8')` on aliased text fields when U+FFFD is detected.
 - **HFSQL tables**: `stock_fil`, `ref_fil`, `colori_fil`, `fournisseur`
+
+## Fournisseurs Références (`/fournisseurs/references`)
+
+**Master catalog of yarn references** — mirrors the legacy `FEN_Gestion_des_références_de_fil.wdw`. 3-panel `MasterDetailLayout` with:
+- **Left**: Searchable `ref_fil` list, BobineIcon + reference name, subtitle with variantes/fournisseurs count + price. Bio/Recyclé icons inline per row.
+- **Center header**: Standard trio (`Printer` + `AtSign` + **Modifier (`variant="gold"`)**), icon box with BobineIcon, bio/recycle badges under title, trash button exposed in edit mode.
+- **Center body cards**: Spécifications (titrage/unité/nb_fil/nb_brin/prix/bio/recycle — §35 pill toggles for bio & recyclé), Composition collapsible card (list of `asso_fil_matiere` rows with % total footer flipping green↔amber at exactly 100%), Variantes de coloris collapsible card (list of `colori_fil` rows with `fournisseurs_count` badge), Stock actuel (read-only aggregate linking out to `/fournisseurs/stock?q=...`), Commandes en cours (read-only aggregate), Notes. All cards get `editSectionClass` in edit mode (even the read-only aggregates).
+- **Right sidebar**: Single untabbed Info panel — Statistiques KV rows + distinct fournisseurs list linking to `/fournisseurs/gestion`.
+- **Detail API**: `GET /api/references-fil/:id` returns `ref_fil` + `variantes[]` (with `fournisseurs_count`) + `composition[]` (with joined `matiere_libelle`) + `stock_total_kg` / `stock_lots` / `stock_per_variante[]` + `commande_total_kg` / `commande_lignes` + distinct `fournisseurs[]`.
+- **CRUD endpoints** (in `apps/api/src/routes/references-fil.ts`):
+  - `GET /api/references-fil` — list with batched `variantes_count` + `fournisseurs_count` per ref
+  - `GET/POST /api/references-fil` + `PUT/DELETE /:id` — `ref_fil` CRUD (delete guarded: 409 if variantes / stock_fil / ref_fil_commande reference it)
+  - `POST/PUT/DELETE /:id/variantes[/:coloriId]` — `colori_fil` CRUD (delete guarded: 409 if in stock_fil / ref_fil_commande / asso_colorisfil_frs)
+  - `POST/PUT/DELETE /:id/compositions[/:assoId]` — `asso_fil_matiere` CRUD, **Windows-only writes** (returns 501 on Linux — column names `IDasso_fil_matière`, `IDMatière`, `recyclé` are unreachable via the Linux HFSQL bridge)
+  - `GET /lookups/matieres`, `GET /lookups/unites-titrage`
+- **Accented column handling**: normaliser helpers in-file (`normalizeRefFilRow`, `normalizeAssoFilMatiereRow`, `normalizeMatiereRow`) map any platform's key shape to ASCII (`recyclé`/`recycl` → `recycle`, `IDasso_fil_matière` → `IDasso_fil_matiere`, `IDMatière` → `IDmatiere`, `IDmatière_première` → `IDmatiere_premiere`). `ref_fil.recyclé` is excluded from INSERT/UPDATE column list on Linux. Same approach as `stock.ts`.
+- **Pourcentage units**: `asso_fil_matiere.pourcentage` is stored as a **decimal fraction 0..1** in HFSQL (0.31 = 31%). The frontend multiplies by 100 for display and divides by 100 on write.
+- **HFSQL tables**: `ref_fil`, `colori_fil`, `asso_fil_matiere`, `matiere_premiere`, `unite_titrage`, `asso_colorisfil_frs` (read-only here — linking still lives in Fournisseurs/Gestion), `stock_fil` (aggregate read), `ref_fil_commande` (aggregate read), `commande_fil` (joined for etat filter)
+- **Out of scope for Phase 1** (see plan `effervescent-percolating-tarjan.md`): variante↔fournisseur linking drawer, `offre_fil`, full PDF print, full email send via `SendEmailDialog`. Print + Email buttons are §18 A-bis placeholders.

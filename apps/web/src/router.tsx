@@ -38,7 +38,6 @@ const ClientsFacturationPage = createPlaceholder('Facturation', 'Gérez la factu
 const ClientsGestionPage = createPlaceholder('Gestion Clients', 'Gérez votre portefeuille clients', Users)
 
 // Fournisseurs pages
-const FournisseursReferencesPage = createPlaceholder('Références Fournisseurs', 'Catalogue des références fournisseurs', Tag)
 const FournisseursPrevisionsPage = createPlaceholder('Prévisions Fournisseurs', 'Prévisions d\'approvisionnement fournisseurs', FileText)
 
 // Sous-traitants pages
@@ -66,6 +65,7 @@ const TransportLivraisons = createPlaceholder('Livraisons', 'Suivi des livraison
 
 // Fournisseurs pages (real)
 import { Fournisseurs } from '@/pages/Fournisseurs'
+import { FournisseursReferences } from '@/pages/FournisseursReferences'
 import { FournisseursStock } from '@/pages/FournisseursStock'
 import { FournisseursCommandes } from '@/pages/FournisseursCommandes'
 
@@ -92,7 +92,7 @@ export const router = createBrowserRouter([
 
       // Fournisseurs
       { path: 'fournisseurs', element: <Navigate to="/fournisseurs/references" replace /> },
-      { path: 'fournisseurs/references', element: <FournisseursReferencesPage /> },
+      { path: 'fournisseurs/references', element: <FournisseursReferences /> },
       { path: 'fournisseurs/stock', element: <FournisseursStock /> },
       { path: 'fournisseurs/commandes', element: <FournisseursCommandes /> },
       { path: 'fournisseurs/gestion', element: <Fournisseurs /> },

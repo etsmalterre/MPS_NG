@@ -59,7 +59,7 @@ MPS_NG/
 │   │       │   ├── user-emails.ts        # JSON-backed per-user emails (TODO: DB)
 │   │       │   ├── gmail.ts              # Gmail API send helper (JWT + DWD)
 │   │       │   └── pdf/                  # theme.ts, MalterreDocument.tsx, CommandeFournisseurPdf.tsx
-│   │       ├── routes/                   # entreprises, fournisseurs, stock, commandes-fil, auth, permissions, user-emails
+│   │       ├── routes/                   # entreprises, fournisseurs, references-fil, stock, commandes-fil, auth, permissions, user-emails
 │   │       └── index.ts
 │   └── web/           # React frontend
 │       └── src/
@@ -79,7 +79,7 @@ MPS_NG/
 │           │   ├── email.ts      # Types + postEmail helper for SendEmailDialog
 │           │   ├── dates.ts      # HFSQL date helpers
 │           │   └── format.ts     # fmtNum (French formatting)
-│           ├── pages/            # Dashboard, Entreprises, Fournisseurs, FournisseursStock, FournisseursCommandes, SettingsUtilisateurs
+│           ├── pages/            # Dashboard, Entreprises, Fournisseurs, FournisseursReferences, FournisseursStock, FournisseursCommandes, SettingsUtilisateurs
 │           ├── main.tsx          # QueryClient → UserProvider → PermissionsProvider → UserPickerGate → RouterProvider
 │           └── router.tsx
 ├── claude_doc/                   # Detailed reference docs (load on demand, see below)
