@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { useUnsavedGuard } from '@/hooks/useUnsavedGuard'
 import {
   ShoppingCart,
@@ -25,6 +26,7 @@ import {
   Printer,
   AtSign,
   FileText,
+  Upload,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -219,6 +221,11 @@ export function FournisseursCommandes() {
   const [createOpen, setCreateOpen] = useState(false)
   const [stockDrawerLineId, setStockDrawerLineId] = useState<number | null>(null)
   const [emailModalOpen, setEmailModalOpen] = useState(false)
+  // Set by CreateCommandeDialog's onCreated; watched by an effect that flips
+  // the screen into edit mode once the detail for the new commande loads.
+  const [autoEditForId, setAutoEditForId] = useState<number | null>(null)
+  // Page-level in-app delete confirmation (replaces native confirm()).
+  const [deleteCommandeConfirmOpen, setDeleteCommandeConfirmOpen] = useState(false)
 
   // Edit-mode draft state for the header
   const [editDateCommande, setEditDateCommande] = useState('')
@@ -325,13 +332,31 @@ export function FournisseursCommandes() {
   })
 
   const deleteMut = useMutation({
-    mutationFn: () => apiFetch(`/commandes-fil/${selectedId}`, { method: 'DELETE' }),
-    onSuccess: () => {
+    mutationFn: (id: number) => apiFetch(`/commandes-fil/${id}`, { method: 'DELETE' }),
+    onSuccess: (_data, deletedId) => {
+      // Pick the next commande to surface *before* invalidation, while the
+      // cached list still contains the full pre-delete set. The
+      // auto-select-first effect reads stale data during the refetch gap,
+      // so we set the new selection explicitly here instead of nulling it.
+      const cached = queryClient.getQueryData<CommandeListRow[]>(['commandes-fil', statusFilter]) ?? []
+      const remaining = cached.filter((c) => c.IDcommande_fil !== deletedId)
       queryClient.invalidateQueries({ queryKey: ['commandes-fil'] })
-      setSelectedId(null)
       setIsEditing(false)
+      setDeleteCommandeConfirmOpen(false)
+      setSelectedId(remaining.length > 0 ? remaining[0].IDcommande_fil : null)
     },
   })
+
+  // Auto-enter edit mode after a new commande is created: CreateCommandeDialog
+  // sets `autoEditForId`, then we wait for the detail query to finish loading
+  // before calling startEdit — it needs `detail` to snapshot the draft.
+  useEffect(() => {
+    if (autoEditForId !== null && detail?.IDcommande_fil === autoEditForId) {
+      startEdit()
+      setAutoEditForId(null)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoEditForId, detail])
 
   const guard = useUnsavedGuard({
     isDirty,
@@ -405,14 +430,7 @@ export function FournisseursCommandes() {
             onCancelEdit={cancelEdit}
             onSave={() => saveHeaderMut.mutate()}
             isSaving={saveHeaderMut.isPending}
-            onDelete={() => {
-              if (confirm('Supprimer cette commande et toutes ses lignes ?')) {
-                // Reset edit state first so the guard doesn't block the list
-                // re-render that happens after deletion completes.
-                setIsEditing(false)
-                deleteMut.mutate()
-              }
-            }}
+            onDelete={() => setDeleteCommandeConfirmOpen(true)}
             onPrintClick={() => {
               if (selectedId !== null) {
                 window.open(`${API_URL}/commandes-fil/${selectedId}/pdf`, '_blank')
@@ -474,6 +492,21 @@ export function FournisseursCommandes() {
           setCreateOpen(false)
           queryClient.invalidateQueries({ queryKey: ['commandes-fil'] })
           setSelectedId(newId)
+          // Flag the new commande so the effect flips into edit mode as
+          // soon as its detail query resolves.
+          setAutoEditForId(newId)
+        }}
+      />
+
+      <ConfirmDialog
+        open={deleteCommandeConfirmOpen}
+        title="Supprimer la commande"
+        description="Cette action supprimera la commande et toutes ses lignes. Elle est irréversible."
+        confirmLabel="Supprimer"
+        isPending={deleteMut.isPending}
+        onCancel={() => setDeleteCommandeConfirmOpen(false)}
+        onConfirm={() => {
+          if (selectedId !== null) deleteMut.mutate(selectedId)
         }}
       />
 
@@ -765,6 +798,7 @@ function LignesSection({
 }) {
   const [editingLineId, setEditingLineId] = useState<number | null>(null)
   const [showLineForm, setShowLineForm] = useState(false)
+  const [deleteLineConfirmId, setDeleteLineConfirmId] = useState<number | null>(null)
   const [lineForm, setLineForm] = useState({
     IDref_fil: 0,
     IDcolori_fil: 0,
@@ -885,6 +919,7 @@ function LignesSection({
     : null
 
   return (
+    <>
     <div className="flex-1 min-h-0 flex flex-col">
       <div
         className={cn(
@@ -924,7 +959,7 @@ function LignesSection({
                 isEditing={isEditing}
                 isStockDrawerOpen={stockDrawerLineId === l.IDref_fil_commande}
                 onEdit={() => startEditLine(l)}
-                onDelete={() => { if (confirm('Supprimer cette ligne ?')) deleteLineMut.mutate(l.IDref_fil_commande) }}
+                onDelete={() => setDeleteLineConfirmId(l.IDref_fil_commande)}
                 onToggleEtat={() => toggleLineEtatMut.mutate({ lineId: l.IDref_fil_commande, etat: l.etat === 1 ? 0 : 1 })}
                 onOpenStockDrawer={onOpenStockDrawer}
               />
@@ -980,6 +1015,23 @@ function LignesSection({
         </div>
       )}
     </div>
+
+    <ConfirmDialog
+      open={deleteLineConfirmId !== null}
+      title="Supprimer la ligne"
+      description="Cette ligne de commande sera supprimée définitivement."
+      confirmLabel="Supprimer"
+      isPending={deleteLineMut.isPending}
+      onCancel={() => setDeleteLineConfirmId(null)}
+      onConfirm={() => {
+        if (deleteLineConfirmId !== null) {
+          deleteLineMut.mutate(deleteLineConfirmId, {
+            onSuccess: () => setDeleteLineConfirmId(null),
+          })
+        }
+      }}
+    />
+    </>
   )
 }
 
@@ -1395,7 +1447,8 @@ function DetailSidebar({
   ]
 
   return (
-    <div className="w-96 flex-shrink-0 rounded-xl border flex flex-col overflow-hidden bg-zinc-100/80">
+    <div className="w-96 flex-shrink-0 flex flex-col gap-3 min-h-0">
+      <div className="flex-1 min-h-0 rounded-xl border flex flex-col overflow-hidden bg-zinc-100/80">
       <div className="flex border-b p-1 gap-1 rounded-t-xl bg-zinc-200/50">
         {tabs.map((tab) => {
           const Icon = tab.icon
@@ -1444,7 +1497,7 @@ function DetailSidebar({
           />
         )}
         {activeTab === 'docs' && (
-          <DocsTab commande={commande} />
+          <DocsTab commande={commande} isEditing={isEditing} />
         )}
         {activeTab === 'journal' && (
           <JournalTab
@@ -1454,6 +1507,7 @@ function DetailSidebar({
             onEditJournalChange={onEditJournalChange}
           />
         )}
+      </div>
       </div>
       <StatusFooter
         etat={commande.etat}
@@ -1482,28 +1536,26 @@ function StatusFooter({
   const ActionIcon = isTerminee ? Clock : CheckCircle2
 
   return (
-    <div className="flex-shrink-0 border-t bg-zinc-200/50 rounded-b-xl p-3">
-      <div
-        className={cn(
-          'rounded-lg shadow-sm overflow-hidden flex items-stretch h-11',
-          isTerminee ? 'bg-success' : 'bg-primary'
-        )}
-      >
-        <div className="flex items-center gap-2 px-3 flex-1 text-white min-w-0">
-          <Icon className="h-4 w-4 flex-shrink-0" />
-          <span className="text-sm font-bold uppercase tracking-wide truncate">{label}</span>
-        </div>
-        <button
-          type="button"
-          onClick={onToggle}
-          disabled={disabled || isToggling}
-          title={isTerminee ? 'Marquer en cours' : 'Marquer terminée'}
-          className="px-3.5 bg-white/15 hover:bg-white/25 active:bg-white/30 disabled:bg-white/5 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-semibold border-l border-white/25 flex items-center gap-1.5 transition-colors"
-        >
-          <ActionIcon className="h-3.5 w-3.5" />
-          {actionLabel}
-        </button>
+    <div
+      className={cn(
+        'flex-shrink-0 rounded-xl border shadow-sm overflow-hidden flex items-stretch h-11',
+        isTerminee ? 'bg-success border-success' : 'bg-primary border-primary'
+      )}
+    >
+      <div className="flex items-center gap-2 px-3 flex-1 text-white min-w-0">
+        <Icon className="h-4 w-4 flex-shrink-0" />
+        <span className="text-sm font-bold uppercase tracking-wide truncate">{label}</span>
       </div>
+      <button
+        type="button"
+        onClick={onToggle}
+        disabled={disabled || isToggling}
+        title={isTerminee ? 'Marquer en cours' : 'Marquer terminée'}
+        className="px-3.5 bg-white/15 hover:bg-white/25 active:bg-white/30 disabled:bg-white/5 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-semibold border-l border-white/25 flex items-center gap-1.5 transition-colors"
+      >
+        <ActionIcon className="h-3.5 w-3.5" />
+        {actionLabel}
+      </button>
     </div>
   )
 }
@@ -1774,20 +1826,580 @@ function AdressePickerDialog({
 
 // ── Sidebar Tab: Docs ──────────────────────────────────
 
-function DocsTab({ commande: _commande }: { commande: CommandeDetail }) {
+interface GedDocument {
+  IDged: number
+  nom: string | null
+  commentaire: string | null
+  IDtype_doc: number
+  type_nom: string | null
+  linked_lots: Array<{ IDstock_fil: number; lot: string | null }>
+}
+
+interface TypeDoc {
+  IDtype_doc: number
+  nom: string
+}
+
+function DocsTab({ commande, isEditing }: { commande: CommandeDetail; isEditing: boolean }) {
+  const queryClient = useQueryClient()
+  const commandeId = commande.IDcommande_fil
+  const docsQueryKey = ['commande-fil-docs', commandeId] as const
+
+  const { data, isLoading, error } = useQuery<GedDocument[]>({
+    queryKey: docsQueryKey,
+    queryFn: () => apiFetch(`/commandes-fil/${commandeId}/documents`),
+  })
+
+  const [viewDoc, setViewDoc] = useState<GedDocument | null>(null)
+  const [editingDoc, setEditingDoc] = useState<GedDocument | null>(null)
+  const [createOpen, setCreateOpen] = useState(false)
+  const [deleteDocConfirm, setDeleteDocConfirm] = useState<GedDocument | null>(null)
+
+  const invalidate = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: docsQueryKey })
+  }, [queryClient, commandeId])
+
+  const deleteMut = useMutation({
+    mutationFn: (idged: number) =>
+      apiFetch(`/commandes-fil/${commandeId}/documents/${idged}`, { method: 'DELETE' }),
+    onSuccess: invalidate,
+  })
+
   return (
-    <div className="p-3 rounded-lg border bg-card shadow-sm">
-      <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
-        <FileText className="h-3.5 w-3.5" />Documents
-      </p>
-      <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-        <FileText className="h-10 w-10 mb-3 opacity-40" />
-        <p className="text-sm font-medium">Aucun document</p>
-        <p className="text-[11px] mt-1 text-center">
-          Les bons de commande, accusés de réception et autres documents liés à cette commande apparaîtront ici.
-        </p>
-      </div>
-    </div>
+    <>
+      {isLoading && (
+        <div className="flex items-center justify-center py-6">
+          <Loader2 className="h-4 w-4 animate-spin text-accent" />
+        </div>
+      )}
+
+      {!!error && (
+        <div className="flex items-center gap-1.5 py-3 text-xs text-destructive">
+          <AlertCircle className="h-3.5 w-3.5" />
+          <span>Erreur de chargement</span>
+        </div>
+      )}
+
+      {!isLoading && !error && !data?.length && (
+        <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+          <FileText className="h-10 w-10 mb-3 opacity-40" />
+          <p className="text-sm font-medium">Aucun document</p>
+          <p className="text-[11px] mt-1 text-center">
+            Les bons de commande, factures et autres documents liés à cette commande apparaîtront ici.
+          </p>
+        </div>
+      )}
+
+      {!!data?.length && (
+        <div className="space-y-2">
+          {data.map((doc) => {
+            const title = doc.nom?.trim() || `Document #${doc.IDged}`
+            return (
+              <div
+                key={doc.IDged}
+                onClick={() => isEditing ? setEditingDoc(doc) : setViewDoc(doc)}
+                className={cn(
+                  'group p-3 rounded-lg border bg-card shadow-sm cursor-pointer hover:border-accent/40 transition-colors',
+                  isEditing && editSectionClass,
+                )}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-amber-400/10">
+                    <FileText className="h-3.5 w-3.5 text-amber-600" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium truncate" title={title}>{title}</p>
+                    {!!doc.type_nom && (
+                      <p className="text-[11px] text-muted-foreground truncate">{doc.type_nom}</p>
+                    )}
+                  </div>
+                  {doc.linked_lots.length > 0 && (
+                    <div
+                      className="flex items-center gap-1 min-w-0 max-w-[45%]"
+                      title={doc.linked_lots.map((l) => `Lot ${l.lot || '—'}`).join(', ')}
+                    >
+                      <BobineIcon className="h-3 w-3 text-accent flex-shrink-0" />
+                      <p className="text-[10px] text-muted-foreground truncate">
+                        {doc.linked_lots.map((l) => `Lot ${l.lot || '—'}`).join(', ')}
+                      </p>
+                    </div>
+                  )}
+                  {isEditing && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 text-destructive hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setDeleteDocConfirm(doc)
+                      }}
+                      title="Supprimer"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
+                  )}
+                </div>
+                {!!doc.commentaire?.trim() && (
+                  <div className="flex items-start gap-1.5 mt-2 ml-9">
+                    <MessageSquare className="h-3 w-3 text-muted-foreground/50 flex-shrink-0 mt-0.5" />
+                    <p className="text-[11px] text-muted-foreground italic">{doc.commentaire.trim()}</p>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {isEditing && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="w-full mt-2 text-muted-foreground hover:text-foreground"
+          onClick={() => setCreateOpen(true)}
+        >
+          <Plus className="h-4 w-4 mr-1.5" />Ajouter un document
+        </Button>
+      )}
+
+      <DocViewDialog
+        commandeId={commandeId}
+        doc={viewDoc}
+        onClose={() => setViewDoc(null)}
+      />
+
+      <DocCreateEditDialog
+        open={createOpen || editingDoc !== null}
+        commandeId={commandeId}
+        doc={editingDoc}
+        onClose={() => { setCreateOpen(false); setEditingDoc(null) }}
+        onSuccess={() => { setCreateOpen(false); setEditingDoc(null); invalidate() }}
+      />
+
+      <ConfirmDialog
+        open={deleteDocConfirm !== null}
+        title="Supprimer le document"
+        description={deleteDocConfirm ? `« ${deleteDocConfirm.nom?.trim() || `Document #${deleteDocConfirm.IDged}`} » sera supprimé définitivement.` : undefined}
+        confirmLabel="Supprimer"
+        isPending={deleteMut.isPending}
+        onCancel={() => setDeleteDocConfirm(null)}
+        onConfirm={() => {
+          if (deleteDocConfirm) {
+            deleteMut.mutate(deleteDocConfirm.IDged, {
+              onSuccess: () => setDeleteDocConfirm(null),
+            })
+          }
+        }}
+      />
+    </>
+  )
+}
+
+interface DocLotsPayload {
+  linked: StockLotLite[]
+  available: StockLotLite[]
+}
+
+function DocCreateEditDialog({
+  open, commandeId, doc, onClose, onSuccess,
+}: {
+  open: boolean
+  commandeId: number
+  doc: GedDocument | null  // null = create mode
+  onClose: () => void
+  onSuccess: () => void
+}) {
+  const isNew = doc === null
+  const queryClient = useQueryClient()
+  const [nom, setNom] = useState('')
+  const [idTypeDoc, setIdTypeDoc] = useState<number>(0)
+  const [commentaire, setCommentaire] = useState('')
+  const [newFile, setNewFile] = useState<File | null>(null)
+  const [newFileUrl, setNewFileUrl] = useState<string | null>(null)
+  const [removeFichier, setRemoveFichier] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [pendingLotId, setPendingLotId] = useState<number | null>(null)
+  // "all lots" (default) vs "specific selection". Initialized from server
+  // state on first data arrival: zero stock_fil_ged rows = "all".
+  const [allLotsMode, setAllLotsMode] = useState(true)
+  const modeInitializedRef = useRef(false)
+
+  const { data: typeDocs } = useQuery<TypeDoc[]>({
+    queryKey: ['types-doc'],
+    queryFn: () => apiFetch('/fournisseurs/type-doc'),
+    enabled: open,
+  })
+
+  // Doc ↔ lot linkage — only meaningful once the doc has an IDged (i.e.
+  // in edit mode). At create time the lots section stays hidden until the
+  // user re-opens the dialog after the initial save.
+  const lotsQueryKey = ['commande-fil-doc-lots', commandeId, doc?.IDged ?? 0] as const
+  const { data: lotsData, isLoading: lotsLoading } = useQuery<DocLotsPayload>({
+    queryKey: lotsQueryKey,
+    queryFn: () => apiFetch(`/commandes-fil/${commandeId}/documents/${doc!.IDged}/lots`),
+    enabled: open && !isNew && doc !== null,
+  })
+
+  const toggleLotMut = useMutation({
+    mutationFn: async ({ stockId, linked }: { stockId: number; linked: boolean }): Promise<DocLotsPayload> => {
+      const method = linked ? 'DELETE' : 'PUT'
+      return apiFetch(`/commandes-fil/${commandeId}/documents/${doc!.IDged}/lots/${stockId}`, { method })
+    },
+    onMutate: ({ stockId }) => { setPendingLotId(stockId) },
+    onSuccess: (payload) => {
+      queryClient.setQueryData(lotsQueryKey, payload)
+      // Keep the parent docs list in sync — the linked_lots field on each
+      // card reflects stock_fil_ged and must refresh after any toggle.
+      queryClient.invalidateQueries({ queryKey: ['commande-fil-docs', commandeId] })
+      setPendingLotId(null)
+    },
+    onError: () => { setPendingLotId(null) },
+  })
+
+  const clearLotsMut = useMutation({
+    mutationFn: (): Promise<DocLotsPayload> =>
+      apiFetch(`/commandes-fil/${commandeId}/documents/${doc!.IDged}/lots`, { method: 'DELETE' }),
+    onSuccess: (payload) => {
+      queryClient.setQueryData(lotsQueryKey, payload)
+      queryClient.invalidateQueries({ queryKey: ['commande-fil-docs', commandeId] })
+    },
+  })
+
+  // Initialize the toggle state from the first server payload: if the doc
+  // has no per-lot rows, treat it as "applies to all lots" by default.
+  useEffect(() => {
+    if (!open) { modeInitializedRef.current = false; return }
+    if (lotsData && !modeInitializedRef.current) {
+      setAllLotsMode(lotsData.linked.length === 0)
+      modeInitializedRef.current = true
+    }
+  }, [open, lotsData])
+
+  const handleAllLotsToggle = (nextAll: boolean) => {
+    setAllLotsMode(nextAll)
+    // Flipping back to "all" clears any previously-selected specific links.
+    if (nextAll && lotsData && lotsData.linked.length > 0) {
+      clearLotsMut.mutate()
+    }
+  }
+
+  // Combined + sorted list for stable rendering (linked on top, then
+  // available, each sorted by ref / colori / lot).
+  const lotRows = useMemo(() => {
+    if (!lotsData) return [] as Array<StockLotLite & { isLinked: boolean }>
+    const sortFn = (a: StockLotLite, b: StockLotLite) =>
+      (a.ref_fil ?? '').localeCompare(b.ref_fil ?? '') ||
+      (a.colori_reference ?? '').localeCompare(b.colori_reference ?? '') ||
+      (a.lot ?? '').localeCompare(b.lot ?? '')
+    return [
+      ...[...lotsData.linked].sort(sortFn).map((l) => ({ ...l, isLinked: true })),
+      ...[...lotsData.available].sort(sortFn).map((l) => ({ ...l, isLinked: false })),
+    ]
+  }, [lotsData])
+
+  // Reset form whenever the dialog opens (or the target doc changes).
+  useEffect(() => {
+    if (!open) return
+    setNom(doc?.nom ?? '')
+    setIdTypeDoc(doc?.IDtype_doc ?? 0)
+    setCommentaire(doc?.commentaire ?? '')
+    setNewFile(null)
+    if (newFileUrl) URL.revokeObjectURL(newFileUrl)
+    setNewFileUrl(null)
+    setRemoveFichier(false)
+    setError(null)
+    setIsSaving(false)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, doc?.IDged])
+
+  // Clean up blob URL when dialog closes.
+  useEffect(() => {
+    if (!open && newFileUrl) {
+      URL.revokeObjectURL(newFileUrl)
+      setNewFileUrl(null)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  const handleFilePick = (f: File) => {
+    if (newFileUrl) URL.revokeObjectURL(newFileUrl)
+    setNewFile(f)
+    setNewFileUrl(URL.createObjectURL(f))
+    setRemoveFichier(false)
+  }
+
+  const handleRemoveFile = () => {
+    if (newFileUrl) URL.revokeObjectURL(newFileUrl)
+    setNewFile(null)
+    setNewFileUrl(null)
+    setRemoveFichier(true)
+  }
+
+  const handleSave = async () => {
+    setError(null)
+    setIsSaving(true)
+    try {
+      const formData = new FormData()
+      formData.append('nom', nom)
+      formData.append('commentaire', commentaire)
+      formData.append('IDtype_doc', String(idTypeDoc))
+      if (newFile) formData.append('fichier', newFile)
+      if (removeFichier && !newFile) formData.append('remove_fichier', '1')
+
+      const url = isNew
+        ? `${API_URL}/commandes-fil/${commandeId}/documents`
+        : `${API_URL}/commandes-fil/${commandeId}/documents/${doc!.IDged}`
+      const method = isNew ? 'POST' : 'PUT'
+      // Raw fetch with credentials: the shared apiFetch forces JSON, which
+      // would clobber multer's multipart boundary.
+      const res = await fetch(url, { method, body: formData, credentials: 'include' })
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '')
+        throw new Error(txt || `HTTP ${res.status}`)
+      }
+      onSuccess()
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Erreur inconnue')
+      setIsSaving(false)
+    }
+  }
+
+  // Preview source: freshly-picked file blob OR existing stored blob OR nothing.
+  const previewUrl = newFileUrl
+    ? newFileUrl
+    : !isNew && !removeFichier && doc
+      ? `${API_URL}/commandes-fil/${commandeId}/documents/${doc.IDged}/fichier#view=FitH`
+      : null
+
+  if (!open) return null
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent className="max-w-5xl h-[85vh] flex flex-col" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <FileText className="h-4 w-4 text-accent" />
+            {isNew ? 'Ajouter un document' : 'Modifier le document'}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="flex-1 min-h-0 flex gap-4">
+          {/* Left: form fields */}
+          <div className="w-80 flex-shrink-0 overflow-y-auto space-y-3 px-1">
+            <LabeledInput label="Nom" value={nom} onChange={setNom} autoFocus />
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Type de document</label>
+              <select
+                value={idTypeDoc}
+                onChange={(e) => setIdTypeDoc(parseInt(e.target.value, 10) || 0)}
+                className={cn(inputClass, 'cursor-pointer')}
+              >
+                <option value={0}>— Aucun —</option>
+                {typeDocs?.map((t) => (
+                  <option key={t.IDtype_doc} value={t.IDtype_doc}>{t.nom}</option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Commentaire</label>
+              <textarea
+                value={commentaire}
+                onChange={(e) => setCommentaire(e.target.value)}
+                rows={4}
+                className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+              />
+            </div>
+            {!isNew && doc && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-lg border border-border/60 bg-white shadow-sm">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold">
+                      <BobineIcon className="h-3.5 w-3.5 text-accent" />
+                      <span>Appliquer à tous les lots</span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      {allLotsMode
+                        ? 'Ce document concerne toute la commande'
+                        : lotsData
+                          ? `${lotsData.linked.length} lot${lotsData.linked.length > 1 ? 's' : ''} sélectionné${lotsData.linked.length > 1 ? 's' : ''}`
+                          : 'Sélection spécifique'}
+                    </p>
+                  </div>
+                  {clearLotsMut.isPending && <Loader2 className="h-3 w-3 animate-spin text-accent flex-shrink-0" />}
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={allLotsMode}
+                    disabled={lotsLoading || clearLotsMut.isPending}
+                    onClick={() => handleAllLotsToggle(!allLotsMode)}
+                    className={cn(
+                      'relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full transition-colors',
+                      'focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+                      'disabled:opacity-50 disabled:cursor-not-allowed',
+                      allLotsMode ? 'bg-accent shadow-inner' : 'bg-zinc-300 hover:bg-zinc-400/80',
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200 ease-out',
+                        allLotsMode ? 'translate-x-[18px]' : 'translate-x-0.5',
+                      )}
+                    />
+                  </button>
+                </div>
+
+                {!allLotsMode && (
+                  <div className="rounded-md border border-input bg-white max-h-48 overflow-y-auto scrollbar-transparent">
+                    {lotsLoading && (
+                      <div className="flex items-center justify-center py-4">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" />
+                      </div>
+                    )}
+                    {!lotsLoading && lotRows.length === 0 && (
+                      <p className="px-2 py-3 text-[11px] text-muted-foreground italic text-center">
+                        Aucun lot de fil pour cette commande
+                      </p>
+                    )}
+                    {!lotsLoading && lotRows.length > 0 && (
+                      <ul>
+                        {lotRows.map((lot) => {
+                          const isPending = pendingLotId === lot.IDstock_fil
+                          return (
+                            <li
+                              key={lot.IDstock_fil}
+                              className="flex items-center gap-2 px-2 py-1.5 border-b border-border/40 last:border-0 hover:bg-accent/5"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={lot.isLinked}
+                                disabled={isPending || toggleLotMut.isPending}
+                                onChange={() => toggleLotMut.mutate({ stockId: lot.IDstock_fil, linked: lot.isLinked })}
+                                className="h-3.5 w-3.5 rounded border-input text-accent focus:ring-2 focus:ring-ring cursor-pointer disabled:cursor-not-allowed"
+                              />
+                              <div className="min-w-0 flex-1">
+                                <p className="text-[11px] font-medium truncate">
+                                  {lot.ref_fil ?? '—'}
+                                  {!!lot.colori_reference && <span className="text-muted-foreground"> · {lot.colori_reference}</span>}
+                                </p>
+                                <p className="text-[10px] text-muted-foreground truncate">
+                                  Lot {lot.lot || '—'}
+                                  {lot.stock != null && <span> · {fmtNum(Number(lot.stock), 1)} kg</span>}
+                                  {!!lot.bio && <span className="text-green-600"> · Bio</span>}
+                                </p>
+                              </div>
+                              {isPending && <Loader2 className="h-3 w-3 animate-spin text-accent flex-shrink-0" />}
+                            </li>
+                          )
+                        })}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+            {!!error && (
+              <div className="flex items-start gap-1.5 text-xs text-destructive">
+                <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                <span className="break-all">{error}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Right: viewer + file controls + action buttons */}
+          <div className="flex-1 min-w-0 flex flex-col gap-2">
+            <div className="flex-1 min-h-0 rounded-lg border border-border/60 bg-zinc-50 overflow-hidden">
+              {previewUrl ? (
+                <iframe src={previewUrl} className="w-full h-full" title="Document" />
+              ) : (
+                <div className="w-full h-full flex flex-col items-center justify-center text-muted-foreground">
+                  <FileText className="h-12 w-12 mb-2 opacity-30" />
+                  <p className="text-sm">Aucun fichier</p>
+                  <p className="text-[11px]">Choisissez un fichier ci-dessous</p>
+                </div>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="cursor-pointer">
+                <input
+                  type="file"
+                  className="hidden"
+                  accept=".pdf,image/*"
+                  onClick={(e) => { (e.target as HTMLInputElement).value = '' }}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0]
+                    if (f) handleFilePick(f)
+                  }}
+                />
+                <span className={cn(inputClass, 'inline-flex items-center gap-1.5 cursor-pointer hover:bg-accent/5 w-auto px-3')}>
+                  <Upload className="h-3.5 w-3.5" />
+                  {newFile ? newFile.name : 'Choisir un fichier'}
+                </span>
+              </label>
+              {(newFile || (!isNew && !removeFichier && doc)) && (
+                <Button variant="ghost" size="sm" className="h-8 px-2" onClick={handleRemoveFile} title="Retirer le fichier">
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              )}
+              <div className="flex items-center gap-2 ml-auto">
+                <Button variant="outline" size="sm" onClick={onClose} disabled={isSaving}>Annuler</Button>
+                <Button size="sm" onClick={handleSave} disabled={isSaving}>
+                  {isSaving && <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />}
+                  <Save className="h-3.5 w-3.5 mr-1.5" />
+                  Enregistrer
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function DocViewDialog({
+  commandeId, doc, onClose,
+}: { commandeId: number; doc: GedDocument | null; onClose: () => void }) {
+  const [fichierOk, setFichierOk] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    if (!doc) { setFichierOk(null); return }
+    setFichierOk(null)
+    fetch(`${API_URL}/commandes-fil/${commandeId}/documents/${doc.IDged}/fichier`, {
+      method: 'HEAD',
+      credentials: 'include',
+    })
+      .then((r) => setFichierOk(r.ok))
+      .catch(() => setFichierOk(false))
+  }, [doc?.IDged, commandeId])
+
+  if (!doc) return null
+
+  return (
+    <Dialog open={!!doc} onOpenChange={() => onClose()}>
+      {fichierOk ? (
+        <div
+          className="relative z-50 w-[60vw] max-w-3xl h-[95vh]"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <iframe
+            src={`${API_URL}/commandes-fil/${commandeId}/documents/${doc.IDged}/fichier#view=FitH`}
+            className="w-full h-full rounded-lg"
+            title={doc.nom ?? 'Document'}
+          />
+        </div>
+      ) : (
+        <DialogContent className="max-w-sm" onClose={onClose}>
+          <div className="flex items-center justify-center py-8 text-muted-foreground">
+            <div className="text-center space-y-2">
+              <FileText className="h-12 w-12 mx-auto opacity-30" />
+              <p className="text-sm">
+                {fichierOk === null ? 'Chargement...' : 'Aucun document attaché'}
+              </p>
+            </div>
+          </div>
+        </DialogContent>
+      )}
+    </Dialog>
   )
 }
 

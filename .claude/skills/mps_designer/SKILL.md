@@ -627,6 +627,71 @@ className="flex-1 overflow-y-auto p-3 space-y-2"
 
 Only shown when `isEditing && !showForm && editingId === null`.
 
+### 8.1 Item cards inside tabs — use the section card style, NOT the center-panel one
+
+When a sidebar tab renders a list of items (documents, contacts, notes, attachments…), each item card must use the **sidebar section card style**, not the center-panel "item view card" style from §7.
+
+| Context | Container classes | Used on |
+|---|---|---|
+| **Sidebar tab item** (this rule) | `p-3 rounded-lg border bg-card shadow-sm` | `DocsTab` doc cards, `AdresseCard`, `InfoTab` sub-cards |
+| **Center-panel item** (§7) | `rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3` | `LineCard`, ref cards, commande cards in `Fournisseurs.tsx` |
+
+Visual intent: center-panel cards sit on the warm background and rely on the left-edge status color to communicate state; sidebar tab cards sit on the `bg-zinc-100/80` panel and need to be white `bg-card` with a shadow to separate from the panel. Mixing the two — putting a zinc + border-l card inside a zinc sidebar panel — makes the card disappear into the background.
+
+When `isEditing`, add `editSectionClass` (`border-l-4 border-l-accent/70 bg-accent/[0.03]`) to the same white card — this gives the gold left edge and subtle tint used consistently across every edit-aware panel card in the app. Do NOT try to use the amber `border-l-amber-400/60` accent from the center-panel neutral pattern.
+
+### 8.2 Do not wrap single-content tabs in a redundant section card
+
+When a sidebar tab holds only one kind of content (a single list of documents, a single form, a single note field), do NOT wrap the entire tab body in a `p-3 rounded-lg border bg-card shadow-sm` card with a header that repeats the tab's name.
+
+```tsx
+// WRONG — the "Documents" label duplicates the tab label,
+// the card has nothing else inside, and the whitespace compounds.
+function DocsTab({ commande, isEditing }) {
+  return (
+    <div className={cn('p-3 rounded-lg border bg-card shadow-sm', isEditing && editSectionClass)}>
+      <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
+        <FileText className="h-3.5 w-3.5" />Documents
+      </p>
+      {/* doc list */}
+    </div>
+  )
+}
+
+// RIGHT — fragment root, items render directly in the tab body's p-3 space-y-2 layout.
+function DocsTab({ commande, isEditing }) {
+  return (
+    <>
+      {/* doc cards, each using the §8.1 section card style */}
+      {/* "Ajouter un document" button, edit mode only */}
+    </>
+  )
+}
+```
+
+Rationale: the tab header (Info / Adresses / Docs / Journal) already identifies the content. Doubling that as an internal card title creates redundant chrome and eats vertical space.
+
+Multi-content tabs (like `InfoTab`'s "Metadata" + "Commentaire" pair) DO get internal cards — each logical group is its own card. The rule is about single-group tabs.
+
+### 8.3 Edit-mode click swaps view ↔ edit on item cards
+
+Item cards in a sidebar tab are clickable in both modes, but the target differs:
+
+```tsx
+onClick={() => isEditing ? setEditingDoc(doc) : setViewDoc(doc)}
+className={cn(
+  'group p-3 rounded-lg border bg-card shadow-sm cursor-pointer hover:border-accent/40 transition-colors',
+  isEditing && editSectionClass,
+)}
+```
+
+Conventions:
+- **View mode** — click opens the read-only viewer dialog (`DocViewDialog`, `ContactViewDialog`, etc.). No action buttons shown on the card.
+- **Edit mode** — click opens the create/edit form dialog. The card picks up `editSectionClass` so users see it's in "edit context". The only hover-revealed action on the card is **Trash** (red ghost icon); there is no separate Pencil button — the whole card is the pencil.
+- **Delete** — hover-reveal `<Button variant="ghost" size="icon" className="h-6 w-6 text-destructive hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">` with `e.stopPropagation()` inside its handler so the row click doesn't also fire. The destructive action goes through `ConfirmDialog` (§33).
+
+Reference implementation: `DocsTab` in `FournisseursCommandes.tsx`. Applies to every future tab where items are editable (contacts, adresses, lots, attachments…).
+
 ---
 
 ## 9. Edit Mode Pattern
@@ -1300,6 +1365,93 @@ const invalidateAll = useCallback(() => {
 }, [queryClient, selectedId])
 ```
 
+### 25.1 Auto-enter edit mode after creating a new entity
+
+When the user clicks **Nouveau** to create a commande / fournisseur / entreprise / etc., the expected flow is: dialog opens → user fills the mandatory fields → dialog closes → the new row appears selected **and already in edit mode**, so the user can immediately finish filling optional fields without a second click on "Modifier". Don't make them hunt for the edit button on a freshly-created skeleton row.
+
+The race condition to solve: `setSelectedId(newId)` switches the detail query, but the detail hasn't loaded yet, so calling `startEdit()` synchronously has nothing to snapshot. The fix is a one-shot trigger id + an effect that waits for the detail to match:
+
+```tsx
+// Page-level state — set by the create dialog's onCreated, cleared by the effect.
+const [autoEditForId, setAutoEditForId] = useState<number | null>(null)
+
+// Effect runs after every detail query settle. When the detail's id matches
+// the flagged one, startEdit() snapshots the freshly-loaded row and flips
+// isEditing on. The flag is then cleared so this only fires once.
+useEffect(() => {
+  if (autoEditForId !== null && detail?.IDcommande_fil === autoEditForId) {
+    startEdit()
+    setAutoEditForId(null)
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [autoEditForId, detail])
+
+// Wire it in the create dialog's onCreated:
+<CreateCommandeDialog
+  open={createOpen}
+  onClose={() => setCreateOpen(false)}
+  onCreated={(newId) => {
+    setCreateOpen(false)
+    queryClient.invalidateQueries({ queryKey: ['commandes-fil'] })
+    setSelectedId(newId)
+    setAutoEditForId(newId)
+  }}
+/>
+```
+
+The `eslint-disable` is deliberate — including `startEdit` in deps re-runs the effect whenever the callback identity changes, which causes false re-triggers after cancel. Keying the effect on `[autoEditForId, detail]` alone is correct.
+
+Reference: `FournisseursCommandes.tsx` — apply the same pattern to every screen with a "Nouveau" affordance.
+
+### 25.2 Auto-select the next item after a delete (read cache BEFORE invalidating)
+
+When the user deletes the currently-selected row, the expected UX is: the row disappears from the list AND the next best row gets selected automatically, so the detail panel never shows an empty "Select a row" state. The naive implementation is broken in a subtle way:
+
+```tsx
+// BROKEN — the auto-select-first useEffect fires during stale-while-revalidate
+// and picks the deleted row as selectedId, then the refetch removes it and
+// selectedId points at a non-existent row.
+const deleteMut = useMutation({
+  mutationFn: () => apiFetch(`/commandes-fil/${selectedId}`, { method: 'DELETE' }),
+  onSuccess: () => {
+    queryClient.invalidateQueries({ queryKey: ['commandes-fil'] })
+    setSelectedId(null)  // the effect sees cached (old) list, picks [0]
+    setIsEditing(false)
+  },
+})
+```
+
+The React Query default is `stale-while-revalidate`: `invalidateQueries` marks the query stale and triggers a refetch, but returns the cached result synchronously. Between the invalidation and the refetch completing, `commandes` still contains the just-deleted row. If the auto-select-first effect reads that stale list, it picks the wrong row.
+
+**Fix**: read the cached list *before* invalidation, filter out the deleted id yourself, set the selection explicitly, then invalidate:
+
+```tsx
+const deleteMut = useMutation({
+  // Pass the id as a mutation arg so onSuccess has a stable reference
+  // that can't drift if the user changes selection mid-flight.
+  mutationFn: (id: number) => apiFetch(`/commandes-fil/${id}`, { method: 'DELETE' }),
+  onSuccess: (_data, deletedId) => {
+    const cached = queryClient.getQueryData<CommandeListRow[]>(['commandes-fil', statusFilter]) ?? []
+    const remaining = cached.filter((c) => c.IDcommande_fil !== deletedId)
+    queryClient.invalidateQueries({ queryKey: ['commandes-fil'] })
+    setIsEditing(false)
+    setSelectedId(remaining.length > 0 ? remaining[0].IDcommande_fil : null)
+  },
+})
+
+// At the call site, pass the current selection explicitly:
+deleteMut.mutate(selectedId)
+```
+
+Conventions:
+- **Always take the id as a mutation argument**, not from closure — the arg is stable across re-renders; closure captures can drift.
+- **Read from the cache, not from state** — `queryClient.getQueryData` sees the same data React Query would render, keyed on the query key actually in use. Using a React state `commandes` variable risks closure staleness.
+- **Include the cache key's full parameters** (`statusFilter`, `searchQuery`, etc.) when the query key depends on filters — otherwise `getQueryData` returns undefined.
+- **Set selection explicitly, not to null** — setting to null and relying on an auto-select-first effect hits the stale-while-revalidate gap. Compute the next selection yourself and set it directly.
+- **Empty list → `null`** — if nothing remains, set `selectedId` to `null` and let the existing empty-state render.
+
+Reference: `FournisseursCommandes.tsx`. Apply to every delete mutation on every master-detail screen.
+
 ---
 
 ## 26. HFSQL Date Helpers
@@ -1907,31 +2059,52 @@ Manual test that must pass on every edit-mode screen:
 
 ---
 
-## 29. Sidebar Status Footer (binary state + toggle action)
+## 29. Sidebar Status Bar (binary state + toggle action, detached pill)
 
 Reference: **`apps/web/src/pages/FournisseursCommandes.tsx`** → `StatusFooter`.
 
-For entities with a **binary primary state** that the user toggles (open/closed, en cours/terminée, active/archivé…), render the current state as a **solid-colored bar pinned at the bottom of the right sidebar panel** — not as a small badge in the header. The bar is both the status display and the toggle control, combined into a single visual unit.
+For entities with a **binary primary state** that the user toggles (open/closed, en cours/terminée, active/archivé…), render the current state as a **solid-colored pill placed as a standalone sibling below the sidebar tabs panel** — not as a small badge in the header, and not as an inset cap on the bottom of the panel. The pill is both the status display and the toggle control, combined into a single visual unit, and it is structurally separated from the tabs panel by a 12px gap.
 
-### 29.1 Why the sidebar footer, not the header
+### 29.1 Why a detached pill, not an inset footer
 
 - The detail header is already dense with title, date, edit/delete buttons, and "Mode édition" chip — adding a badge there competes for attention
-- A bar pinned at the bottom of the right panel sits in a predictable spot across screens, so users always know where to look for / change status
+- A bar fixed below the right sidebar sits in a predictable spot across screens, so users always know where to look for / change status
 - Giving the state its own bold, colored surface communicates its importance more than a pastel pill
+- **Detaching** it from the tabs panel (rather than capping the panel with it) lets the tabs panel keep its own rounded-xl border on all four corners and makes the status pill feel like a first-class, distinct control rather than subordinate chrome of the tabs panel
 
-### 29.2 Structure
+### 29.2 Structure — parent layout
+
+The sidebar's root is a flex column with two siblings: the tabs panel (fills remaining height) and the status pill (fixed height, pinned at the bottom). Use `gap-3` between them so they read as two distinct elements.
 
 ```tsx
-{/* Placed as the last child of the sidebar's outer flex-col, AFTER the scrollable tab body */}
-<StatusFooter
-  etat={commande.etat}
-  onToggle={onToggleEtat}
-  isToggling={isTogglingEtat}
-  disabled={isEditing}
-/>
+return (
+  <div className="w-96 flex-shrink-0 flex flex-col gap-3 min-h-0">
+    {/* Tabs panel — takes remaining space, own rounded border on all four corners */}
+    <div className="flex-1 min-h-0 rounded-xl border flex flex-col overflow-hidden bg-zinc-100/80">
+      <div className="flex border-b p-1 gap-1 rounded-t-xl bg-zinc-200/50">
+        {/* tab buttons */}
+      </div>
+      <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-transparent">
+        {/* active tab content */}
+      </div>
+    </div>
+
+    {/* Standalone status pill — flex-shrink-0, same w-96 inherited from the parent */}
+    <StatusFooter
+      etat={commande.etat}
+      onToggle={onToggleEtat}
+      isToggling={isTogglingEtat}
+      disabled={isEditing}
+    />
+  </div>
+)
 ```
 
-The parent sidebar container must be `flex flex-col overflow-hidden` so the footer can use `flex-shrink-0` and stay visible while the tab body scrolls above it.
+Critical classes on the root:
+- **`flex flex-col gap-3 min-h-0`** — the `min-h-0` is mandatory: without it the `flex-1` child can't shrink below its content's natural height and the status pill gets pushed off-screen.
+- **`gap-3`** — 12px separation between the tabs panel and the status pill. Smaller gaps look accidental.
+
+### 29.3 StatusFooter — the pill itself
 
 ```tsx
 function StatusFooter({
@@ -1949,44 +2122,43 @@ function StatusFooter({
   const ActionIcon = isDone ? Clock : CheckCircle2
 
   return (
-    <div className="flex-shrink-0 border-t bg-zinc-200/50 rounded-b-xl p-3">
-      <div
-        className={cn(
-          'rounded-lg shadow-sm overflow-hidden flex items-stretch h-11',
-          isDone ? 'bg-success' : 'bg-primary'
-        )}
-      >
-        {/* Left half: icon + state label */}
-        <div className="flex items-center gap-2 px-3 flex-1 text-white min-w-0">
-          <Icon className="h-4 w-4 flex-shrink-0" />
-          <span className="text-sm font-bold uppercase tracking-wide truncate">{label}</span>
-        </div>
-        {/* Right half: toggle action, split by a white divider */}
-        <button
-          type="button"
-          onClick={onToggle}
-          disabled={disabled || isToggling}
-          title={isDone ? 'Marquer en cours' : 'Marquer terminée'}
-          className="px-3.5 bg-white/15 hover:bg-white/25 active:bg-white/30 disabled:bg-white/5 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-semibold border-l border-white/25 flex items-center gap-1.5 transition-colors"
-        >
-          <ActionIcon className="h-3.5 w-3.5" />
-          {actionLabel}
-        </button>
+    <div
+      className={cn(
+        'flex-shrink-0 rounded-xl border shadow-sm overflow-hidden flex items-stretch h-11',
+        isDone ? 'bg-success border-success' : 'bg-primary border-primary'
+      )}
+    >
+      {/* Left half: icon + state label */}
+      <div className="flex items-center gap-2 px-3 flex-1 text-white min-w-0">
+        <Icon className="h-4 w-4 flex-shrink-0" />
+        <span className="text-sm font-bold uppercase tracking-wide truncate">{label}</span>
       </div>
+      {/* Right half: toggle action, split by a white divider */}
+      <button
+        type="button"
+        onClick={onToggle}
+        disabled={disabled || isToggling}
+        title={isDone ? 'Marquer en cours' : 'Marquer terminée'}
+        className="px-3.5 bg-white/15 hover:bg-white/25 active:bg-white/30 disabled:bg-white/5 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-semibold border-l border-white/25 flex items-center gap-1.5 transition-colors"
+      >
+        <ActionIcon className="h-3.5 w-3.5" />
+        {actionLabel}
+      </button>
     </div>
   )
 }
 ```
 
-### 29.3 Conventions
+### 29.4 Conventions
 
-- **Colors**: `bg-primary` (MPS deep blue) for the "in progress / active" state, `bg-success` for the "done / validated" state. Do NOT use `bg-amber`/`bg-yellow` for active — amber is reserved for warnings/alerts. Do NOT use pastel transparent colors (`bg-primary/10`) — the bar must be solid and bold to match the left-list badge aesthetic.
+- **Colors**: `bg-primary` (MPS deep blue) for the "in progress / active" state, `bg-success` for the "done / validated" state. The border matches the bg color (`border-primary` / `border-success`) so the pill reads as a single solid shape, not a ringed button. Do NOT use `bg-amber`/`bg-yellow` for active — amber is reserved for warnings/alerts. Do NOT use pastel transparent colors (`bg-primary/10`) — the pill must be solid and bold to match the left-list badge aesthetic.
+- **Shape**: `rounded-xl` all four corners (NOT `rounded-b-xl`) — it's a standalone pill now, not a bottom cap.
+- **Border + shadow**: `border shadow-sm` to match the tabs panel's visual weight. Without them the pill looks flat next to the bordered panel above.
 - **Height**: fixed `h-11` — visually substantial without dominating the sidebar.
 - **Typography**: `text-sm font-bold uppercase tracking-wide` for the state label, `text-xs font-semibold` for the action button text. White foreground throughout.
-- **Action button as inset split**: the toggle button lives **inside** the colored bar, separated by `border-l border-white/25` and a `bg-white/15` hover-tinted surface. It is not an outlined shadcn `<Button>` — use a raw `<button>` so it can share the bar's background.
+- **Action button as inset split**: the toggle button lives **inside** the colored pill, separated by `border-l border-white/25` and a `bg-white/15` hover-tinted surface. It is not an outlined shadcn `<Button>` — use a raw `<button>` so it can share the pill's background.
 - **Disabled during edit mode**: pass `disabled={isEditing}` so users cannot toggle the state while a header edit is mid-flight. Also disable while the mutation is in-flight (`isTogglingEtat`).
-- **Placement**: always `flex-shrink-0 border-t bg-zinc-200/50 rounded-b-xl p-3` — the `rounded-b-xl` matches the sidebar's outer border radius, and the `bg-zinc-200/50` matches the tab-bar top strip for symmetry.
-- **No "Statut" label above the bar**: the bold colored bar speaks for itself. Adding a label above makes it feel like a form field and eats vertical space.
+- **No "Statut" label above the pill**: the bold colored pill speaks for itself. Adding a label above makes it feel like a form field and eats vertical space.
 
 ### 29.4 When to use this pattern vs a badge in the header
 
@@ -2566,3 +2738,464 @@ A new document screen needs:
 7. A `<SendEmailDialog>` mount at the page root passing `pdfUrl`, `pdfAttachmentLabel`, `queryKey`, `loadDefaults`, and `onSend` via `postEmail(..., { includeAttachPdf: true })`
 
 A plain non-document screen (like Entreprises) skips steps 1–3 and omits `pdfUrl` / `pdfAttachmentLabel` from the `<SendEmailDialog>` props. The `onSend` call drops `includeAttachPdf`.
+
+---
+
+## 33. Destructive confirmation — `ConfirmDialog` (never use `window.confirm`)
+
+Reference: **`apps/web/src/components/shared/ConfirmDialog.tsx`**, used for commande / ligne / document deletion in `FournisseursCommandes.tsx`.
+
+**Never call `window.confirm()` / `window.alert()` / `window.prompt()` from application code.** Native browser dialogs are jarring, styled by the browser (so they break the app's visual language), block the entire tab, and cannot surface loading state while the destructive mutation runs. Every destructive or hard-to-reverse action in the app must go through `ConfirmDialog` instead.
+
+### 33.1 Import & props
+
+```tsx
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+
+<ConfirmDialog
+  open={confirmOpen}
+  title="Supprimer la commande"
+  description="Cette action supprimera la commande et toutes ses lignes. Elle est irréversible."
+  confirmLabel="Supprimer"
+  isPending={deleteMut.isPending}
+  onCancel={() => setConfirmOpen(false)}
+  onConfirm={() => deleteMut.mutate(id, { onSuccess: () => setConfirmOpen(false) })}
+/>
+```
+
+| Prop | Type | Notes |
+|---|---|---|
+| `open` | `boolean` | Required |
+| `title` | `string` | Required. Imperative + the entity ("Supprimer la commande"). Keep it to one short phrase. |
+| `description` | `string?` | Optional second line. Use when the action has side effects the user needs to know about ("toutes ses lignes", "tous les contacts", etc.). Keep to 1–2 short sentences. |
+| `confirmLabel` | `string?` | Defaults to `"Supprimer"` for destructive, `"Confirmer"` for default. Always an imperative verb. |
+| `cancelLabel` | `string?` | Defaults to `"Annuler"`. Never override unless there's a specific reason. |
+| `variant` | `'destructive' \| 'default'` | Defaults to `'destructive'`. Controls the title icon (`AlertTriangle` in red for destructive, none for default) and the confirm button variant (`destructive` red vs `default` primary). |
+| `isPending` | `boolean?` | Wire this to the mutation's `isPending`. Disables both buttons and swaps the `Trash2` icon on the confirm button for a spinning `Loader2` — users get visual feedback that the action is actually running. |
+| `onCancel` | `() => void` | Close the dialog. Also fires on overlay/escape/X. |
+| `onConfirm` | `() => void` | Fire the destructive mutation. **The component does NOT auto-close on confirm** — you are responsible for closing it yourself, typically in the mutation's `onSuccess`. This lets the dialog stay visible (with its spinner) while the request is in flight. |
+
+### 33.2 State pattern — local state at the nearest owner
+
+Don't try to hoist confirmation state to the page root when the action is owned by a sub-component. Each component that fires a destructive mutation owns its own confirm state. If three different places on a screen can delete things (the detail header, the lines section, the docs tab), mount three `ConfirmDialog`s — one per owner — each with its own state. This keeps the concerns colocated and avoids cross-tree plumbing.
+
+The canonical shape for a one-target-at-a-time delete:
+
+```tsx
+// Single-target delete (commande, current entity, etc.)
+const [confirmOpen, setConfirmOpen] = useState(false)
+
+// …in the button handler:
+onClick={() => setConfirmOpen(true)}
+
+// …at the end of the JSX:
+<ConfirmDialog
+  open={confirmOpen}
+  title="Supprimer la commande"
+  description="Cette action supprimera la commande et toutes ses lignes. Elle est irréversible."
+  isPending={deleteMut.isPending}
+  onCancel={() => setConfirmOpen(false)}
+  onConfirm={() => {
+    if (selectedId !== null) deleteMut.mutate(selectedId)
+  }}
+/>
+```
+
+For a list of items where each has its own delete button, store the target id (or full object) instead of a boolean — the dialog is "open" iff that value is non-null:
+
+```tsx
+// Per-row delete (line cards, doc cards, etc.)
+const [deleteTarget, setDeleteTarget] = useState<LigneCommande | null>(null)
+
+onDelete={() => setDeleteTarget(line)}
+
+<ConfirmDialog
+  open={deleteTarget !== null}
+  title="Supprimer la ligne"
+  description={deleteTarget ? `${deleteTarget.ref_fil} · ${deleteTarget.colori_reference} sera supprimée.` : undefined}
+  isPending={deleteMut.isPending}
+  onCancel={() => setDeleteTarget(null)}
+  onConfirm={() => {
+    if (deleteTarget) {
+      deleteMut.mutate(deleteTarget.IDref_fil_commande, {
+        onSuccess: () => setDeleteTarget(null),
+      })
+    }
+  }}
+/>
+```
+
+Storing the full object (not just the id) lets you interpolate entity fields into the `description` without a second lookup. The dialog closes on the mutation's per-call `onSuccess` — the page-level `deleteMut` can have its own global `onSuccess` for invalidation that runs in addition.
+
+### 33.3 Placement — always a top-level sibling of the main JSX
+
+Like `UnsavedChangesDialog` and `SendEmailDialog`, `ConfirmDialog` must be a **top-level sibling of the screen's main content**, not nested inside a card or section. Wrap the component's return in a `<>…</>` fragment if needed. Nesting it under a scrollable or transform-containing parent causes the `AlertDialog` overlay to render in the wrong stacking context and the dialog ends up clipped.
+
+### 33.4 Copy conventions (French)
+
+- **Title** — imperative verb + entity, no punctuation: `"Supprimer la commande"`, `"Supprimer le document"`, `"Supprimer la ligne"`. Not `"Êtes-vous sûr ?"` — that's a popup question, not a decision.
+- **Description** — 1–2 short sentences in present tense, stating what will happen. End with a period. Mention cascading effects explicitly: `"Cette action supprimera la commande et toutes ses lignes. Elle est irréversible."` — the user deserves to know that deleting a commande also wipes its lines.
+- **Confirm button** — imperative verb matching the title: `"Supprimer"` / `"Archiver"` / `"Clôturer"`. Never `"OK"` or `"Oui"`.
+- **Cancel button** — always `"Annuler"`.
+
+### 33.5 When to use the dialog vs proceed directly
+
+Use it for:
+- **Irreversible deletes** — rows from the database, files, linked sub-entities
+- **Cascading actions** — deleting a parent that also removes children
+- **State transitions that can't be trivially undone** — closing a commande, invoicing, sending
+- **Discarding unsaved work** — covered by `UnsavedChangesDialog` (§28), not this one
+
+Do NOT use it for:
+- Toggling a boolean state that has its own in-place undo (`checked` → `unchecked`)
+- Navigation with unsaved changes — use `UnsavedChangesDialog` instead
+- Anything the user can trivially redo (reassigning a lot to a line, reordering a list)
+
+When in doubt, lean towards using it — one extra click is much cheaper than a lost order.
+
+### 33.6 Mandatory replacements
+
+Any existing `window.confirm(…)` / `alert(…)` / `prompt(…)` call in the codebase is a bug. When you touch a file that still has one, replace it with `ConfirmDialog` as part of the same edit. Do not add new native dialog calls under any circumstances.
+
+---
+
+## 34. Polymorphic document attachments (`ged` + `type_doc`)
+
+Reference implementation: **`apps/web/src/pages/FournisseursCommandes.tsx`** → `DocsTab`, `DocViewDialog`, `DocCreateEditDialog` + **`apps/api/src/routes/commandes-fil.ts`** → the `/:id/documents*` endpoint cluster.
+
+The legacy MPS database uses **one shared table `ged`** to store documents for every entity in the system — client commandes, sous-traitant commandes, commande_fil (fournisseur orders), stock lots, certificates, references, and more. Rather than one attachment table per parent, rows are disambiguated by which of several discriminator columns is non-zero. Every screen that needs attached documents follows the same convention below — do not build a new dedicated table, and do not skip any of the conventions.
+
+### 34.1 `ged` schema (columns you care about)
+
+| Column | Type | Purpose |
+|---|---|---|
+| `IDged` | int PK | Stable id used by API routes and `stock_fil_ged` linker |
+| `nom` | string | User-facing filename / label |
+| `fichier` | blob (BinMemo) | The actual file bytes — may be empty/null even when `IS NOT NULL` (see §34.6) |
+| `commentaire` | string | Free-form note |
+| `IDdossier` | int FK | Legacy "dossier" grouping, rarely used in the new app — set to `0` |
+| `IDcommande_client` | int FK | Non-zero iff the doc belongs to a client order |
+| `IDcommande_sous_traitant` | int FK | Non-zero iff the doc belongs to a subcontractor order |
+| `IDtype_doc` | int FK → `type_doc.IDtype_doc` | Doc type (facture fil, cert GOTS, BL, cert oekotex…). The full catalog lives in `type_doc` |
+| `IDreference` | int | **The polymorphic parent id**. Interpretation depends on which of the discriminator columns above are non-zero |
+
+### 34.2 Polymorphic discriminator — how to know which parent a row belongs to
+
+There is no dedicated "parent_type" column — the owning entity is inferred from which FKs are zero:
+
+| Parent entity | `IDcommande_client` | `IDcommande_sous_traitant` | `IDreference` |
+|---|---|---|---|
+| **Client commande** | `≠ 0` (the commande id) | `0` | typically also equal to the commande id (legacy quirk) |
+| **Sous-traitant commande** | `0` | `≠ 0` (the commande id) | typically also equal to the commande id |
+| **Commande_fil (fournisseur order)** | `0` | `0` | `= IDcommande_fil` |
+| **Other entities** (stock_fil via `stock_fil_ged`, references via `IDreference`, dossier via `IDdossier`, …) | `0` | `0` | varies — see the specific screen's pattern |
+
+**Critical consequence**: to query "documents for commande_fil #672", the WHERE clause is **not** just `IDreference = 672`. It must explicitly filter out client and sous-traitant rows:
+
+```sql
+WHERE g.IDreference = ${id}
+  AND g.IDcommande_client = 0
+  AND g.IDcommande_sous_traitant = 0
+```
+
+Skipping either zero guard leaks documents from other parent types that happen to share the same numeric id.
+
+### 34.3 The canonical endpoint shape (mirror this for every parent)
+
+For each parent type that needs documents, implement this exact five-endpoint cluster on the parent's route file. Naming uses `commande-fil` below — substitute the parent.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/:id/documents` | List metadata (joins `type_doc`, includes per-doc `linked_lots` when relevant) |
+| `GET` | `/:id/documents/:idged/fichier` | Serve the blob as `application/pdf` / `image/*` / `application/octet-stream` |
+| `POST` | `/:id/documents` | Multipart create (metadata + optional file) |
+| `PUT` | `/:id/documents/:idged` | Multipart update (metadata + optional file replace) |
+| `DELETE` | `/:id/documents/:idged` | Scoped delete |
+
+Every endpoint **must** enforce the parent scope — a caller with a valid `IDged` from another commande must not be able to read, edit, or delete a doc that doesn't belong to the parent in the URL:
+
+```ts
+// Scope guard reused by every PUT/DELETE and the file GET
+const scope = await query(
+  `SELECT IDged FROM ged
+   WHERE IDged = ${idged}
+     AND IDreference = ${id}
+     AND IDcommande_client = 0
+     AND IDcommande_sous_traitant = 0`
+)
+if (scope.length === 0) { res.status(404).json({ error: 'Document not found' }); return }
+```
+
+Factor this into a helper (`verifyDocBelongsToCommande`) once you have more than two endpoints using it.
+
+### 34.4 Encoding — `fixEncoding` for two separate base tables
+
+The list endpoint joins `ged` and `type_doc`, both of which have French accented text that comes back corrupted through the ODBC bridge. `fixEncoding()` works on one base table at a time, so apply it twice:
+
+```ts
+const fixed = await fixEncoding(rows, 'ged', 'IDged', ['nom', 'commentaire'])
+// type_nom (from type_doc) needs a separate targeted pass keyed on IDtype_doc:
+const typeIds = Array.from(new Set(fixed.map((r) => r.IDtype_doc).filter((t) => t > 0)))
+const typeMap = new Map<number, string>()
+if (typeIds.length > 0) {
+  const typeRows = await query(
+    `SELECT IDtype_doc, nom FROM type_doc WHERE IDtype_doc IN (${typeIds.join(',')})`
+  )
+  const fixedTypes = await fixEncoding(typeRows, 'type_doc', 'IDtype_doc', ['nom'])
+  for (const t of fixedTypes) typeMap.set(t.IDtype_doc, t.nom)
+}
+```
+
+Do NOT try to `CONVERT(td.nom USING 'UTF-8') AS type_nom` inline in the JOIN — `fixEncoding` assumes a single base table and gets confused.
+
+### 34.5 Writing binary blobs — hex literals, not parameters
+
+HFSQL ODBC doesn't accept parameterized binary values. All blob writes go through a hex literal on `queryRaw`:
+
+```ts
+if (req.file && req.file.buffer.length > 0) {
+  const hexStr = req.file.buffer.toString('hex')
+  await queryRaw(`UPDATE ged SET fichier = x'${hexStr}' WHERE IDged = ${newId}`)
+}
+```
+
+For `POST`, do the INSERT of metadata first (with zero blob), then the hex-literal UPDATE on the looked-up new `IDged`. For `PUT`, accept a `remove_fichier=1` form field that clears the blob when the user wants to delete the file without replacing it:
+
+```ts
+if (req.file && req.file.buffer.length > 0) {
+  await queryRaw(`UPDATE ged SET fichier = x'${req.file.buffer.toString('hex')}' WHERE IDged = ${idged}`)
+} else if (req.body.remove_fichier === '1') {
+  await query(`UPDATE ged SET fichier = NULL WHERE IDged = ${idged}`)
+}
+```
+
+### 34.6 Serving the blob — MIME sniff + empty-blob 404 + iframe header strip
+
+```ts
+const rows = await queryRaw(
+  `SELECT fichier FROM ged
+   WHERE IDged = ${idged} AND IDreference = ${id}
+     AND IDcommande_client = 0 AND IDcommande_sous_traitant = 0`
+)
+if (rows.length === 0) { res.status(404).json({ error: 'Document not found' }); return }
+
+const fichier = rows[0].fichier
+if (fichier == null) { res.status(404).json({ error: 'No file attached' }); return }
+
+let buf: Buffer
+if (fichier instanceof ArrayBuffer) buf = Buffer.from(fichier)
+else if (Buffer.isBuffer(fichier)) buf = fichier
+else { res.status(404).json({ error: 'No file attached' }); return }
+
+// HFSQL BinMemo IS NOT NULL is unreliable — empty/null-terminator-only
+// blobs pass the null check. Return 404 here so the frontend HEAD pre-check
+// can hide the viewer cleanly.
+if (buf.length === 0 || (buf.length === 1 && buf[0] === 0)) {
+  res.status(404).json({ error: 'No file attached' }); return
+}
+
+// Sniff MIME from magic bytes
+let contentType = 'application/octet-stream'
+if (buf.length >= 4) {
+  const h = buf.subarray(0, 4)
+  if (h[0] === 0x25 && h[1] === 0x50 && h[2] === 0x44 && h[3] === 0x46) contentType = 'application/pdf'
+  else if (h[0] === 0x89 && h[1] === 0x50 && h[2] === 0x4E && h[3] === 0x47) contentType = 'image/png'
+  else if (h[0] === 0xFF && h[1] === 0xD8) contentType = 'image/jpeg'
+}
+
+res.setHeader('Content-Type', contentType)
+res.setHeader('Content-Disposition', 'inline')
+// Strip helmet so cross-origin iframe embedding works in dev
+res.removeHeader('X-Frame-Options')
+res.removeHeader('Content-Security-Policy')
+res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+res.end(buf)
+```
+
+The "empty blob = 404" rule (§34.6 CLAUDE.md HFSQL rules) is mandatory: without it the frontend HEAD pre-check can't distinguish "document exists" from "document has a real file". Three magic-byte checks (PDF / PNG / JPEG) cover essentially every document type ETS Malterre uses; fall back to `application/octet-stream` and let the browser's inline handler do its best.
+
+### 34.7 Per-lot scoping via `stock_fil_ged` — "zero rows = applies to all"
+
+A `ged` row attached to a commande_fil can additionally be scoped to a subset of the commande's yarn lots via the **`stock_fil_ged`** linker table (`IDstock_fil_ged`, `IDged`, `IDstock_fil`). This is how a GOTS certificate applies to only some of an order's lots instead of the whole order.
+
+**Semantics — critical and easy to get wrong**:
+
+- **Zero rows in `stock_fil_ged` for a given `IDged`** = the document applies to **all** lots of the parent commande. This is the default and the "implicit global" state. It matches legacy behavior and means you don't need to backfill links when a new lot is added to the order.
+- **One or more rows** = the document applies **only** to the listed lots — explicit specific scoping.
+
+Do NOT add a separate boolean column to `ged` to represent "all vs specific" — the empty-set convention already encodes it. When the user flips a UI toggle from "specific" back to "all", DELETE every `stock_fil_ged` row for that `IDged` (not "insert one row per lot" — that would be the wrong semantics and would break the moment someone adds a new lot).
+
+**Scope guard on link writes**: when inserting a `stock_fil_ged` row, verify that the stock_fil lot actually belongs to the parent commande via the line table:
+
+```ts
+const scope = await query(
+  `SELECT sf.IDstock_fil FROM stock_fil sf
+   INNER JOIN ref_fil_commande rfc ON sf.IDref_fil_commande = rfc.IDref_fil_commande
+   WHERE sf.IDstock_fil = ${stockId} AND rfc.IDcommande_fil = ${id}`
+)
+if (scope.length === 0) {
+  res.status(400).json({ error: 'Lot does not belong to this commande' }); return
+}
+// Idempotent insert — skip if already linked
+const existing = await query(
+  `SELECT IDstock_fil_ged FROM stock_fil_ged WHERE IDged = ${idged} AND IDstock_fil = ${stockId}`
+)
+if (existing.length === 0) {
+  await query(`INSERT INTO stock_fil_ged (IDged, IDstock_fil) VALUES (${idged}, ${stockId})`)
+}
+```
+
+**Endpoints**:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/:id/documents/:idged/lots` | Return `{ linked: StockLot[], available: StockLot[] }` |
+| `PUT` | `/:id/documents/:idged/lots/:stockId` | Idempotent link (returns the refreshed `{linked, available}`) |
+| `DELETE` | `/:id/documents/:idged/lots/:stockId` | Unlink a single lot (same return shape) |
+| `DELETE` | `/:id/documents/:idged/lots` | Bulk clear — used when the UI toggle flips back to "all lots" |
+
+Every write returns the refreshed `{linked, available}` payload so the dialog can hydrate via `queryClient.setQueryData` without a follow-up fetch. Matches the pattern used by the stock drawer's link/unlink endpoints.
+
+### 34.8 Enrich the list endpoint with `linked_lots`
+
+When the frontend shows a doc list and needs to render a per-card indicator like `"Lot A, Lot B"` when specific lots are selected, include a batched `linked_lots` field on each doc row from the list endpoint — don't force the frontend to fire N per-doc queries.
+
+```ts
+// After fetching + fixEncoding'ing the main ged rows:
+const docIds = fixed.map((r) => r.IDged)
+const lotsByDoc = new Map<number, Array<{ IDstock_fil: number; lot: string | null }>>()
+if (docIds.length > 0) {
+  const lotRows = await query(
+    `SELECT sfg.IDged, sf.IDstock_fil, sf.lot
+     FROM stock_fil_ged sfg
+     INNER JOIN stock_fil sf ON sfg.IDstock_fil = sf.IDstock_fil
+     WHERE sfg.IDged IN (${docIds.join(',')})
+     ORDER BY sf.lot`
+  )
+  for (const lr of lotRows) {
+    const arr = lotsByDoc.get(lr.IDged) ?? []
+    arr.push({ IDstock_fil: lr.IDstock_fil, lot: lr.lot })
+    lotsByDoc.set(lr.IDged, arr)
+  }
+}
+
+const out = fixed.map((r) => ({
+  IDged: r.IDged,
+  nom: r.nom,
+  commentaire: r.commentaire,
+  IDtype_doc: r.IDtype_doc,
+  type_nom: typeMap.get(r.IDtype_doc) ?? null,
+  linked_lots: lotsByDoc.get(r.IDged) ?? [],  // empty array = "all lots"
+}))
+```
+
+Empty `linked_lots` on the frontend = render nothing (the doc applies globally). Non-empty = render a `<BobineIcon>` + truncated `Lot A, Lot B, Lot C…` inline on the right side of the card.
+
+### 34.9 Frontend — `DocsTab` + `DocViewDialog` + `DocCreateEditDialog`
+
+Three components, all colocated in the parent screen file (not factored into shared), mirroring `FournisseursCommandes.tsx`:
+
+1. **`DocsTab`** — the sidebar tab:
+   - Fragment root (no wrapping card, per §8.2)
+   - `useQuery` on `['<parent>-docs', parentId]`
+   - Each doc rendered as a `p-3 rounded-lg border bg-card shadow-sm` card (per §8.1) with `editSectionClass` when editing, lot indicator on the right side when `linked_lots.length > 0`, hover-reveal trash in edit mode
+   - Click-to-view (view mode) or click-to-edit (edit mode) per §8.3
+   - `"Ajouter un document"` ghost button at the bottom, `isEditing && !isNew`
+   - Locally-mounted `ConfirmDialog` (§33) for deletes — doc-level state `deleteDocConfirm: GedDocument | null`
+
+2. **`DocViewDialog`** — chrome-free full-bleed iframe per §18.B:
+   - HEAD pre-check on the file endpoint before rendering the iframe
+   - Falls back to a compact `DialogContent` with "Aucun document attaché" when the HEAD returns 404 (empty blob)
+
+3. **`DocCreateEditDialog`** — side-by-side form + preview per §18.C:
+   - Left column: `LabeledInput` for `nom`, a select for `IDtype_doc` (sourced from `/fournisseurs/type-doc`, reuse that endpoint across screens — do not duplicate it), textarea for `commentaire`, the "Lots de fil" toggle + list section (edit mode only, doc exists), error banner
+   - Right column: iframe preview of the current blob OR the freshly-picked file via `URL.createObjectURL`, file picker (`accept=".pdf,image/*"`), action buttons bottom-right
+   - Raw `fetch` with `FormData` (NOT `apiFetch` — multipart needs the browser to set the boundary)
+   - `createOpen || editingDoc !== null` controls `open`; `doc={editingDoc}` distinguishes create mode (null) from edit mode
+   - On success, calls `onSuccess` which closes the dialog and invalidates the docs list — parent state (`createOpen`, `editingDoc`) is reset in the same handler
+
+### 34.10 Candidate screens
+
+Apply this entire pattern to every screen where entities have attached documents:
+
+- **Fournisseurs → Commandes** ✅ reference implementation
+- **Clients → Commandes** — discriminator: `IDcommande_client = id`, `IDcommande_sous_traitant = 0`
+- **Sous-traitants → Commandes** — discriminator: `IDcommande_sous_traitant = id`, `IDcommande_client = 0`
+- **Clients → Devis / Facturation** — same legacy split; check which `IDtype_doc` values legacy populates for each
+- **Production → Tricotage / Teinture / Confection** — attached via `IDsuivi_tricotage` etc., polymorphic column depends on entity. Check the legacy MPS database before coding.
+- **Stock → Matières premières / Produits finis** — these go through `stock_fil_ged` for yarn lots; finished-product lots may have their own linker
+
+For each new parent, the checklist is: (1) identify the discriminator columns, (2) implement the five-endpoint cluster with scope guards, (3) copy-paste the three frontend components and adapt the query keys + parent id. Do NOT try to abstract the components into a single generic `<DocumentAttachments>` — the parent-specific scope guards and discriminator columns are different enough per screen that a generic component ends up riddled with conditionals.
+
+---
+
+## 35. Inline toggle pill (`role="switch"`)
+
+Reference: **`apps/web/src/pages/FournisseursCommandes.tsx`** → `DocCreateEditDialog` "Appliquer à tous les lots" row.
+
+For inline boolean controls inside a form — "Appliquer à tous les lots", "Notifier par email à la création", "Afficher les éléments archivés", etc. — use an iOS-style pill switch, not a plain `<input type="checkbox">` and not a shadcn-style filled checkbox. The pill reads as a toggle at a glance and matches the app's modern feel.
+
+The app has no shared `<Switch>` component — copy this inline. Don't refactor into a component until at least three screens use it.
+
+### 35.1 Markup
+
+```tsx
+<button
+  type="button"
+  role="switch"
+  aria-checked={value}
+  disabled={disabled}
+  onClick={() => onChange(!value)}
+  className={cn(
+    'relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full transition-colors',
+    'focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+    'disabled:opacity-50 disabled:cursor-not-allowed',
+    value ? 'bg-accent shadow-inner' : 'bg-zinc-300 hover:bg-zinc-400/80',
+  )}
+>
+  <span
+    className={cn(
+      'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200 ease-out',
+      value ? 'translate-x-[18px]' : 'translate-x-0.5',
+    )}
+  />
+</button>
+```
+
+### 35.2 Row layout — label on left, toggle pinned right
+
+The toggle itself is intentionally small; give it a descriptive row around it so the whole thing is a clickable-feeling control:
+
+```tsx
+<div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-lg border border-border/60 bg-white shadow-sm">
+  <div className="min-w-0 flex-1">
+    <div className="flex items-center gap-1.5 text-xs font-semibold">
+      <BobineIcon className="h-3.5 w-3.5 text-accent" />
+      <span>Appliquer à tous les lots</span>
+    </div>
+    <p className="text-[10px] text-muted-foreground mt-0.5">
+      {value ? 'Ce document concerne toute la commande' : `${specific.length} lot sélectionné(s)`}
+    </p>
+  </div>
+  {mutation.isPending && <Loader2 className="h-3 w-3 animate-spin text-accent flex-shrink-0" />}
+  {/* …toggle button from §35.1 goes here… */}
+</div>
+```
+
+### 35.3 Conventions
+
+- **Track**: `h-5 w-9` (20×36px). `bg-accent` (gold `#F2B80A`) when on, `bg-zinc-300` when off. `shadow-inner` on the on-state adds a subtle recessed feel. Hover tint on the off-state only.
+- **Thumb**: `h-4 w-4` white circle with `shadow`. Slides from `translate-x-0.5` to `translate-x-[18px]` — the arbitrary `18px` is `w-9 (36) - w-4 (16) - 2×(0.5×4) = 18`. A `200ms ease-out` transition is exactly enough to feel responsive without looking sluggish.
+- **Accessibility**: `role="switch"` + `aria-checked` is non-negotiable — without them screen readers announce the button as a plain button. Full keyboard support comes for free via `<button>`.
+- **Disabled**: `opacity-50 cursor-not-allowed` on the track; do NOT change the thumb position for disabled state — the user still needs to read the current value while a mutation is in flight.
+- **Never use `<input type="checkbox">`** — browsers render those very differently on Windows (square, grey) vs macOS (circle, blue); the pill is consistent across platforms.
+- **Label click**: the outer row is NOT clickable. The click target is the pill itself. Putting a click handler on the row risks firing when users click the subtitle text or a stray icon — confusing for state that drives a destructive operation (like clearing all lot links).
+
+### 35.4 When NOT to use this pattern
+
+- **Form submission checkboxes** (accept terms, agree to newsletter…) — a shadcn checkbox is more conventional there because those are part of a larger form submission, not inline state toggles
+- **List filters** (hide terminated, show bio only…) — a plain checkbox+label in the toolbar is fine; the pill is overkill for a filter
+- **Multi-select checkboxes** (lot-picker list, tag picker…) — use a checkbox; the pill doesn't scale visually to many side-by-side toggles
+
+Use the pill specifically for **inline single-boolean state that has meaningful UX consequences** (hides/shows a section, toggles a mode, clears/sets a relationship).
+

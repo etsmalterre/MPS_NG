@@ -1,8 +1,11 @@
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
 import { z } from 'zod'
+import multer from 'multer'
 import { renderToBuffer } from '@react-pdf/renderer'
 import React from 'react'
-import { query, fixEncoding } from '../lib/hfsql-auto.js'
+import { query, queryRaw, fixEncoding } from '../lib/hfsql-auto.js'
+
+const upload = multer({ storage: multer.memoryStorage() })
 import { CommandeFournisseurPdf, type CommandeFournisseurPdfData } from '../lib/pdf/CommandeFournisseurPdf.js'
 import { sendMail } from '../lib/gmail.js'
 import { getUserEmail } from '../lib/user-emails.js'
@@ -959,6 +962,385 @@ commandesFilRouter.delete('/:commandeId/lignes/:ligneId/stock/:stockId', async (
     res.json(payload)
   } catch (err) {
     console.error('Error unlinking stock from line:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Documents (GED) ─────────────────────────────────────
+//
+// Documents attached to a commande_fil live in the shared `ged` table with a
+// polymorphic reverse-link: `IDreference = IDcommande_fil` AND both
+// `IDcommande_client` and `IDcommande_sous_traitant` equal 0. There is no
+// dedicated asso table — the same `ged` row is also used for other parents
+// (client commandes, sous-traitant commandes, references, etc.) depending on
+// which column is set. Per-lot linkage (e.g. a GOTS cert attached to specific
+// lots within the order) is handled separately via `stock_fil_ged`.
+
+commandesFilRouter.get('/:id/documents', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const rows = await query<{
+      IDged: number
+      nom: string | null
+      commentaire: string | null
+      IDtype_doc: number
+      type_nom: string | null
+    }>(
+      `SELECT g.IDged, g.nom, g.commentaire, g.IDtype_doc, td.nom AS type_nom
+       FROM ged g
+       LEFT JOIN type_doc td ON g.IDtype_doc = td.IDtype_doc
+       WHERE g.IDreference = ${id}
+         AND g.IDcommande_client = 0
+         AND g.IDcommande_sous_traitant = 0
+       ORDER BY g.IDged DESC`
+    )
+    const fixed = await fixEncoding(rows, 'ged', 'IDged', ['nom', 'commentaire'])
+    // type_nom comes from the joined type_doc table — fix it separately via a
+    // targeted query keyed on IDtype_doc, because fixEncoding works on a single
+    // base table at a time.
+    const typeIds = Array.from(new Set(fixed.map((r) => r.IDtype_doc).filter((t) => t > 0)))
+    const typeMap = new Map<number, string>()
+    if (typeIds.length > 0) {
+      const typeRows = await query<{ IDtype_doc: number; nom: string }>(
+        `SELECT IDtype_doc, nom FROM type_doc WHERE IDtype_doc IN (${typeIds.join(',')})`
+      )
+      const fixedTypes = await fixEncoding(typeRows, 'type_doc', 'IDtype_doc', ['nom'])
+      for (const t of fixedTypes) typeMap.set(t.IDtype_doc, t.nom)
+    }
+    // Fetch linked lots per doc in one batched query. Empty result for a
+    // given IDged means "applies to all lots of the commande" (zero rows in
+    // stock_fil_ged = no per-lot scoping, matches legacy semantics).
+    const docIds = fixed.map((r) => r.IDged)
+    const lotsByDoc = new Map<number, Array<{ IDstock_fil: number; lot: string | null }>>()
+    if (docIds.length > 0) {
+      const lotRows = await query<{ IDged: number; IDstock_fil: number; lot: string | null }>(
+        `SELECT sfg.IDged, sf.IDstock_fil, sf.lot
+         FROM stock_fil_ged sfg
+         INNER JOIN stock_fil sf ON sfg.IDstock_fil = sf.IDstock_fil
+         WHERE sfg.IDged IN (${docIds.join(',')})
+         ORDER BY sf.lot`
+      )
+      for (const lr of lotRows) {
+        const arr = lotsByDoc.get(lr.IDged) ?? []
+        arr.push({ IDstock_fil: lr.IDstock_fil, lot: lr.lot })
+        lotsByDoc.set(lr.IDged, arr)
+      }
+    }
+
+    const out = fixed.map((r) => ({
+      IDged: r.IDged,
+      nom: r.nom,
+      commentaire: r.commentaire,
+      IDtype_doc: r.IDtype_doc,
+      type_nom: typeMap.get(r.IDtype_doc) ?? null,
+      linked_lots: lotsByDoc.get(r.IDged) ?? [],
+    }))
+    res.json(out)
+  } catch (err) {
+    console.error('Error listing commande-fil documents:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+commandesFilRouter.get('/:id/documents/:idged/fichier', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    const idged = parseInt(req.params.idged, 10)
+    if (isNaN(id) || isNaN(idged)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    // Scope the blob read by both :id and :idged so one commande cannot fetch
+    // another commande's (or a client commande's) documents by guessing IDged.
+    const rows = await queryRaw(
+      `SELECT fichier FROM ged
+       WHERE IDged = ${idged}
+         AND IDreference = ${id}
+         AND IDcommande_client = 0
+         AND IDcommande_sous_traitant = 0`
+    )
+    if (rows.length === 0) { res.status(404).json({ error: 'Document not found' }); return }
+
+    const fichier = rows[0].fichier
+    if (fichier == null) { res.status(404).json({ error: 'No file attached' }); return }
+
+    let buf: Buffer
+    if (fichier instanceof ArrayBuffer) {
+      buf = Buffer.from(fichier)
+    } else if (Buffer.isBuffer(fichier)) {
+      buf = fichier
+    } else {
+      res.status(404).json({ error: 'No file attached' }); return
+    }
+
+    // HFSQL BinMemo IS NOT NULL is unreliable — empty/null-terminator-only
+    // blobs pass the null check. Return 404 here so the frontend HEAD pre-check
+    // can hide the preview for empty rows.
+    if (buf.length === 0 || (buf.length === 1 && buf[0] === 0)) {
+      res.status(404).json({ error: 'No file attached' }); return
+    }
+
+    // MIME sniff from magic bytes (same taxonomy as fournisseurs certificats).
+    let contentType = 'application/octet-stream'
+    if (buf.length >= 4) {
+      const h = buf.subarray(0, 4)
+      if (h[0] === 0x25 && h[1] === 0x50 && h[2] === 0x44 && h[3] === 0x46) contentType = 'application/pdf'
+      else if (h[0] === 0x89 && h[1] === 0x50 && h[2] === 0x4E && h[3] === 0x47) contentType = 'image/png'
+      else if (h[0] === 0xFF && h[1] === 0xD8) contentType = 'image/jpeg'
+    }
+
+    res.setHeader('Content-Type', contentType)
+    res.setHeader('Content-Disposition', 'inline')
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.end(buf)
+  } catch (err) {
+    console.error('Error serving commande-fil document:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// POST /:id/documents — create a new document attached to this commande_fil.
+// Mirrors the certificat upload flow in fournisseurs.ts: metadata INSERT
+// first, then a hex-literal UPDATE for the blob because HFSQL ODBC doesn't
+// accept parameterized binary values.
+commandesFilRouter.post('/:id/documents', upload.single('fichier'), async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    // Guard: commande must exist (avoid creating orphan ged rows pointing at
+    // a non-existent IDreference).
+    const cf = await query(`SELECT IDcommande_fil FROM commande_fil WHERE IDcommande_fil = ${id}`)
+    if (cf.length === 0) { res.status(404).json({ error: 'Commande not found' }); return }
+
+    const nom = (req.body.nom ?? '').toString()
+    const commentaire = (req.body.commentaire ?? '').toString()
+    const idTypeDoc = parseInt(req.body.IDtype_doc, 10) || 0
+
+    await query(
+      `INSERT INTO ged (nom, commentaire, IDtype_doc, IDreference, IDcommande_client, IDcommande_sous_traitant, IDdossier)
+       VALUES ('${esc(nom)}', '${esc(commentaire)}', ${idTypeDoc}, ${id}, 0, 0, 0)`
+    )
+
+    // HFSQL has no RETURNING, so look up the just-inserted row by the highest
+    // IDged for this commande.
+    const newRows = await query<{ IDged: number }>(
+      `SELECT IDged FROM ged
+       WHERE IDreference = ${id} AND IDcommande_client = 0 AND IDcommande_sous_traitant = 0
+       ORDER BY IDged DESC`
+    )
+    if (newRows.length === 0) { res.status(500).json({ error: 'Insert lookup failed' }); return }
+    const newId = newRows[0].IDged
+
+    if (req.file && req.file.buffer.length > 0) {
+      const hexStr = req.file.buffer.toString('hex')
+      await queryRaw(`UPDATE ged SET fichier = x'${hexStr}' WHERE IDged = ${newId}`)
+    }
+
+    res.status(201).json({ IDged: newId })
+  } catch (err) {
+    console.error('Error creating commande-fil document:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// PUT /:id/documents/:idged — update metadata and optionally replace the
+// file blob. `remove_fichier=1` (without a new file) clears the blob.
+commandesFilRouter.put('/:id/documents/:idged', upload.single('fichier'), async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    const idged = parseInt(req.params.idged, 10)
+    if (isNaN(id) || isNaN(idged)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    // Scope guard: only update ged rows that belong to THIS commande_fil.
+    // Prevents a caller from editing another commande's documents by guessing
+    // IDged.
+    const scope = await query(
+      `SELECT IDged FROM ged
+       WHERE IDged = ${idged}
+         AND IDreference = ${id}
+         AND IDcommande_client = 0
+         AND IDcommande_sous_traitant = 0`
+    )
+    if (scope.length === 0) { res.status(404).json({ error: 'Document not found' }); return }
+
+    const sets: string[] = []
+    if (req.body.nom !== undefined) sets.push(`nom = '${esc(String(req.body.nom))}'`)
+    if (req.body.commentaire !== undefined) sets.push(`commentaire = '${esc(String(req.body.commentaire))}'`)
+    if (req.body.IDtype_doc !== undefined) sets.push(`IDtype_doc = ${parseInt(req.body.IDtype_doc, 10) || 0}`)
+    if (sets.length > 0) {
+      await query(`UPDATE ged SET ${sets.join(', ')} WHERE IDged = ${idged}`)
+    }
+
+    if (req.file && req.file.buffer.length > 0) {
+      const hexStr = req.file.buffer.toString('hex')
+      await queryRaw(`UPDATE ged SET fichier = x'${hexStr}' WHERE IDged = ${idged}`)
+    } else if (req.body.remove_fichier === '1') {
+      await query(`UPDATE ged SET fichier = NULL WHERE IDged = ${idged}`)
+    }
+
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error updating commande-fil document:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// DELETE /:id/documents/:idged — scoped delete, same guard as PUT.
+commandesFilRouter.delete('/:id/documents/:idged', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    const idged = parseInt(req.params.idged, 10)
+    if (isNaN(id) || isNaN(idged)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const scope = await query(
+      `SELECT IDged FROM ged
+       WHERE IDged = ${idged}
+         AND IDreference = ${id}
+         AND IDcommande_client = 0
+         AND IDcommande_sous_traitant = 0`
+    )
+    if (scope.length === 0) { res.status(404).json({ error: 'Document not found' }); return }
+
+    await query(`DELETE FROM ged WHERE IDged = ${idged}`)
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error deleting commande-fil document:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Document ↔ stock_fil lot linkage (per-lot doc scope) ────────
+//
+// stock_fil_ged is the M:N linker. A GOTS certificate (or any other doc)
+// attached to a commande_fil can additionally be scoped to specific lots
+// within that commande. The UI in DocCreateEditDialog shows a checkbox list
+// of all lots reachable via this commande's ref_fil_commande rows; clicking
+// a checkbox PUTs or DELETEs a single stock_fil_ged row and echoes back the
+// refreshed {linked, available} payload so the dialog can hydrate without
+// a follow-up fetch.
+
+/** Throws 404 semantics via return null if the ged row doesn't belong to the
+ *  given commande_fil. Callers check the return and short-circuit. */
+async function verifyDocBelongsToCommande(commandeId: number, idged: number): Promise<boolean> {
+  const rows = await query(
+    `SELECT IDged FROM ged
+     WHERE IDged = ${idged}
+       AND IDreference = ${commandeId}
+       AND IDcommande_client = 0
+       AND IDcommande_sous_traitant = 0`
+  )
+  return rows.length > 0
+}
+
+/** Build the {linked, available} payload for a given ged row + commande.
+ *  `linked` = stock_fil rows currently in stock_fil_ged for this IDged that
+ *  are also reachable via this commande's ref_fil_commande lines.
+ *  `available` = the remaining lots of the commande not yet linked. */
+async function fetchDocLots(commandeId: number, idged: number) {
+  // All lots belonging to this commande, via the order-line linkage.
+  const all = await fetchStockLots(
+    `WHERE sf.IDref_fil_commande IN (
+      SELECT IDref_fil_commande FROM ref_fil_commande WHERE IDcommande_fil = ${commandeId}
+    )`
+  )
+  const linkedRows = await query<{ IDstock_fil: number }>(
+    `SELECT IDstock_fil FROM stock_fil_ged WHERE IDged = ${idged}`
+  )
+  const linkedSet = new Set(linkedRows.map((r) => r.IDstock_fil))
+  const linked = all.filter((r) => linkedSet.has(r.IDstock_fil as number))
+  const available = all.filter((r) => !linkedSet.has(r.IDstock_fil as number))
+  return { linked, available }
+}
+
+commandesFilRouter.get('/:id/documents/:idged/lots', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    const idged = parseInt(req.params.idged, 10)
+    if (isNaN(id) || isNaN(idged)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (!(await verifyDocBelongsToCommande(id, idged))) {
+      res.status(404).json({ error: 'Document not found' }); return
+    }
+    const payload = await fetchDocLots(id, idged)
+    res.json(payload)
+  } catch (err) {
+    console.error('Error listing doc lots:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+commandesFilRouter.put('/:id/documents/:idged/lots/:stockId', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    const idged = parseInt(req.params.idged, 10)
+    const stockId = parseInt(req.params.stockId, 10)
+    if (isNaN(id) || isNaN(idged) || isNaN(stockId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (!(await verifyDocBelongsToCommande(id, idged))) {
+      res.status(404).json({ error: 'Document not found' }); return
+    }
+    // Scope the stock row to this commande too — prevents a caller from
+    // linking an arbitrary stock_fil (from another commande or freestanding)
+    // to a doc that's technically attached to a different commande.
+    const scope = await query<{ IDstock_fil: number }>(
+      `SELECT sf.IDstock_fil FROM stock_fil sf
+       INNER JOIN ref_fil_commande rfc ON sf.IDref_fil_commande = rfc.IDref_fil_commande
+       WHERE sf.IDstock_fil = ${stockId} AND rfc.IDcommande_fil = ${id}`
+    )
+    if (scope.length === 0) {
+      res.status(400).json({ error: 'Lot does not belong to this commande' }); return
+    }
+    // Idempotent insert — skip if the link already exists.
+    const existing = await query<{ IDstock_fil_ged: number }>(
+      `SELECT IDstock_fil_ged FROM stock_fil_ged WHERE IDged = ${idged} AND IDstock_fil = ${stockId}`
+    )
+    if (existing.length === 0) {
+      await query(`INSERT INTO stock_fil_ged (IDged, IDstock_fil) VALUES (${idged}, ${stockId})`)
+    }
+    const payload = await fetchDocLots(id, idged)
+    res.json(payload)
+  } catch (err) {
+    console.error('Error linking doc to lot:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Bulk unlink — clears every stock_fil_ged row for this IDged. Used when
+// the user flips the "Appliquer à tous les lots" toggle back on: zero rows
+// in stock_fil_ged semantically means "no per-lot scoping, applies to the
+// whole commande" (matches legacy behavior).
+commandesFilRouter.delete('/:id/documents/:idged/lots', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    const idged = parseInt(req.params.idged, 10)
+    if (isNaN(id) || isNaN(idged)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (!(await verifyDocBelongsToCommande(id, idged))) {
+      res.status(404).json({ error: 'Document not found' }); return
+    }
+    await query(`DELETE FROM stock_fil_ged WHERE IDged = ${idged}`)
+    const payload = await fetchDocLots(id, idged)
+    res.json(payload)
+  } catch (err) {
+    console.error('Error clearing doc lots:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+commandesFilRouter.delete('/:id/documents/:idged/lots/:stockId', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    const idged = parseInt(req.params.idged, 10)
+    const stockId = parseInt(req.params.stockId, 10)
+    if (isNaN(id) || isNaN(idged) || isNaN(stockId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (!(await verifyDocBelongsToCommande(id, idged))) {
+      res.status(404).json({ error: 'Document not found' }); return
+    }
+    await query(`DELETE FROM stock_fil_ged WHERE IDged = ${idged} AND IDstock_fil = ${stockId}`)
+    const payload = await fetchDocLots(id, idged)
+    res.json(payload)
+  } catch (err) {
+    console.error('Error unlinking doc from lot:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
