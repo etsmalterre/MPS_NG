@@ -59,14 +59,14 @@ MPS_NG/
 │   │       │   ├── user-emails.ts        # JSON-backed per-user emails (TODO: DB)
 │   │       │   ├── gmail.ts              # Gmail API send helper (JWT + DWD)
 │   │       │   └── pdf/                  # theme.ts, MalterreDocument.tsx, CommandeFournisseurPdf.tsx
-│   │       ├── routes/                   # entreprises, fournisseurs, references-fil, stock, commandes-fil, auth, permissions, user-emails
+│   │       ├── routes/                   # entreprises, fournisseurs, references-fil, stock, commandes-fil, etudes-coloris, auth, permissions, user-emails
 │   │       └── index.ts
 │   └── web/           # React frontend
 │       └── src/
 │           ├── components/
 │           │   ├── auth/         # UserPickerGate, UserPicker
 │           │   ├── email/        # SendEmailDialog (shared two-pane send dialog)
-│           │   ├── icons/        # BobineIcon
+│           │   ├── icons/        # BobineIcon, KnitIcon (Tombé Métier), FabricRollIcon (Finis)
 │           │   ├── layout/       # AppShell, Sidebar, Header, MobileNav, MasterDetailLayout
 │           │   └── ui/           # Radix-based (Button has 'gold' variant)
 │           ├── config/navigation.ts      # SubMenuItem.adminOnly flag
@@ -79,7 +79,7 @@ MPS_NG/
 │           │   ├── email.ts      # Types + postEmail helper for SendEmailDialog
 │           │   ├── dates.ts      # HFSQL date helpers
 │           │   └── format.ts     # fmtNum (French formatting)
-│           ├── pages/            # Dashboard, Entreprises, Fournisseurs, FournisseursReferences, FournisseursStock, FournisseursCommandes, SettingsUtilisateurs
+│           ├── pages/            # Dashboard, Entreprises, FilsGestion, FilsReferences, FilsStock, FilsCommandes, EtudesColoris, SettingsUtilisateurs
 │           ├── main.tsx          # QueryClient → UserProvider → PermissionsProvider → UserPickerGate → RouterProvider
 │           └── router.tsx
 ├── claude_doc/                   # Detailed reference docs (load on demand, see below)
@@ -91,16 +91,21 @@ MPS_NG/
 
 ## Navigation Structure
 
+Mirrors the legacy WinDev main menu (top → bottom):
+
 1. **Tableau de bord** (`/`)
-2. **Clients** — Commandes, Devis, Facturation, Gestion
-3. **Fournisseurs** — Références, Stock (table-centric), Commandes, Gestion, Prévisions
+2. **Marketing** — placeholder
+3. **Clients** — Commandes, Devis, Facturation, Gestion
 4. **Sous-traitants** — Commandes, Gestion
-5. **Production** — Tricotage, Teinture, Confection, Contrôle qualité
-6. **Stock** — Matières premières, Produits finis, Mouvements
-7. **Produits** — Références, Coloris
-8. **Transport** — Expéditions, Livraisons
-9. **Réseau** — Entreprises (first data screen)
-10. **Paramètres** — Utilisateurs (**admin-only**: per-user permissions + per-user email for Gmail impersonation)
+5. **Transferts** — placeholder
+6. **Fils** (route `/fils/*`, renamed from `/fournisseurs/*`) — Références, Stock (table-centric), Commandes, Gestion, Prévisions
+7. **Tombé Métier** — placeholder, custom `KnitIcon`
+8. **Finis** — Références, Stock, **Études coloris** (implemented), Tarifs, Coloris Teint, Prévisions — custom `FabricRollIcon`
+9. **Divers** — placeholder
+10. **Qualité** — placeholder
+11. **Rapports** — placeholder
+12. **Réseau** — Entreprises
+13. **Paramètres** — Utilisateurs (**admin-only**: per-user permissions + per-user email for Gmail impersonation)
 
 ## Reference Documentation
 
@@ -146,7 +151,7 @@ Full details in `claude_doc/hfsql_odbc.md`. These are the non-negotiable rules f
 
 **Invoke the skill when**: building a new screen; adding a button/tab/card/dialog to an existing screen; touching anything the user describes in visual terms ("add a print button", "make it red", "slide a drawer in"); deciding a color/icon/size/spacing/shape.
 
-**Before inventing a pattern, grep the gold-standard reference screens**: `Entreprises.tsx`, `Fournisseurs.tsx`, `FournisseursStock.tsx`, `FournisseursCommandes.tsx`. Existing screens almost always have the pattern — use the exact same icon, strings, and dialog structure. See `claude_doc/implemented_screens.md` for what each reference covers.
+**Before inventing a pattern, grep the gold-standard reference screens**: `Entreprises.tsx`, `FilsGestion.tsx`, `FilsStock.tsx`, `FilsCommandes.tsx`, `EtudesColoris.tsx`. Existing screens almost always have the pattern — use the exact same icon, strings, and dialog structure. See `claude_doc/implemented_screens.md` for what each reference covers.
 
 **Core visual language**: Vivid Gold `#F2B80A` (not orange), medium-dark blue `#143D6B` (not navy), premium cards with gold borders, icon boxes with gradient backgrounds. Panel backgrounds: `bg-zinc-100/80` (list/sidebar), `bg-zinc-200/50` (header/footer), `bg-white` (cards). Use `scrollbar-transparent` on scrollable panels. **Never hardcode hex values** — use Tailwind CSS variable classes (`text-accent`, `bg-primary`, `border-gold/30`).
 
@@ -154,7 +159,9 @@ Full details in `claude_doc/hfsql_odbc.md`. These are the non-negotiable rules f
 
 **Edit mode pattern** (follow `Entreprises.tsx`): `isEditing` toggle, gold "Mode edition" badge, `border-l-4 border-l-accent/70 bg-accent/[0.03]` on editable cards, hover-reveal actions (`opacity-0 group-hover:opacity-100`), `LabeledInput` + `InlineForm` components.
 
-**Layout**: 3-panel `MasterDetailLayout` for master-detail screens (left `w-72`, right `w-96`, responsive full/compact/stacked). Table-centric screens do NOT use `MasterDetailLayout` — see `FournisseursStock.tsx`.
+**Layout**: 3-panel `MasterDetailLayout` for master-detail screens (left `w-72`, right `w-96`, responsive full/compact/stacked). Table-centric screens do NOT use `MasterDetailLayout` — see `FilsStock.tsx`.
+
+**Status management**: user-controlled primary state goes to the **sidebar footer pill** (not a header badge), regardless of how many values it can take. Binary → split toggle button (`FilsCommandes`); 3+ values → menu button + popover (`EtudesColoris`). See `mps_designer §29`.
 
 **Sidebar logo**: `public/logo-full.png` (expanded, `h-10 mx-auto`) / `public/logo-small.png` (collapsed, `h-8 mx-auto`).
 

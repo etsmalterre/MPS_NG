@@ -212,7 +212,7 @@ function etatColors(etat: number | null) {
 
 // ── Main Page ──────────────────────────────────────────
 
-export function FournisseursCommandes() {
+export function FilsCommandes() {
   const queryClient = useQueryClient()
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')

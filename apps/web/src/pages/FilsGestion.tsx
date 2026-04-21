@@ -155,7 +155,7 @@ const editSectionClass = 'border-l-4 border-l-accent/70 bg-accent/[0.03]'
 
 // ── Main Page ──────────────────────────────────────────
 
-export function Fournisseurs() {
+export function FilsGestion() {
   const queryClient = useQueryClient()
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')

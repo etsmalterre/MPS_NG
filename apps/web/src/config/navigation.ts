@@ -1,16 +1,21 @@
+import type { ComponentType, SVGProps } from 'react'
 import {
   LayoutDashboard,
   Users,
-  Package,
   Building2,
   Truck,
-  Tag,
-  Factory,
-  Boxes,
+  Megaphone,
+  Box,
+  ShieldCheck,
+  FileBarChart,
   Globe,
   Settings,
-  type LucideIcon,
 } from 'lucide-react'
+import { BobineIcon } from '@/components/icons/BobineIcon'
+import { KnitIcon } from '@/components/icons/KnitIcon'
+import { FabricRollIcon } from '@/components/icons/FabricRollIcon'
+
+export type NavIcon = ComponentType<SVGProps<SVGSVGElement> & { className?: string }>
 
 export interface SubMenuItem {
   title: string
@@ -24,7 +29,7 @@ export interface SubMenuItem {
 export interface MainMenuItem {
   id: string
   title: string
-  icon: LucideIcon
+  icon: NavIcon
   href: string
   submenus: SubMenuItem[]
 }
@@ -49,8 +54,18 @@ export const settingsItem: MainMenuItem = {
   ],
 }
 
-// Main navigation items (between dashboard and settings)
+// Main navigation items (between dashboard and settings).
+// Order mirrors the legacy WinDev MPS main menu: Marketing, Clients,
+// Sous-traitants, Transferts, Fils, Tombé Métier, Finis, Divers, Qualité,
+// Rapports, Réseau.
 export const mainNavigation: MainMenuItem[] = [
+  {
+    id: 'marketing',
+    title: 'Marketing',
+    icon: Megaphone,
+    href: '/marketing',
+    submenus: [],
+  },
   {
     id: 'clients',
     title: 'Clients',
@@ -64,19 +79,6 @@ export const mainNavigation: MainMenuItem[] = [
     ],
   },
   {
-    id: 'fournisseurs',
-    title: 'Fournisseurs',
-    icon: Package,
-    href: '/fournisseurs',
-    submenus: [
-      { title: 'Références', href: '/fournisseurs/references' },
-      { title: 'Stock', href: '/fournisseurs/stock' },
-      { title: 'Commandes', href: '/fournisseurs/commandes' },
-      { title: 'Gestion', href: '/fournisseurs/gestion' },
-      { title: 'Prévisions', href: '/fournisseurs/previsions' },
-    ],
-  },
-  {
     id: 'sous-traitants',
     title: 'Sous-traitants',
     icon: Building2,
@@ -87,47 +89,66 @@ export const mainNavigation: MainMenuItem[] = [
     ],
   },
   {
-    id: 'production',
-    title: 'Production',
-    icon: Factory,
-    href: '/production',
-    submenus: [
-      { title: 'Tricotage', href: '/production/tricotage' },
-      { title: 'Teinture', href: '/production/teinture' },
-      { title: 'Confection', href: '/production/confection' },
-      { title: 'Contrôle qualité', href: '/production/controle-qualite' },
-    ],
-  },
-  {
-    id: 'stock',
-    title: 'Stock',
-    icon: Boxes,
-    href: '/stock',
-    submenus: [
-      { title: 'Matières premières', href: '/stock/matieres' },
-      { title: 'Produits finis', href: '/stock/produits' },
-      { title: 'Mouvements', href: '/stock/mouvements' },
-    ],
-  },
-  {
-    id: 'produits',
-    title: 'Produits',
-    icon: Tag,
-    href: '/produits',
-    submenus: [
-      { title: 'Références', href: '/produits/references' },
-      { title: 'Coloris', href: '/produits/coloris' },
-    ],
-  },
-  {
-    id: 'transport',
-    title: 'Transport',
+    id: 'transferts',
+    title: 'Transferts',
     icon: Truck,
-    href: '/transport',
+    href: '/transferts',
+    submenus: [],
+  },
+  {
+    id: 'fils',
+    title: 'Fils',
+    icon: BobineIcon,
+    href: '/fils',
     submenus: [
-      { title: 'Expéditions', href: '/transport/expeditions' },
-      { title: 'Livraisons', href: '/transport/livraisons' },
+      { title: 'Références', href: '/fils/references' },
+      { title: 'Stock', href: '/fils/stock' },
+      { title: 'Commandes', href: '/fils/commandes' },
+      { title: 'Gestion', href: '/fils/gestion' },
+      { title: 'Prévisions', href: '/fils/previsions' },
     ],
+  },
+  {
+    id: 'tombe-metier',
+    title: 'Tombé Métier',
+    icon: KnitIcon,
+    href: '/tombe-metier',
+    submenus: [],
+  },
+  {
+    id: 'finis',
+    title: 'Finis',
+    icon: FabricRollIcon,
+    href: '/finis',
+    submenus: [
+      { title: 'Références', href: '/finis/references' },
+      { title: 'Stock', href: '/finis/stock' },
+      { title: 'Études coloris', href: '/finis/etudes-coloris' },
+      { title: 'Tarifs', href: '/finis/tarifs' },
+      { title: 'Coloris Teint', href: '/finis/coloris-teint' },
+      { title: 'Prévisions', href: '/finis/previsions' },
+    ],
+  },
+  {
+    id: 'divers',
+    title: 'Divers',
+    icon: Box,
+    href: '/divers',
+    submenus: [],
+  },
+  {
+    id: 'qualite',
+    title: 'Qualité',
+    icon: ShieldCheck,
+    href: '/qualite',
+    submenus: [],
+  },
+  {
+    id: 'rapports',
+    title: 'Rapports',
+    icon: FileBarChart,
+    href: '/rapports',
+    submenus: [],
   },
   {
     id: 'reseau',
@@ -159,42 +180,43 @@ export function getActiveMenu(pathname: string): MainMenuItem | undefined {
 // Route titles for breadcrumbs
 export const routeTitles: Record<string, string> = {
   '/': 'Accueil',
+  // Marketing
+  '/marketing': 'Marketing',
   // Clients
   '/clients': 'Clients',
   '/clients/commandes': 'Commandes',
   '/clients/devis': 'Devis',
   '/clients/facturation': 'Facturation',
   '/clients/gestion': 'Gestion',
-  // Fournisseurs
-  '/fournisseurs': 'Fournisseurs',
-  '/fournisseurs/references': 'Références',
-  '/fournisseurs/stock': 'Stock',
-  '/fournisseurs/commandes': 'Commandes',
-  '/fournisseurs/gestion': 'Gestion',
-  '/fournisseurs/previsions': 'Prévisions',
   // Sous-traitants
   '/sous-traitants': 'Sous-traitants',
   '/sous-traitants/commandes': 'Commandes',
   '/sous-traitants/gestion': 'Gestion',
-  // Production
-  '/production': 'Production',
-  '/production/tricotage': 'Tricotage',
-  '/production/teinture': 'Teinture',
-  '/production/confection': 'Confection',
-  '/production/controle-qualite': 'Contrôle qualité',
-  // Stock
-  '/stock': 'Stock',
-  '/stock/matieres': 'Matières premières',
-  '/stock/produits': 'Produits finis',
-  '/stock/mouvements': 'Mouvements',
-  // Produits
-  '/produits': 'Produits',
-  '/produits/references': 'Références',
-  '/produits/coloris': 'Coloris',
-  // Transport
-  '/transport': 'Transport',
-  '/transport/expeditions': 'Expéditions',
-  '/transport/livraisons': 'Livraisons',
+  // Transferts
+  '/transferts': 'Transferts',
+  // Fils
+  '/fils': 'Fils',
+  '/fils/references': 'Références',
+  '/fils/stock': 'Stock',
+  '/fils/commandes': 'Commandes',
+  '/fils/gestion': 'Gestion',
+  '/fils/previsions': 'Prévisions',
+  // Tombé Métier
+  '/tombe-metier': 'Tombé Métier',
+  // Finis
+  '/finis': 'Finis',
+  '/finis/references': 'Références',
+  '/finis/stock': 'Stock',
+  '/finis/etudes-coloris': 'Études coloris',
+  '/finis/tarifs': 'Tarifs',
+  '/finis/coloris-teint': 'Coloris Teint',
+  '/finis/previsions': 'Prévisions',
+  // Divers
+  '/divers': 'Divers',
+  // Qualité
+  '/qualite': 'Qualité',
+  // Rapports
+  '/rapports': 'Rapports',
   // Réseau
   '/reseau': 'Réseau',
   '/reseau/entreprises': 'Entreprises',

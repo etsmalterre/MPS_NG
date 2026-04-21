@@ -2059,11 +2059,19 @@ Manual test that must pass on every edit-mode screen:
 
 ---
 
-## 29. Sidebar Status Bar (binary state + toggle action, detached pill)
+## 29. Sidebar Status Footer (user-controlled state, detached pill)
 
-Reference: **`apps/web/src/pages/FournisseursCommandes.tsx`** → `StatusFooter`.
+References:
+- **Binary**: `apps/web/src/pages/FilsCommandes.tsx` → `StatusFooter` (two-state toggle — en cours / terminée)
+- **Multi-state**: `apps/web/src/pages/EtudesColoris.tsx` → `EtudeStatutFooter` (four-state menu — attente labo / soumis / accepté / annulé)
 
-For entities with a **binary primary state** that the user toggles (open/closed, en cours/terminée, active/archivé…), render the current state as a **solid-colored pill placed as a standalone sibling below the sidebar tabs panel** — not as a small badge in the header, and not as an inset cap on the bottom of the panel. The pill is both the status display and the toggle control, combined into a single visual unit, and it is structurally separated from the tabs panel by a 12px gap.
+For entities with a **user-controlled primary state**, render the current state as a **solid-colored pill placed as a standalone sibling below the sidebar tabs panel** — not as a small badge in the header, and not as an inset cap on the bottom of the panel. The pill is both the status display and the state-change control, combined into a single visual unit, and it is structurally separated from the tabs panel by a 12px gap.
+
+This pattern applies regardless of how many values the state can take:
+- **2 values (binary)** → pill + split toggle button (§29.3)
+- **3+ values (multi-state)** → pill + menu button that opens a transition popover (§29.4)
+
+Both variants share the same outer shape, colors, and placement. Do NOT put state management in the detail header (no status Badge next to the title). Multi-state entities were an exception in earlier drafts of this skill — they are not an exception anymore.
 
 ### 29.1 Why a detached pill, not an inset footer
 
@@ -2104,7 +2112,9 @@ Critical classes on the root:
 - **`flex flex-col gap-3 min-h-0`** — the `min-h-0` is mandatory: without it the `flex-1` child can't shrink below its content's natural height and the status pill gets pushed off-screen.
 - **`gap-3`** — 12px separation between the tabs panel and the status pill. Smaller gaps look accidental.
 
-### 29.3 StatusFooter — the pill itself
+### 29.3 Binary variant — pill + split toggle button
+
+Two states, one click flips from one to the other. The right-side action button's label describes the *target* state, not the current one ("Clôturer" on an en-cours order, "Rouvrir" on a closed one).
 
 ```tsx
 function StatusFooter({
@@ -2149,7 +2159,103 @@ function StatusFooter({
 }
 ```
 
-### 29.4 Conventions
+### 29.4 Multi-state variant — pill + menu button
+
+Three or more discrete states (pending / sent / accepted / refused, draft / submitted / paid / overdue / cancelled, …). Same outer shape as the binary variant, but the right-side button opens a small popover with one row per possible state. Clicking a row fires the state-change mutation immediately and closes the menu.
+
+```tsx
+const STATUT_META: Record<Statut, {
+  label: string               // e.g. "Soumis au client"
+  icon: LucideIcon            // e.g. Send
+  solidBg: string             // Tailwind bg class, e.g. 'bg-blue-500 border-blue-500'
+}> = { /* …one entry per state… */ }
+
+function StatutFooter({
+  current, onChange, isChanging, disabled,
+}: {
+  current: Statut
+  onChange: (next: Statut) => void
+  isChanging: boolean
+  disabled: boolean
+}) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const meta = STATUT_META[current]
+  const Icon = meta.icon
+
+  // Click outside to close the menu.
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [menuOpen])
+
+  return (
+    <div ref={rootRef} className="flex-shrink-0 relative">
+      <div className={cn(
+        'rounded-xl border shadow-sm overflow-hidden flex items-stretch h-11',
+        meta.solidBg,
+      )}>
+        <div className="flex items-center gap-2 px-3 flex-1 text-white min-w-0">
+          <Icon className="h-4 w-4 flex-shrink-0" />
+          <span className="text-sm font-bold uppercase tracking-wide truncate">
+            {meta.label}
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={() => setMenuOpen((v) => !v)}
+          disabled={disabled || isChanging}
+          title="Changer le statut"
+          className="px-3.5 bg-white/15 hover:bg-white/25 active:bg-white/30 disabled:bg-white/5 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-semibold border-l border-white/25 flex items-center gap-1.5 transition-colors"
+        >
+          {isChanging
+            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            : <ChevronUp className={cn('h-3.5 w-3.5 transition-transform', menuOpen && 'rotate-180')} />}
+          Changer
+        </button>
+      </div>
+      {menuOpen && (
+        <div className="absolute bottom-full right-0 mb-1 w-full min-w-[220px] rounded-lg border bg-white shadow-lg overflow-hidden z-50">
+          {STATUT_ORDER.map((s) => {
+            const m = STATUT_META[s]
+            const active = current === s
+            const SIcon = m.icon
+            return (
+              <button
+                key={s}
+                type="button"
+                onClick={() => { if (!active) onChange(s); setMenuOpen(false) }}
+                className={cn(
+                  'w-full flex items-center gap-2 px-3 py-2 text-sm text-left transition-colors',
+                  active ? 'bg-accent/10 text-accent cursor-default' : 'hover:bg-zinc-100',
+                )}
+              >
+                <SIcon className="h-4 w-4" />
+                {m.label}
+                {active && <CheckCircle2 className="h-4 w-4 ml-auto text-accent" />}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+```
+
+Conventions specific to the multi-state variant:
+- **Menu button label is always `"Changer"`** (not the target state — there are too many possible targets to name one). The icon is a `ChevronUp` that rotates 180° when open so it reads as "expand upward."
+- **Popover anchors to `bottom-full`** (opens upward from the pill) so it doesn't get clipped at the bottom of the viewport.
+- **Active row is non-interactive** (`cursor-default`, no hover state, check icon on the right) — clicking it does nothing. The other rows fire `onChange` immediately.
+- **`onChange` triggers a mutation that persists the change directly** — there is no "Enregistrer" step. Status changes are not part of the record's edit form. During edit mode, the button is `disabled` so the user can't race their own unsaved edit against a status change.
+- **Loader replaces the chevron** while `isChanging` is true. The button stays disabled through the round-trip.
+- **State list comes from a `STATUT_META` record** indexed by the state type. This is the same structure used by the left-list card (strip color), detail-header badge, and any other status-displaying surface — one definition, one visual language.
+
+### 29.5 Conventions
 
 - **Colors**: `bg-primary` (MPS deep blue) for the "in progress / active" state, `bg-success` for the "done / validated" state. The border matches the bg color (`border-primary` / `border-success`) so the pill reads as a single solid shape, not a ringed button. Do NOT use `bg-amber`/`bg-yellow` for active — amber is reserved for warnings/alerts. Do NOT use pastel transparent colors (`bg-primary/10`) — the pill must be solid and bold to match the left-list badge aesthetic.
 - **Shape**: `rounded-xl` all four corners (NOT `rounded-b-xl`) — it's a standalone pill now, not a bottom cap.
@@ -2160,17 +2266,19 @@ function StatusFooter({
 - **Disabled during edit mode**: pass `disabled={isEditing}` so users cannot toggle the state while a header edit is mid-flight. Also disable while the mutation is in-flight (`isTogglingEtat`).
 - **No "Statut" label above the pill**: the bold colored pill speaks for itself. Adding a label above makes it feel like a form field and eats vertical space.
 
-### 29.4 When to use this pattern vs a badge in the header
+### 29.6 When to use the footer vs a badge in the header
 
 | Situation | Pattern |
 |---|---|
-| Binary primary state (open/closed, active/done) that the user explicitly toggles | **StatusFooter** at the bottom of the sidebar |
-| Computed / derived state shown for reference only (e.g. "en retard" from due date) | Badge in the detail header |
-| Multi-valued state (draft / sent / paid / overdue / cancelled) | Header badge, potentially with a state-transition menu instead of a single toggle |
+| **User-controlled** primary state — 2 values → §29.3 / 3+ values → §29.4 | **Footer pill** at the bottom of the sidebar |
+| **Computed / derived** state shown for reference only (e.g. "en retard" from due date, "surstockée" from a threshold) | Badge in the detail header |
+| Several independent flags displayed together (e.g. Bio + Recyclé + GOTS on a yarn reference) | Row of badges in the detail header or near the title |
 
-The StatusFooter is the right tool **only** for binary, user-toggled states. For multi-step workflows use a header badge + menu.
+Decision rule: *"Can the user change this from a dropdown or toggle?"* If yes, it goes to the footer, regardless of how many values exist. If it's purely derived from other fields (dates, thresholds, calculations), it stays in the header where it reads as "informational."
 
-### 29.5 Gotcha: `<Badge variant='default'>` is primary blue, not grey
+**Do not** place user-controlled status management in the detail header — even for multi-valued states. Earlier drafts of this skill allowed a header badge + menu as an alternative for 3+-state screens; that guidance has been superseded. Every status surface now uses the footer.
+
+### 29.7 Gotcha: `<Badge variant='default'>` is primary blue, not grey
 
 When building related status indicators elsewhere, note that the shadcn `<Badge>` component in this project defaults to `variant='default'` which is `bg-primary text-primary-foreground` — **solid deep blue**, not a neutral grey. If you append a `badge-warning` / `badge-success` utility via `className`, the variant's `bg-primary` will usually win because both classes sit in the same CSS layer. Always pass an explicit `variant` (`variant='default'`, `variant='success'`, `variant='warning'`, `variant='secondary'`) when building status badges. This is how `CommandeEtatBadge` in `FournisseursCommandes.tsx` is written: `<Badge variant="success">Terminée</Badge>` / `<Badge variant="default">En cours</Badge>`.
 

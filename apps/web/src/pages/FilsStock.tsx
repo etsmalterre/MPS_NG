@@ -167,7 +167,7 @@ function compareRows(a: StockRow, b: StockRow, key: SortKey): number {
 
 // ── Main Page ──────────────────────────────────────────
 
-export function FournisseursStock() {
+export function FilsStock() {
   const queryClient = useQueryClient()
   const [searchQuery, setSearchQuery] = useState('')
   const [hideFinished, setHideFinished] = useState(true)

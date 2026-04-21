@@ -7,22 +7,27 @@ import {
   ShoppingCart,
   FileText,
   Receipt,
-  Package,
   Building2,
+  Megaphone,
   Truck,
-  Send,
-  Globe,
-  Tag,
-  Palette,
-  Factory,
-  Scissors,
-  FlaskConical,
-  ClipboardCheck,
-  Boxes,
   Box,
-  ArrowRightLeft,
+  ShieldCheck,
+  FileBarChart,
+  Tag,
+  Boxes,
+  Palette,
+  Euro,
+  Droplet,
+  TrendingUp,
   type LucideIcon,
 } from 'lucide-react'
+import { KnitIcon } from '@/components/icons/KnitIcon'
+import { FabricRollIcon } from '@/components/icons/FabricRollIcon'
+
+// PagePlaceholder takes a LucideIcon — widen it locally so our custom
+// SVG components (KnitIcon, FabricRollIcon) are accepted too. They share
+// the same React props shape.
+const PlaceholderIcon = (c: unknown) => c as LucideIcon
 
 // Placeholder component factory
 function createPlaceholder(title: string, description: string, Icon: LucideIcon) {
@@ -37,37 +42,35 @@ const ClientsDevisPage = createPlaceholder('Devis', 'Créez et gérez les devis 
 const ClientsFacturationPage = createPlaceholder('Facturation', 'Gérez la facturation clients', Receipt)
 const ClientsGestionPage = createPlaceholder('Gestion Clients', 'Gérez votre portefeuille clients', Users)
 
-// Fournisseurs pages
-const FournisseursPrevisionsPage = createPlaceholder('Prévisions Fournisseurs', 'Prévisions d\'approvisionnement fournisseurs', FileText)
+// Fils placeholder (prévisions only — other Fils sub-screens are real)
+const FilsPrevisionsPage = createPlaceholder('Prévisions Fournisseurs', 'Prévisions d\'approvisionnement fournisseurs', FileText)
 
 // Sous-traitants pages
 const SousTraitantsCommandesPage = createPlaceholder('Commandes Sous-traitants', 'Gérez les commandes sous-traitants', ShoppingCart)
 const SousTraitantsGestionPage = createPlaceholder('Gestion Sous-traitants', 'Gérez vos sous-traitants', Building2)
 
-// Production pages
-const ProductionTricotage = createPlaceholder('Tricotage', 'Suivi de la production tricotage', Factory)
-const ProductionTeinture = createPlaceholder('Teinture', 'Suivi des opérations de teinture', FlaskConical)
-const ProductionConfection = createPlaceholder('Confection', 'Suivi de la confection', Scissors)
-const ProductionControleQualite = createPlaceholder('Contrôle Qualité', 'Gestion du contrôle qualité', ClipboardCheck)
+// Legacy-menu top-level placeholders
+const MarketingPage = createPlaceholder('Marketing', 'Outils et suivi marketing', Megaphone)
+const TransfertsPage = createPlaceholder('Transferts', 'Transferts de stock entre sites et sous-traitants', Truck)
+const TombeMetierPage = createPlaceholder('Tombé Métier', 'Suivi du tombé métier', PlaceholderIcon(KnitIcon))
+const FinisReferencesPage = createPlaceholder('Références Finis', 'Catalogue des références de produits finis', Tag)
+const FinisStockPage = createPlaceholder('Stock Finis', 'Stock des produits finis', Boxes)
+// Études coloris — real screen (not a placeholder anymore)
+const FinisTarifsPage = createPlaceholder('Tarifs Finis', 'Tarifs des produits finis', Euro)
+const FinisColorisTeintPage = createPlaceholder('Coloris Teint', 'Coloris teints et ennoblissement', Droplet)
+const FinisPrevisionsPage = createPlaceholder('Prévisions Finis', 'Prévisions des produits finis', TrendingUp)
+const DiversPage = createPlaceholder('Divers', 'Outils divers', Box)
+const QualitePage = createPlaceholder('Qualité', 'Contrôle qualité', ShieldCheck)
+const RapportsPage = createPlaceholder('Rapports', 'Rapports et exports', FileBarChart)
 
-// Stock pages
-const StockMatieres = createPlaceholder('Matières Premières', 'Gestion du stock de matières premières', Box)
-const StockProduits = createPlaceholder('Produits Finis', 'Gestion du stock de produits finis', Boxes)
-const StockMouvements = createPlaceholder('Mouvements', 'Historique des mouvements de stock', ArrowRightLeft)
+// Fils pages (real)
+import { FilsGestion } from '@/pages/FilsGestion'
+import { FilsReferences } from '@/pages/FilsReferences'
+import { FilsStock } from '@/pages/FilsStock'
+import { FilsCommandes } from '@/pages/FilsCommandes'
 
-// Produits pages
-const ProduitsReferences = createPlaceholder('Références Produits', 'Gestion des références produits', Tag)
-const ProduitsColoris = createPlaceholder('Coloris', 'Gestion des coloris disponibles', Palette)
-
-// Transport pages
-const TransportExpeditions = createPlaceholder('Expéditions', 'Gestion des expéditions', Send)
-const TransportLivraisons = createPlaceholder('Livraisons', 'Suivi des livraisons', Truck)
-
-// Fournisseurs pages (real)
-import { Fournisseurs } from '@/pages/Fournisseurs'
-import { FournisseursReferences } from '@/pages/FournisseursReferences'
-import { FournisseursStock } from '@/pages/FournisseursStock'
-import { FournisseursCommandes } from '@/pages/FournisseursCommandes'
+// Finis pages (real)
+import { EtudesColoris } from '@/pages/EtudesColoris'
 
 // Réseau pages
 import { Entreprises } from '@/pages/Entreprises'
@@ -83,6 +86,9 @@ export const router = createBrowserRouter([
       // Dashboard
       { index: true, element: <Dashboard /> },
 
+      // Marketing
+      { path: 'marketing', element: <MarketingPage /> },
+
       // Clients
       { path: 'clients', element: <Navigate to="/clients/commandes" replace /> },
       { path: 'clients/commandes', element: <ClientsCommandesPage /> },
@@ -90,41 +96,42 @@ export const router = createBrowserRouter([
       { path: 'clients/facturation', element: <ClientsFacturationPage /> },
       { path: 'clients/gestion', element: <ClientsGestionPage /> },
 
-      // Fournisseurs
-      { path: 'fournisseurs', element: <Navigate to="/fournisseurs/references" replace /> },
-      { path: 'fournisseurs/references', element: <FournisseursReferences /> },
-      { path: 'fournisseurs/stock', element: <FournisseursStock /> },
-      { path: 'fournisseurs/commandes', element: <FournisseursCommandes /> },
-      { path: 'fournisseurs/gestion', element: <Fournisseurs /> },
-      { path: 'fournisseurs/previsions', element: <FournisseursPrevisionsPage /> },
-
       // Sous-traitants
       { path: 'sous-traitants', element: <Navigate to="/sous-traitants/commandes" replace /> },
       { path: 'sous-traitants/commandes', element: <SousTraitantsCommandesPage /> },
       { path: 'sous-traitants/gestion', element: <SousTraitantsGestionPage /> },
 
-      // Production
-      { path: 'production', element: <Navigate to="/production/tricotage" replace /> },
-      { path: 'production/tricotage', element: <ProductionTricotage /> },
-      { path: 'production/teinture', element: <ProductionTeinture /> },
-      { path: 'production/confection', element: <ProductionConfection /> },
-      { path: 'production/controle-qualite', element: <ProductionControleQualite /> },
+      // Transferts
+      { path: 'transferts', element: <TransfertsPage /> },
 
-      // Stock
-      { path: 'stock', element: <Navigate to="/stock/matieres" replace /> },
-      { path: 'stock/matieres', element: <StockMatieres /> },
-      { path: 'stock/produits', element: <StockProduits /> },
-      { path: 'stock/mouvements', element: <StockMouvements /> },
+      // Fils
+      { path: 'fils', element: <Navigate to="/fils/references" replace /> },
+      { path: 'fils/references', element: <FilsReferences /> },
+      { path: 'fils/stock', element: <FilsStock /> },
+      { path: 'fils/commandes', element: <FilsCommandes /> },
+      { path: 'fils/gestion', element: <FilsGestion /> },
+      { path: 'fils/previsions', element: <FilsPrevisionsPage /> },
 
-      // Produits
-      { path: 'produits', element: <Navigate to="/produits/references" replace /> },
-      { path: 'produits/references', element: <ProduitsReferences /> },
-      { path: 'produits/coloris', element: <ProduitsColoris /> },
+      // Tombé Métier
+      { path: 'tombe-metier', element: <TombeMetierPage /> },
 
-      // Transport
-      { path: 'transport', element: <Navigate to="/transport/expeditions" replace /> },
-      { path: 'transport/expeditions', element: <TransportExpeditions /> },
-      { path: 'transport/livraisons', element: <TransportLivraisons /> },
+      // Finis
+      { path: 'finis', element: <Navigate to="/finis/references" replace /> },
+      { path: 'finis/references', element: <FinisReferencesPage /> },
+      { path: 'finis/stock', element: <FinisStockPage /> },
+      { path: 'finis/etudes-coloris', element: <EtudesColoris /> },
+      { path: 'finis/tarifs', element: <FinisTarifsPage /> },
+      { path: 'finis/coloris-teint', element: <FinisColorisTeintPage /> },
+      { path: 'finis/previsions', element: <FinisPrevisionsPage /> },
+
+      // Divers
+      { path: 'divers', element: <DiversPage /> },
+
+      // Qualité
+      { path: 'qualite', element: <QualitePage /> },
+
+      // Rapports
+      { path: 'rapports', element: <RapportsPage /> },
 
       // Réseau
       { path: 'reseau', element: <Navigate to="/reseau/entreprises" replace /> },

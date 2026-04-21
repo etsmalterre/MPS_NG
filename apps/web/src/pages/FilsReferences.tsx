@@ -290,7 +290,7 @@ function draftToBody(d: HeaderDraft) {
   }
 }
 
-export function FournisseursReferences() {
+export function FilsReferences() {
   const queryClient = useQueryClient()
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
@@ -1769,7 +1769,7 @@ function StockAggregateCard({
                   return (
                     <a
                       key={v.IDcolori_fil}
-                      href={`/fournisseurs/stock?q=${encodeURIComponent(
+                      href={`/fils/stock?q=${encodeURIComponent(
                         `${detail.reference} ${v.reference ?? ''}`,
                       )}`}
                       className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-md hover:bg-accent/5 transition-colors text-sm"
@@ -1814,7 +1814,7 @@ function CommandesAggregateCard({
           <div className="flex items-baseline justify-between">
             <span className="text-xs text-muted-foreground">Total commandé</span>
             <a
-              href="/fournisseurs/commandes"
+              href="/fils/commandes"
               className="text-lg font-semibold tabular-nums hover:text-accent transition-colors"
             >
               {fmtNum(detail.commande_total_kg, 1)} kg
@@ -1918,7 +1918,7 @@ function DetailSidebar({ detail, isEditing }: { detail: RefFilDetail | null; isE
               {detail.fournisseurs.map((f) => (
                 <a
                   key={f.IDfournisseur}
-                  href="/fournisseurs/gestion"
+                  href="/fils/gestion"
                   className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-accent/5 transition-colors text-sm"
                 >
                   <Factory className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
