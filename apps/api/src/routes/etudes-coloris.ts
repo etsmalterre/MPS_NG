@@ -1,6 +1,23 @@
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
 import { z } from 'zod'
+import { renderToBuffer } from '@react-pdf/renderer'
+import React from 'react'
 import { query, queryRaw, fixEncoding } from '../lib/hfsql-auto.js'
+import {
+  DemandeEtudeColorisPdf,
+  type DemandeEtudeColorisPdfData,
+} from '../lib/pdf/DemandeEtudeColorisPdf.js'
+import {
+  SoumissionPdf,
+  parseSampleNumbers,
+  type SoumissionPdfData,
+} from '../lib/pdf/SoumissionPdf.js'
+import {
+  FeuilleColorisPdf,
+  type FeuilleColorisPdfData,
+} from '../lib/pdf/FeuilleColorisPdf.js'
+import { sendMail } from '../lib/gmail.js'
+import { getUserEmail } from '../lib/user-emails.js'
 
 export const etudesColorisRouter: RouterType = Router()
 
@@ -113,15 +130,18 @@ function nextTypeSoum(existing: SoumissionRow[]): string {
   return `v${max + 1}`
 }
 
-/** Load soumissions for an étude, ordered newest-first. */
-async function loadSoumissions(etudeId: number): Promise<SoumissionRow[]> {
+/** Load soumissions for an étude, ordered newest-first. Includes a
+ *  precomputed envoi_count so the UI can badge rows that have been sent. */
+async function loadSoumissions(
+  etudeId: number,
+): Promise<(SoumissionRow & { envoi_count: number; last_envoi_date: string | null })[]> {
   const rows = await query<any>(
     `SELECT IDsoum_col, IDetude_col, date_soum, type_soum, observation, date_reponse, accepte
      FROM soum_col WHERE IDetude_col = ${etudeId}
-     ORDER BY date_soum DESC, IDsoum_col DESC`,
+     ORDER BY date_soum ASC, IDsoum_col ASC`,
   )
   const fixed = await fixEncoding(rows, 'soum_col', 'IDsoum_col', ['type_soum', 'observation'])
-  return (fixed as any[]).map((r) => ({
+  const base = (fixed as any[]).map((r) => ({
     IDsoum_col: Number(r.IDsoum_col),
     IDetude_col: Number(r.IDetude_col),
     date_soum: r.date_soum ?? null,
@@ -130,6 +150,39 @@ async function loadSoumissions(etudeId: number): Promise<SoumissionRow[]> {
     date_reponse: r.date_reponse ?? null,
     accepte: coerceAccepte(r.accepte),
   }))
+  if (base.length === 0) return []
+
+  // Bulk-fetch envoi aggregates in one query; avoids N extra SELECTs.
+  const soumIds = base.map((s) => s.IDsoum_col)
+  const envoiAgg = new Map<number, { count: number; last: string | null }>()
+  try {
+    const aggRows = await query<{ IDreference: number; DATE: string | null }>(
+      `SELECT IDreference, DATE FROM envoi_email
+       WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION}
+         AND IDreference IN (${soumIds.join(',')})
+         AND invalidé = 0`,
+    )
+    for (const r of aggRows) {
+      const id = Number(r.IDreference)
+      const acc = envoiAgg.get(id) ?? { count: 0, last: null as string | null }
+      acc.count += 1
+      const d = typeof r.DATE === 'string' ? r.DATE : ''
+      if (d && (acc.last === null || d > acc.last)) acc.last = d
+      envoiAgg.set(id, acc)
+    }
+  } catch (e) {
+    // Legacy envoi_email absent or unreadable — degrade to zero counts.
+    console.error('envoi_email aggregate failed:', (e as Error).message)
+  }
+
+  return base.map((s) => {
+    const agg = envoiAgg.get(s.IDsoum_col)
+    return {
+      ...s,
+      envoi_count: agg?.count ?? 0,
+      last_envoi_date: agg?.last ?? null,
+    }
+  })
 }
 
 /** Load a single étude with all its soumissions + join-enriched display names.
@@ -218,6 +271,11 @@ const soumissionBody = z.object({
 const respondBody = z.object({
   accepte: z.union([z.literal(0), z.literal(1), z.literal(2)]),
   date_reponse: z.string().optional(), // defaults to today
+  // Only meaningful when accepte=1. When provided, a new ref_fini_colori
+  // row is created named "<étude.libelle>/<sampleNumber>" and the étude's
+  // libelle + IDref_fini_colori are updated to point at it; statut_col is
+  // auto-advanced to 3 (accepté).
+  sampleNumber: z.string().trim().min(1).max(20).optional(),
 })
 
 // ── List endpoint ────────────────────────────────────────
@@ -362,6 +420,604 @@ etudesColorisRouter.get('/:id', async (req: Request, res: Response) => {
     res.json(detail)
   } catch (err) {
     console.error('Error fetching etude-coloris detail:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── PDF export (Demande d'étude coloris) ─────────────────
+
+const FRENCH_MONTHS = [
+  'janvier', 'février', 'mars', 'avril', 'mai', 'juin',
+  'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre',
+] as const
+
+/** Format a HFSQL YYYYMMDD string as long-form French "14 avril 2026". */
+function formatHfsqlDateLongFr(raw: string | null | undefined): string {
+  if (!raw) return ''
+  const s = String(raw)
+  if (!/^\d{8}$/.test(s)) return ''
+  const day = parseInt(s.slice(6, 8), 10)
+  const month = parseInt(s.slice(4, 6), 10)
+  const year = s.slice(0, 4)
+  if (month < 1 || month > 12) return ''
+  return `${day} ${FRENCH_MONTHS[month - 1]} ${year}`
+}
+
+function todayLongFr(): string {
+  const d = new Date()
+  return `${d.getDate()} ${FRENCH_MONTHS[d.getMonth()]} ${d.getFullYear()}`
+}
+
+/** Strip HFSQL placeholder values (dots, dashes, underscores, blanks).
+ *  Legacy records often have ".", " . ", "-", "" etc. in unset address fields. */
+function cleanAddrField(s: string | null | undefined): string | null {
+  if (!s) return null
+  const t = String(s).trim()
+  if (!t) return null
+  if (/^[.\-_·•\s]+$/.test(t)) return null
+  return t
+}
+
+interface DefaultAdresse {
+  nom: string | null
+  adresse1: string | null
+  adresse2: string | null
+  adresse3: string | null
+  cp: string | null
+  ville: string | null
+  pays: string | null
+}
+
+/** Load the default visible address for an owner (client / sous_traitant /
+ *  fournisseur). Prefers est_defaut = 1, then est_defaut_livraison, then the
+ *  first visible row. Returns null when the owner has no address on file. */
+async function loadDefaultAdresse(
+  ownerType: 'client' | 'sous_traitant' | 'fournisseur',
+  id: number,
+): Promise<DefaultAdresse | null> {
+  if (id <= 0) return null
+  const fkCol =
+    ownerType === 'client' ? 'IDclient'
+    : ownerType === 'sous_traitant' ? 'IDsous_traitant'
+    : 'IDfournisseur'
+  const rows = await query<any>(
+    `SELECT * FROM adresse
+     WHERE ${fkCol} = ${id} AND est_visible = 1
+     ORDER BY est_defaut DESC, est_defaut_livraison DESC, IDadresse`,
+  )
+  if (rows.length === 0) return null
+  const fixed = await fixEncoding(rows, 'adresse', 'IDadresse', [
+    'nom', 'adresse1', 'adresse2', 'adresse3', 'ville', 'pays',
+  ])
+  const a = fixed[0] as any
+  return {
+    nom: cleanAddrField(a.nom),
+    adresse1: cleanAddrField(a.adresse1),
+    adresse2: cleanAddrField(a.adresse2),
+    adresse3: cleanAddrField(a.adresse3),
+    cp: cleanAddrField(a.cp),
+    ville: cleanAddrField(a.ville),
+    pays: cleanAddrField(a.pays),
+  }
+}
+
+/** Backwards-compatible alias for the PDF builder. */
+async function loadSousTraitantAdresse(id: number): Promise<DefaultAdresse | null> {
+  return loadDefaultAdresse('sous_traitant', id)
+}
+
+/** Load all data and build the PDF payload for a demande d'étude coloris.
+ *  Reused by the /pdf download route and the /email send route so both
+ *  produce a byte-identical PDF. Returns null if the étude doesn't exist. */
+async function buildDemandeEtudeColorisData(
+  id: number,
+): Promise<DemandeEtudeColorisPdfData | null> {
+  const detail = (await loadEtudeDetail(id)) as Record<string, any> | null
+  if (!detail) return null
+
+  const dateLong =
+    formatHfsqlDateLongFr(detail.date_reception_type as string | null) || todayLongFr()
+
+  const sousTraitantAdresse = await loadSousTraitantAdresse(
+    Number(detail.IDsous_traitant) || 0,
+  )
+
+  return {
+    numero: String(detail.IDetude_col),
+    dateDocument: dateLong,
+    sousTraitantNom: (detail.sous_traitant_nom as string | null) ?? null,
+    sousTraitantAdresse,
+    clientNom: (detail.client_nom as string | null) ?? null,
+    refFini: (detail.ref_fini_reference as string | null) ?? null,
+    refFiniDesignation: (detail.ref_fini_designation as string | null) ?? null,
+    codeClient: (detail.desig_client as string | null) ?? null,
+    libelle: (detail.libelle as string | null) ?? null,
+    commentaire: (detail.commentaire as string | null) ?? null,
+  }
+}
+
+/** Render the demande d'étude coloris PDF as a Buffer. */
+async function renderDemandeEtudeColorisBuffer(
+  data: DemandeEtudeColorisPdfData,
+): Promise<Buffer> {
+  return renderToBuffer(
+    React.createElement(DemandeEtudeColorisPdf, { data }) as unknown as React.ReactElement<
+      import('@react-pdf/renderer').DocumentProps
+    >,
+  )
+}
+
+etudesColorisRouter.get('/:id/pdf', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id), 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const data = await buildDemandeEtudeColorisData(id)
+    if (!data) { res.status(404).json({ error: 'Étude not found' }); return }
+
+    const buffer = await renderDemandeEtudeColorisBuffer(data)
+
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="demande-etude-coloris-${data.numero}.pdf"`,
+    )
+    // Allow iframe embedding from the web app origin (dev + prod).
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.send(buffer)
+  } catch (err) {
+    console.error('Error rendering etude-coloris PDF:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Internal "Feuille coloris" PDF ───────────────────────
+// Workshop-board document, not emailed. Shows the Type placeholder (top-
+// left), a manual-fill coloris card + general info (top-right stacked),
+// an approved-coloris placeholder, and an open production-sample area.
+
+async function buildFeuilleColorisData(id: number): Promise<FeuilleColorisPdfData | null> {
+  const detail = (await loadEtudeDetail(id)) as Record<string, any> | null
+  if (!detail) return null
+
+  const dateLong =
+    formatHfsqlDateLongFr(detail.date_reception_type as string | null) || todayLongFr()
+
+  return {
+    numero: String(detail.IDetude_col),
+    dateDocument: dateLong,
+    clientNom: (detail.client_nom as string | null) ?? null,
+    refFini: (detail.ref_fini_reference as string | null) ?? null,
+    refFiniDesignation: (detail.ref_fini_designation as string | null) ?? null,
+    codeClient: (detail.desig_client as string | null) ?? null,
+    // Prefer the étude libellé (full descriptive name like "2304 Coffee")
+    // over the raw ref_fini_colori reference — matches the Soumission PDF.
+    codeMalterre:
+      ((detail.libelle as string | null) && String(detail.libelle).trim())
+      || (detail.ref_fini_colori_reference as string | null)
+      || null,
+    sousTraitantNom: (detail.sous_traitant_nom as string | null) ?? null,
+  }
+}
+
+async function renderFeuilleColorisBuffer(data: FeuilleColorisPdfData): Promise<Buffer> {
+  return renderToBuffer(
+    React.createElement(FeuilleColorisPdf, { data }) as unknown as React.ReactElement<
+      import('@react-pdf/renderer').DocumentProps
+    >,
+  )
+}
+
+etudesColorisRouter.get('/:id/feuille-pdf', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id), 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const data = await buildFeuilleColorisData(id)
+    if (!data) { res.status(404).json({ error: 'Étude not found' }); return }
+
+    const buffer = await renderFeuilleColorisBuffer(data)
+
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="feuille-coloris-${data.numero}.pdf"`,
+    )
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.send(buffer)
+  } catch (err) {
+    console.error('Error rendering feuille coloris PDF:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Email (Gmail API via domain-wide delegation) ─────────
+//
+// Two endpoints, mirroring the commandes-fil pattern (mps_designer §32):
+//   GET  /:id/email-defaults  — returns pre-filled recipients + subject +
+//                               body so the frontend dialog opens populated
+//   POST /:id/email           — sends the email, impersonating the acting
+//                               user's mapped @etsmalterre.com address
+
+interface EmailRecipientPayload {
+  email: string
+  name?: string
+  source: 'contact'
+  contactId: number
+}
+
+interface EmailDefaultsPayload {
+  recipients: {
+    selected: EmailRecipientPayload[]
+    suggestions: EmailRecipientPayload[]
+  }
+  subject: string
+  body: string
+  sousTraitantNom: string
+  numero: string
+}
+
+/** Build default email form state for an étude. Splits the sous-traitant's
+ *  visible contacts with a valid email into two buckets: those flagged
+ *  envoi_soumission = 1 go into `selected` (pre-filled chips), the rest
+ *  into `suggestions` (clickable to add). */
+async function buildEtudeEmailDefaults(id: number): Promise<EmailDefaultsPayload | null> {
+  const detail = (await loadEtudeDetail(id)) as Record<string, any> | null
+  if (!detail) return null
+
+  const idSt = Number(detail.IDsous_traitant) || 0
+  const sousTraitantNom = (detail.sous_traitant_nom as string | null) ?? ''
+  const refFini = (detail.ref_fini_reference as string | null) ?? ''
+  const codeClient = (detail.desig_client as string | null) ?? ''
+  const clientNom = (detail.client_nom as string | null) ?? ''
+
+  const contactRows = idSt > 0
+    ? await query<{
+        IDcontact: number
+        nom: string | null
+        prenom: string | null
+        mail: string | null
+        envoi_soumission: number | null
+        est_visible: number | null
+      }>(
+        `SELECT IDcontact, nom, prenom, mail, envoi_soumission, est_visible
+         FROM contact WHERE IDsous_traitant = ${idSt}`,
+      )
+    : []
+  const fixedContacts = await fixEncoding(contactRows, 'contact', 'IDcontact', [
+    'nom', 'prenom', 'mail',
+  ])
+
+  const selected: EmailRecipientPayload[] = []
+  const suggestions: EmailRecipientPayload[] = []
+  const seen = new Set<string>()
+  for (const c of fixedContacts as any[]) {
+    if (c.est_visible === 0) continue
+    const raw = (c.mail ?? '').toString().trim()
+    if (!raw) continue
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) continue
+    const key = raw.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    const displayName = [c.prenom, c.nom]
+      .map((s: string | null) => (s ?? '').toString().trim())
+      .filter((s: string) => s.length > 0)
+      .join(' ')
+    const recipient: EmailRecipientPayload = {
+      email: raw,
+      source: 'contact',
+      contactId: Number(c.IDcontact),
+    }
+    if (displayName) recipient.name = displayName
+    if (c.envoi_soumission === 1) selected.push(recipient)
+    else suggestions.push(recipient)
+  }
+
+  const numero = String(id)
+
+  // Include a concise context block in the subject so a casual inbox
+  // scan lets the recipient know which study + coloris this concerns.
+  const subjectContext = [refFini, codeClient].filter((s) => s).join(' · ')
+  const subject = subjectContext
+    ? `Demande d'étude coloris N°${numero} — ${subjectContext}`
+    : `Demande d'étude coloris N°${numero}`
+
+  const bodyLines = [
+    'Bonjour,',
+    '',
+    `Veuillez trouver ci-joint notre demande d'étude coloris N°${numero}${
+      sousTraitantNom ? ` à destination de ${sousTraitantNom}` : ''
+    }.`,
+    '',
+  ]
+  if (refFini || clientNom || codeClient) {
+    bodyLines.push('Détails de la demande :')
+    if (refFini) bodyLines.push(`  • Référence fini : ${refFini}`)
+    if (clientNom) bodyLines.push(`  • Client : ${clientNom}`)
+    if (codeClient) bodyLines.push(`  • Code client : ${codeClient}`)
+    bodyLines.push('')
+  }
+  bodyLines.push(
+    "Nous vous remercions de bien vouloir nous retourner vos propositions après étude de l'échantillon joint.",
+    '',
+    'Cordialement,',
+    'ETS Malterre',
+  )
+  const body = bodyLines.join('\n')
+
+  return {
+    recipients: { selected, suggestions },
+    subject,
+    body,
+    sousTraitantNom,
+    numero,
+  }
+}
+
+etudesColorisRouter.get('/:id/email-defaults', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id), 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const defaults = await buildEtudeEmailDefaults(id)
+    if (!defaults) { res.status(404).json({ error: 'Étude not found' }); return }
+    res.json(defaults)
+  } catch (err) {
+    console.error('Error building etude email defaults:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+const extraAttachmentSchema = z.object({
+  filename: z.string().min(1).max(255),
+  content_base64: z.string().min(1),
+  content_type: z.string().min(1).max(100),
+})
+
+const emailBodySchema = z.object({
+  to: z.array(z.string().email()).min(1, 'At least one recipient is required'),
+  cc: z.array(z.string().email()).optional(),
+  subject: z.string().min(1).max(500),
+  body: z.string().min(1).max(20000),
+  attach_pdf: z.boolean().optional(),
+  extra_attachments: z.array(extraAttachmentSchema).optional(),
+})
+
+etudesColorisRouter.post('/:id/email', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id), 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    if (req.userId === undefined) {
+      res.status(401).json({ error: 'not authenticated' })
+      return
+    }
+
+    const parsed = emailBodySchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Validation failed', details: parsed.error.issues })
+      return
+    }
+
+    // Acting user's corporate email (required to impersonate via DWD)
+    const senderEmail = await getUserEmail(req.userId)
+    if (!senderEmail) {
+      res.status(400).json({
+        error: 'no_sender_email',
+        message:
+          "Aucune adresse email n'est associée à votre compte. Un administrateur doit en définir une dans Paramètres › Utilisateurs.",
+      })
+      return
+    }
+
+    // Display name for the From header
+    const userRows = await query<{ prenom: string | null; nom: string | null }>(
+      `SELECT prenom, nom FROM utilisateur WHERE IDutilisateur = ${req.userId}`,
+    )
+    const fixedUser = await fixEncoding(userRows, 'utilisateur', 'IDutilisateur', ['prenom', 'nom'])
+    const u = (fixedUser[0] as any) ?? null
+    const displayName = u
+      ? [u.prenom, u.nom]
+          .filter((s: string | null) => s && s.trim())
+          .map((s: string) => s.trim())
+          .join(' ')
+      : ''
+    const fromName = displayName ? `${displayName} — ETS Malterre` : 'ETS Malterre'
+
+    const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
+    if (parsed.data.attach_pdf !== false) {
+      const data = await buildDemandeEtudeColorisData(id)
+      if (!data) { res.status(404).json({ error: 'Étude not found' }); return }
+      const buffer = await renderDemandeEtudeColorisBuffer(data)
+      attachments.push({
+        filename: `demande-etude-coloris-${data.numero}.pdf`,
+        content: buffer,
+        contentType: 'application/pdf',
+      })
+    }
+    for (const a of parsed.data.extra_attachments ?? []) {
+      attachments.push({
+        filename: a.filename,
+        content: Buffer.from(a.content_base64, 'base64'),
+        contentType: a.content_type,
+      })
+    }
+
+    const messageId = await sendMail({
+      from: senderEmail,
+      fromName,
+      to: parsed.data.to,
+      cc: parsed.data.cc,
+      subject: parsed.data.subject,
+      body: parsed.data.body,
+      attachments: attachments.length > 0 ? attachments : undefined,
+    })
+
+    // Log one envoi_email row per recipient. Société defaults to the
+    // sous-traitant name — the demande is sent to the sous-traitant.
+    const logDetail = (await loadEtudeDetail(id)) as Record<string, any> | null
+    const societe = (logDetail?.sous_traitant_nom as string | null) ?? ''
+    const recipients = [...parsed.data.to, ...(parsed.data.cc ?? [])]
+    await logEnvoiEmails(TYPE_DOC_DEMANDE_ETUDE_COLORIS, id, recipients, societe)
+
+    res.json({ ok: true, messageId })
+  } catch (err) {
+    console.error('Error sending etude-coloris email:', err)
+    const message = err instanceof Error ? err.message : 'Internal server error'
+    res.status(500).json({ error: 'send_failed', message })
+  }
+})
+
+// ── Étude history timeline ───────────────────────────────
+//
+// Unified timeline of envoi_email events for an étude: demande d'étude
+// coloris sends (IDtype_doc = 27, IDreference = etudeId) + every soumission
+// send (IDtype_doc = 15, IDreference IN soumissions). Returned newest-first
+// so the frontend can render a reverse-chronological list.
+
+interface HistoryEvent {
+  /** Envoi_email id for send events, or 'reception-<etudeId>' /
+   *  'acceptance-<soumId>' for synthetic events (no DB id). */
+  id: number | string
+  kind: 'etude' | 'soumission' | 'reception_type' | 'acceptance'
+  date: string | null                 // raw datetime for envois (YYYY-MM-DD HH:MM:SS.mmm) or YYYYMMDD for synthetic events
+  adresse: string | null
+  societe: string | null
+  soumissionId: number | null         // non-null when kind='soumission' or 'acceptance'
+  soumissionObservation: string | null // e.g. "1-2" for the sample numbers
+}
+
+etudesColorisRouter.get('/:id/history', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(String(req.params.id), 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const etudeRows = await query<{ IDetude_col: number; date_reception_type: string | null }>(
+      `SELECT IDetude_col, date_reception_type FROM etude_col WHERE IDetude_col = ${id}`,
+    )
+    if (etudeRows.length === 0) { res.status(404).json({ error: 'Étude not found' }); return }
+    const etude = etudeRows[0]
+
+    // Gather soumission IDs + their observations so we can enrich events,
+    // and grab date_reponse + accepte so we can synthesize acceptance events.
+    const soumRows = await query<{
+      IDsoum_col: number; observation: string | null
+      date_reponse: string | null; accepte: number | null
+    }>(
+      `SELECT IDsoum_col, observation, date_reponse, accepte
+       FROM soum_col WHERE IDetude_col = ${id}`,
+    )
+    const fixedSoum = await fixEncoding(soumRows as any[], 'soum_col', 'IDsoum_col', ['observation'])
+    interface SoumCtx { observation: string | null; dateReponse: string | null; accepte: number }
+    const soumMap = new Map<number, SoumCtx>()
+    for (const s of fixedSoum as any[]) {
+      soumMap.set(Number(s.IDsoum_col), {
+        observation: s.observation ?? null,
+        dateReponse: (s.date_reponse as string | null) ?? null,
+        accepte: Number(s.accepte) || 0,
+      })
+    }
+    const soumIds = Array.from(soumMap.keys())
+
+    // Pull both kinds of envois in parallel.
+    const [etudeEnvois, soumissionEnvois] = await Promise.all([
+      query<any>(
+        `SELECT IDenvoi_email, DATE, adresse, société, IDreference
+         FROM envoi_email
+         WHERE IDtype_doc = ${TYPE_DOC_DEMANDE_ETUDE_COLORIS}
+           AND IDreference = ${id}
+           AND invalidé = 0`,
+      ),
+      soumIds.length > 0
+        ? query<any>(
+            `SELECT IDenvoi_email, DATE, adresse, société, IDreference
+             FROM envoi_email
+             WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION}
+               AND IDreference IN (${soumIds.join(',')})
+               AND invalidé = 0`,
+          )
+        : Promise.resolve([]),
+    ])
+    const fixedEtudeEnvois = await fixEncoding(etudeEnvois as any[], 'envoi_email', 'IDenvoi_email', ['adresse', 'société'])
+    const fixedSoumEnvois = await fixEncoding(soumissionEnvois as any[], 'envoi_email', 'IDenvoi_email', ['adresse', 'société'])
+
+    const events: HistoryEvent[] = []
+
+    // Synthetic "reception type" event, dated at the start of that day so
+    // it sorts correctly against the datetime-stamped envoi events.
+    if (etude.date_reception_type && /^\d{8}$/.test(String(etude.date_reception_type))) {
+      const raw = String(etude.date_reception_type)
+      const normalized = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)} 00:00:00.000`
+      events.push({
+        id: `reception-${id}`,
+        kind: 'reception_type',
+        date: normalized,
+        adresse: null,
+        societe: null,
+        soumissionId: null,
+        soumissionObservation: null,
+      })
+    }
+
+    for (const r of fixedEtudeEnvois as any[]) {
+      events.push({
+        id: Number(r.IDenvoi_email),
+        kind: 'etude',
+        date: (r.DATE as string | null) ?? null,
+        adresse: r.adresse ?? null,
+        societe: r['société'] ?? null,
+        soumissionId: null,
+        soumissionObservation: null,
+      })
+    }
+    for (const r of fixedSoumEnvois as any[]) {
+      const sid = Number(r.IDreference)
+      const ctx = soumMap.get(sid)
+      events.push({
+        id: Number(r.IDenvoi_email),
+        kind: 'soumission',
+        date: (r.DATE as string | null) ?? null,
+        adresse: r.adresse ?? null,
+        societe: r['société'] ?? null,
+        soumissionId: sid,
+        soumissionObservation: ctx?.observation ?? null,
+      })
+    }
+
+    // Synthetic "soumission acceptée" events — one per accepted soumission
+    // with a recorded response date. Lets the Historique tab show a clear
+    // "Soumission X acceptée le 23/04/2026" card.
+    for (const [sid, ctx] of soumMap) {
+      if (ctx.accepte !== 1) continue
+      const raw = String(ctx.dateReponse ?? '')
+      if (!/^\d{8}$/.test(raw)) continue
+      const normalized = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)} 23:59:59.999`
+      events.push({
+        id: `acceptance-${sid}`,
+        kind: 'acceptance',
+        date: normalized,
+        adresse: null,
+        societe: null,
+        soumissionId: sid,
+        soumissionObservation: ctx.observation,
+      })
+    }
+
+    // Newest-first. Nulls sink to the bottom. Tie-break by string id so
+    // numeric + synthetic ids compare safely.
+    events.sort((a, b) => {
+      if (a.date === b.date) return String(b.id).localeCompare(String(a.id))
+      if (!a.date) return 1
+      if (!b.date) return -1
+      return a.date < b.date ? 1 : -1
+    })
+
+    res.json(events)
+  } catch (err) {
+    console.error('Error fetching étude history:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -602,6 +1258,70 @@ etudesColorisRouter.post('/soumissions/:soumId/respond', async (req: Request, re
     await query(
       `UPDATE soum_col SET accepte = ${d.accepte}, date_reponse = '${dateRep}' WHERE IDsoum_col = ${soumId}`,
     )
+
+    // Acceptance flow: when accepte=1 and a sample number was supplied,
+    // create a brand-new ref_fini_colori scoped to the étude's IDref_fini
+    // with reference = "<libelle>/<sampleNumber>", point the étude at it,
+    // update the étude's libelle to match, and auto-advance statut to 3.
+    if (d.accepte === 1 && d.sampleNumber) {
+      const sampleNumber = d.sampleNumber.trim()
+      const etudeRows = await query<{
+        libelle: string | null
+        IDref_fini: number
+        IDref_fini_colori: number
+        IDsous_traitant: number
+      }>(
+        `SELECT libelle, IDref_fini, IDref_fini_colori, IDsous_traitant
+         FROM etude_col WHERE IDetude_col = ${etudeId}`,
+      )
+      const fixedEtude = await fixEncoding(etudeRows, 'etude_col', 'IDetude_col', ['libelle'])
+      const etu = (fixedEtude[0] as any) ?? null
+      if (etu) {
+        const currentLibelle = ((etu.libelle as string | null) ?? '').trim()
+        // Avoid doubling the suffix if the user re-accepts on the same
+        // soumission (idempotent-ish): only append when the libelle doesn't
+        // already end with "/<sampleNumber>".
+        const suffix = `/${sampleNumber}`
+        const newLibelle = currentLibelle.endsWith(suffix)
+          ? currentLibelle
+          : `${currentLibelle}${suffix}`
+        const idRefFini = Number(etu.IDref_fini) || 0
+        const idSousTraitant = Number(etu.IDsous_traitant) || 0
+        let newColoriId = Number(etu.IDref_fini_colori) || 0
+
+        if (idRefFini > 0) {
+          // Include IDsous_traitant so the new colori is owned by the
+          // étude's sous-traitant (otherwise legacy screens display it as
+          // orphan / default "Tricotage Malterre").
+          await query(
+            `INSERT INTO ref_fini_colori (IDref_fini, IDsous_traitant, reference, observations)
+             VALUES (${idRefFini}, ${idSousTraitant}, '${esc(newLibelle)}', '')`,
+          )
+          // Look up the new row's ID (HFSQL has no RETURNING).
+          const inserted = await query<{ IDref_fini_colori: number }>(
+            `SELECT TOP 1 IDref_fini_colori FROM ref_fini_colori
+             WHERE IDref_fini = ${idRefFini} AND reference = '${esc(newLibelle)}'
+             ORDER BY IDref_fini_colori DESC`,
+          )
+          if (inserted[0]?.IDref_fini_colori) {
+            newColoriId = Number(inserted[0].IDref_fini_colori)
+          }
+        }
+
+        await query(
+          `UPDATE etude_col SET
+             libelle = '${esc(newLibelle)}',
+             IDref_fini_colori = ${newColoriId},
+             statut_col = 3
+           WHERE IDetude_col = ${etudeId}`,
+        )
+      }
+    } else if (d.accepte === 1) {
+      // Plain acceptance (no sample number) — still move statut to 3 so
+      // the list filter picks up the final state.
+      await query(`UPDATE etude_col SET statut_col = 3 WHERE IDetude_col = ${etudeId}`)
+    }
+
     await touchEtude(etudeId)
 
     const detail = await loadEtudeDetail(etudeId)
@@ -612,12 +1332,422 @@ etudesColorisRouter.post('/soumissions/:soumId/respond', async (req: Request, re
   }
 })
 
+// ── Soumission PDF + email ───────────────────────────────
+//
+// A "Soumission" is a single proposal within an étude. The PDF is a
+// sample carrier sent to the client — dashed placeholders for physical
+// samples, numbered from soumission.observation ("1-2" or "4-5-6").
+
+interface SoumissionWithContext {
+  soumission: SoumissionRow
+  etudeId: number
+  idClient: number
+  idSousTraitant: number
+  idRefFini: number
+  idRefFiniColori: number
+  desigClient: string | null
+  libelleEtude: string | null
+  commentaireEtude: string | null
+  refFiniReference: string | null
+  refFiniColoriReference: string | null
+  clientNom: string | null
+  sousTraitantNom: string | null
+}
+
+async function loadSoumissionContext(soumId: number): Promise<SoumissionWithContext | null> {
+  const soumRows = await query<any>(
+    `SELECT IDsoum_col, IDetude_col, date_soum, type_soum, observation, date_reponse, accepte
+     FROM soum_col WHERE IDsoum_col = ${soumId}`,
+  )
+  if (soumRows.length === 0) return null
+  const fixedSoum = await fixEncoding(soumRows, 'soum_col', 'IDsoum_col', ['type_soum', 'observation'])
+  const s = fixedSoum[0] as any
+
+  const etudeId = Number(s.IDetude_col)
+  const etudeRows = await query<any>(
+    `SELECT IDclient, IDsous_traitant, IDref_fini, IDref_fini_colori, libelle, desig_client, commentaire
+     FROM etude_col WHERE IDetude_col = ${etudeId}`,
+  )
+  if (etudeRows.length === 0) return null
+  const fixedEtude = await fixEncoding(etudeRows, 'etude_col', 'IDetude_col', ['libelle', 'desig_client', 'commentaire'])
+  const e = fixedEtude[0] as any
+
+  const [refFiniRows, colorisRows, clientRows, sousTraitantRows] = await Promise.all([
+    Number(e.IDref_fini) > 0
+      ? query<{ reference: string | null }>(`SELECT reference FROM ref_fini WHERE IDref_fini = ${Number(e.IDref_fini)}`)
+      : Promise.resolve([]),
+    Number(e.IDref_fini_colori) > 0
+      ? query<{ reference: string | null }>(
+          `SELECT reference FROM ref_fini_colori WHERE IDref_fini_colori = ${Number(e.IDref_fini_colori)}`,
+        )
+      : Promise.resolve([]),
+    Number(e.IDclient) > 0
+      ? query<{ nom: string | null }>(`SELECT nom FROM client WHERE IDclient = ${Number(e.IDclient)}`)
+      : Promise.resolve([]),
+    Number(e.IDsous_traitant) > 0
+      ? query<{ nom: string | null }>(
+          `SELECT nom FROM sous_traitant WHERE IDsous_traitant = ${Number(e.IDsous_traitant)}`,
+        )
+      : Promise.resolve([]),
+  ])
+  const fixedRefFini = await fixEncoding(refFiniRows as any[], 'ref_fini', 'IDref_fini', ['reference'])
+  const fixedColoris = await fixEncoding(colorisRows as any[], 'ref_fini_colori', 'IDref_fini_colori', ['reference'])
+  const fixedClient = await fixEncoding(clientRows as any[], 'client', 'IDclient', ['nom'])
+  const fixedSousTraitant = await fixEncoding(sousTraitantRows as any[], 'sous_traitant', 'IDsous_traitant', ['nom'])
+
+  return {
+    soumission: {
+      IDsoum_col: Number(s.IDsoum_col),
+      IDetude_col: etudeId,
+      date_soum: s.date_soum ?? null,
+      type_soum: s.type_soum ?? null,
+      observation: s.observation ?? null,
+      date_reponse: s.date_reponse ?? null,
+      accepte: coerceAccepte(s.accepte),
+    },
+    etudeId,
+    idClient: Number(e.IDclient) || 0,
+    idSousTraitant: Number(e.IDsous_traitant) || 0,
+    idRefFini: Number(e.IDref_fini) || 0,
+    idRefFiniColori: Number(e.IDref_fini_colori) || 0,
+    desigClient: (e.desig_client as string | null) ?? null,
+    libelleEtude: (e.libelle as string | null) ?? null,
+    commentaireEtude: (e.commentaire as string | null) ?? null,
+    refFiniReference: ((fixedRefFini[0] as any)?.reference ?? null) as string | null,
+    refFiniColoriReference: ((fixedColoris[0] as any)?.reference ?? null) as string | null,
+    clientNom: ((fixedClient[0] as any)?.nom ?? null) as string | null,
+    sousTraitantNom: ((fixedSousTraitant[0] as any)?.nom ?? null) as string | null,
+  }
+}
+
+async function buildSoumissionPdfData(soumId: number): Promise<SoumissionPdfData | null> {
+  const ctx = await loadSoumissionContext(soumId)
+  if (!ctx) return null
+
+  // Prefer the soumission's own date; fall back to today so the header
+  // isn't blank.
+  const dateLong =
+    formatHfsqlDateLongFr(ctx.soumission.date_soum) || todayLongFr()
+
+  const clientAdresse = await loadDefaultAdresse('client', ctx.idClient)
+
+  return {
+    numero: String(ctx.soumission.IDsoum_col),
+    dateDocument: dateLong,
+    clientNom: ctx.clientNom,
+    clientAdresse,
+    refFini: ctx.refFiniReference,
+    codeClient: ctx.desigClient,
+    // Full étude label ("1202 0593 lilas 63710") preferred; fall back to
+    // the raw coloris reference if the étude's libelle is blank.
+    codeMalterre: (ctx.libelleEtude && ctx.libelleEtude.trim())
+      || ctx.refFiniColoriReference,
+    commentaire: ctx.commentaireEtude,
+    sampleNumbers: parseSampleNumbers(ctx.soumission.observation),
+  }
+}
+
+async function renderSoumissionPdfBuffer(data: SoumissionPdfData): Promise<Buffer> {
+  return renderToBuffer(
+    React.createElement(SoumissionPdf, { data }) as unknown as React.ReactElement<
+      import('@react-pdf/renderer').DocumentProps
+    >,
+  )
+}
+
+etudesColorisRouter.get('/soumissions/:soumId/pdf', async (req: Request, res: Response) => {
+  try {
+    const soumId = parseInt(String(req.params.soumId), 10)
+    if (isNaN(soumId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const data = await buildSoumissionPdfData(soumId)
+    if (!data) { res.status(404).json({ error: 'Soumission not found' }); return }
+
+    const buffer = await renderSoumissionPdfBuffer(data)
+
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `inline; filename="soumission-${data.numero}.pdf"`)
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.send(buffer)
+  } catch (err) {
+    console.error('Error rendering soumission PDF:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+async function buildSoumissionEmailDefaults(soumId: number): Promise<{
+  recipients: { selected: EmailRecipientPayload[]; suggestions: EmailRecipientPayload[] }
+  subject: string
+  body: string
+  sousTraitantNom: string
+  numero: string
+} | null> {
+  const ctx = await loadSoumissionContext(soumId)
+  if (!ctx) return null
+
+  // Recipients = the sous-traitant's envoi_soumission contacts (the lab
+  // doing the coloris work), NOT the end client.
+  const contactRows = ctx.idSousTraitant > 0
+    ? await query<{
+        IDcontact: number
+        nom: string | null
+        prenom: string | null
+        mail: string | null
+        envoi_soumission: number | null
+        est_visible: number | null
+      }>(
+        `SELECT IDcontact, nom, prenom, mail, envoi_soumission, est_visible
+         FROM contact WHERE IDsous_traitant = ${ctx.idSousTraitant}`,
+      )
+    : []
+  const fixedContacts = await fixEncoding(contactRows, 'contact', 'IDcontact', [
+    'nom', 'prenom', 'mail',
+  ])
+
+  const selected: EmailRecipientPayload[] = []
+  const suggestions: EmailRecipientPayload[] = []
+  const seen = new Set<string>()
+  for (const c of fixedContacts as any[]) {
+    if (c.est_visible === 0) continue
+    const raw = (c.mail ?? '').toString().trim()
+    if (!raw) continue
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) continue
+    const key = raw.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    const displayName = [c.prenom, c.nom]
+      .map((s: string | null) => (s ?? '').toString().trim())
+      .filter((s: string) => s.length > 0)
+      .join(' ')
+    const recipient: EmailRecipientPayload = {
+      email: raw,
+      source: 'contact',
+      contactId: Number(c.IDcontact),
+    }
+    if (displayName) recipient.name = displayName
+    if (c.envoi_soumission === 1) selected.push(recipient)
+    else suggestions.push(recipient)
+  }
+
+  const numero = String(soumId)
+  const sousTraitantNom = ctx.sousTraitantNom ?? ''
+  const refFini = ctx.refFiniReference ?? ''
+  const codeClient = ctx.desigClient ?? ''
+  const subjectContext = [refFini, codeClient].filter(Boolean).join(' · ')
+  const subject = subjectContext
+    ? `Soumission N°${numero} — ${subjectContext}`
+    : `Soumission N°${numero}`
+
+  const bodyLines = [
+    'Bonjour,',
+    '',
+    `Veuillez trouver ci-joint notre soumission N°${numero}${sousTraitantNom ? ` à destination de ${sousTraitantNom}` : ''}.`,
+    '',
+  ]
+  if (refFini || codeClient || ctx.refFiniColoriReference) {
+    bodyLines.push('Détails :')
+    if (refFini) bodyLines.push(`  • Référence fini : ${refFini}`)
+    if (codeClient) bodyLines.push(`  • Code client : ${codeClient}`)
+    if (ctx.refFiniColoriReference) bodyLines.push(`  • Code Malterre : ${ctx.refFiniColoriReference}`)
+    bodyLines.push('')
+  }
+  bodyLines.push(
+    "Merci de bien vouloir nous retourner vos commentaires après examen des échantillons joints.",
+    '',
+    'Cordialement,',
+    'ETS Malterre',
+  )
+
+  return {
+    recipients: { selected, suggestions },
+    subject,
+    body: bodyLines.join('\n'),
+    sousTraitantNom,
+    numero,
+  }
+}
+
+etudesColorisRouter.get('/soumissions/:soumId/email-defaults', async (req: Request, res: Response) => {
+  try {
+    const soumId = parseInt(String(req.params.soumId), 10)
+    if (isNaN(soumId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const defaults = await buildSoumissionEmailDefaults(soumId)
+    if (!defaults) { res.status(404).json({ error: 'Soumission not found' }); return }
+    res.json(defaults)
+  } catch (err) {
+    console.error('Error building soumission email defaults:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// envoi_email logging — legacy table shared across every outbound document
+// in MPS. One row per recipient. IDtype_doc codes come from the legacy
+// type_doc catalog. Never blocks the response: a logging failure is
+// reported in the server log but the client still sees a successful send.
+const TYPE_DOC_SOUMISSION = 15
+const TYPE_DOC_DEMANDE_ETUDE_COLORIS = 27 // "labo coloris"
+
+function nowHfsqlDatetime(): string {
+  const d = new Date()
+  const pad = (n: number, w = 2) => String(n).padStart(w, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
+    + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.`
+    + `${pad(d.getMilliseconds(), 3)}`
+}
+
+/** Insert one envoi_email row per recipient. `societe` is a free-text
+ *  label — typically the client name for a soumission. Failures are
+ *  swallowed (logged) so the send response path isn't affected. */
+async function logEnvoiEmails(
+  idTypeDoc: number,
+  idReference: number,
+  recipients: string[],
+  societe: string,
+): Promise<void> {
+  if (recipients.length === 0) return
+  const ts = nowHfsqlDatetime()
+  const soc = esc(societe || '')
+  for (const raw of recipients) {
+    const addr = esc(String(raw).trim())
+    if (!addr) continue
+    try {
+      await query(
+        `INSERT INTO envoi_email
+           (DATE, adresse, société, IDreference, invalidé, notes, IDtype_doc)
+         VALUES
+           ('${ts}', '${addr}', '${soc}', ${idReference}, 0, '', ${idTypeDoc})`,
+      )
+    } catch (e) {
+      console.error(`envoi_email log failed (${idTypeDoc}/${idReference}/${addr}):`, (e as Error).message)
+    }
+  }
+}
+
+etudesColorisRouter.post('/soumissions/:soumId/email', async (req: Request, res: Response) => {
+  try {
+    const soumId = parseInt(String(req.params.soumId), 10)
+    if (isNaN(soumId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    if (req.userId === undefined) {
+      res.status(401).json({ error: 'not authenticated' })
+      return
+    }
+
+    const parsed = emailBodySchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Validation failed', details: parsed.error.issues })
+      return
+    }
+
+    const senderEmail = await getUserEmail(req.userId)
+    if (!senderEmail) {
+      res.status(400).json({
+        error: 'no_sender_email',
+        message:
+          "Aucune adresse email n'est associée à votre compte. Un administrateur doit en définir une dans Paramètres › Utilisateurs.",
+      })
+      return
+    }
+
+    const userRows = await query<{ prenom: string | null; nom: string | null }>(
+      `SELECT prenom, nom FROM utilisateur WHERE IDutilisateur = ${req.userId}`,
+    )
+    const fixedUser = await fixEncoding(userRows, 'utilisateur', 'IDutilisateur', ['prenom', 'nom'])
+    const u = (fixedUser[0] as any) ?? null
+    const displayName = u
+      ? [u.prenom, u.nom]
+          .filter((s: string | null) => s && s.trim())
+          .map((s: string) => s.trim())
+          .join(' ')
+      : ''
+    const fromName = displayName ? `${displayName} — ETS Malterre` : 'ETS Malterre'
+
+    const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
+    if (parsed.data.attach_pdf !== false) {
+      const data = await buildSoumissionPdfData(soumId)
+      if (!data) { res.status(404).json({ error: 'Soumission not found' }); return }
+      const buffer = await renderSoumissionPdfBuffer(data)
+      attachments.push({
+        filename: `soumission-${data.numero}.pdf`,
+        content: buffer,
+        contentType: 'application/pdf',
+      })
+    }
+    for (const a of parsed.data.extra_attachments ?? []) {
+      attachments.push({
+        filename: a.filename,
+        content: Buffer.from(a.content_base64, 'base64'),
+        contentType: a.content_type,
+      })
+    }
+
+    const messageId = await sendMail({
+      from: senderEmail,
+      fromName,
+      to: parsed.data.to,
+      cc: parsed.data.cc,
+      subject: parsed.data.subject,
+      body: parsed.data.body,
+      attachments: attachments.length > 0 ? attachments : undefined,
+    })
+
+    // Log one envoi_email row per recipient (TO + CC). Société defaults to
+    // the sous-traitant (the actual recipient of the soumission).
+    const ctx = await loadSoumissionContext(soumId)
+    const societe = ctx?.sousTraitantNom ?? ''
+    const recipients = [...parsed.data.to, ...(parsed.data.cc ?? [])]
+    await logEnvoiEmails(TYPE_DOC_SOUMISSION, soumId, recipients, societe)
+
+    res.json({ ok: true, messageId })
+  } catch (err) {
+    console.error('Error sending soumission email:', err)
+    const message = err instanceof Error ? err.message : 'Internal server error'
+    res.status(500).json({ error: 'send_failed', message })
+  }
+})
+
+etudesColorisRouter.get('/soumissions/:soumId/envois', async (req: Request, res: Response) => {
+  try {
+    const soumId = parseInt(String(req.params.soumId), 10)
+    if (isNaN(soumId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const rows = await query<{
+      IDenvoi_email: number
+      DATE: string | null
+      adresse: string | null
+      IDtype_doc: number
+    }>(
+      `SELECT IDenvoi_email, DATE, adresse, société, IDtype_doc
+       FROM envoi_email
+       WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION}
+         AND IDreference = ${soumId}
+         AND invalidé = 0
+       ORDER BY DATE DESC, IDenvoi_email DESC`,
+    )
+    const fixed = await fixEncoding(rows as any[], 'envoi_email', 'IDenvoi_email', ['adresse', 'société'])
+    res.json(
+      (fixed as any[]).map((r) => ({
+        IDenvoi_email: Number(r.IDenvoi_email),
+        date: r.DATE ?? null,
+        adresse: r.adresse ?? null,
+        societe: r['société'] ?? null,
+      })),
+    )
+  } catch (err) {
+    console.error('Error fetching soumission envois:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // ── Lookups (dropdown sources) ───────────────────────────
 
 etudesColorisRouter.get('/lookups/clients', async (_req: Request, res: Response) => {
   try {
     const rows = await query<{ IDclient: number; nom: string | null }>(
-      `SELECT IDclient, nom FROM client WHERE est_visible = 1 ORDER BY nom`,
+      `SELECT IDclient, nom FROM client
+       WHERE est_visible = 1 AND archivé = 0
+       ORDER BY nom`,
     )
     const fixed = await fixEncoding(rows, 'client', 'IDclient', ['nom'])
     res.json(fixed.filter((r: any) => r.nom && String(r.nom).trim().length > 0))
@@ -630,12 +1760,49 @@ etudesColorisRouter.get('/lookups/clients', async (_req: Request, res: Response)
 etudesColorisRouter.get('/lookups/refs-fini', async (_req: Request, res: Response) => {
   try {
     const rows = await query<{ IDref_fini: number; reference: string | null; designation: string | null }>(
-      `SELECT IDref_fini, reference, designation FROM ref_fini ORDER BY reference`,
+      `SELECT IDref_fini, reference, designation FROM ref_fini
+       WHERE archivé = 0
+       ORDER BY reference`,
     )
     const fixed = await fixEncoding(rows, 'ref_fini', 'IDref_fini', ['reference', 'designation'])
     res.json(fixed.filter((r: any) => r.reference && String(r.reference).trim().length > 0))
   } catch (err) {
     console.error('Error fetching refs-fini lookup:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Open (non-settled, non-archived) commandes for a given client — used as
+// the "N° commande" dropdown options on the Nouvelle étude dialog. Returns
+// an empty array if no client is specified or no matching rows exist.
+etudesColorisRouter.get('/lookups/client-commandes', async (req: Request, res: Response) => {
+  try {
+    const client = parseInt(String(req.query.client ?? ''), 10)
+    if (isNaN(client) || client <= 0) { res.json([]); return }
+    const rows = await query<{
+      IDcommande_client: number
+      numero: number
+      ref_client: string | null
+      date_commande: string | null
+    }>(
+      `SELECT IDcommande_client, numero, ref_client, date_commande
+       FROM commande_client
+       WHERE IDclient = ${client}
+         AND est_soldee = 0
+         AND archivé = 0
+       ORDER BY date_commande DESC, IDcommande_client DESC`,
+    )
+    const fixed = await fixEncoding(rows, 'commande_client', 'IDcommande_client', ['ref_client'])
+    res.json(
+      (fixed as any[]).map((r) => ({
+        IDcommande_client: Number(r.IDcommande_client),
+        numero: Number(r.numero) || 0,
+        ref_client: (r.ref_client ?? null) as string | null,
+        date_commande: (r.date_commande ?? null) as string | null,
+      })),
+    )
+  } catch (err) {
+    console.error('Error fetching client-commandes lookup:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -679,6 +1846,27 @@ etudesColorisRouter.get('/lookups/sous-traitants', async (_req: Request, res: Re
     res.json(fixed.filter((r: any) => r.nom && String(r.nom).trim().length > 0))
   } catch (err) {
     console.error('Error fetching sous-traitants lookup:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Default address for a given owner (client / sous_traitant / fournisseur).
+// Used by the Études Adresses tab to render both the client and sous-traitant
+// addresses live-following the selection in edit mode. Returns null when the
+// owner has no address on file.
+etudesColorisRouter.get('/lookups/default-adresse', async (req: Request, res: Response) => {
+  try {
+    const type = String(req.query.type ?? '')
+    const id = parseInt(String(req.query.id ?? ''), 10)
+    if (type !== 'client' && type !== 'sous_traitant' && type !== 'fournisseur') {
+      res.status(400).json({ error: 'Invalid type (expected client|sous_traitant|fournisseur)' })
+      return
+    }
+    if (isNaN(id) || id <= 0) { res.json(null); return }
+    const adr = await loadDefaultAdresse(type, id)
+    res.json(adr)
+  } catch (err) {
+    console.error('Error fetching default adresse lookup:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

@@ -84,6 +84,39 @@ export function TruckIcon({ size = 12, color = colors.primary, strokeWidth = 1.8
   )
 }
 
+export function TagIcon({ size = 11, color = colors.primary, strokeWidth = 1.8 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <Path
+        d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"
+        stroke={color}
+        strokeWidth={strokeWidth}
+        fill="none"
+      />
+      <Path d="M7 7h.01" stroke={color} strokeWidth={strokeWidth * 1.5} fill="none" />
+    </Svg>
+  )
+}
+
+export function UserIcon({ size = 12, color = colors.primary, strokeWidth = 1.8 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <Path
+        d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"
+        stroke={color}
+        strokeWidth={strokeWidth}
+        fill="none"
+      />
+      <Path
+        d="M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"
+        stroke={color}
+        strokeWidth={strokeWidth}
+        fill="none"
+      />
+    </Svg>
+  )
+}
+
 export function FactoryIcon({ size = 12, color = colors.primary, strokeWidth = 1.8 }: IconProps) {
   return (
     <Svg width={size} height={size} viewBox="0 0 24 24">
@@ -101,7 +134,7 @@ export function FactoryIcon({ size = 12, color = colors.primary, strokeWidth = 1
 }
 
 // Maps a metadata icon kind to the right SVG component.
-type IconKind = 'card' | 'calendar' | 'clock' | 'truck' | 'message' | 'factory'
+type IconKind = 'card' | 'calendar' | 'clock' | 'truck' | 'message' | 'factory' | 'tag' | 'user'
 function ResolveIcon({ kind, ...props }: { kind: IconKind } & IconProps) {
   switch (kind) {
     case 'card': return <CreditCardIcon {...props} />
@@ -110,6 +143,8 @@ function ResolveIcon({ kind, ...props }: { kind: IconKind } & IconProps) {
     case 'truck': return <TruckIcon {...props} />
     case 'message': return <MessageSquareIcon {...props} />
     case 'factory': return <FactoryIcon {...props} />
+    case 'tag': return <TagIcon {...props} />
+    case 'user': return <UserIcon {...props} />
   }
 }
 
@@ -340,28 +375,43 @@ const styles = StyleSheet.create({
   },
   footerInner: {
     paddingHorizontal: 36,
-    paddingTop: 10,
-    paddingBottom: 14,
+    paddingTop: 8,
+    paddingBottom: 10,
     alignItems: 'center',
   },
   footerCompany: {
-    fontSize: 7.5,
+    fontSize: 8,
     color: colors.text,
     fontWeight: 900,
     textAlign: 'center',
-    marginBottom: 1,
+    letterSpacing: 0.4,
+    marginBottom: 2,
   },
-  footerLegal: {
-    fontSize: 7.5,
+  footerLine: {
+    fontSize: 7,
+    color: colors.text,
+    textAlign: 'center',
+    lineHeight: 1.4,
+  },
+  footerContact: {
+    fontSize: 7,
     color: colors.muted,
     textAlign: 'center',
-    lineHeight: 1.45,
+    lineHeight: 1.4,
   },
-  footerNotice: {
-    fontSize: 7,
+  footerLegal: {
+    fontSize: 6.5,
+    color: colors.muted,
+    textAlign: 'center',
+    lineHeight: 1.4,
+    marginTop: 3,
+  },
+  footerJurisdiction: {
+    fontSize: 6.5,
     color: colors.subtle,
     textAlign: 'center',
-    marginTop: 2,
+    letterSpacing: 0.3,
+    marginTop: 1,
   },
 })
 
@@ -396,10 +446,12 @@ export interface MalterreDocumentProps {
   reference: string
   /** Free-text date (long form, e.g. "14 Avril 2026") */
   documentDate: string
-  /** Top-left card — typically the supplier or client address */
-  topLeftAddress: AddressBlockData
+  /** Top-left card — typically the supplier or client address. Optional:
+   *  when both topLeftAddress and topRightInfo are omitted, the stock
+   *  2-card top row is skipped and `children` gets the full content area. */
+  topLeftAddress?: AddressBlockData
   /** Top-right card — metadata icon list (paiement, échéance, etc.) */
-  topRightInfo: MetadataCardData
+  topRightInfo?: MetadataCardData
   /** PDF document title (browser tab) */
   title?: string
   /** Body sections — table, totals, etc. */
@@ -417,7 +469,7 @@ export function AddressCard({ data, stretch }: { data: AddressBlockData; stretch
         {data.icon ? <ResolveIcon kind={data.icon} /> : null}
         <Text style={styles.cardTitle}>{data.title.toUpperCase()}</Text>
       </View>
-      <Text style={styles.cardName}>{data.name}</Text>
+      {data.name ? <Text style={styles.cardName}>{data.name}</Text> : null}
       {data.lines.map((l, i) => (
         <Text key={i} style={styles.cardLine}>{l}</Text>
       ))}
@@ -483,16 +535,20 @@ export function MalterreDocument({
 
         {/* Content body */}
         <View style={styles.content}>
-          {/* Top row: address card on the left, metadata card on the right.
-              Both cards stretch to the height of the taller one. */}
-          <View style={styles.topRow}>
-            <View style={styles.topRowSlot}>
-              <AddressCard data={topLeftAddress} stretch />
+          {/* Top row — stock 2-card layout (address + metadata). Rendered
+              only when either card is supplied; otherwise the body gets
+              the full content area (documents with a custom top layout
+              render their own cards inside `children`). */}
+          {(topLeftAddress || topRightInfo) && (
+            <View style={styles.topRow}>
+              <View style={styles.topRowSlot}>
+                {topLeftAddress ? <AddressCard data={topLeftAddress} stretch /> : null}
+              </View>
+              <View style={styles.topRowSlot}>
+                {topRightInfo ? <MetadataCard data={topRightInfo} stretch /> : null}
+              </View>
             </View>
-            <View style={styles.topRowSlot}>
-              <MetadataCard data={topRightInfo} stretch />
-            </View>
-          </View>
+          )}
 
           {/* Body — specific document content (table + totals) */}
           {children}
@@ -507,13 +563,16 @@ export function MalterreDocument({
             <View style={styles.footerStripeRed} />
           </View>
           <View style={styles.footerInner}>
-            <Text style={styles.footerCompany}>
-              {company.legalName} - Au capital de {company.capital} - RCS {company.rcs}
+            <Text style={styles.footerLine}>
+              {company.address1} - {company.zip} {company.city}
+            </Text>
+            <Text style={styles.footerContact}>
+              Tél: {company.phone}   ·   Mail: {company.email}
             </Text>
             <Text style={styles.footerLegal}>
-              SIRET : {company.siret} - N° TVA Intracommunautaire : {company.vat}
+              SIRET: {company.siret} - Code NAF: {company.naf} - N° TVA: {company.vat} - Capital: {company.capital}
             </Text>
-            <Text style={styles.footerNotice}>{company.paymentNotice}</Text>
+            <Text style={styles.footerJurisdiction}>{company.legalJurisdiction}</Text>
           </View>
         </View>
       </Page>

@@ -14,7 +14,6 @@ import {
   Trash2,
   Printer,
   AtSign,
-  Mail,
   Clock,
   Send,
   CheckCircle2,
@@ -27,7 +26,9 @@ import {
   Building2,
   Factory,
   FileText,
-  Tag,
+  MapPin,
+  History,
+  Inbox,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -42,7 +43,9 @@ import {
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
-import { apiFetch } from '@/lib/api'
+import { apiFetch, API_URL } from '@/lib/api'
+import { SendEmailDialog } from '@/components/email/SendEmailDialog'
+import { postEmail } from '@/lib/email'
 
 // ── Types ────────────────────────────────────────────────
 
@@ -78,6 +81,17 @@ interface Soumission {
   observation: string | null
   date_reponse: string | null
   accepte: SoumissionAccepte
+  /** Number of envoi_email rows logged for this soumission (0 when never sent). */
+  envoi_count: number
+  /** ISO datetime of the most recent send, or null. */
+  last_envoi_date: string | null
+}
+
+interface EnvoiEmailRow {
+  IDenvoi_email: number
+  date: string | null
+  adresse: string | null
+  societe: string | null
 }
 
 interface EtudeDetail extends EtudeListRow {
@@ -88,6 +102,12 @@ interface EtudeDetail extends EtudeListRow {
 }
 
 interface ClientOption { IDclient: number; nom: string | null }
+interface ClientCommandeOption {
+  IDcommande_client: number
+  numero: number
+  ref_client: string | null
+  date_commande: string | null
+}
 interface RefFiniOption { IDref_fini: number; reference: string | null; designation: string | null }
 interface RefFiniColoriOption { IDref_fini_colori: number; reference: string | null; has_photo: 0 | 1 }
 interface SousTraitantOption { IDsous_traitant: number; nom: string | null }
@@ -189,6 +209,16 @@ function formatIsoFr(iso: string | null): string {
   return `${m[3]}/${m[2]}/${m[1]}`
 }
 
+// envoi_email DATE is a full datetime like "2026-04-23 10:03:07.245".
+// Render as "23/04/2026 10:03".
+function formatEnvoiDate(raw: string | null): string {
+  if (!raw) return ''
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/.exec(raw)
+  if (!m) return ''
+  const base = `${m[3]}/${m[2]}/${m[1]}`
+  return m[4] && m[5] ? `${base} ${m[4]}:${m[5]}` : base
+}
+
 function soumissionStatut(s: Soumission): 'pending' | 'accepted' | 'refused' {
   const hasResponse = s.date_reponse && s.date_reponse.trim().length > 0
   if (!hasResponse || s.accepte === 0) return 'pending'
@@ -209,8 +239,8 @@ export function EtudesColoris() {
   const [autoEditForId, setAutoEditForId] = useState<number | null>(null)
   const [deleteEtudeConfirmOpen, setDeleteEtudeConfirmOpen] = useState(false)
   const [deleteSoumissionId, setDeleteSoumissionId] = useState<number | null>(null)
-  const [printModalOpen, setPrintModalOpen] = useState(false)
   const [emailModalOpen, setEmailModalOpen] = useState(false)
+  const [emailSoumissionId, setEmailSoumissionId] = useState<number | null>(null)
 
   // Edit-mode draft state
   const [editLibelle, setEditLibelle] = useState('')
@@ -385,6 +415,19 @@ export function EtudesColoris() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoEditForId, detail])
 
+  // When the selected étude's statut changes to a value that no longer
+  // matches the current filter (e.g. Accepter flips 1/2 → 3), auto-switch
+  // to the matching tab so the card stays in view during the transition.
+  // 'all' passes everything, so skip the jump in that case.
+  useEffect(() => {
+    if (!detail) return
+    if (statusFilter === 'all') return
+    const target = STATUT_META[detail.statut_col]?.filter
+    if (target && target !== statusFilter) {
+      setStatusFilter(target)
+    }
+  }, [detail?.statut_col, statusFilter, detail])
+
   // ── Guard ───────────────────────────────────────────────
 
   const guard = useUnsavedGuard({
@@ -487,7 +530,11 @@ export function EtudesColoris() {
               onCancelEdit={cancelEdit}
               onSaveEdit={() => saveMut.mutate()}
               onDeleteClick={() => setDeleteEtudeConfirmOpen(true)}
-              onPrintClick={() => setPrintModalOpen(true)}
+              onPrintClick={(kind) => {
+                if (selectedId === null) return
+                const path = kind === 'feuille' ? 'feuille-pdf' : 'pdf'
+                window.open(`${API_URL}/etudes-coloris/${selectedId}/${path}`, '_blank')
+              }}
               onEmailClick={() => setEmailModalOpen(true)}
               saving={saveMut.isPending}
             />
@@ -505,6 +552,7 @@ export function EtudesColoris() {
               openSoumissionId={openSoumissionId}
               onOpenSoumission={setOpenSoumissionId}
               onDeleteSoumission={setDeleteSoumissionId}
+              onEmailSoumission={setEmailSoumissionId}
               onMutationSuccess={invalidateAll}
               reportDirty={reportDirty}
             />
@@ -580,21 +628,43 @@ export function EtudesColoris() {
         onDeleted={invalidateAll}
       />
 
-      <PlaceholderDialog
-        open={printModalOpen}
-        onClose={() => setPrintModalOpen(false)}
-        title="Imprimer"
-        titleIcon={Printer}
-        centerIcon={Printer}
-      />
+      {selectedId !== null && (
+        <SendEmailDialog
+          open={emailModalOpen}
+          onClose={() => setEmailModalOpen(false)}
+          contextLabel={detail?.sous_traitant_nom ?? undefined}
+          queryKey={['etude-coloris-email-defaults', selectedId]}
+          loadDefaults={() => apiFetch(`/etudes-coloris/${selectedId}/email-defaults`)}
+          pdfUrl={`${API_URL}/etudes-coloris/${selectedId}/pdf`}
+          pdfAttachmentLabel={`demande-etude-coloris-${selectedId}.pdf`}
+          onSend={(p) =>
+            postEmail(`${API_URL}/etudes-coloris/${selectedId}/email`, p, {
+              includeAttachPdf: true,
+            })
+          }
+        />
+      )}
 
-      <PlaceholderDialog
-        open={emailModalOpen}
-        onClose={() => setEmailModalOpen(false)}
-        title="Envoyer un email"
-        titleIcon={AtSign}
-        centerIcon={Mail}
-      />
+      {emailSoumissionId !== null && (
+        <SendEmailDialog
+          open={emailSoumissionId !== null}
+          onClose={() => setEmailSoumissionId(null)}
+          contextLabel={detail?.sous_traitant_nom ?? undefined}
+          queryKey={['etude-soumission-email-defaults', emailSoumissionId]}
+          loadDefaults={() =>
+            apiFetch(`/etudes-coloris/soumissions/${emailSoumissionId}/email-defaults`)
+          }
+          pdfUrl={`${API_URL}/etudes-coloris/soumissions/${emailSoumissionId}/pdf`}
+          pdfAttachmentLabel={`soumission-${emailSoumissionId}.pdf`}
+          onSend={(p) =>
+            postEmail(
+              `${API_URL}/etudes-coloris/soumissions/${emailSoumissionId}/email`,
+              p,
+              { includeAttachPdf: true },
+            )
+          }
+        />
+      )}
 
       <UnsavedChangesDialog
         open={guard.showDialog}
@@ -824,7 +894,7 @@ function EtudeDetailHeader({
   onCancelEdit: () => void
   onSaveEdit: () => void
   onDeleteClick: () => void
-  onPrintClick: () => void
+  onPrintClick: (kind: 'etude' | 'feuille') => void
   onEmailClick: () => void
   saving: boolean
 }) {
@@ -890,15 +960,7 @@ function EtudeDetailHeader({
             </>
           ) : (
             <>
-              <Button
-                variant="outline"
-                size="icon"
-                className="h-9 w-9"
-                title="Imprimer"
-                onClick={onPrintClick}
-              >
-                <Printer className="h-4 w-4" />
-              </Button>
+              <PrintMenuButton onPrint={onPrintClick} />
               <Button
                 variant="outline"
                 size="icon"
@@ -928,6 +990,61 @@ function EtudeDetailHeader({
   )
 }
 
+// ── Print dropdown (Étude vs Feuille coloris) ─────────────
+
+function PrintMenuButton({
+  onPrint,
+}: {
+  onPrint: (kind: 'etude' | 'feuille') => void
+}) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  // Close on outside click.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  const items: { kind: 'etude' | 'feuille'; label: string }[] = [
+    { kind: 'etude',   label: 'Étude coloris' },
+    { kind: 'feuille', label: 'Feuille coloris' },
+  ]
+
+  return (
+    <div ref={rootRef} className="relative">
+      <Button
+        variant="outline"
+        size="icon"
+        className="h-9 w-9"
+        title="Imprimer"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <Printer className="h-4 w-4" />
+      </Button>
+      {open && (
+        <div className="absolute z-50 right-0 top-full mt-1 w-48 rounded-lg border bg-white shadow-lg overflow-hidden">
+          {items.map((item) => (
+            <button
+              key={item.kind}
+              type="button"
+              onClick={() => { onPrint(item.kind); setOpen(false) }}
+              className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent/10 transition-colors"
+            >
+              <Printer className="h-3.5 w-3.5 text-accent" />
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Center: main body (soumissions) ──────────────────────
 
 // ── Soumissions section (center panel body) ─────────────
@@ -937,13 +1054,14 @@ function EtudeDetailHeader({
 // the étude header above. Matches the `LignesSection` shape in `FilsCommandes.tsx`.
 
 function SoumissionsSection({
-  detail, isEditing, openSoumissionId, onOpenSoumission, onDeleteSoumission, onMutationSuccess, reportDirty,
+  detail, isEditing, openSoumissionId, onOpenSoumission, onDeleteSoumission, onEmailSoumission, onMutationSuccess, reportDirty,
 }: {
   detail: EtudeDetail
   isEditing: boolean
   openSoumissionId: number | null
   onOpenSoumission: (id: number | null) => void
   onDeleteSoumission: (id: number) => void
+  onEmailSoumission: (id: number) => void
   onMutationSuccess: () => void
   reportDirty: (key: string, dirty: boolean) => void
 }) {
@@ -1023,6 +1141,7 @@ function SoumissionsSection({
                     setCreating(false)
                   }}
                   onDelete={() => onDeleteSoumission(s.IDsoum_col)}
+                  onEmail={() => onEmailSoumission(s.IDsoum_col)}
                 />
               ),
             )}
@@ -1071,7 +1190,7 @@ function SoumissionsSection({
 // ── Soumission card ──────────────────────────────────────
 
 function SoumissionCard({
-  soumission, isEditing, isDrawerOpen, onOpenDrawer, onEdit, onDelete,
+  soumission, isEditing, isDrawerOpen, onOpenDrawer, onEdit, onDelete, onEmail,
 }: {
   soumission: Soumission
   isEditing: boolean
@@ -1079,6 +1198,7 @@ function SoumissionCard({
   onOpenDrawer: () => void
   onEdit: () => void
   onDelete: () => void
+  onEmail: () => void
 }) {
   const s = soumissionStatut(soumission)
   const borderCls =
@@ -1116,18 +1236,31 @@ function SoumissionCard({
             <Icon className={cn('h-3.5 w-3.5', iconColor)} />
           </div>
           <div className="min-w-0">
-            <p className="text-sm font-medium truncate">
-              {soumission.type_soum ?? '—'}
-              {soumission.date_soum && (
-                <span className="text-muted-foreground font-normal ml-2">
-                  · {formatHfsqlDate(soumission.date_soum)}
-                </span>
+            <p className="text-sm font-medium truncate flex items-center gap-1.5">
+              <span className="truncate">
+                {soumission.date_soum ? formatHfsqlDate(soumission.date_soum) : '—'}
+              </span>
+              {soumission.envoi_count > 0 && (
+                <Badge
+                  variant="secondary"
+                  className="text-[10px] py-0 px-1.5 h-4 gap-1 bg-accent/15 text-accent border-accent/20 flex-shrink-0"
+                  title={
+                    soumission.last_envoi_date
+                      ? `Dernier envoi : ${formatIsoFr(soumission.last_envoi_date) || soumission.last_envoi_date}`
+                      : 'Envoyée'
+                  }
+                >
+                  <AtSign className="h-2.5 w-2.5" />
+                  {soumission.envoi_count > 1
+                    ? `Envoyée ${soumission.envoi_count}×`
+                    : 'Envoyée'}
+                </Badge>
               )}
             </p>
             <p className="text-[11px] text-muted-foreground truncate">{labelText}</p>
           </div>
         </div>
-        {isEditing && (
+        {isEditing ? (
           <div className="flex gap-0.5 flex-shrink-0">
             <Button
               variant="ghost"
@@ -1146,6 +1279,18 @@ function SoumissionCard({
               title="Supprimer"
             >
               <Trash2 className="h-3 w-3" />
+            </Button>
+          </div>
+        ) : (
+          <div className="flex-shrink-0">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 text-muted-foreground hover:text-accent hover:bg-accent/10"
+              onClick={(e) => { e.stopPropagation(); onEmail() }}
+              title="Envoyer au client"
+            >
+              <AtSign className="h-3.5 w-3.5" />
             </Button>
           </div>
         )}
@@ -1173,20 +1318,16 @@ function SoumissionInlineForm({
   onClose: () => void
   onSuccess: () => void
 }) {
-  const [typeSoum, setTypeSoum] = useState(soumission?.type_soum ?? '')
-  const [dateSoum, setDateSoum] = useState(
-    soumission ? hfsqlDateToInput(soumission.date_soum) : hfsqlDateToInput(''),
-  )
   const [observation, setObservation] = useState(soumission?.observation ?? '')
   const [error, setError] = useState<string | null>(null)
 
+  // Create: backend auto-assigns the next type_soum (v1, v2, …) and
+  //         auto-defaults date_soum to today, so we only send observation.
+  // Edit:   only observation is editable here — existing type_soum and
+  //         date_soum are left untouched.
   const mut = useMutation({
     mutationFn: async () => {
-      const body = JSON.stringify({
-        type_soum: typeSoum,
-        date_soum: inputDateToHfsql(dateSoum),
-        observation,
-      })
+      const body = JSON.stringify({ observation })
       if (mode === 'create') {
         return apiFetch(`/etudes-coloris/${etudeId}/soumissions`, { method: 'POST', body })
       }
@@ -1204,27 +1345,6 @@ function SoumissionInlineForm({
       <p className="text-xs font-semibold text-accent uppercase tracking-wide">
         {mode === 'create' ? 'Nouvelle soumission' : 'Modifier la soumission'}
       </p>
-      <div className="grid grid-cols-2 gap-2">
-        <div className="space-y-1">
-          <label className="text-xs font-medium text-muted-foreground">Version</label>
-          <input
-            type="text"
-            value={typeSoum}
-            onChange={(e) => setTypeSoum(e.target.value)}
-            placeholder="v1, v2, essai…"
-            className="w-full h-8 px-2.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-          />
-        </div>
-        <div className="space-y-1">
-          <label className="text-xs font-medium text-muted-foreground">Date d'envoi</label>
-          <input
-            type="date"
-            value={dateSoum}
-            onChange={(e) => setDateSoum(e.target.value)}
-            className="w-full h-8 px-2.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-          />
-        </div>
-      </div>
       <div className="space-y-1">
         <label className="text-xs font-medium text-muted-foreground">Observation</label>
         <textarea
@@ -1232,7 +1352,8 @@ function SoumissionInlineForm({
           value={observation}
           onChange={(e) => setObservation(e.target.value)}
           placeholder="Notes laboratoire, détails couleur…"
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+          className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+          autoFocus
         />
       </div>
       {error && <p className="text-xs text-destructive">{error}</p>}
@@ -1262,11 +1383,23 @@ function SoumissionDrawer({
   const queryClient = useQueryClient()
   const s = soumissionStatut(soumission)
 
+  // Envoi history — only fetched when the drawer is open. Keyed on the
+  // soumission id AND the envoi_count so sending a new email invalidates
+  // the cached list automatically.
+  const { data: envois = [], isLoading: envoisLoading } = useQuery<EnvoiEmailRow[]>({
+    queryKey: ['soumission-envois', soumission.IDsoum_col, soumission.envoi_count],
+    queryFn: () =>
+      apiFetch(`/etudes-coloris/soumissions/${soumission.IDsoum_col}/envois`),
+  })
+
   const respondMut = useMutation({
-    mutationFn: (vars: { accepte: 0 | 1 | 2 }) =>
+    mutationFn: (vars: { accepte: 0 | 1 | 2; sampleNumber?: string }) =>
       apiFetch(`/etudes-coloris/soumissions/${soumission.IDsoum_col}/respond`, {
         method: 'POST',
-        body: JSON.stringify({ accepte: vars.accepte }),
+        body: JSON.stringify({
+          accepte: vars.accepte,
+          ...(vars.sampleNumber ? { sampleNumber: vars.sampleNumber } : {}),
+        }),
       }),
     onSuccess: (payload) => {
       queryClient.setQueryData(['etude-coloris', etudeId], payload)
@@ -1274,20 +1407,9 @@ function SoumissionDrawer({
     },
   })
 
-  const createNewVersionMut = useMutation({
-    mutationFn: () =>
-      apiFetch(`/etudes-coloris/${etudeId}/soumissions`, {
-        method: 'POST',
-        body: JSON.stringify({}),
-      }),
-    onSuccess: (payload) => {
-      queryClient.setQueryData(['etude-coloris', etudeId], payload)
-      onMutationSuccess()
-      onClose()
-    },
-  })
+  const [acceptDialogOpen, setAcceptDialogOpen] = useState(false)
 
-  const pending = respondMut.isPending || createNewVersionMut.isPending
+  const pending = respondMut.isPending
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -1295,12 +1417,7 @@ function SoumissionDrawer({
         <div className="flex items-center gap-2 min-w-0">
           <FileText className="h-3.5 w-3.5 text-accent flex-shrink-0" />
           <p className="text-xs font-semibold truncate">
-            {soumission.type_soum ?? '—'}
-            {soumission.date_soum && (
-              <span className="font-normal text-muted-foreground ml-2">
-                · {formatHfsqlDate(soumission.date_soum)}
-              </span>
-            )}
+            {soumission.date_soum ? formatHfsqlDate(soumission.date_soum) : '—'}
           </p>
         </div>
         <Button variant="ghost" size="icon" onClick={onClose} className="h-7 w-7" title="Fermer">
@@ -1335,6 +1452,39 @@ function SoumissionDrawer({
             </p>
           )}
         </div>
+        <div>
+          <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1 flex items-center gap-1.5">
+            <AtSign className="h-3 w-3" />Historique d'envoi
+          </p>
+          {envoisLoading ? (
+            <p className="text-sm text-muted-foreground italic flex items-center gap-2">
+              <Loader2 className="h-3 w-3 animate-spin" />Chargement…
+            </p>
+          ) : envois.length === 0 ? (
+            <p className="text-sm text-muted-foreground italic">Jamais envoyée.</p>
+          ) : (
+            <div className="space-y-1">
+              {envois.map((e) => (
+                <div
+                  key={e.IDenvoi_email}
+                  className="flex items-center justify-between gap-2 text-xs rounded-md border border-border/60 bg-white px-2 py-1.5"
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-medium">{e.adresse || '—'}</p>
+                    {e.societe?.trim() && (
+                      <p className="text-[10px] text-muted-foreground truncate">
+                        {e.societe.trim()}
+                      </p>
+                    )}
+                  </div>
+                  <span className="text-[10px] text-muted-foreground flex-shrink-0 tabular-nums">
+                    {formatEnvoiDate(e.date)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
       <div className="flex-shrink-0 px-4 py-3 border-t bg-zinc-200/50 flex flex-wrap items-center gap-2">
         {s === 'pending' ? (
@@ -1352,7 +1502,7 @@ function SoumissionDrawer({
             <Button
               size="sm"
               className="bg-success hover:bg-success/90 text-white"
-              onClick={() => respondMut.mutate({ accepte: 1 })}
+              onClick={() => setAcceptDialogOpen(true)}
               disabled={pending}
             >
               <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" />
@@ -1370,26 +1520,126 @@ function SoumissionDrawer({
               <X className="h-3.5 w-3.5 mr-1.5" />
               Annuler la réponse
             </Button>
-            {s === 'refused' && (
-              <Button
-                size="sm"
-                variant="gold"
-                onClick={() => createNewVersionMut.mutate()}
-                disabled={pending}
-              >
-                <Plus className="h-3.5 w-3.5 mr-1.5" />
-                Nouvelle version
-              </Button>
-            )}
           </>
         )}
         {pending && <Loader2 className="h-3.5 w-3.5 animate-spin text-accent ml-auto" />}
       </div>
+
+      <AcceptSoumissionDialog
+        open={acceptDialogOpen}
+        onClose={() => setAcceptDialogOpen(false)}
+        isPending={respondMut.isPending}
+        onConfirm={(sampleNumber) => {
+          respondMut.mutate(
+            { accepte: 1, sampleNumber: sampleNumber || undefined },
+            { onSuccess: () => setAcceptDialogOpen(false) },
+          )
+        }}
+      />
     </div>
   )
 }
 
-// ── Right sidebar: Info card ─────────────────────────────
+// ── Accept-soumission dialog ─────────────────────────────
+// Appears when the user clicks "Accepter" on a soumission. Always creates
+// a new ref_fini_colori scoped to the étude's IDref_fini when a sample
+// number is provided: the étude libellé becomes "<libellé>/<N>", the new
+// colori is linked on the étude, and statut_col is advanced to 3.
+
+function AcceptSoumissionDialog({
+  open, onClose, onConfirm, isPending,
+}: {
+  open: boolean
+  onClose: () => void
+  onConfirm: (sampleNumber: string) => void
+  isPending: boolean
+}) {
+  const [sampleNumber, setSampleNumber] = useState('')
+
+  useEffect(() => {
+    if (open) setSampleNumber('')
+  }, [open])
+
+  const canSubmit = sampleNumber.trim().length > 0
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => (!o && !isPending ? onClose() : undefined)}>
+      <DialogContent className="max-w-sm" onClose={isPending ? undefined : onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <CheckCircle2 className="h-5 w-5 text-success" />
+            Accepter la soumission
+          </DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 mt-2">
+          <p className="text-sm text-muted-foreground">
+            Un nouveau coloris sera créé pour cette référence. Le numéro
+            d'échantillon sera ajouté à la fin du libellé.
+          </p>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">
+              Numéro d'échantillon <span className="text-destructive">*</span>
+            </label>
+            <input
+              type="text"
+              value={sampleNumber}
+              onChange={(e) => setSampleNumber(e.target.value)}
+              placeholder="Ex : 1"
+              autoFocus
+              className="w-full h-9 px-3 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && canSubmit && !isPending) {
+                  onConfirm(sampleNumber.trim())
+                }
+              }}
+            />
+          </div>
+        </div>
+        <DialogFooter className="mt-4">
+          <Button variant="outline" onClick={onClose} disabled={isPending}>
+            Annuler
+          </Button>
+          <Button
+            className="bg-success hover:bg-success/90 text-white"
+            onClick={() => onConfirm(sampleNumber.trim())}
+            disabled={!canSubmit || isPending}
+          >
+            {isPending && <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />}
+            Accepter
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ── Right sidebar: Info + Adresses tabs + standalone status footer ─
+// Structure mirrors FilsCommandes DetailSidebar exactly — §8 tab container
+// + §29.2 flex-col gap-3 with the status pill as a standalone sibling.
+
+type EtudeSidebarTab = 'info' | 'adresses' | 'historique'
+
+interface EtudeHistoryEvent {
+  id: number | string
+  kind: 'etude' | 'soumission' | 'reception_type' | 'acceptance'
+  date: string | null
+  adresse: string | null
+  societe: string | null
+  soumissionId: number | null
+  soumissionObservation: string | null
+}
+
+const editCardClass = 'border-l-4 border-l-accent/70 bg-accent/[0.03]'
+
+interface AdresseLite {
+  nom: string | null
+  adresse1: string | null
+  adresse2: string | null
+  adresse3: string | null
+  cp: string | null
+  ville: string | null
+  pays: string | null
+}
 
 function EtudeDetailSidebar({
   detail, isEditing,
@@ -1420,9 +1670,9 @@ function EtudeDetailSidebar({
   onChangeStatut: (s: EtudeStatut) => void
   isChangingStatut: boolean
 }) {
-  const editCardClass = 'border-l-4 border-l-accent/70 bg-accent/[0.03]'
+  const [activeTab, setActiveTab] = useState<EtudeSidebarTab>('info')
 
-  // Lookup data
+  // Lookup data for edit mode
   const { data: clients } = useQuery<ClientOption[]>({
     queryKey: ['etudes-coloris-clients'],
     queryFn: () => apiFetch('/etudes-coloris/lookups/clients'),
@@ -1448,186 +1698,93 @@ function EtudeDetailSidebar({
     staleTime: 5 * 60 * 1000,
   })
 
+  // Adresse previews — follow the edit-mode IDs so the display updates live
+  // when the user picks a new client / sous-traitant. In view mode we fall
+  // back to the saved IDs from the detail payload.
+  const effIDClient = isEditing ? editIDClient : detail.IDclient
+  const effIDSousTraitant = isEditing ? editIDSousTraitant : detail.IDsous_traitant
+
+  const { data: clientAdresse } = useQuery<AdresseLite | null>({
+    queryKey: ['etude-default-adresse', 'client', effIDClient],
+    queryFn: () => apiFetch(`/etudes-coloris/lookups/default-adresse?type=client&id=${effIDClient}`),
+    enabled: effIDClient > 0,
+    staleTime: 30 * 1000,
+  })
+  const { data: stAdresse } = useQuery<AdresseLite | null>({
+    queryKey: ['etude-default-adresse', 'sous_traitant', effIDSousTraitant],
+    queryFn: () => apiFetch(`/etudes-coloris/lookups/default-adresse?type=sous_traitant&id=${effIDSousTraitant}`),
+    enabled: effIDSousTraitant > 0,
+    staleTime: 30 * 1000,
+  })
+
+  const tabs: { key: EtudeSidebarTab; label: string; icon: React.ElementType }[] = [
+    { key: 'info', label: 'Info', icon: Info },
+    { key: 'adresses', label: 'Adresses', icon: MapPin },
+    { key: 'historique', label: 'Historique', icon: History },
+  ]
+
   return (
     <div className="w-96 flex-shrink-0 flex flex-col gap-3 min-h-0">
-      <div className="flex-1 min-h-0 overflow-y-auto space-y-3 scrollbar-transparent pr-0.5">
-      <Card className={cn('card-premium', isEditing && editCardClass)}>
-        <CardHeader className="pb-2 flex flex-row items-center gap-2">
-          <Info className="h-4 w-4 text-accent" />
-          <CardTitle className="text-sm font-semibold">Informations</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3 text-sm">
-          <KV
-            label="Client"
-            icon={Building2}
-            value={
-              isEditing ? (
-                <select
-                  value={editIDClient}
-                  onChange={(e) => onIDClientChange(Number(e.target.value))}
-                  className="w-full h-8 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer"
-                >
-                  <option value={0}>— sélectionner —</option>
-                  {clients?.map((c) => (
-                    <option key={c.IDclient} value={c.IDclient}>
-                      {c.nom}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                detail.client_nom ?? '—'
-              )
-            }
-          />
-          <KV
-            label="Référence fini"
-            icon={Tag}
-            value={
-              isEditing ? (
-                <select
-                  value={editIDRefFini}
-                  onChange={(e) => onIDRefFiniChange(Number(e.target.value))}
-                  className="w-full h-8 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer"
-                >
-                  <option value={0}>— sélectionner —</option>
-                  {refsFini?.map((r) => (
-                    <option key={r.IDref_fini} value={r.IDref_fini}>
-                      {r.reference} {r.designation && `— ${r.designation}`}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <>
-                  {detail.ref_fini_reference ?? '—'}
-                  {detail.ref_fini_designation && (
-                    <span className="text-muted-foreground ml-1">· {detail.ref_fini_designation}</span>
-                  )}
-                </>
-              )
-            }
-          />
-          <KV
-            label="Coloris"
-            icon={Palette}
-            value={
-              isEditing ? (
-                <select
-                  value={editIDRefFiniColori}
-                  onChange={(e) => onIDRefFiniColoriChange(Number(e.target.value))}
-                  disabled={editIDRefFini === 0}
-                  className="w-full h-8 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer disabled:bg-zinc-100 disabled:text-muted-foreground disabled:cursor-not-allowed"
-                >
-                  <option value={0}>— à définir —</option>
-                  {coloris?.map((c) => (
-                    <option key={c.IDref_fini_colori} value={c.IDref_fini_colori}>
-                      {c.reference}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                detail.ref_fini_colori_reference ?? '—'
-              )
-            }
-          />
-          <KV
-            label="Sous-traitant"
-            icon={Factory}
-            value={
-              isEditing ? (
-                <select
-                  value={editIDSousTraitant}
-                  onChange={(e) => onIDSousTraitantChange(Number(e.target.value))}
-                  className="w-full h-8 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer"
-                >
-                  <option value={0}>— aucun —</option>
-                  {sousTraitants?.map((s) => (
-                    <option key={s.IDsous_traitant} value={s.IDsous_traitant}>
-                      {s.nom}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                detail.sous_traitant_nom ?? '—'
-              )
-            }
-          />
-          <div className="border-t border-border/50 pt-3 space-y-3">
-            <KV
-              label="N° commande"
-              value={
-                isEditing ? (
-                  <input
-                    type="text"
-                    value={editNumCommande}
-                    onChange={(e) => onNumCommandeChange(e.target.value)}
-                    className="w-full h-8 px-2.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-                  />
-                ) : (
-                  detail.num_commande?.trim() || '—'
-                )
-              }
+      <div className="flex-1 min-h-0 rounded-xl border flex flex-col overflow-hidden bg-zinc-100/80">
+        <div className="flex border-b p-1 gap-1 rounded-t-xl bg-zinc-200/50">
+          {tabs.map((tab) => {
+            const Icon = tab.icon
+            return (
+              <button
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                className={cn(
+                  'flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-md transition-colors',
+                  activeTab === tab.key
+                    ? 'bg-accent text-accent-foreground shadow-sm'
+                    : 'text-muted-foreground hover:bg-accent/10',
+                )}
+              >
+                <Icon className="h-3.5 w-3.5" />{tab.label}
+              </button>
+            )
+          })}
+        </div>
+        <div className="flex-1 overflow-y-auto p-3 space-y-3 scrollbar-transparent">
+          {activeTab === 'info' && (
+            <EtudeInfoTab
+              detail={detail}
+              isEditing={isEditing}
+              editNumCommande={editNumCommande}
+              editDesigClient={editDesigClient}
+              editCommentaire={editCommentaire}
+              editDateRecep={editDateRecep}
+              editIDClient={editIDClient}
+              editIDRefFini={editIDRefFini}
+              editIDRefFiniColori={editIDRefFiniColori}
+              editIDSousTraitant={editIDSousTraitant}
+              onNumCommandeChange={onNumCommandeChange}
+              onDesigClientChange={onDesigClientChange}
+              onCommentaireChange={onCommentaireChange}
+              onDateRecepChange={onDateRecepChange}
+              onIDClientChange={onIDClientChange}
+              onIDRefFiniChange={onIDRefFiniChange}
+              onIDRefFiniColoriChange={onIDRefFiniColoriChange}
+              onIDSousTraitantChange={onIDSousTraitantChange}
+              clients={clients ?? []}
+              refsFini={refsFini ?? []}
+              coloris={coloris ?? []}
+              sousTraitants={sousTraitants ?? []}
             />
-            <KV
-              label="Désignation client"
-              value={
-                isEditing ? (
-                  <input
-                    type="text"
-                    value={editDesigClient}
-                    onChange={(e) => onDesigClientChange(e.target.value)}
-                    className="w-full h-8 px-2.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-                  />
-                ) : (
-                  detail.desig_client?.trim() || '—'
-                )
-              }
-            />
-            <KV
-              label="Réception labo"
-              value={
-                isEditing ? (
-                  <input
-                    type="date"
-                    value={editDateRecep}
-                    onChange={(e) => onDateRecepChange(e.target.value)}
-                    className="w-full h-8 px-2.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-                  />
-                ) : (
-                  formatHfsqlDate(detail.date_reception_type ?? '') || '—'
-                )
-              }
-            />
-            <KV
-              label="Dernière action"
-              value={formatIsoFr(detail.date_derniere_action) || '—'}
-            />
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card className={cn('card-premium', isEditing && editCardClass)}>
-        <CardHeader className="pb-2 flex flex-row items-center gap-2">
-          <MessageSquare className="h-4 w-4 text-accent" />
-          <CardTitle className="text-sm font-semibold">Commentaire</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {isEditing ? (
-            <textarea
-              rows={4}
-              value={editCommentaire}
-              onChange={(e) => onCommentaireChange(e.target.value)}
-              placeholder="Notes internes…"
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
-            />
-          ) : detail.commentaire?.trim() ? (
-            <p className="text-sm text-muted-foreground whitespace-pre-line">
-              {detail.commentaire.trim()}
-            </p>
-          ) : (
-            <p className="text-sm text-muted-foreground italic">Aucun commentaire.</p>
           )}
-        </CardContent>
-      </Card>
+          {activeTab === 'adresses' && (
+            <EtudeAdressesTab
+              isEditing={isEditing}
+              sousTraitantNom={detail.sous_traitant_nom}
+              clientNom={detail.client_nom}
+              sousTraitantAdresse={stAdresse ?? null}
+              clientAdresse={clientAdresse ?? null}
+            />
+          )}
+          {activeTab === 'historique' && (
+            <EtudeHistoriqueTab etudeId={detail.IDetude_col} />
+          )}
+        </div>
       </div>
 
       <EtudeStatutFooter
@@ -1636,6 +1793,374 @@ function EtudeDetailSidebar({
         isChanging={isChangingStatut}
         disabled={isEditing}
       />
+    </div>
+  )
+}
+
+// ── Sidebar tab: Info ──────────────────────────────────
+
+function EtudeInfoTab({
+  detail, isEditing,
+  editNumCommande, editDesigClient, editCommentaire, editDateRecep,
+  editIDClient, editIDRefFini, editIDRefFiniColori, editIDSousTraitant,
+  onNumCommandeChange, onDesigClientChange, onCommentaireChange, onDateRecepChange,
+  onIDClientChange, onIDRefFiniChange, onIDRefFiniColoriChange, onIDSousTraitantChange,
+  clients, refsFini, coloris, sousTraitants,
+}: {
+  detail: EtudeDetail
+  isEditing: boolean
+  editNumCommande: string
+  editDesigClient: string
+  editCommentaire: string
+  editDateRecep: string
+  editIDClient: number
+  editIDRefFini: number
+  editIDRefFiniColori: number
+  editIDSousTraitant: number
+  onNumCommandeChange: (s: string) => void
+  onDesigClientChange: (s: string) => void
+  onCommentaireChange: (s: string) => void
+  onDateRecepChange: (s: string) => void
+  onIDClientChange: (n: number) => void
+  onIDRefFiniChange: (n: number) => void
+  onIDRefFiniColoriChange: (n: number) => void
+  onIDSousTraitantChange: (n: number) => void
+  clients: ClientOption[]
+  refsFini: RefFiniOption[]
+  coloris: RefFiniColoriOption[]
+  sousTraitants: SousTraitantOption[]
+}) {
+  const selectCls =
+    'h-7 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer text-right max-w-[220px] truncate'
+  const selectDisabledCls =
+    `${selectCls} disabled:bg-zinc-100 disabled:text-muted-foreground disabled:cursor-not-allowed`
+  const inputCls =
+    'h-7 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring text-right max-w-[180px]'
+
+  return (
+    <>
+      {/* Metadata card */}
+      <div
+        className={cn(
+          'p-3 rounded-lg border bg-card shadow-sm space-y-2',
+          isEditing && editCardClass,
+        )}
+      >
+        <KV
+          label="Client"
+          value={
+            isEditing ? (
+              <select
+                value={editIDClient}
+                onChange={(e) => onIDClientChange(Number(e.target.value))}
+                className={selectCls}
+              >
+                <option value={0}>— sélectionner —</option>
+                {clients.map((c) => (
+                  <option key={c.IDclient} value={c.IDclient}>{c.nom}</option>
+                ))}
+              </select>
+            ) : (detail.client_nom || '—')
+          }
+        />
+        <KV
+          label="Référence fini"
+          value={
+            isEditing ? (
+              <select
+                value={editIDRefFini}
+                onChange={(e) => onIDRefFiniChange(Number(e.target.value))}
+                className={selectCls}
+              >
+                <option value={0}>— sélectionner —</option>
+                {refsFini.map((r) => (
+                  <option key={r.IDref_fini} value={r.IDref_fini}>
+                    {r.reference}{r.designation ? ` — ${r.designation}` : ''}
+                  </option>
+                ))}
+              </select>
+            ) : (detail.ref_fini_reference || '—')
+          }
+        />
+        <KV
+          label="Coloris"
+          value={
+            isEditing ? (
+              <select
+                value={editIDRefFiniColori}
+                onChange={(e) => onIDRefFiniColoriChange(Number(e.target.value))}
+                disabled={editIDRefFini === 0}
+                className={selectDisabledCls}
+              >
+                <option value={0}>— à définir —</option>
+                {coloris.map((c) => (
+                  <option key={c.IDref_fini_colori} value={c.IDref_fini_colori}>{c.reference}</option>
+                ))}
+              </select>
+            ) : (detail.ref_fini_colori_reference || '—')
+          }
+        />
+        <KV
+          label="Sous-traitant"
+          value={
+            isEditing ? (
+              <select
+                value={editIDSousTraitant}
+                onChange={(e) => onIDSousTraitantChange(Number(e.target.value))}
+                className={selectCls}
+              >
+                <option value={0}>— aucun —</option>
+                {sousTraitants.map((s) => (
+                  <option key={s.IDsous_traitant} value={s.IDsous_traitant}>{s.nom}</option>
+                ))}
+              </select>
+            ) : (detail.sous_traitant_nom || '—')
+          }
+        />
+        <KV
+          label="N° commande"
+          value={
+            isEditing ? (
+              <input
+                type="text"
+                value={editNumCommande}
+                onChange={(e) => onNumCommandeChange(e.target.value)}
+                className={inputCls}
+              />
+            ) : (detail.num_commande?.trim() || '—')
+          }
+        />
+        <KV
+          label="Désignation client"
+          value={
+            isEditing ? (
+              <input
+                type="text"
+                value={editDesigClient}
+                onChange={(e) => onDesigClientChange(e.target.value)}
+                className={inputCls}
+              />
+            ) : (detail.desig_client?.trim() || '—')
+          }
+        />
+      </div>
+
+      {/* Commentaire card */}
+      <div
+        className={cn(
+          'p-3 rounded-lg border bg-card shadow-sm',
+          isEditing && editCardClass,
+        )}
+      >
+        <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
+          <MessageSquare className="h-3.5 w-3.5" />Commentaire
+        </p>
+        {isEditing ? (
+          <textarea
+            rows={4}
+            value={editCommentaire}
+            onChange={(e) => onCommentaireChange(e.target.value)}
+            placeholder="Notes internes…"
+            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+          />
+        ) : detail.commentaire?.trim() ? (
+          <p className="text-sm text-muted-foreground whitespace-pre-line">
+            {detail.commentaire.trim()}
+          </p>
+        ) : (
+          <p className="text-sm text-muted-foreground italic">Aucun commentaire</p>
+        )}
+      </div>
+    </>
+  )
+}
+
+// ── Sidebar tab: Adresses ──────────────────────────────
+
+function EtudeAdressesTab({
+  isEditing, sousTraitantNom, clientNom, sousTraitantAdresse, clientAdresse,
+}: {
+  isEditing: boolean
+  sousTraitantNom: string | null
+  clientNom: string | null
+  sousTraitantAdresse: AdresseLite | null
+  clientAdresse: AdresseLite | null
+}) {
+  return (
+    <>
+      <AdresseReadOnlyCard
+        label="Sous-traitant"
+        icon={Factory}
+        ownerLabel={sousTraitantNom}
+        adresse={sousTraitantAdresse}
+        isEditing={isEditing}
+      />
+      <AdresseReadOnlyCard
+        label="Client"
+        icon={Building2}
+        ownerLabel={clientNom}
+        adresse={clientAdresse}
+        isEditing={isEditing}
+      />
+    </>
+  )
+}
+
+// ── Sidebar tab: Historique ───────────────────────────────
+
+function EtudeHistoriqueTab({ etudeId }: { etudeId: number }) {
+  const { data: events, isLoading, isError } = useQuery<EtudeHistoryEvent[]>({
+    queryKey: ['etude-history', etudeId],
+    queryFn: () => apiFetch(`/etudes-coloris/${etudeId}/history`),
+  })
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-8 text-muted-foreground">
+        <Loader2 className="h-5 w-5 animate-spin" />
+      </div>
+    )
+  }
+  if (isError) {
+    return (
+      <div className="flex flex-col items-center justify-center py-8 text-destructive">
+        <AlertCircle className="h-6 w-6 mb-2" />
+        <p className="text-xs">Erreur de chargement de l'historique</p>
+      </div>
+    )
+  }
+  if (!events || events.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-10 text-muted-foreground">
+        <History className="h-8 w-8 opacity-40 mb-2" />
+        <p className="text-sm italic">Aucun événement</p>
+        <p className="text-[11px] mt-1">
+          L'envoi d'une étude ou d'une soumission apparaîtra ici.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-2">
+      {events.map((e) => (
+        <HistoryEventCard key={e.id} event={e} />
+      ))}
+    </div>
+  )
+}
+
+function HistoryEventCard({ event }: { event: EtudeHistoryEvent }) {
+  // Reception-type synthetic event — just show the date, no recipient line.
+  if (event.kind === 'reception_type') {
+    const dateFr = formatEnvoiDate(event.date).split(' ')[0] || ''
+    return (
+      <div className="rounded-lg border border-border/60 bg-card shadow-sm p-2.5 flex items-start gap-2.5">
+        <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-teal-500/10">
+          <Inbox className="h-3.5 w-3.5 text-teal-600" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-medium leading-snug">
+            {dateFr ? `Réception type le ${dateFr}` : 'Réception type'}
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  // Acceptance synthetic event — green icon, single line naming the
+  // accepted soumission by its sample numbers (or id as fallback).
+  if (event.kind === 'acceptance') {
+    const dateFr = formatEnvoiDate(event.date).split(' ')[0] || ''
+    const soumLabel = event.soumissionObservation?.trim() || `#${event.soumissionId}`
+    return (
+      <div className="rounded-lg border border-border/60 bg-card shadow-sm p-2.5 flex items-start gap-2.5">
+        <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-green-500/10">
+          <CheckCircle2 className="h-3.5 w-3.5 text-green-600" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-medium leading-snug">
+            {dateFr
+              ? `Soumission ${soumLabel} acceptée le ${dateFr}`
+              : `Soumission ${soumLabel} acceptée`}
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  const isEtude = event.kind === 'etude'
+  const Icon = isEtude ? Palette : FileText
+  const iconBg = isEtude ? 'bg-amber-400/10' : 'bg-blue-500/10'
+  const iconColor = isEtude ? 'text-amber-600' : 'text-blue-600'
+  const target =
+    (event.societe && event.societe.trim())
+    || event.adresse
+    || 'destinataire inconnu'
+  const label = isEtude
+    ? `Étude envoyée à ${target}`
+    : `Soumission ${event.soumissionObservation?.trim() || `#${event.soumissionId}`} envoyée à ${target}`
+
+  return (
+    <div className="rounded-lg border border-border/60 bg-card shadow-sm p-2.5 flex items-start gap-2.5">
+      <div className={cn('h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0', iconBg)}>
+        <Icon className={cn('h-3.5 w-3.5', iconColor)} />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs font-medium leading-snug">{label}</p>
+        <div className="flex items-center justify-between gap-2 mt-1">
+          {event.adresse ? (
+            <span className="text-[10px] text-muted-foreground truncate">{event.adresse}</span>
+          ) : <span />}
+          <span className="text-[10px] text-muted-foreground tabular-nums flex-shrink-0">
+            {formatEnvoiDate(event.date)}
+          </span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function AdresseReadOnlyCard({
+  label, icon: Icon, ownerLabel, adresse, isEditing,
+}: {
+  label: string
+  icon: React.ElementType
+  ownerLabel: string | null
+  adresse: AdresseLite | null
+  isEditing: boolean
+}) {
+  return (
+    <div
+      className={cn(
+        'p-3 rounded-lg border bg-card shadow-sm',
+        isEditing && editCardClass,
+      )}
+    >
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <p className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
+          <Icon className="h-3.5 w-3.5" />{label}
+        </p>
+        {ownerLabel && (
+          <span className="text-[11px] text-muted-foreground truncate max-w-[180px]">
+            {ownerLabel}
+          </span>
+        )}
+      </div>
+      {adresse ? (
+        <div className="text-xs text-muted-foreground space-y-0.5">
+          {adresse.nom && <p className="font-medium text-foreground">{adresse.nom}</p>}
+          {adresse.adresse1 && <p>{adresse.adresse1}</p>}
+          {adresse.adresse2 && <p>{adresse.adresse2}</p>}
+          {adresse.adresse3 && <p>{adresse.adresse3}</p>}
+          {(adresse.cp || adresse.ville) && (
+            <p>{[adresse.cp, adresse.ville].filter(Boolean).join(' ')}</p>
+          )}
+          {adresse.pays && <p>{adresse.pays}</p>}
+        </div>
+      ) : (
+        <p className="text-sm text-muted-foreground italic">Aucune adresse</p>
+      )}
     </div>
   )
 }
@@ -1741,20 +2266,11 @@ function EtudeStatutFooter({
   )
 }
 
-function KV({
-  label, icon: Icon, value,
-}: {
-  label: string
-  icon?: typeof Info
-  value: React.ReactNode
-}) {
+function KV({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="space-y-1">
-      <label className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
-        {Icon && <Icon className="h-3 w-3" />}
-        {label}
-      </label>
-      <div className="text-sm">{value}</div>
+    <div className="flex items-baseline justify-between gap-2">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="text-sm text-right truncate">{value}</span>
     </div>
   )
 }
@@ -1771,24 +2287,26 @@ function CreateEtudeDialog({
   const [libelle, setLibelle] = useState('')
   const [IDclient, setIDclient] = useState(0)
   const [IDref_fini, setIDRefFini] = useState(0)
-  const [IDref_fini_colori, setIDRefFiniColori] = useState(0)
   const [IDsous_traitant, setIDsoustraitant] = useState(0)
   const [numCommande, setNumCommande] = useState('')
   const [desigClient, setDesigClient] = useState('')
   const [dateRecep, setDateRecep] = useState('')
   const [error, setError] = useState<string | null>(null)
 
-  // Reset on open
+  // Reset on open. Date de réception defaults to today.
   useEffect(() => {
     if (open) {
+      const now = new Date()
+      const y = now.getFullYear()
+      const m = String(now.getMonth() + 1).padStart(2, '0')
+      const d = String(now.getDate()).padStart(2, '0')
       setLibelle('')
       setIDclient(0)
       setIDRefFini(0)
-      setIDRefFiniColori(0)
       setIDsoustraitant(0)
       setNumCommande('')
       setDesigClient('')
-      setDateRecep('')
+      setDateRecep(`${y}-${m}-${d}`)
       setError(null)
     }
   }, [open])
@@ -1799,23 +2317,26 @@ function CreateEtudeDialog({
     enabled: open,
     staleTime: 5 * 60 * 1000,
   })
-  const { data: refsFini } = useQuery<RefFiniOption[]>({
+  // Full catalog of ref_fini — unfiltered so the user can pick any reference.
+  const { data: refsFini, isFetching: refsFiniLoading } = useQuery<RefFiniOption[]>({
     queryKey: ['etudes-coloris-refs-fini'],
     queryFn: () => apiFetch('/etudes-coloris/lookups/refs-fini'),
     enabled: open,
     staleTime: 5 * 60 * 1000,
-  })
-  const { data: coloris } = useQuery<RefFiniColoriOption[]>({
-    queryKey: ['etudes-coloris-ref-fini-coloris', IDref_fini],
-    queryFn: () => apiFetch(`/etudes-coloris/lookups/ref-fini-coloris?ref_fini=${IDref_fini}`),
-    enabled: open && IDref_fini > 0,
-    staleTime: 60 * 1000,
   })
   const { data: sousTraitants } = useQuery<SousTraitantOption[]>({
     queryKey: ['etudes-coloris-sous-traitants'],
     queryFn: () => apiFetch('/etudes-coloris/lookups/sous-traitants'),
     enabled: open,
     staleTime: 5 * 60 * 1000,
+  })
+  // Open (non-settled) commandes for the selected client, for the N° commande
+  // dropdown. Empty array while no client is picked.
+  const { data: clientCommandes } = useQuery<ClientCommandeOption[]>({
+    queryKey: ['etudes-coloris-client-commandes', IDclient],
+    queryFn: () => apiFetch(`/etudes-coloris/lookups/client-commandes?client=${IDclient}`),
+    enabled: open && IDclient > 0,
+    staleTime: 60 * 1000,
   })
 
   const canSubmit = libelle.trim().length > 0 && IDclient > 0 && IDref_fini > 0
@@ -1827,7 +2348,7 @@ function CreateEtudeDialog({
         body: JSON.stringify({
           IDclient,
           IDref_fini,
-          IDref_fini_colori: IDref_fini_colori || 0,
+          IDref_fini_colori: 0,
           IDsous_traitant: IDsous_traitant || 0,
           libelle: libelle.trim(),
           num_commande: numCommande.trim(),
@@ -1851,7 +2372,7 @@ function CreateEtudeDialog({
             Nouvelle étude coloris
           </DialogTitle>
         </DialogHeader>
-        <div className="space-y-3">
+        <div className="space-y-3 mt-4">
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">
               Libellé <span className="text-destructive">*</span>
@@ -1861,7 +2382,7 @@ function CreateEtudeDialog({
               value={libelle}
               onChange={(e) => setLibelle(e.target.value)}
               placeholder="Ex : 0903 iced coffee 15-1040-TCX"
-              className="w-full h-9 px-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+              className="w-full h-9 px-3 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
               autoFocus
             />
           </div>
@@ -1870,57 +2391,37 @@ function CreateEtudeDialog({
               <label className="text-xs font-medium text-muted-foreground">
                 Client <span className="text-destructive">*</span>
               </label>
-              <select
+              <SearchableCombobox
+                options={clients ?? []}
                 value={IDclient}
-                onChange={(e) => setIDclient(Number(e.target.value))}
-                className="w-full h-9 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer"
-              >
-                <option value={0}>— sélectionner —</option>
-                {clients?.map((c) => (
-                  <option key={c.IDclient} value={c.IDclient}>
-                    {c.nom}
-                  </option>
-                ))}
-              </select>
+                onChange={(id) => {
+                  setIDclient(id)
+                  // Reset the N° commande selection — the previously-selected
+                  // order belonged to the old client.
+                  setNumCommande('')
+                }}
+                getId={(c) => c.IDclient}
+                getPrimary={(c) => c.nom ?? ''}
+                placeholder="Rechercher un client"
+              />
             </div>
             <div className="space-y-1">
               <label className="text-xs font-medium text-muted-foreground">
                 Référence fini <span className="text-destructive">*</span>
               </label>
-              <select
+              <SearchableCombobox
+                options={refsFini ?? []}
                 value={IDref_fini}
-                onChange={(e) => {
-                  setIDRefFini(Number(e.target.value))
-                  setIDRefFiniColori(0)
-                }}
-                className="w-full h-9 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer"
-              >
-                <option value={0}>— sélectionner —</option>
-                {refsFini?.map((r) => (
-                  <option key={r.IDref_fini} value={r.IDref_fini}>
-                    {r.reference}
-                  </option>
-                ))}
-              </select>
+                onChange={setIDRefFini}
+                getId={(r) => r.IDref_fini}
+                getPrimary={(r) => r.reference ?? ''}
+                getSecondary={(r) => r.designation}
+                loading={refsFiniLoading}
+                placeholder={refsFiniLoading ? 'Chargement…' : 'Rechercher une référence'}
+              />
             </div>
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <div className="space-y-1">
-              <label className="text-xs font-medium text-muted-foreground">Coloris</label>
-              <select
-                value={IDref_fini_colori}
-                onChange={(e) => setIDRefFiniColori(Number(e.target.value))}
-                disabled={IDref_fini === 0}
-                className="w-full h-9 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer disabled:bg-zinc-100 disabled:text-muted-foreground disabled:cursor-not-allowed"
-              >
-                <option value={0}>— à définir plus tard —</option>
-                {coloris?.map((c) => (
-                  <option key={c.IDref_fini_colori} value={c.IDref_fini_colori}>
-                    {c.reference}
-                  </option>
-                ))}
-              </select>
-            </div>
             <div className="space-y-1">
               <label className="text-xs font-medium text-muted-foreground">Sous-traitant</label>
               <select
@@ -1936,44 +2437,55 @@ function CreateEtudeDialog({
                 ))}
               </select>
             </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">N° commande</label>
+              <select
+                value={numCommande}
+                onChange={(e) => setNumCommande(e.target.value)}
+                disabled={IDclient === 0}
+                className="w-full h-9 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer disabled:bg-zinc-100 disabled:text-muted-foreground disabled:cursor-not-allowed"
+                title={IDclient === 0 ? 'Sélectionnez d\'abord un client' : undefined}
+              >
+                <option value="">— aucun —</option>
+                {clientCommandes?.map((c) => {
+                  const val = String(c.numero)
+                  const dateFr = c.date_commande ? formatHfsqlDate(c.date_commande) : ''
+                  const label = dateFr ? `N°${c.numero} - ${dateFr}` : `N°${c.numero}`
+                  return (
+                    <option key={c.IDcommande_client} value={val}>{label}</option>
+                  )
+                })}
+              </select>
+            </div>
           </div>
           <div className="grid grid-cols-2 gap-2">
             <div className="space-y-1">
-              <label className="text-xs font-medium text-muted-foreground">N° commande</label>
-              <input
-                type="text"
-                value={numCommande}
-                onChange={(e) => setNumCommande(e.target.value)}
-                className="w-full h-9 px-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-              />
-            </div>
-            <div className="space-y-1">
               <label className="text-xs font-medium text-muted-foreground">
-                Réception labo
+                Date de réception
               </label>
               <input
                 type="date"
                 value={dateRecep}
                 onChange={(e) => setDateRecep(e.target.value)}
-                className="w-full h-9 px-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+                className="w-full h-9 px-3 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">
+                Désignation client
+              </label>
+              <input
+                type="text"
+                value={desigClient}
+                onChange={(e) => setDesigClient(e.target.value)}
+                placeholder="Nom du coloris côté client"
+                className="w-full h-9 px-3 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
               />
             </div>
           </div>
-          <div className="space-y-1">
-            <label className="text-xs font-medium text-muted-foreground">
-              Désignation client
-            </label>
-            <input
-              type="text"
-              value={desigClient}
-              onChange={(e) => setDesigClient(e.target.value)}
-              placeholder="Nom du coloris côté client"
-              className="w-full h-9 px-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-            />
-          </div>
           {error && <p className="text-xs text-destructive">{error}</p>}
         </div>
-        <DialogFooter>
+        <DialogFooter className="mt-6">
           <Button variant="outline" onClick={onClose} disabled={mut.isPending}>
             Annuler
           </Button>
@@ -1984,6 +2496,144 @@ function CreateEtudeDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// ── Generic searchable combobox ──────────────────────────
+// A minimal inline combobox: text input + filtered dropdown. Used across
+// the Nouvelle étude dialog for both Référence fini and Client. Callers
+// provide how to extract the id and render each option (primary line +
+// optional secondary line) so the component stays entity-agnostic.
+
+interface SearchableComboboxProps<T> {
+  options: T[]
+  value: number
+  onChange: (id: number) => void
+  getId: (item: T) => number
+  /** Primary line (e.g. reference, client name). */
+  getPrimary: (item: T) => string
+  /** Secondary line shown right of the primary (e.g. designation). */
+  getSecondary?: (item: T) => string | null | undefined
+  disabled?: boolean
+  loading?: boolean
+  placeholder: string
+}
+
+function SearchableCombobox<T>({
+  options, value, onChange, getId, getPrimary, getSecondary, disabled, loading, placeholder,
+}: SearchableComboboxProps<T>) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const rootRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  // Display label for the currently-selected item (shown when the dropdown
+  // is closed and no free-text query is active).
+  const selectedLabel = useMemo(() => {
+    const sel = options.find((o) => getId(o) === value)
+    if (!sel) return ''
+    const primary = getPrimary(sel) || ''
+    const secondary = getSecondary?.(sel) || ''
+    return secondary ? `${primary} — ${secondary}` : primary
+  }, [options, value, getId, getPrimary, getSecondary])
+
+  // Reset visible text when the field is disabled or deselected.
+  useEffect(() => {
+    if (disabled) {
+      setOpen(false)
+      setQuery('')
+    }
+  }, [disabled])
+  useEffect(() => {
+    if (value === 0) setQuery('')
+  }, [value])
+
+  // Close on outside click.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return options
+    return options.filter((o) => {
+      const hay = `${getPrimary(o) ?? ''} ${getSecondary?.(o) ?? ''}`.toLowerCase()
+      return hay.includes(q)
+    })
+  }, [options, query, getPrimary, getSecondary])
+
+  const displayValue = open ? query : selectedLabel
+
+  return (
+    <div ref={rootRef} className="relative">
+      <input
+        ref={inputRef}
+        type="text"
+        value={displayValue}
+        onFocus={() => { if (!disabled) setOpen(true) }}
+        onChange={(e) => {
+          setQuery(e.target.value)
+          setOpen(true)
+          // Typing invalidates the current selection until user picks again.
+          if (value !== 0) onChange(0)
+        }}
+        placeholder={placeholder}
+        disabled={disabled}
+        className={cn(
+          'w-full h-9 px-3 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring',
+          disabled && 'bg-zinc-100 text-muted-foreground cursor-not-allowed',
+        )}
+      />
+      {open && !disabled && (
+        <div className="absolute z-50 top-full left-0 right-0 mt-1 max-h-56 overflow-y-auto rounded-md border bg-white shadow-lg scrollbar-transparent">
+          {loading ? (
+            <div className="px-3 py-2 text-xs text-muted-foreground flex items-center gap-2">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Chargement…
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="px-3 py-2 text-xs text-muted-foreground italic">
+              {options.length === 0 ? placeholder : 'Aucun résultat'}
+            </div>
+          ) : (
+            filtered.map((o) => {
+              const id = getId(o)
+              const active = id === value
+              const primary = getPrimary(o) || '—'
+              const secondary = getSecondary?.(o)
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => {
+                    onChange(id)
+                    setQuery('')
+                    setOpen(false)
+                    inputRef.current?.blur()
+                  }}
+                  className={cn(
+                    'w-full flex items-start gap-2 px-3 py-2 text-left text-sm transition-colors',
+                    active ? 'bg-accent/10 text-accent' : 'hover:bg-zinc-100',
+                  )}
+                >
+                  <span className="font-medium">{primary}</span>
+                  {secondary && (
+                    <span className="text-xs text-muted-foreground truncate">
+                      {secondary}
+                    </span>
+                  )}
+                </button>
+              )
+            })
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -2021,32 +2671,3 @@ function DeleteSoumissionConfirm({
   )
 }
 
-// ── Placeholder dialog (§18.A-bis) ───────────────────────
-
-function PlaceholderDialog({
-  open, onClose, title, titleIcon: TitleIcon, centerIcon: CenterIcon,
-}: {
-  open: boolean
-  onClose: () => void
-  title: string
-  titleIcon: typeof Printer
-  centerIcon: typeof Printer
-}) {
-  return (
-    <Dialog open={open} onOpenChange={(o) => (!o ? onClose() : undefined)}>
-      <DialogContent onClose={onClose}>
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <TitleIcon className="h-5 w-5 text-accent" />
-            {title}
-          </DialogTitle>
-        </DialogHeader>
-        <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-          <CenterIcon className="h-12 w-12 mb-3 opacity-40" />
-          <p className="text-sm font-medium">En developpement</p>
-          <p className="text-xs mt-1">Cette fonctionnalite sera disponible prochainement.</p>
-        </div>
-      </DialogContent>
-    </Dialog>
-  )
-}

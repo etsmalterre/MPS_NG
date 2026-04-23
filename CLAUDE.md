@@ -58,7 +58,7 @@ MPS_NG/
 │   │       │   ├── permission-keys.ts    # PERMISSION_KEYS catalog
 │   │       │   ├── user-emails.ts        # JSON-backed per-user emails (TODO: DB)
 │   │       │   ├── gmail.ts              # Gmail API send helper (JWT + DWD)
-│   │       │   └── pdf/                  # theme.ts, MalterreDocument.tsx, CommandeFournisseurPdf.tsx
+│   │       │   └── pdf/                  # theme.ts, MalterreDocument.tsx, CommandeFournisseurPdf, DemandeEtudeColorisPdf, SoumissionPdf, FeuilleColorisPdf
 │   │       ├── routes/                   # entreprises, fournisseurs, references-fil, stock, commandes-fil, etudes-coloris, auth, permissions, user-emails
 │   │       └── index.ts
 │   └── web/           # React frontend
