@@ -23,7 +23,6 @@ import {
   ChevronUp,
   MessageSquare,
   Palette,
-  ChevronDown,
   Info,
   Building2,
   Factory,
@@ -500,7 +499,7 @@ export function EtudesColoris() {
         }
         detail={
           detail ? (
-            <EtudeDetailMain
+            <SoumissionsSection
               detail={detail}
               isEditing={isEditing}
               openSoumissionId={openSoumissionId}
@@ -931,34 +930,11 @@ function EtudeDetailHeader({
 
 // ── Center: main body (soumissions) ──────────────────────
 
-function EtudeDetailMain({
-  detail, isEditing,
-  openSoumissionId, onOpenSoumission, onDeleteSoumission, onMutationSuccess, reportDirty,
-}: {
-  detail: EtudeDetail
-  isEditing: boolean
-  openSoumissionId: number | null
-  onOpenSoumission: (id: number | null) => void
-  onDeleteSoumission: (id: number) => void
-  onMutationSuccess: () => void
-  reportDirty: (key: string, dirty: boolean) => void
-}) {
-  return (
-    <div className="flex-1 min-h-0 overflow-auto space-y-4">
-      <SoumissionsSection
-        detail={detail}
-        isEditing={isEditing}
-        openSoumissionId={openSoumissionId}
-        onOpenSoumission={onOpenSoumission}
-        onDeleteSoumission={onDeleteSoumission}
-        onMutationSuccess={onMutationSuccess}
-        reportDirty={reportDirty}
-      />
-    </div>
-  )
-}
-
-// ── Soumissions section ──────────────────────────────────
+// ── Soumissions section (center panel body) ─────────────
+// Follows §31 in-screen drawer pattern. When the center panel holds a single
+// list like this, do NOT wrap in a §23 collapsible Card — the center panel IS
+// the list, and a framing Card with a "Soumissions" title would just duplicate
+// the étude header above. Matches the `LignesSection` shape in `FilsCommandes.tsx`.
 
 function SoumissionsSection({
   detail, isEditing, openSoumissionId, onOpenSoumission, onDeleteSoumission, onMutationSuccess, reportDirty,
@@ -971,7 +947,6 @@ function SoumissionsSection({
   onMutationSuccess: () => void
   reportDirty: (key: string, dirty: boolean) => void
 }) {
-  const [open, setOpen] = useState(true)
   const [creating, setCreating] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
 
@@ -993,65 +968,34 @@ function SoumissionsSection({
   const drawerSoumission = drawerOpen
     ? detail.soumissions.find((s) => s.IDsoum_col === openSoumissionId) ?? null
     : null
+  const hasAny = detail.soumissions.length > 0
+
+  const startCreate = () => {
+    setEditingId(null)
+    setCreating(true)
+  }
 
   return (
-    <Card className="card-premium">
-      <CardHeader
-        className="flex flex-row items-center gap-2 p-4 space-y-0 cursor-pointer select-none"
-        onClick={() => setOpen(!open)}
-      >
-        <FileText className="h-4 w-4 text-accent" />
-        <CardTitle className="text-sm font-semibold">Soumissions</CardTitle>
-        {isEditing && (
-          <Button
-            size="sm"
-            variant="ghost"
-            className="h-6 w-6 p-0 text-accent hover:text-accent hover:bg-accent/10"
-            onClick={(e) => {
-              e.stopPropagation()
-              setCreating(true)
-              setEditingId(null)
-              setOpen(true)
-            }}
-            title="Ajouter une soumission"
-          >
-            <Plus className="h-3.5 w-3.5" />
-          </Button>
+    <div className="flex-1 min-h-0 flex flex-col">
+      <div
+        className={cn(
+          'overflow-auto space-y-2 p-1 scrollbar-transparent',
+          drawerOpen ? 'flex-shrink-0 max-h-[40%]' : 'flex-1 min-h-0',
         )}
-        <Badge variant="secondary" className="text-xs ml-auto">
-          {detail.soumissions.length}
-        </Badge>
-        <ChevronDown
-          className={cn(
-            'h-4 w-4 text-muted-foreground transition-transform',
-            open && 'rotate-180',
-          )}
-        />
-      </CardHeader>
-      {open && (
-        <CardContent className="flex-1 min-h-0 flex flex-col">
-          <div
-            className={cn(
-              'space-y-2 p-1 scrollbar-transparent',
-              drawerOpen ? 'flex-shrink-0 max-h-[40%] overflow-auto' : 'flex-1 min-h-0 overflow-auto',
+      >
+        {!hasAny && !creating ? (
+          <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+            <FileText className="h-12 w-12 mb-3 opacity-40" />
+            <p className="text-sm">Aucune soumission</p>
+            {isEditing && (
+              <Button variant="outline" size="sm" className="mt-3" onClick={startCreate}>
+                <Plus className="h-3.5 w-3.5 mr-1.5" />
+                Ajouter une soumission
+              </Button>
             )}
-          >
-            {creating && (
-              <SoumissionInlineForm
-                etudeId={detail.IDetude_col}
-                mode="create"
-                onClose={() => setCreating(false)}
-                onSuccess={() => {
-                  setCreating(false)
-                  onMutationSuccess()
-                }}
-              />
-            )}
-            {detail.soumissions.length === 0 && !creating && (
-              <p className="text-sm text-muted-foreground italic text-center py-4">
-                Aucune soumission.
-              </p>
-            )}
+          </div>
+        ) : (
+          <>
             {detail.soumissions.map((s) =>
               editingId === s.IDsoum_col ? (
                 <SoumissionInlineForm
@@ -1071,45 +1015,69 @@ function SoumissionsSection({
                   soumission={s}
                   isEditing={isEditing}
                   isDrawerOpen={openSoumissionId === s.IDsoum_col && !isEditing}
-                  onClick={() => {
-                    if (isEditing) {
-                      setEditingId(s.IDsoum_col)
-                      setCreating(false)
-                    } else {
-                      onOpenSoumission(openSoumissionId === s.IDsoum_col ? null : s.IDsoum_col)
-                    }
+                  onOpenDrawer={() =>
+                    onOpenSoumission(openSoumissionId === s.IDsoum_col ? null : s.IDsoum_col)
+                  }
+                  onEdit={() => {
+                    setEditingId(s.IDsoum_col)
+                    setCreating(false)
                   }}
                   onDelete={() => onDeleteSoumission(s.IDsoum_col)}
                 />
               ),
             )}
-          </div>
 
-          {drawerOpen && drawerSoumission && (
-            <div className="flex-1 min-h-0 flex flex-col mt-3 rounded-lg border border-border/60 overflow-hidden bg-zinc-50/80 animate-in slide-in-from-bottom-4 fade-in-0 duration-200">
-              <SoumissionDrawer
+            {creating && (
+              <SoumissionInlineForm
                 etudeId={detail.IDetude_col}
-                soumission={drawerSoumission}
-                onClose={() => onOpenSoumission(null)}
-                onMutationSuccess={onMutationSuccess}
+                mode="create"
+                onClose={() => setCreating(false)}
+                onSuccess={() => {
+                  setCreating(false)
+                  onMutationSuccess()
+                }}
               />
-            </div>
-          )}
-        </CardContent>
+            )}
+
+            {isEditing && hasAny && !creating && editingId === null && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={startCreate}
+                className="w-full text-muted-foreground hover:text-accent hover:bg-accent/5 border border-dashed border-border/60 hover:border-accent/40"
+              >
+                <Plus className="h-3.5 w-3.5 mr-1.5" />
+                Ajouter une soumission
+              </Button>
+            )}
+          </>
+        )}
+      </div>
+
+      {drawerOpen && drawerSoumission && (
+        <div className="flex-1 min-h-0 flex flex-col mt-3 rounded-lg border border-border/60 overflow-hidden bg-zinc-50/80 animate-in slide-in-from-bottom-4 fade-in-0 duration-200">
+          <SoumissionDrawer
+            etudeId={detail.IDetude_col}
+            soumission={drawerSoumission}
+            onClose={() => onOpenSoumission(null)}
+            onMutationSuccess={onMutationSuccess}
+          />
+        </div>
       )}
-    </Card>
+    </div>
   )
 }
 
 // ── Soumission card ──────────────────────────────────────
 
 function SoumissionCard({
-  soumission, isEditing, isDrawerOpen, onClick, onDelete,
+  soumission, isEditing, isDrawerOpen, onOpenDrawer, onEdit, onDelete,
 }: {
   soumission: Soumission
   isEditing: boolean
   isDrawerOpen: boolean
-  onClick: () => void
+  onOpenDrawer: () => void
+  onEdit: () => void
   onDelete: () => void
 }) {
   const s = soumissionStatut(soumission)
@@ -1130,14 +1098,16 @@ function SoumissionCard({
     s === 'accepted' ? `Acceptée le ${formatHfsqlDate(soumission.date_reponse ?? '')}`
     : s === 'refused' ? `Refusée le ${formatHfsqlDate(soumission.date_reponse ?? '')}`
     : 'En attente'
+  const clickable = !isEditing
+
   return (
     <div
-      onClick={onClick}
+      onClick={clickable ? onOpenDrawer : undefined}
       className={cn(
-        'group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3 cursor-pointer transition-colors',
+        'group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3',
         borderCls,
+        clickable && 'cursor-pointer hover:bg-zinc-100 hover:border-accent/40 transition-colors',
         isDrawerOpen && 'ring-1 ring-accent bg-accent/[0.06] border-accent/50',
-        isEditing && 'border-l-4 border-l-accent/70 bg-accent/[0.03]',
       )}
     >
       <div className="flex items-center justify-between gap-2">
@@ -1157,22 +1127,28 @@ function SoumissionCard({
             <p className="text-[11px] text-muted-foreground truncate">{labelText}</p>
           </div>
         </div>
-        <div className="flex items-center gap-1.5 flex-shrink-0">
-          {isEditing && (
+        {isEditing && (
+          <div className="flex gap-0.5 flex-shrink-0">
             <Button
               variant="ghost"
               size="icon"
-              className="h-6 w-6 text-destructive hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
-              onClick={(e) => {
-                e.stopPropagation()
-                onDelete()
-              }}
+              className="h-6 w-6"
+              onClick={(e) => { e.stopPropagation(); onEdit() }}
+              title="Modifier"
+            >
+              <Pencil className="h-3 w-3" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 text-destructive hover:text-destructive"
+              onClick={(e) => { e.stopPropagation(); onDelete() }}
               title="Supprimer"
             >
               <Trash2 className="h-3 w-3" />
             </Button>
-          )}
-        </div>
+          </div>
+        )}
       </div>
       {soumission.observation?.trim() && !isDrawerOpen && (
         <div className="flex items-start gap-1.5 mt-2 ml-9">

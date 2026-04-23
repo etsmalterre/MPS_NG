@@ -408,7 +408,14 @@ Reference implementations: `apps/web/src/pages/Entreprises.tsx`, `apps/web/src/p
 
 ## 7. Center Panel: Detail Body
 
-Scrollable area: `flex-1 min-h-0 overflow-auto space-y-4`
+The detail body hosts one of two layouts. Pick before writing code — they are not mixable:
+
+| Shape | When to use | Outer classes |
+|---|---|---|
+| **Multi-section** — several distinct content groups stacked (notes, competences, certs, commandes, recommandations…) | The record has several independent concepts that each deserve their own titled surface | `flex-1 min-h-0 overflow-auto space-y-4` with one `<Card>` per section (often §23 collapsible) |
+| **Single-list** — the whole center panel IS one list of rows (lignes of a commande, soumissions of an étude, mouvements of a stock lot…) | The record has one primary nested resource that's also its main interaction surface | `flex-1 min-h-0 flex flex-col` directly (§31 pattern), **no framing Card, no section title** |
+
+For the single-list shape, **do not** wrap the rows in a `<Card>` with a "Section Title" + chevron + count-badge header. That pattern belongs to §23 (multi-section). The étude's title is already one screen-row above — a second "Soumissions" title would just duplicate it, eat vertical space, and invite the user to collapse the only thing on the screen. Render the row list as the flex-sibling body from §31.1, with the drawer as a second flex sibling below. Reference: `LignesSection` in `FilsCommandes.tsx`, `SoumissionsSection` in `EtudesColoris.tsx`.
 
 ### Cards (`.card-premium`)
 
@@ -1249,7 +1256,9 @@ Hidden `<input type="file">` wrapped in a styled `<label>` for a polished button
 
 ## 23. Collapsible Section Cards
 
-The center detail body uses collapsible cards for groups of related items (Certificats, Refs de fil, Commandes in `Fournisseurs.tsx`).
+The center detail body uses collapsible cards for groups of related items (Certificats, Refs de fil, Commandes in `FilsGestion.tsx`).
+
+**Apply this pattern only when the center panel stacks *multiple* sections** (see §7 multi-section shape). When the center panel is a single primary list — lignes of a commande, soumissions of an étude, mouvements of a stock lot — do NOT use a collapsible Card. Use §31's flex-sibling layout directly. A framing Card with a title + chevron around the only thing on the screen duplicates the detail header, eats space, and lets the user collapse the only interaction surface.
 
 ```tsx
 <Card className="card-premium">
@@ -2403,7 +2412,7 @@ This pattern already exists in **MFProd** (`C:\dev\mfprod\mfprod_erp` → `src/f
 
 ### 31.1 Core mechanic — flexbox sibling, no `position: fixed`
 
-The drawer is a **flex sibling** of the rows-scrollable div, not a positioned overlay. The parent is already `flex-1 min-h-0 flex flex-col` (§7 detail body pattern). When the drawer is open, the rows div capitulates to `flex-shrink-0 max-h-[40%]` and the drawer gets `flex-1 min-h-0`. Flexbox handles the height split with no explicit calc.
+The drawer is a **flex sibling** of the rows-scrollable div, not a positioned overlay. The parent is already `flex-1 min-h-0 flex flex-col` (§7 single-list shape — **no framing `<Card>` around the list**, see §7 and §23). When the drawer is open, the rows div capitulates to `flex-shrink-0 max-h-[40%]` and the drawer gets `flex-1 min-h-0`. Flexbox handles the height split with no explicit calc.
 
 ```tsx
 function LignesSection({ commande, stockDrawerLineId, onOpenStockDrawer, isEditing, ... }: Props) {
