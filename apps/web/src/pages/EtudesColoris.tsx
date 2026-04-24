@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
@@ -20,6 +21,7 @@ import {
   XCircle,
   Ban,
   ChevronUp,
+  ChevronDown,
   MessageSquare,
   Palette,
   Info,
@@ -575,19 +577,23 @@ export function EtudesColoris() {
               editDateRecep={editDateRecep}
               editIDClient={editIDClient}
               editIDRefFini={editIDRefFini}
-              editIDRefFiniColori={editIDRefFiniColori}
               editIDSousTraitant={editIDSousTraitant}
               onNumCommandeChange={setEditNumCommande}
               onDesigClientChange={setEditDesigClient}
               onCommentaireChange={setEditCommentaire}
               onDateRecepChange={setEditDateRecep}
-              onIDClientChange={setEditIDClient}
+              onIDClientChange={(v) => {
+                setEditIDClient(v)
+                // Cascading: a N° commande belongs to the old client, so drop
+                // it whenever the client changes.
+                setEditNumCommande('')
+              }}
               onIDRefFiniChange={(v) => {
                 setEditIDRefFini(v)
-                // Cascading: reset colori if ref_fini changes
+                // Cascading: reset colori if ref_fini changes — coloris is
+                // linked to a ref_fini and must not dangle.
                 setEditIDRefFiniColori(0)
               }}
-              onIDRefFiniColoriChange={setEditIDRefFiniColori}
               onIDSousTraitantChange={setEditIDSousTraitant}
               onChangeStatut={(s) => changeStatutMut.mutate(s)}
               isChangingStatut={changeStatutMut.isPending}
@@ -1644,9 +1650,9 @@ interface AdresseLite {
 function EtudeDetailSidebar({
   detail, isEditing,
   editNumCommande, editDesigClient, editCommentaire, editDateRecep,
-  editIDClient, editIDRefFini, editIDRefFiniColori, editIDSousTraitant,
+  editIDClient, editIDRefFini, editIDSousTraitant,
   onNumCommandeChange, onDesigClientChange, onCommentaireChange, onDateRecepChange,
-  onIDClientChange, onIDRefFiniChange, onIDRefFiniColoriChange, onIDSousTraitantChange,
+  onIDClientChange, onIDRefFiniChange, onIDSousTraitantChange,
   onChangeStatut, isChangingStatut,
 }: {
   detail: EtudeDetail
@@ -1657,7 +1663,6 @@ function EtudeDetailSidebar({
   editDateRecep: string
   editIDClient: number
   editIDRefFini: number
-  editIDRefFiniColori: number
   editIDSousTraitant: number
   onNumCommandeChange: (s: string) => void
   onDesigClientChange: (s: string) => void
@@ -1665,7 +1670,6 @@ function EtudeDetailSidebar({
   onDateRecepChange: (s: string) => void
   onIDClientChange: (n: number) => void
   onIDRefFiniChange: (n: number) => void
-  onIDRefFiniColoriChange: (n: number) => void
   onIDSousTraitantChange: (n: number) => void
   onChangeStatut: (s: EtudeStatut) => void
   isChangingStatut: boolean
@@ -1685,17 +1689,20 @@ function EtudeDetailSidebar({
     enabled: isEditing,
     staleTime: 5 * 60 * 1000,
   })
-  const { data: coloris } = useQuery<RefFiniColoriOption[]>({
-    queryKey: ['etudes-coloris-ref-fini-coloris', editIDRefFini],
-    queryFn: () => apiFetch(`/etudes-coloris/lookups/ref-fini-coloris?ref_fini=${editIDRefFini}`),
-    enabled: isEditing && editIDRefFini > 0,
-    staleTime: 60 * 1000,
-  })
   const { data: sousTraitants } = useQuery<SousTraitantOption[]>({
     queryKey: ['etudes-coloris-sous-traitants'],
     queryFn: () => apiFetch('/etudes-coloris/lookups/sous-traitants'),
     enabled: isEditing,
     staleTime: 5 * 60 * 1000,
+  })
+  // Open (non-settled) commandes for the currently-selected client, matching
+  // the Nouvelle étude dialog behavior so the edit-mode N° commande dropdown
+  // only offers the client's active orders.
+  const { data: clientCommandes } = useQuery<ClientCommandeOption[]>({
+    queryKey: ['etudes-coloris-client-commandes', editIDClient],
+    queryFn: () => apiFetch(`/etudes-coloris/lookups/client-commandes?client=${editIDClient}`),
+    enabled: isEditing && editIDClient > 0,
+    staleTime: 60 * 1000,
   })
 
   // Adresse previews — follow the edit-mode IDs so the display updates live
@@ -1756,7 +1763,6 @@ function EtudeDetailSidebar({
               editDateRecep={editDateRecep}
               editIDClient={editIDClient}
               editIDRefFini={editIDRefFini}
-              editIDRefFiniColori={editIDRefFiniColori}
               editIDSousTraitant={editIDSousTraitant}
               onNumCommandeChange={onNumCommandeChange}
               onDesigClientChange={onDesigClientChange}
@@ -1764,12 +1770,11 @@ function EtudeDetailSidebar({
               onDateRecepChange={onDateRecepChange}
               onIDClientChange={onIDClientChange}
               onIDRefFiniChange={onIDRefFiniChange}
-              onIDRefFiniColoriChange={onIDRefFiniColoriChange}
               onIDSousTraitantChange={onIDSousTraitantChange}
               clients={clients ?? []}
               refsFini={refsFini ?? []}
-              coloris={coloris ?? []}
               sousTraitants={sousTraitants ?? []}
+              clientCommandes={clientCommandes ?? []}
             />
           )}
           {activeTab === 'adresses' && (
@@ -1802,10 +1807,10 @@ function EtudeDetailSidebar({
 function EtudeInfoTab({
   detail, isEditing,
   editNumCommande, editDesigClient, editCommentaire, editDateRecep,
-  editIDClient, editIDRefFini, editIDRefFiniColori, editIDSousTraitant,
+  editIDClient, editIDRefFini, editIDSousTraitant,
   onNumCommandeChange, onDesigClientChange, onCommentaireChange, onDateRecepChange,
-  onIDClientChange, onIDRefFiniChange, onIDRefFiniColoriChange, onIDSousTraitantChange,
-  clients, refsFini, coloris, sousTraitants,
+  onIDClientChange, onIDRefFiniChange, onIDSousTraitantChange,
+  clients, refsFini, sousTraitants, clientCommandes,
 }: {
   detail: EtudeDetail
   isEditing: boolean
@@ -1815,7 +1820,6 @@ function EtudeInfoTab({
   editDateRecep: string
   editIDClient: number
   editIDRefFini: number
-  editIDRefFiniColori: number
   editIDSousTraitant: number
   onNumCommandeChange: (s: string) => void
   onDesigClientChange: (s: string) => void
@@ -1823,17 +1827,12 @@ function EtudeInfoTab({
   onDateRecepChange: (s: string) => void
   onIDClientChange: (n: number) => void
   onIDRefFiniChange: (n: number) => void
-  onIDRefFiniColoriChange: (n: number) => void
   onIDSousTraitantChange: (n: number) => void
   clients: ClientOption[]
   refsFini: RefFiniOption[]
-  coloris: RefFiniColoriOption[]
   sousTraitants: SousTraitantOption[]
+  clientCommandes: ClientCommandeOption[]
 }) {
-  const selectCls =
-    'h-7 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer text-right max-w-[220px] truncate'
-  const selectDisabledCls =
-    `${selectCls} disabled:bg-zinc-100 disabled:text-muted-foreground disabled:cursor-not-allowed`
   const inputCls =
     'h-7 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring text-right max-w-[180px]'
 
@@ -1850,16 +1849,15 @@ function EtudeInfoTab({
           label="Client"
           value={
             isEditing ? (
-              <select
+              <SearchableCombobox
+                options={clients}
                 value={editIDClient}
-                onChange={(e) => onIDClientChange(Number(e.target.value))}
-                className={selectCls}
-              >
-                <option value={0}>— sélectionner —</option>
-                {clients.map((c) => (
-                  <option key={c.IDclient} value={c.IDclient}>{c.nom}</option>
-                ))}
-              </select>
+                onChange={onIDClientChange}
+                getId={(c) => c.IDclient}
+                getPrimary={(c) => c.nom ?? ''}
+                placeholder="Rechercher un client"
+                size="sm"
+              />
             ) : (detail.client_nom || '—')
           }
         />
@@ -1867,53 +1865,33 @@ function EtudeInfoTab({
           label="Référence fini"
           value={
             isEditing ? (
-              <select
+              <SearchableCombobox
+                options={refsFini}
                 value={editIDRefFini}
-                onChange={(e) => onIDRefFiniChange(Number(e.target.value))}
-                className={selectCls}
-              >
-                <option value={0}>— sélectionner —</option>
-                {refsFini.map((r) => (
-                  <option key={r.IDref_fini} value={r.IDref_fini}>
-                    {r.reference}{r.designation ? ` — ${r.designation}` : ''}
-                  </option>
-                ))}
-              </select>
+                onChange={onIDRefFiniChange}
+                getId={(r) => r.IDref_fini}
+                getPrimary={(r) => r.reference ?? ''}
+                getSecondary={(r) => r.designation}
+                placeholder="Rechercher une référence"
+                size="sm"
+              />
             ) : (detail.ref_fini_reference || '—')
           }
         />
-        <KV
-          label="Coloris"
-          value={
-            isEditing ? (
-              <select
-                value={editIDRefFiniColori}
-                onChange={(e) => onIDRefFiniColoriChange(Number(e.target.value))}
-                disabled={editIDRefFini === 0}
-                className={selectDisabledCls}
-              >
-                <option value={0}>— à définir —</option>
-                {coloris.map((c) => (
-                  <option key={c.IDref_fini_colori} value={c.IDref_fini_colori}>{c.reference}</option>
-                ))}
-              </select>
-            ) : (detail.ref_fini_colori_reference || '—')
-          }
-        />
+        {/* Coloris is set automatically when a soumission is accepted — never
+            user-editable, so always render the saved value (no dropdown in
+            edit mode). */}
+        <KV label="Coloris" value={detail.ref_fini_colori_reference || '—'} />
         <KV
           label="Sous-traitant"
           value={
             isEditing ? (
-              <select
+              <PopoverSelect
+                options={sousTraitants.map((s) => ({ id: s.IDsous_traitant, primary: s.nom ?? '' }))}
                 value={editIDSousTraitant}
-                onChange={(e) => onIDSousTraitantChange(Number(e.target.value))}
-                className={selectCls}
-              >
-                <option value={0}>— aucun —</option>
-                {sousTraitants.map((s) => (
-                  <option key={s.IDsous_traitant} value={s.IDsous_traitant}>{s.nom}</option>
-                ))}
-              </select>
+                onChange={onIDSousTraitantChange}
+                size="sm"
+              />
             ) : (detail.sous_traitant_nom || '—')
           }
         />
@@ -1921,11 +1899,12 @@ function EtudeInfoTab({
           label="N° commande"
           value={
             isEditing ? (
-              <input
-                type="text"
+              <CommandeSelect
                 value={editNumCommande}
-                onChange={(e) => onNumCommandeChange(e.target.value)}
-                className={inputCls}
+                onChange={onNumCommandeChange}
+                commandes={clientCommandes}
+                disabled={editIDClient === 0}
+                size="sm"
               />
             ) : (detail.num_commande?.trim() || '—')
           }
@@ -1953,7 +1932,7 @@ function EtudeInfoTab({
         )}
       >
         <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
-          <MessageSquare className="h-3.5 w-3.5" />Commentaire
+          <MessageSquare className="h-3.5 w-3.5" />Commentaire Sous-traitant
         </p>
         {isEditing ? (
           <textarea
@@ -2424,38 +2403,20 @@ function CreateEtudeDialog({
           <div className="grid grid-cols-2 gap-2">
             <div className="space-y-1">
               <label className="text-xs font-medium text-muted-foreground">Sous-traitant</label>
-              <select
+              <PopoverSelect
+                options={(sousTraitants ?? []).map((s) => ({ id: s.IDsous_traitant, primary: s.nom ?? '' }))}
                 value={IDsous_traitant}
-                onChange={(e) => setIDsoustraitant(Number(e.target.value))}
-                className="w-full h-9 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer"
-              >
-                <option value={0}>— aucun —</option>
-                {sousTraitants?.map((s) => (
-                  <option key={s.IDsous_traitant} value={s.IDsous_traitant}>
-                    {s.nom}
-                  </option>
-                ))}
-              </select>
+                onChange={setIDsoustraitant}
+              />
             </div>
             <div className="space-y-1">
               <label className="text-xs font-medium text-muted-foreground">N° commande</label>
-              <select
+              <CommandeSelect
                 value={numCommande}
-                onChange={(e) => setNumCommande(e.target.value)}
+                onChange={setNumCommande}
+                commandes={clientCommandes ?? []}
                 disabled={IDclient === 0}
-                className="w-full h-9 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer disabled:bg-zinc-100 disabled:text-muted-foreground disabled:cursor-not-allowed"
-                title={IDclient === 0 ? 'Sélectionnez d\'abord un client' : undefined}
-              >
-                <option value="">— aucun —</option>
-                {clientCommandes?.map((c) => {
-                  const val = String(c.numero)
-                  const dateFr = c.date_commande ? formatHfsqlDate(c.date_commande) : ''
-                  const label = dateFr ? `N°${c.numero} - ${dateFr}` : `N°${c.numero}`
-                  return (
-                    <option key={c.IDcommande_client} value={val}>{label}</option>
-                  )
-                })}
-              </select>
+              />
             </div>
           </div>
           <div className="grid grid-cols-2 gap-2">
@@ -2517,15 +2478,18 @@ interface SearchableComboboxProps<T> {
   disabled?: boolean
   loading?: boolean
   placeholder: string
+  /** `'sm'` matches the compact right-panel KV row (h-7, right-aligned, capped width). */
+  size?: 'default' | 'sm'
 }
 
 function SearchableCombobox<T>({
-  options, value, onChange, getId, getPrimary, getSecondary, disabled, loading, placeholder,
+  options, value, onChange, getId, getPrimary, getSecondary, disabled, loading, placeholder, size = 'default',
 }: SearchableComboboxProps<T>) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
-  const rootRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(null)
 
   // Display label for the currently-selected item (shown when the dropdown
   // is closed and no free-text query is active).
@@ -2548,15 +2512,37 @@ function SearchableCombobox<T>({
     if (value === 0) setQuery('')
   }, [value])
 
-  // Close on outside click.
+  // Portal positioning — mirror the CommandeSelect technique so the dropdown
+  // escapes the KV row's `truncate` clip and any scrollable ancestor.
+  const reposition = useCallback(() => {
+    const el = inputRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    setPos({ left: r.left, top: r.bottom, width: r.width })
+  }, [])
   useEffect(() => {
     if (!open) return
+    reposition()
     const onDown = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
+      const t = e.target as Node
+      if (inputRef.current?.contains(t)) return
+      if (popoverRef.current?.contains(t)) return
+      setOpen(false)
+    }
+    // Ignore scrolls inside the popover — the filtered list is scrollable.
+    const onScroll = (e: Event) => {
+      if (popoverRef.current?.contains(e.target as Node)) return
+      setOpen(false)
     }
     document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [open])
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', reposition)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', reposition)
+    }
+  }, [open, reposition])
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -2569,8 +2555,9 @@ function SearchableCombobox<T>({
 
   const displayValue = open ? query : selectedLabel
 
+  const isSm = size === 'sm'
   return (
-    <div ref={rootRef} className="relative">
+    <div className={cn('relative inline-block align-middle', isSm ? 'w-[220px]' : 'w-full')}>
       <input
         ref={inputRef}
         type="text"
@@ -2585,12 +2572,22 @@ function SearchableCombobox<T>({
         placeholder={placeholder}
         disabled={disabled}
         className={cn(
-          'w-full h-9 px-3 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring',
+          'w-full rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring',
+          isSm ? 'h-7 px-2 text-sm text-right' : 'h-9 px-3 text-sm',
           disabled && 'bg-zinc-100 text-muted-foreground cursor-not-allowed',
         )}
       />
-      {open && !disabled && (
-        <div className="absolute z-50 top-full left-0 right-0 mt-1 max-h-56 overflow-y-auto rounded-md border bg-white shadow-lg scrollbar-transparent">
+      {open && !disabled && pos && createPortal(
+        <div
+          ref={popoverRef}
+          style={{
+            position: 'fixed',
+            left: pos.left,
+            top: pos.top + 6,
+            width: Math.max(pos.width, 260),
+          }}
+          className="z-[100] max-h-64 overflow-y-auto rounded-lg border bg-white shadow-lg scrollbar-transparent"
+        >
           {loading ? (
             <div className="px-3 py-2 text-xs text-muted-foreground flex items-center gap-2">
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -2631,7 +2628,328 @@ function SearchableCombobox<T>({
               )
             })
           )}
-        </div>
+        </div>,
+        document.body,
+      )}
+    </div>
+  )
+}
+
+// ── PopoverSelect (generic styled ID-keyed dropdown) ─────
+// Portal-based styled dropdown for short ID-keyed lists (typically < 30
+// items). Use this in right-panel KV rows where a native <select> would look
+// cheap and where `truncate` / scrollable ancestors would clip a non-portal
+// popover. For long searchable lists (clients, refs) prefer SearchableCombobox.
+
+interface PopoverSelectOption {
+  id: number
+  primary: string
+  secondary?: string
+}
+
+function PopoverSelect({
+  options,
+  value,
+  onChange,
+  emptyLabel = '— aucun —',
+  disabled,
+  disabledTitle,
+  size = 'default',
+}: {
+  options: PopoverSelectOption[]
+  value: number
+  onChange: (id: number) => void
+  /** Label for the `id=0` "none" option at the top of the popover. */
+  emptyLabel?: string
+  disabled?: boolean
+  disabledTitle?: string
+  size?: 'default' | 'sm'
+}) {
+  const [open, setOpen] = useState(false)
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(null)
+
+  const reposition = useCallback(() => {
+    const el = buttonRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    setPos({ left: r.left, top: r.bottom, width: r.width })
+  }, [])
+
+  useEffect(() => {
+    if (!open) return
+    reposition()
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (buttonRef.current?.contains(t)) return
+      if (popoverRef.current?.contains(t)) return
+      setOpen(false)
+    }
+    // Ignore scrolls inside the popover itself — the options list is
+    // scrollable and must not close on internal scroll.
+    const onScroll = (e: Event) => {
+      if (popoverRef.current?.contains(e.target as Node)) return
+      setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', reposition)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', reposition)
+    }
+  }, [open, reposition])
+
+  useEffect(() => { if (disabled) setOpen(false) }, [disabled])
+
+  const selected = options.find((o) => o.id === value)
+  const buttonLabel = value === 0
+    ? emptyLabel
+    : selected
+      ? (selected.secondary ? `${selected.primary} — ${selected.secondary}` : selected.primary)
+      : emptyLabel
+
+  const isSm = size === 'sm'
+  return (
+    <div className={cn('relative inline-block align-middle', isSm ? 'w-[220px]' : 'w-full')}>
+      <button
+        ref={buttonRef}
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+        className={cn(
+          'w-full rounded-md border bg-white flex items-center justify-between gap-2 transition-colors',
+          'focus:outline-none focus:ring-2 focus:ring-ring',
+          isSm ? 'h-7 pl-2 pr-1.5 text-sm' : 'h-9 pl-3 pr-2 text-sm',
+          open ? 'border-ring' : 'border-input hover:border-ring/60',
+          disabled && 'bg-zinc-100 text-muted-foreground cursor-not-allowed hover:border-input',
+          value === 0 && !disabled && 'text-muted-foreground',
+        )}
+        title={disabled ? disabledTitle : undefined}
+      >
+        <span className="truncate text-left">{buttonLabel}</span>
+        <ChevronDown
+          className={cn(
+            'h-4 w-4 flex-shrink-0 text-muted-foreground transition-transform',
+            open && 'rotate-180',
+          )}
+        />
+      </button>
+      {open && !disabled && pos && createPortal(
+        <div
+          ref={popoverRef}
+          style={{
+            position: 'fixed',
+            left: pos.left,
+            top: pos.top + 6,
+            width: Math.max(pos.width, 240),
+          }}
+          className="z-[100] rounded-lg border bg-white shadow-lg py-1 max-h-64 overflow-y-auto scrollbar-transparent"
+        >
+          <button
+            type="button"
+            onClick={() => { onChange(0); setOpen(false) }}
+            className={cn(
+              'w-full px-3 py-2 text-left text-sm italic transition-colors flex items-center justify-between',
+              value === 0 ? 'bg-accent/10 text-accent' : 'text-muted-foreground hover:bg-zinc-100',
+            )}
+          >
+            <span>{emptyLabel}</span>
+          </button>
+          {options.length > 0 && <div className="my-1 border-t" />}
+          {options.map((o) => {
+            const active = o.id === value
+            return (
+              <button
+                key={o.id}
+                type="button"
+                onClick={() => { onChange(o.id); setOpen(false) }}
+                className={cn(
+                  'w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors',
+                  active ? 'bg-accent/10 text-accent' : 'hover:bg-zinc-100',
+                )}
+              >
+                <span className="font-medium truncate">{o.primary}</span>
+                {o.secondary && (
+                  <span className="text-xs text-muted-foreground truncate">{o.secondary}</span>
+                )}
+              </button>
+            )
+          })}
+        </div>,
+        document.body,
+      )}
+    </div>
+  )
+}
+
+// ── CommandeSelect (styled N° commande dropdown) ─────────
+// Popover-style single-select. Used in both the Nouvelle étude dialog and the
+// edit-mode detail panel so the two places look and behave identically.
+// The button shows the currently-selected commande; opening it reveals a
+// styled list instead of the browser's native dropdown.
+
+function CommandeSelect({
+  value,
+  onChange,
+  commandes,
+  disabled,
+  size = 'default',
+}: {
+  value: string
+  onChange: (v: string) => void
+  commandes: ClientCommandeOption[]
+  disabled?: boolean
+  size?: 'default' | 'sm'
+}) {
+  const [open, setOpen] = useState(false)
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(null)
+
+  // Measure the button's viewport rect whenever the popup opens so we can
+  // portal the menu into <body> at the right spot. Needed because KV's value
+  // wrapper has `truncate` (overflow: hidden) which would clip an in-place
+  // absolute popup, and the sidebar scroll container does the same.
+  const reposition = useCallback(() => {
+    const el = buttonRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    setPos({ left: r.left, top: r.bottom, width: r.width })
+  }, [])
+
+  useEffect(() => {
+    if (!open) return
+    reposition()
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (buttonRef.current?.contains(t)) return
+      if (popoverRef.current?.contains(t)) return
+      setOpen(false)
+    }
+    // Close on scroll of any ancestor — easier than repositioning the portal
+    // in sync with nested scrollable containers. Scrolls *inside* the popover
+    // itself (e.g. the user scrolling the options list) must NOT close it.
+    const onScroll = (e: Event) => {
+      if (popoverRef.current?.contains(e.target as Node)) return
+      setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', reposition)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', reposition)
+    }
+  }, [open, reposition])
+
+  useEffect(() => { if (disabled) setOpen(false) }, [disabled])
+
+  const selected = commandes.find((c) => String(c.numero) === value)
+  const selectedDateFr = selected?.date_commande
+    ? formatHfsqlDate(selected.date_commande)
+    : ''
+  // If the saved value doesn't match any active commande (e.g. it was since
+  // settled/archived), expose it as a leading "stale" option so the user can
+  // still see and re-select it.
+  const hasStale = !!value && !selected
+  const buttonLabel = value === ''
+    ? '— aucun —'
+    : selected
+      ? (selectedDateFr ? `N°${selected.numero} · ${selectedDateFr}` : `N°${selected.numero}`)
+      : `N°${value}`
+
+  const isSm = size === 'sm'
+  return (
+    <div className={cn('relative inline-block align-middle', isSm ? 'w-[220px]' : 'w-full')}>
+      <button
+        ref={buttonRef}
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+        className={cn(
+          'w-full rounded-md border bg-white flex items-center justify-between gap-2 transition-colors',
+          'focus:outline-none focus:ring-2 focus:ring-ring',
+          isSm ? 'h-7 pl-2 pr-1.5 text-sm' : 'h-9 pl-3 pr-2 text-sm',
+          open ? 'border-ring' : 'border-input hover:border-ring/60',
+          disabled && 'bg-zinc-100 text-muted-foreground cursor-not-allowed hover:border-input',
+          value === '' && !disabled && 'text-muted-foreground',
+        )}
+        title={disabled ? 'Sélectionnez d\'abord un client' : undefined}
+      >
+        <span className="truncate text-left">{buttonLabel}</span>
+        <ChevronDown
+          className={cn(
+            'h-4 w-4 flex-shrink-0 text-muted-foreground transition-transform',
+            open && 'rotate-180',
+          )}
+        />
+      </button>
+      {open && !disabled && pos && createPortal(
+        <div
+          ref={popoverRef}
+          style={{
+            position: 'fixed',
+            left: pos.left,
+            top: pos.top + 6,
+            width: Math.max(pos.width, 240),
+          }}
+          className="z-[100] rounded-lg border bg-white shadow-lg py-1 max-h-64 overflow-y-auto scrollbar-transparent"
+        >
+          <button
+            type="button"
+            onClick={() => { onChange(''); setOpen(false) }}
+            className={cn(
+              'w-full px-3 py-2 text-left text-sm italic transition-colors flex items-center justify-between',
+              value === ''
+                ? 'bg-accent/10 text-accent'
+                : 'text-muted-foreground hover:bg-zinc-100',
+            )}
+          >
+            <span>— aucun —</span>
+          </button>
+          {(hasStale || commandes.length > 0) && <div className="my-1 border-t" />}
+          {hasStale && (
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="w-full px-3 py-2 text-left text-sm transition-colors flex items-center justify-between gap-3 bg-accent/10 text-accent"
+            >
+              <span className="font-medium tabular-nums">N°{value}</span>
+              <span className="text-[11px] uppercase tracking-wide text-muted-foreground">soldée</span>
+            </button>
+          )}
+          {commandes.map((c) => {
+            const val = String(c.numero)
+            const dateFr = c.date_commande ? formatHfsqlDate(c.date_commande) : ''
+            const active = val === value
+            return (
+              <button
+                key={c.IDcommande_client}
+                type="button"
+                onClick={() => { onChange(val); setOpen(false) }}
+                className={cn(
+                  'w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors',
+                  active ? 'bg-accent/10 text-accent' : 'hover:bg-zinc-100',
+                )}
+              >
+                <span className="font-medium tabular-nums">N°{c.numero}</span>
+                {dateFr && (
+                  <span className="text-xs text-muted-foreground tabular-nums">{dateFr}</span>
+                )}
+              </button>
+            )
+          })}
+          {commandes.length === 0 && !hasStale && (
+            <div className="px-3 py-2 text-xs text-muted-foreground italic">
+              Aucune commande active
+            </div>
+          )}
+        </div>,
+        document.body,
       )}
     </div>
   )

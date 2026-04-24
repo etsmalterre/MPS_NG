@@ -840,24 +840,104 @@ className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm
 
 ### Select / Dropdown
 
-**MANDATORY**: every `<select>` must include `cursor-pointer` so the hand cursor appears on hover — this is how users recognise a dropdown is clickable. When the select can be disabled, also add `disabled:cursor-not-allowed` so the cursor switches to the forbidden icon instead of staying as a hand.
+Three patterns in order of preference — **do not reach for native `<select>` first**, it looks like Windows 95 next to our cards and its native popup clips wrong inside KV rows (see §11bis for the clipping story).
+
+1. **`SearchableCombobox`** — long lists (30+ items), typed search. Clients, Références, any catalog lookup. Both in edit-mode detail panels (size="sm") and in Nouveau dialogs (default size).
+2. **`PopoverSelect`** — short ID-keyed lists (< 30 items), no search. Sous-traitant, magasins, statuses. Both in detail panels (size="sm") and in dialogs.
+3. **Native `<select>`** — last resort. Only acceptable outside KV rows and outside scrollable panels (e.g. a flat form on a standalone page). Even then, prefer the styled variants for consistency. If you must use native: `cursor-pointer` + `disabled:cursor-not-allowed` (Windows defaults to arrow, not hand).
 
 ```tsx
-// Always-enabled select
-<select className={cn(inputClass, 'cursor-pointer')}>
-
-// Select that may be disabled (e.g. dependent dropdown)
+// Fallback native select if you truly need it:
 <select
-  disabled={...}
   className="w-full h-9 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer disabled:bg-zinc-100 disabled:text-muted-foreground disabled:cursor-not-allowed"
 >
 ```
 
-Do not rely on the browser default — on Windows the default select cursor is an arrow, not a hand, so the class is required.
+Both `SearchableCombobox` and `PopoverSelect` are defined in `apps/web/src/pages/EtudesColoris.tsx` (the canonical reference screen for the pattern); extract to `components/ui/` the first time a second feature needs them.
 
 ### Focus Ring
 
 All inputs: `focus:ring-2 focus:ring-ring` where `--ring: 42 80% 55%` (gold).
+
+---
+
+## 11bis. Styled Dropdowns: `SearchableCombobox` + `PopoverSelect`
+
+Both components render the visible trigger inline (the text input for `SearchableCombobox`, the button for `PopoverSelect`) but mount the **popover list through `createPortal` into `document.body`**, positioned with `position: fixed` using `getBoundingClientRect()` from the trigger. This is non-negotiable in our right-panel detail views — see the clipping story below.
+
+### Why portal — the clipping trap
+
+The right-panel `KV` component wraps values in `<span className="… truncate">`, which expands to `overflow: hidden`. An `absolute z-50 top-full` popover rendered as a child of that span is clipped to the span's box (~button width × button height) and the user sees nothing clickable. The tab container above also has `overflow-hidden`, and its content has `overflow-y-auto`, so there are up to **three** ancestors that clip a non-portal popover. Always portal.
+
+### When to pick which
+
+| Use | Component | Trigger | Why |
+|-----|-----------|---------|-----|
+| 30+ options, user needs to find one fast (clients, references, catalogs) | `SearchableCombobox` | Text input | Typing filters the list live; selected item renders as primary — secondary |
+| < 30 options, no search needed (sous-traitants, magasins, statuses) | `PopoverSelect` | Button + chevron | Cleaner visual; button shows current label, popover lists all options |
+| A status the user cycles through (pending / sent / accepted / refused) | See §29 (detached status footer pill) | — | Not a form field — lives in sidebar footer, not inside a card |
+
+### `SearchableCombobox<T>` — generic, ID-keyed
+
+```tsx
+<SearchableCombobox
+  options={clients ?? []}
+  value={IDclient}                         // 0 means nothing selected
+  onChange={setIDclient}
+  getId={(c) => c.IDclient}
+  getPrimary={(c) => c.nom ?? ''}
+  getSecondary={(c) => c.ville}            // optional
+  placeholder="Rechercher un client"
+  size="sm"                                // omit in dialogs, pass "sm" in right-panel KV rows
+/>
+```
+
+- Typing invalidates the current selection (`onChange(0)`) until the user picks again — prevents stale IDs when the user mistyped.
+- Loading state is supported via the `loading` prop (shows a spinner in the popover).
+- In size="sm", the input is right-aligned at `h-7` capped at 220px to fit KV rows.
+
+### `PopoverSelect` — generic, ID-keyed, no search
+
+```tsx
+<PopoverSelect
+  options={sousTraitants.map((s) => ({ id: s.IDsous_traitant, primary: s.nom ?? '' }))}
+  value={editIDSousTraitant}               // 0 means "none"
+  onChange={setEditIDSousTraitant}
+  emptyLabel="— aucun —"                    // default; customise per field
+  size="sm"                                // same sizing rule as SearchableCombobox
+/>
+```
+
+- Options are `{ id: number; primary: string; secondary?: string }`. The `secondary` is shown muted on the right side of the option row.
+- `id: 0` is the sentinel for "none" — the top of the popover always shows a styled `emptyLabel` row.
+- Set `disabled` + `disabledTitle` when the dropdown depends on another field (e.g. N° commande depends on a client being picked).
+- The button rotates its chevron 180° when open; the selected option gets `bg-accent/10 text-accent`.
+
+### Domain-specific wrappers
+
+For fields with extra business rules, write a thin wrapper instead of inlining the logic at the call site. The canonical example is `CommandeSelect` in `EtudesColoris.tsx` — it wraps `PopoverSelect`-style behavior for N° commande with:
+
+- Tabular-nums `N°<num>` primary label + French-formatted date as secondary.
+- A **stale option row** at the top of the popover if the saved value no longer matches any active commande (e.g. the order was settled after the étude was saved). Rendered with a muted `soldée` tag so the user knows why it's there.
+- Disabled until a client is picked.
+
+Follow that shape when adding other domain dropdowns (e.g. N° devis, N° facture): specialize the wrapper, don't duplicate the portal positioning code.
+
+### Sizing cheatsheet
+
+| Context | Size | Button/input height | Width |
+|---------|------|---------------------|-------|
+| Right-panel KV row, edit mode | `size="sm"` | `h-7` | `w-[220px]` right-aligned |
+| Nouveau dialog / centered form | default | `h-9` | `w-full` |
+| Popover itself (both sizes) | — | `max-h-64 overflow-y-auto` | `max(triggerWidth, 240–260px)` so options stay readable even from a narrow trigger |
+
+### Anti-patterns
+
+- **Do not use native `<select>` inside a `KV` row** — the `truncate` span clips the native popup's hit area inconsistently across browsers and on Windows it looks unstyleable.
+- **Do not absolute-position a popover as a DOM child of the trigger in a scrollable panel** — you'll reinvent the clipping bug. Portal.
+- **Do not re-implement the portal positioning per call site.** If you need a third variant, either extend `PopoverSelect` with new props or write a wrapper (like `CommandeSelect`) — don't copy the `getBoundingClientRect` / scroll-listener block again.
+- **Do not forget to close on scroll.** All our detail panels and dialogs are scrollable; leaving an open portal popover attached to an off-screen trigger looks broken. The existing components already wire this — don't strip it when you copy them.
+- **But do NOT close when the scroll target is inside the popover itself.** The close-on-scroll listener uses `window.addEventListener('scroll', ..., true)` with `capture: true` (needed because `scroll` doesn't bubble), which means scrolls *inside* the popover's own option list also fire it. Always guard: `if (popoverRef.current?.contains(e.target as Node)) return` before closing. Without this, the user can't scroll past the first screen of options — the popover snaps shut on the first wheel tick.
 
 ---
 

@@ -1442,7 +1442,6 @@ async function buildSoumissionPdfData(soumId: number): Promise<SoumissionPdfData
     // the raw coloris reference if the étude's libelle is blank.
     codeMalterre: (ctx.libelleEtude && ctx.libelleEtude.trim())
       || ctx.refFiniColoriReference,
-    commentaire: ctx.commentaireEtude,
     sampleNumbers: parseSampleNumbers(ctx.soumission.observation),
   }
 }

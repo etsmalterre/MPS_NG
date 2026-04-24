@@ -35,7 +35,6 @@ export interface SoumissionPdfData {
   refFini: string | null
   codeClient: string | null         // étude's desig_client (e.g. "0593 LILAS")
   codeMalterre: string | null       // ref_fini_colori.reference (full coloris name)
-  commentaire: string | null
   /** Numbers driving the placeholder grid, parsed from soumission.observation.
    *  Up to 4 entries are rendered; more are truncated. */
   sampleNumbers: number[]
@@ -44,34 +43,6 @@ export interface SoumissionPdfData {
 // ── Styles ───────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  // Optional commentaire block — gold-accented cream box sitting just
-  // above the sample grid.
-  commentaireBox: {
-    flexShrink: 0,
-    marginBottom: 14,
-    padding: 12,
-    backgroundColor: colors.bgCream,
-    borderWidth: 0.75,
-    borderColor: colors.borderStrong,
-    borderStyle: 'solid',
-    borderLeftWidth: 2,
-    borderLeftColor: colors.gold,
-    borderLeftStyle: 'solid',
-    borderRadius: 6,
-  },
-  commentaireTitle: {
-    fontSize: sizes.fontXs,
-    color: colors.primary,
-    fontWeight: 900,
-    letterSpacing: 0.5,
-    marginBottom: 4,
-  },
-  commentaireText: {
-    fontSize: sizes.fontBase,
-    color: colors.text,
-    lineHeight: 1.45,
-  },
-
   // Sample grid — fills the remaining vertical space so it ends just
   // above the footer. Always a 2-column grid so 1-2 samples sit on one
   // row and 3-4 samples sit on two rows at consistent cell sizes.
@@ -180,13 +151,6 @@ export function SoumissionPdf({ data }: { data: SoumissionPdfData }) {
       topRightInfo={infoCard}
       title={`Soumission ${data.numero}`}
     >
-      {data.commentaire && data.commentaire.trim() ? (
-        <View style={styles.commentaireBox} wrap={false}>
-          <Text style={styles.commentaireTitle}>COMMENTAIRE</Text>
-          <Text style={styles.commentaireText}>{data.commentaire.trim()}</Text>
-        </View>
-      ) : null}
-
       <View style={styles.sampleGrid}>
         {samples.length === 0 ? (
           <View style={[styles.sampleCell, styles.sampleCellSingle]}>
