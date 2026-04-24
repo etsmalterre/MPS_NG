@@ -90,27 +90,25 @@ export function verifyUserCookie(raw: string | undefined | null): number | null 
 /** Cookie options used by both login and logout responses. */
 export function cookieOptions(): {
   httpOnly: true
-  sameSite: 'lax' | 'none'
+  sameSite: 'lax'
   path: '/'
-  secure: boolean
+  secure: false
 } {
-  const isProd = process.env.NODE_ENV === 'production'
+  // SameSite=Lax without Secure. The ideal for the WinDev HTML control (which
+  // Chromium treats as a third-party iframe context) is SameSite=None; Secure
+  // so cookies persist across app restarts — but that requires HTTPS, and
+  // `http://mpsng.malterre/` is plain HTTP. With Secure, Chromium silently
+  // drops the cookie on every Set-Cookie, so the picker reappears on every
+  // page load. Lax without Secure is the workable compromise until Caddy
+  // terminates TLS for mpsng.malterre: cookies persist while the WinDev
+  // session is alive; at worst the user re-picks once per WinDev restart.
+  // Flip this back to `sameSite: 'none'` + `secure: true` once the site is
+  // reachable over HTTPS.
   return {
     httpOnly: true,
-    // SameSite=None in production so the cookie persists when the app is
-    // embedded in a third-party context — specifically the WinDev HTML
-    // control, which loads the site inside a WebView2 that the browser
-    // treats as a third-party iframe. Chromium refuses to persist
-    // SameSite=Lax cookies in that context across sessions, so every
-    // WinDev app restart would re-trigger the UserPickerGate. SameSite=None
-    // requires Secure, which we already set in production. In dev we stay
-    // on Lax because plain-HTTP localhost rejects SameSite=None.
-    sameSite: isProd ? 'none' : 'lax',
+    sameSite: 'lax',
     path: '/',
-    // Secure in production so browsers only send the cookie over HTTPS. In
-    // dev we run on plain HTTP localhost, which is allowed to set non-secure
-    // cookies.
-    secure: isProd,
+    secure: false,
   }
 }
 
