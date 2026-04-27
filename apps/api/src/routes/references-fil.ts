@@ -254,18 +254,46 @@ referencesFilRouter.get('/:id', async (req: Request, res: Response) => {
       }
     }
 
-    // Aggregated commandes (pending orders): ref_fil_commande where
-    // parent commande_fil.etat = 0 (en cours). etat is non-accented on
-    // commande_fil.
-    const orderRows = await query<{ quantite: number; IDcommande_fil: number }>(
-      `SELECT rfc.quantite, rfc.IDcommande_fil FROM ref_fil_commande rfc JOIN commande_fil cf ON rfc.IDcommande_fil = cf.IDcommande_fil WHERE rfc.IDref_fil = ${id} AND cf.etat = 0`,
+    // Commande history: every ref_fil_commande line for this ref, joined to
+    // its parent commande_fil (no etat filter — both en cours and terminée
+    // appear), to fournisseur for display, and to colori_fil for the
+    // ordered variant. Ordered most-recent-first.
+    const orderRows = await query<{
+      IDref_fil_commande: number
+      IDcommande_fil: number
+      quantite: number
+      prix_unitaire: number | null
+      IDcolori_fil: number
+      colori_reference: string | null
+      date_commande: string | null
+      etat_cmd: number
+      IDfournisseur: number
+      fournisseur_nom: string | null
+    }>(
+      `SELECT rfc.IDref_fil_commande, rfc.IDcommande_fil, rfc.quantite, rfc.prix_unitaire, rfc.IDcolori_fil, col.reference AS colori_reference, cmd.date_commande, cmd.etat AS etat_cmd, cmd.IDfournisseur, f.nom AS fournisseur_nom
+       FROM ref_fil_commande rfc
+       JOIN commande_fil cmd ON rfc.IDcommande_fil = cmd.IDcommande_fil
+       LEFT JOIN fournisseur f ON cmd.IDfournisseur = f.IDfournisseur
+       LEFT JOIN colori_fil col ON rfc.IDcolori_fil = col.IDcolori_fil
+       WHERE rfc.IDref_fil = ${id}
+       ORDER BY cmd.date_commande DESC, rfc.IDref_fil_commande DESC`,
     )
-    let commandeTotalKg = 0
-    let commandeLignes = 0
-    for (const r of orderRows) {
-      commandeTotalKg += Number(r.quantite) || 0
-      commandeLignes += 1
-    }
+    const orderRowsFournisseurFixed = await fixEncoding(orderRows, 'fournisseur', 'IDfournisseur', ['fournisseur_nom'])
+    const orderRowsFixed = await fixEncoding(orderRowsFournisseurFixed, 'colori_fil', 'IDcolori_fil', ['colori_reference'])
+    const commandeHistory = orderRowsFixed.map((r) => ({
+      IDref_fil_commande: Number(r.IDref_fil_commande),
+      IDcommande_fil: Number(r.IDcommande_fil),
+      quantite: Number(r.quantite) || 0,
+      prix_unitaire: toNumOrNull(r.prix_unitaire),
+      IDcolori_fil: Number(r.IDcolori_fil) || 0,
+      colori_reference: r.colori_reference ?? null,
+      date_commande: r.date_commande ?? null,
+      etat: Number(r.etat_cmd) || 0,
+      IDfournisseur: Number(r.IDfournisseur) || 0,
+      fournisseur_nom: r.fournisseur_nom ?? null,
+    }))
+    const commandeTotalKg = commandeHistory.reduce((sum, r) => sum + r.quantite, 0)
+    const commandeLignes = commandeHistory.length
 
     // Distinct fournisseurs across all variants (read-only list for sidebar)
     let fournisseurs: Array<{ IDfournisseur: number; nom: string | null }> = []
@@ -291,6 +319,7 @@ referencesFilRouter.get('/:id', async (req: Request, res: Response) => {
       stock_per_variante: stockPerVarianteArr,
       commande_total_kg: commandeTotalKg,
       commande_lignes: commandeLignes,
+      commande_history: commandeHistory,
       fournisseurs,
     })
   } catch (err) {

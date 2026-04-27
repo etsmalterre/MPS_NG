@@ -16,26 +16,23 @@ import {
   Leaf,
   Recycle,
   ChevronDown,
-  Printer,
-  AtSign,
   Package,
   FlaskConical,
   Warehouse,
   ShoppingCart,
   MessageSquare,
-  FileText,
-  Mail,
+  Palette,
   Factory,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { BobineIcon } from '@/components/icons/BobineIcon'
 import { cn } from '@/lib/utils'
 import { apiFetch } from '@/lib/api'
 import { fmtNum } from '@/lib/format'
+import { formatHfsqlDate } from '@/lib/dates'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -85,6 +82,19 @@ interface FournisseurRef {
   nom: string | null
 }
 
+interface CommandeHistoryRow {
+  IDref_fil_commande: number
+  IDcommande_fil: number
+  quantite: number
+  prix_unitaire: number | null
+  IDcolori_fil: number
+  colori_reference: string | null
+  date_commande: string | null
+  etat: number
+  IDfournisseur: number
+  fournisseur_nom: string | null
+}
+
 interface RefFilDetail extends RefFilListRow {
   variantes: Variante[]
   composition: Composition[]
@@ -93,6 +103,7 @@ interface RefFilDetail extends RefFilListRow {
   stock_per_variante: StockPerVariante[]
   commande_total_kg: number
   commande_lignes: number
+  commande_history: CommandeHistoryRow[]
   fournisseurs: FournisseurRef[]
 }
 
@@ -316,8 +327,6 @@ export function FilsReferences() {
   const [autoEditForId, setAutoEditForId] = useState<number | null>(null)
 
   // Placeholder dialogs
-  const [printModalOpen, setPrintModalOpen] = useState(false)
-  const [emailModalOpen, setEmailModalOpen] = useState(false)
   // Delete confirm
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
@@ -505,8 +514,6 @@ export function FilsReferences() {
               setDeleteError(null)
               setDeleteConfirmOpen(true)
             }}
-            onPrint={() => setPrintModalOpen(true)}
-            onEmail={() => setEmailModalOpen(true)}
           />
         }
         detail={
@@ -523,7 +530,16 @@ export function FilsReferences() {
             reportDirty={reportDirty}
           />
         }
-        sidebar={selectedId !== null ? <DetailSidebar detail={detail ?? null} isEditing={isEditing} /> : null}
+        sidebar={
+          selectedId !== null ? (
+            <DetailSidebar
+              detail={detail ?? null}
+              isEditing={isEditing}
+              draft={draft}
+              onDraftChange={setDraft}
+            />
+          ) : null
+        }
         sidebarTitle="Informations"
         hasSelection={selectedId !== null}
         onBack={() =>
@@ -551,55 +567,7 @@ export function FilsReferences() {
           deleteMutation.mutate()
         }}
       />
-      <PlaceholderDialog
-        open={printModalOpen}
-        onClose={() => setPrintModalOpen(false)}
-        title="Imprimer"
-        triggerIcon={Printer}
-        centerIcon={Printer}
-      />
-      <PlaceholderDialog
-        open={emailModalOpen}
-        onClose={() => setEmailModalOpen(false)}
-        title="Envoyer un email"
-        triggerIcon={AtSign}
-        centerIcon={Mail}
-      />
     </>
-  )
-}
-
-// ── Placeholder Dialog (§18 A-bis) ─────────────────────
-
-function PlaceholderDialog({
-  open,
-  onClose,
-  title,
-  triggerIcon: TriggerIcon,
-  centerIcon: CenterIcon,
-}: {
-  open: boolean
-  onClose: () => void
-  title: string
-  triggerIcon: React.ComponentType<{ className?: string }>
-  centerIcon: React.ComponentType<{ className?: string }>
-}) {
-  return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <TriggerIcon className="h-5 w-5 text-accent" />
-            {title}
-          </DialogTitle>
-        </DialogHeader>
-        <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-          <CenterIcon className="h-12 w-12 mb-3 opacity-40" />
-          <p className="text-sm font-medium">En developpement</p>
-          <p className="text-xs mt-1">Cette fonctionnalite sera disponible prochainement.</p>
-        </div>
-      </DialogContent>
-    </Dialog>
   )
 }
 
@@ -684,7 +652,7 @@ function RefFilList({
               </div>
               <div className="flex items-center justify-between gap-2 mt-1 text-[11px] text-muted-foreground">
                 <span className="truncate">
-                  {r.variantes_count} variante{r.variantes_count !== 1 ? 's' : ''} · {r.fournisseurs_count} fournisseur
+                  {r.variantes_count} coloris · {r.fournisseurs_count} fournisseur
                   {r.fournisseurs_count !== 1 ? 's' : ''}
                 </span>
                 {r.prix_kg != null && r.prix_kg > 0 && (
@@ -729,8 +697,6 @@ function DetailHeader({
   onSave,
   isSaving,
   onDelete,
-  onPrint,
-  onEmail,
 }: {
   detail: RefFilDetail | null
   isLoading: boolean
@@ -742,8 +708,6 @@ function DetailHeader({
   onSave: () => void
   isSaving: boolean
   onDelete: () => void
-  onPrint: () => void
-  onEmail: () => void
 }) {
   if (!detail && !isLoading) return null
   return (
@@ -817,12 +781,6 @@ function DetailHeader({
               </>
             ) : (
               <>
-                <Button variant="outline" size="icon" className="h-9 w-9" title="Imprimer" onClick={onPrint}>
-                  <Printer className="h-4 w-4" />
-                </Button>
-                <Button variant="outline" size="icon" className="h-9 w-9" title="Envoyer un email" onClick={onEmail}>
-                  <AtSign className="h-4 w-4" />
-                </Button>
                 <Button variant="gold" size="sm" onClick={onStartEdit}>
                   <Pencil className="h-3.5 w-3.5 mr-1.5" />
                   Modifier
@@ -913,7 +871,6 @@ function DetailMain({
       />
       <StockAggregateCard detail={detail} isEditing={isEditing} />
       <CommandesAggregateCard detail={detail} isEditing={isEditing} />
-      <NotesCard isEditing={isEditing} draft={draft} onDraftChange={onDraftChange} detail={detail} />
     </div>
   )
 }
@@ -1064,7 +1021,7 @@ function CompositionCard({
   reportDirty: (key: string, dirty: boolean) => void
 }) {
   const queryClient = useQueryClient()
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState<CompositionDraft>({ IDmatiere: 0, pourcentage: '', bio: false, recycle: false })
@@ -1433,7 +1390,7 @@ function VariantesCard({
   onMutationSuccess: () => void
   reportDirty: (key: string, dirty: boolean) => void
 }) {
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState<VarianteDraft>(emptyVarianteDraft())
@@ -1535,8 +1492,8 @@ function VariantesCard({
           className="flex flex-row items-center gap-2 p-4 space-y-0 pb-2 cursor-pointer select-none"
           onClick={() => setOpen(!open)}
         >
-          <BobineIcon className="h-4 w-4 text-accent" />
-          <CardTitle className="text-sm font-semibold">Variantes de coloris</CardTitle>
+          <Palette className="h-4 w-4 text-accent" />
+          <CardTitle className="text-sm font-semibold">Coloris</CardTitle>
           {isEditing && (
             <Button
               size="sm"
@@ -1577,11 +1534,16 @@ function VariantesCard({
                       title="Modifier la variante"
                     />
                   ) : (
-                    <div className="group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3 border-l-amber-400/60">
+                    <div
+                      className={cn(
+                        'group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3',
+                        'border-l-amber-400/60',
+                      )}
+                    >
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-2 min-w-0">
                           <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-amber-400/10">
-                            <BobineIcon className="h-3.5 w-3.5 text-amber-600" />
+                            <Palette className="h-3.5 w-3.5 text-amber-600" />
                           </div>
                           <div className="min-w-0">
                             <p className="text-sm font-medium truncate">{v.reference ?? '—'}</p>
@@ -1741,15 +1703,21 @@ function StockAggregateCard({
 }) {
   const byVariante = new Map<number, { total_kg: number; lots: number }>()
   for (const s of detail.stock_per_variante) byVariante.set(s.IDcolori_fil, s)
+  const [open, setOpen] = useState(false)
   return (
     <Card className={cn('card-premium', isEditing && editSectionClass)}>
-      <CardHeader className="flex flex-row items-center gap-2 p-4 space-y-0 pb-2">
+      <CardHeader
+        className="flex flex-row items-center gap-2 p-4 space-y-0 pb-2 cursor-pointer select-none"
+        onClick={() => setOpen(!open)}
+      >
         <Warehouse className="h-4 w-4 text-accent" />
         <CardTitle className="text-sm font-semibold">Stock actuel</CardTitle>
         <Badge variant="secondary" className="text-xs ml-auto">
           {detail.stock_lots} lot{detail.stock_lots !== 1 ? 's' : ''}
         </Badge>
+        <ChevronDown className={cn('h-4 w-4 text-muted-foreground transition-transform', open && 'rotate-180')} />
       </CardHeader>
+      {open && (
       <CardContent className="pb-4">
         {detail.stock_lots === 0 ? (
           <p className="text-sm text-muted-foreground italic">Aucun stock en cours</p>
@@ -1785,6 +1753,7 @@ function StockAggregateCard({
           </>
         )}
       </CardContent>
+      )}
     </Card>
   )
 }
@@ -1798,74 +1767,85 @@ function CommandesAggregateCard({
   detail: RefFilDetail
   isEditing: boolean
 }) {
+  const [open, setOpen] = useState(false)
+  const history = detail.commande_history ?? []
   return (
     <Card className={cn('card-premium', isEditing && editSectionClass)}>
-      <CardHeader className="flex flex-row items-center gap-2 p-4 space-y-0 pb-2">
+      <CardHeader
+        className="flex flex-row items-center gap-2 p-4 space-y-0 pb-2 cursor-pointer select-none"
+        onClick={() => setOpen(!open)}
+      >
         <ShoppingCart className="h-4 w-4 text-accent" />
-        <CardTitle className="text-sm font-semibold">Commandes en cours</CardTitle>
+        <CardTitle className="text-sm font-semibold">Historique commandes</CardTitle>
         <Badge variant="secondary" className="text-xs ml-auto">
           {detail.commande_lignes} ligne{detail.commande_lignes !== 1 ? 's' : ''}
         </Badge>
+        <ChevronDown className={cn('h-4 w-4 text-muted-foreground transition-transform', open && 'rotate-180')} />
       </CardHeader>
-      <CardContent className="pb-4">
-        {detail.commande_lignes === 0 ? (
-          <p className="text-sm text-muted-foreground italic">Aucune commande en cours</p>
-        ) : (
-          <div className="flex items-baseline justify-between">
-            <span className="text-xs text-muted-foreground">Total commandé</span>
-            <a
-              href="/fils/commandes"
-              className="text-lg font-semibold tabular-nums hover:text-accent transition-colors"
-            >
-              {fmtNum(detail.commande_total_kg, 1)} kg
-            </a>
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  )
-}
-
-// ── Notes Card ─────────────────────────────────────────
-
-function NotesCard({
-  isEditing,
-  draft,
-  onDraftChange,
-  detail,
-}: {
-  isEditing: boolean
-  draft: HeaderDraft
-  onDraftChange: (d: HeaderDraft) => void
-  detail: RefFilDetail
-}) {
-  return (
-    <Card className={cn('card-premium', isEditing && editSectionClass)}>
-      <CardHeader className="flex flex-row items-center gap-2 p-4 space-y-0 pb-2">
-        <FileText className="h-4 w-4 text-accent" />
-        <CardTitle className="text-sm font-semibold">Notes</CardTitle>
-      </CardHeader>
-      <CardContent className="pb-4">
-        {isEditing ? (
-          <textarea
-            value={draft.commentaire}
-            onChange={(e) => onDraftChange({ ...draft, commentaire: e.target.value })}
-            rows={4}
-            className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
-          />
-        ) : detail.commentaire?.trim() ? (
-          <p className="text-sm text-muted-foreground whitespace-pre-line">{detail.commentaire}</p>
-        ) : (
-          <p className="text-sm text-muted-foreground italic">Aucune note</p>
-        )}
-      </CardContent>
+      {open && (
+        <CardContent className="pb-4">
+          {history.length === 0 ? (
+            <p className="text-sm text-muted-foreground italic">Aucune commande</p>
+          ) : (
+            <>
+              <div className="flex items-baseline justify-between mb-3">
+                <span className="text-xs text-muted-foreground">Total commandé</span>
+                <span className="text-lg font-semibold tabular-nums">{fmtNum(detail.commande_total_kg, 1)} kg</span>
+              </div>
+              <div className="space-y-1.5">
+                {history.map((h) => (
+                  <a
+                    key={h.IDref_fil_commande}
+                    href={`/fils/commandes?id=${h.IDcommande_fil}`}
+                    className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-accent/5 transition-colors text-sm"
+                  >
+                    <span className="tabular-nums text-muted-foreground flex-shrink-0">
+                      N°{h.IDcommande_fil}
+                    </span>
+                    <span className="text-xs text-muted-foreground tabular-nums flex-shrink-0">
+                      {h.date_commande ? formatHfsqlDate(h.date_commande) : '—'}
+                    </span>
+                    <span className="truncate flex-1">
+                      {h.fournisseur_nom ?? '—'}
+                      {h.colori_reference && (
+                        <span className="text-muted-foreground"> · {h.colori_reference}</span>
+                      )}
+                    </span>
+                    {h.etat === 1 && (
+                      <Badge variant="secondary" className="text-[10px] py-0 px-1.5 flex-shrink-0">
+                        Terminée
+                      </Badge>
+                    )}
+                    <span className="text-xs tabular-nums flex-shrink-0">
+                      {fmtNum(h.quantite, 0)} kg
+                      {h.prix_unitaire != null && h.prix_unitaire > 0 && (
+                        <span className="text-muted-foreground"> · {fmtNum(h.prix_unitaire, 2)} €/kg</span>
+                      )}
+                    </span>
+                  </a>
+                ))}
+              </div>
+            </>
+          )}
+        </CardContent>
+      )}
     </Card>
   )
 }
 
 // ── Right Panel: Sidebar ───────────────────────────────
 
-function DetailSidebar({ detail, isEditing }: { detail: RefFilDetail | null; isEditing: boolean }) {
+function DetailSidebar({
+  detail,
+  isEditing,
+  draft,
+  onDraftChange,
+}: {
+  detail: RefFilDetail | null
+  isEditing: boolean
+  draft: HeaderDraft
+  onDraftChange: (d: HeaderDraft) => void
+}) {
   if (!detail) {
     return (
       <div className="w-96 flex-shrink-0 rounded-xl border flex items-center justify-center bg-zinc-100/80">
@@ -1875,9 +1855,14 @@ function DetailSidebar({ detail, isEditing }: { detail: RefFilDetail | null; isE
   }
   return (
     <div className="w-96 flex-shrink-0 rounded-xl border flex flex-col overflow-hidden bg-zinc-100/80">
-      <div className="flex items-center gap-2 px-4 py-3 border-b bg-zinc-200/50 rounded-t-xl">
-        <Info className="h-4 w-4 text-accent" />
-        <h2 className="text-sm font-semibold">Informations</h2>
+      <div className="flex border-b p-1 gap-1 rounded-t-xl bg-zinc-200/50">
+        <button
+          type="button"
+          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-md transition-colors bg-accent text-accent-foreground shadow-sm"
+        >
+          <Info className="h-3.5 w-3.5" />
+          Informations
+        </button>
       </div>
       <div className="flex-1 overflow-y-auto p-3 space-y-3 scrollbar-transparent">
         <div
@@ -1926,6 +1911,26 @@ function DetailSidebar({ detail, isEditing }: { detail: RefFilDetail | null; isE
                 </a>
               ))}
             </div>
+          )}
+        </div>
+        <div
+          className={cn(
+            'p-3 rounded-lg border bg-card shadow-sm space-y-2',
+            isEditing && editSectionClass,
+          )}
+        >
+          <p className="text-xs font-semibold text-muted-foreground">Notes</p>
+          {isEditing ? (
+            <textarea
+              value={draft.commentaire}
+              onChange={(e) => onDraftChange({ ...draft, commentaire: e.target.value })}
+              rows={4}
+              className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+            />
+          ) : detail.commentaire?.trim() ? (
+            <p className="text-sm text-muted-foreground whitespace-pre-line">{detail.commentaire}</p>
+          ) : (
+            <p className="text-sm text-muted-foreground italic">Aucune note</p>
           )}
         </div>
       </div>
