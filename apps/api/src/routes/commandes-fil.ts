@@ -969,12 +969,19 @@ commandesFilRouter.delete('/:commandeId/lignes/:ligneId/stock/:stockId', async (
 // ── Documents (GED) ─────────────────────────────────────
 //
 // Documents attached to a commande_fil live in the shared `ged` table with a
-// polymorphic reverse-link: `IDreference = IDcommande_fil` AND both
-// `IDcommande_client` and `IDcommande_sous_traitant` equal 0. There is no
-// dedicated asso table — the same `ged` row is also used for other parents
-// (client commandes, sous-traitant commandes, references, etc.) depending on
-// which column is set. Per-lot linkage (e.g. a GOTS cert attached to specific
-// lots within the order) is handled separately via `stock_fil_ged`.
+// polymorphic reverse-link: `IDreference = IDcommande_fil`. The discriminator
+// is `IDtype_doc`. A single `ged` row may be shared across multiple parents
+// (e.g. a GOTS cert attached simultaneously to a fournisseur commande, a
+// client commande, and a sous-traitant commande in the same chain) — so we
+// must NOT filter on `IDcommande_client = 0 AND IDcommande_sous_traitant = 0`,
+// which silently hid every shared row from the legacy data. Instead we
+// whitelist the IDtype_doc values whose IDreference points at commande_fil.
+// Per-lot linkage (a doc attached to specific lots within the order) is
+// handled separately via `stock_fil_ged`.
+
+// IDtype_doc values where `ged.IDreference` points at commande_fil:
+//   1 = facture fil, 5 = certificat de transaction GOTS, 6 = bl fournisseur.
+const COMMANDE_FIL_DOC_TYPES = '1, 5, 6'
 
 commandesFilRouter.get('/:id/documents', async (req: Request, res: Response) => {
   try {
@@ -992,8 +999,7 @@ commandesFilRouter.get('/:id/documents', async (req: Request, res: Response) => 
        FROM ged g
        LEFT JOIN type_doc td ON g.IDtype_doc = td.IDtype_doc
        WHERE g.IDreference = ${id}
-         AND g.IDcommande_client = 0
-         AND g.IDcommande_sous_traitant = 0
+         AND g.IDtype_doc IN (${COMMANDE_FIL_DOC_TYPES})
        ORDER BY g.IDged DESC`
     )
     const fixed = await fixEncoding(rows, 'ged', 'IDged', ['nom', 'commentaire'])
@@ -1056,8 +1062,7 @@ commandesFilRouter.get('/:id/documents/:idged/fichier', async (req: Request, res
       `SELECT fichier FROM ged
        WHERE IDged = ${idged}
          AND IDreference = ${id}
-         AND IDcommande_client = 0
-         AND IDcommande_sous_traitant = 0`
+         AND IDtype_doc IN (${COMMANDE_FIL_DOC_TYPES})`
     )
     if (rows.length === 0) { res.status(404).json({ error: 'Document not found' }); return }
 
@@ -1125,10 +1130,16 @@ commandesFilRouter.post('/:id/documents', upload.single('fichier'), async (req: 
     )
 
     // HFSQL has no RETURNING, so look up the just-inserted row by the highest
-    // IDged for this commande.
+    // IDged for this commande. We also scope by IDcommande_client = 0 and
+    // IDcommande_sous_traitant = 0 — the values we just wrote — to avoid
+    // matching a legacy row that happens to be a higher IDged for the same
+    // IDreference / IDtype_doc.
     const newRows = await query<{ IDged: number }>(
       `SELECT IDged FROM ged
-       WHERE IDreference = ${id} AND IDcommande_client = 0 AND IDcommande_sous_traitant = 0
+       WHERE IDreference = ${id}
+         AND IDcommande_client = 0
+         AND IDcommande_sous_traitant = 0
+         AND IDtype_doc = ${idTypeDoc}
        ORDER BY IDged DESC`
     )
     if (newRows.length === 0) { res.status(500).json({ error: 'Insert lookup failed' }); return }
@@ -1161,8 +1172,7 @@ commandesFilRouter.put('/:id/documents/:idged', upload.single('fichier'), async 
       `SELECT IDged FROM ged
        WHERE IDged = ${idged}
          AND IDreference = ${id}
-         AND IDcommande_client = 0
-         AND IDcommande_sous_traitant = 0`
+         AND IDtype_doc IN (${COMMANDE_FIL_DOC_TYPES})`
     )
     if (scope.length === 0) { res.status(404).json({ error: 'Document not found' }); return }
 
@@ -1199,8 +1209,7 @@ commandesFilRouter.delete('/:id/documents/:idged', async (req: Request, res: Res
       `SELECT IDged FROM ged
        WHERE IDged = ${idged}
          AND IDreference = ${id}
-         AND IDcommande_client = 0
-         AND IDcommande_sous_traitant = 0`
+         AND IDtype_doc IN (${COMMANDE_FIL_DOC_TYPES})`
     )
     if (scope.length === 0) { res.status(404).json({ error: 'Document not found' }); return }
 
@@ -1229,8 +1238,7 @@ async function verifyDocBelongsToCommande(commandeId: number, idged: number): Pr
     `SELECT IDged FROM ged
      WHERE IDged = ${idged}
        AND IDreference = ${commandeId}
-       AND IDcommande_client = 0
-       AND IDcommande_sous_traitant = 0`
+       AND IDtype_doc IN (${COMMANDE_FIL_DOC_TYPES})`
   )
   return rows.length > 0
 }

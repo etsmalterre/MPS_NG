@@ -132,6 +132,7 @@ Full details in `claude_doc/hfsql_odbc.md`. These are the non-negotiable rules f
 - **Accented identifiers are platform-specific**: Linux bridge rejects them entirely (use `sf.*` + ASCII-truncated column names); Windows silently returns 0 rows on `alias.*` in JOINs (use explicit `alias.terminé AS termine`). Branch on `process.platform === 'win32'` via `IS_WINDOWS`. Canonical pattern in `apps/api/src/routes/stock.ts`.
 - **Encoding**: ODBC corrupts accents (é→U+FFFD). Use `fixEncoding()` / `CONVERT(field USING 'UTF-8')` per affected field.
 - **BinMemo `IS NOT NULL`**: unreliable — empty blobs pass. File-serving endpoints return 404 if buffer is empty; UI does HEAD pre-check before rendering iframes.
+- **Polymorphic `ged` rows**: a single `ged` row can be linked to multiple parents at once (e.g. a GOTS cert is shared by the fournisseur commande, client commande, and sous-traitant commande in the same chain). The discriminator is `IDtype_doc`, not which `IDcommande_*` columns are zero. **Never** filter doc lists with `IDcommande_client = 0 AND IDcommande_sous_traitant = 0` — that silently hides every shared legacy row. Whitelist by `IDtype_doc` instead. For commande_fil endpoints: `IDtype_doc IN (1, 5, 6)` (facture fil / certif transaction GOTS / bl fournisseur). Pattern in `apps/api/src/routes/commandes-fil.ts`.
 - **Avoid accents in HFSQL table names and in HFSQL backup folder file names** — both cause "fichier de données est déjà décrit" errors at connection time.
 
 **Connection**: `DRIVER={HFSQL};Server Name=localhost;Server Port=4900;Database=MPS;UID=Admin;PWD=;`
@@ -179,6 +180,14 @@ pnpm dev          # start dev servers
 pnpm build        # build all packages
 pnpm test         # run tests
 ```
+
+### First-time setup on a new Windows machine
+
+The factory PC has everything pre-installed; on a fresh machine you also need:
+
+1. **HFSQL Client/Server** running on `localhost:4900` with the `MPS` database.
+2. **HFSQL ODBC driver** — install once via `C:\PC SOFT\WINDEV Suite <year>\Install\ODBC\WX310PACKODBC.exe` (admin required). Without this, the API throws ODBC `IM002` ("Source de données introuvable") on every query and the user picker shows "Impossible de charger la liste".
+3. **`apps/api/.env.development`** with at minimum `PORT=3002`, `CORS_ORIGIN=http://localhost:5174`, `AUTH_COOKIE_SECRET=<32-byte hex>`, `HFSQL_CONNECTION_STRING=DRIVER={HFSQL};Server Name=localhost;Server Port=4900;Database=MPS;UID=Admin;PWD=;`. Gitignored. Gmail send/draft is disabled until `apps/api/secrets/<service-account>.json` exists and `GOOGLE_SERVICE_ACCOUNT_KEY_FILE` points at it.
 
 ### Dev Ports
 
