@@ -980,8 +980,12 @@ commandesFilRouter.delete('/:commandeId/lignes/:ligneId/stock/:stockId', async (
 // handled separately via `stock_fil_ged`.
 
 // IDtype_doc values where `ged.IDreference` points at commande_fil:
-//   1 = facture fil, 5 = certificat de transaction GOTS, 6 = bl fournisseur.
-const COMMANDE_FIL_DOC_TYPES = '1, 5, 6'
+//   1  = facture fil
+//   5  = certificat de transaction GOTS
+//   6  = bl fournisseur
+//   15 = bl fournisseur (legacy variant, no row in `type_doc` — common
+//        in older data, mostly named "ARC" or "PL")
+const COMMANDE_FIL_DOC_TYPES = '1, 5, 6, 15'
 
 commandesFilRouter.get('/:id/documents', async (req: Request, res: Response) => {
   try {
