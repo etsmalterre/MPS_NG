@@ -18,7 +18,12 @@
 #define MAX_COLS 256
 #define MAX_COL_NAME 256
 #define MAX_DATA 65536
-#define MAX_INPUT 1048576
+/* 64 MB — must fit one line of {"sql":"..."}. Binary uploads embed the
+ * blob as a hex literal (x'aabbcc...'), so a 25 MB file produces a ~50 MB
+ * SQL line. Buffers of this size live on the heap (see main); 1 MB used to
+ * truncate any upload over ~500 KB and produce HFSQL "string without end"
+ * errors at the start of the hex literal. */
+#define MAX_INPUT (64 * 1024 * 1024)
 
 static SQLHENV henv = SQL_NULL_HENV;
 static SQLHDBC hdbc = SQL_NULL_HDBC;
@@ -294,8 +299,17 @@ int main(int argc, char *argv[]) {
     printf("{\"status\":\"connected\"}\n");
     fflush(stdout);
 
-    char input[MAX_INPUT];
-    while (fgets(input, sizeof(input), stdin)) {
+    /* Heap allocation — MAX_INPUT is 64 MB and would blow the stack twice. */
+    char *input = malloc(MAX_INPUT);
+    char *sql = malloc(MAX_INPUT);
+    if (!input || !sql) {
+        fprintf(stderr, "hfsql_bridge: malloc failed for input/sql buffers\n");
+        free(input);
+        free(sql);
+        return 1;
+    }
+
+    while (fgets(input, MAX_INPUT, stdin)) {
         /* Remove trailing newline */
         size_t len = strlen(input);
         if (len > 0 && input[len - 1] == '\n') input[len - 1] = '\0';
@@ -310,14 +324,16 @@ int main(int argc, char *argv[]) {
         }
 
         /* Get SQL */
-        char sql[MAX_INPUT];
-        if (json_get_string(input, "sql", sql, sizeof(sql)) != 0) {
+        if (json_get_string(input, "sql", sql, MAX_INPUT) != 0) {
             print_error("Missing 'sql' field");
             continue;
         }
 
         execute_query(sql);
     }
+
+    free(input);
+    free(sql);
 
     if (hdbc != SQL_NULL_HDBC) {
         SQLDisconnect(hdbc);
