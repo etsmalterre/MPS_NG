@@ -21,6 +21,21 @@ import { getUserEmail } from '../lib/user-emails.js'
 
 export const etudesColorisRouter: RouterType = Router()
 
+// HFSQL footgun: the Linux iODBC bridge rejects any accented identifier
+// token in the SQL text (e.g. `archivé`), so WHERE / ORDER BY referencing
+// those columns blows up with "Unexpected word". Branch on platform and
+// post-filter in JS on Linux. The bridge truncates the column name on the
+// way out (last char dropped) so `archivé` arrives as `archiv`. Pattern
+// canonicalised in `apps/api/src/routes/stock.ts`.
+const IS_WINDOWS = process.platform === 'win32'
+
+// Read the `archivé` column off a row regardless of the platform-specific
+// column-name shape (Linux returns it truncated to `archiv`).
+function isArchive(row: Record<string, unknown>): boolean {
+  const v = row.archivé ?? row.archiv ?? 0
+  return Number(v) === 1
+}
+
 // ── Types ────────────────────────────────────────────────
 
 type EtudeStatut = 1 | 2 | 3 | 4 // 1=attente labo · 2=soumis au client · 3=accepté · 4=annulé
@@ -1743,12 +1758,20 @@ etudesColorisRouter.get('/soumissions/:soumId/envois', async (req: Request, res:
 
 etudesColorisRouter.get('/lookups/clients', async (_req: Request, res: Response) => {
   try {
-    const rows = await query<{ IDclient: number; nom: string | null }>(
-      `SELECT IDclient, nom FROM client
-       WHERE est_visible = 1 AND archivé = 0
-       ORDER BY nom`,
-    )
-    const fixed = await fixEncoding(rows, 'client', 'IDclient', ['nom'])
+    const sql = IS_WINDOWS
+      ? `SELECT IDclient, nom FROM client
+         WHERE est_visible = 1 AND archivé = 0
+         ORDER BY nom`
+      : `SELECT * FROM client
+         WHERE est_visible = 1
+         ORDER BY nom`
+    const rows = await query<Record<string, unknown>>(sql)
+    const visible = IS_WINDOWS ? rows : rows.filter((r) => !isArchive(r))
+    const shaped = visible.map((r) => ({
+      IDclient: Number(r.IDclient),
+      nom: (r.nom ?? null) as string | null,
+    }))
+    const fixed = await fixEncoding(shaped, 'client', 'IDclient', ['nom'])
     res.json(fixed.filter((r: any) => r.nom && String(r.nom).trim().length > 0))
   } catch (err) {
     console.error('Error fetching clients lookup:', err)
@@ -1758,12 +1781,20 @@ etudesColorisRouter.get('/lookups/clients', async (_req: Request, res: Response)
 
 etudesColorisRouter.get('/lookups/refs-fini', async (_req: Request, res: Response) => {
   try {
-    const rows = await query<{ IDref_fini: number; reference: string | null; designation: string | null }>(
-      `SELECT IDref_fini, reference, designation FROM ref_fini
-       WHERE archivé = 0
-       ORDER BY reference`,
-    )
-    const fixed = await fixEncoding(rows, 'ref_fini', 'IDref_fini', ['reference', 'designation'])
+    const sql = IS_WINDOWS
+      ? `SELECT IDref_fini, reference, designation FROM ref_fini
+         WHERE archivé = 0
+         ORDER BY reference`
+      : `SELECT * FROM ref_fini
+         ORDER BY reference`
+    const rows = await query<Record<string, unknown>>(sql)
+    const visible = IS_WINDOWS ? rows : rows.filter((r) => !isArchive(r))
+    const shaped = visible.map((r) => ({
+      IDref_fini: Number(r.IDref_fini),
+      reference: (r.reference ?? null) as string | null,
+      designation: (r.designation ?? null) as string | null,
+    }))
+    const fixed = await fixEncoding(shaped, 'ref_fini', 'IDref_fini', ['reference', 'designation'])
     res.json(fixed.filter((r: any) => r.reference && String(r.reference).trim().length > 0))
   } catch (err) {
     console.error('Error fetching refs-fini lookup:', err)
@@ -1778,19 +1809,25 @@ etudesColorisRouter.get('/lookups/client-commandes', async (req: Request, res: R
   try {
     const client = parseInt(String(req.query.client ?? ''), 10)
     if (isNaN(client) || client <= 0) { res.json([]); return }
-    const rows = await query<{
-      IDcommande_client: number
-      numero: number
-      ref_client: string | null
-      date_commande: string | null
-    }>(
-      `SELECT IDcommande_client, numero, ref_client, date_commande
-       FROM commande_client
-       WHERE IDclient = ${client}
-         AND est_soldee = 0
-         AND archivé = 0
-       ORDER BY date_commande DESC, IDcommande_client DESC`,
-    )
+    const sql = IS_WINDOWS
+      ? `SELECT IDcommande_client, numero, ref_client, date_commande
+         FROM commande_client
+         WHERE IDclient = ${client}
+           AND est_soldee = 0
+           AND archivé = 0
+         ORDER BY date_commande DESC, IDcommande_client DESC`
+      : `SELECT * FROM commande_client
+         WHERE IDclient = ${client}
+           AND est_soldee = 0
+         ORDER BY date_commande DESC, IDcommande_client DESC`
+    const rawRows = await query<Record<string, unknown>>(sql)
+    const visible = IS_WINDOWS ? rawRows : rawRows.filter((r) => !isArchive(r))
+    const rows = visible.map((r) => ({
+      IDcommande_client: Number(r.IDcommande_client),
+      numero: Number(r.numero) || 0,
+      ref_client: (r.ref_client ?? null) as string | null,
+      date_commande: (r.date_commande ?? null) as string | null,
+    }))
     const fixed = await fixEncoding(rows, 'commande_client', 'IDcommande_client', ['ref_client'])
     res.json(
       (fixed as any[]).map((r) => ({
