@@ -985,7 +985,8 @@ commandesFilRouter.delete('/:commandeId/lignes/:ligneId/stock/:stockId', async (
 //   6  = bl fournisseur
 //   15 = bl fournisseur (legacy variant, no row in `type_doc` — common
 //        in older data, mostly named "ARC" or "PL")
-const COMMANDE_FIL_DOC_TYPES = '1, 5, 6, 15'
+//   29 = bl fil
+const COMMANDE_FIL_DOC_TYPES = '1, 5, 6, 15, 29'
 
 commandesFilRouter.get('/:id/documents', async (req: Request, res: Response) => {
   try {
