@@ -32,8 +32,7 @@ export interface DemandeEtudeColorisPdfData {
   clientNom: string | null
   refFini: string | null
   refFiniDesignation: string | null
-  codeClient: string | null         // coloris reference, e.g. "0593 LILAS"
-  libelle: string | null
+  libelle: string | null            // étude libellé / coloris title, e.g. "0405 vert amande"
   commentaire: string | null
 }
 
@@ -140,7 +139,7 @@ function buildInfoCard(data: DemandeEtudeColorisPdfData): MetadataCardData {
         value: [data.refFini, data.refFiniDesignation].filter(Boolean).join(' — ') || '—',
       },
       { icon: 'user', label: 'Client', value: data.clientNom || '—' },
-      { icon: 'card', label: 'Code client', value: data.codeClient || '—' },
+      { icon: 'card', label: 'Code coloris', value: data.libelle || '—' },
     ],
   }
 }

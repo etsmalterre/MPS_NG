@@ -545,7 +545,6 @@ async function buildDemandeEtudeColorisData(
     clientNom: (detail.client_nom as string | null) ?? null,
     refFini: (detail.ref_fini_reference as string | null) ?? null,
     refFiniDesignation: (detail.ref_fini_designation as string | null) ?? null,
-    codeClient: (detail.desig_client as string | null) ?? null,
     libelle: (detail.libelle as string | null) ?? null,
     commentaire: (detail.commentaire as string | null) ?? null,
   }
