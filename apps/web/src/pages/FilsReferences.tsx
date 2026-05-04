@@ -667,7 +667,7 @@ function RefFilList({
         <span>
           {refs.length} référence{refs.length !== 1 ? 's' : ''}
         </span>
-        {isEditing && (
+        {!isEditing && (
           <Button
             size="sm"
             variant="ghost"

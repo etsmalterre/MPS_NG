@@ -269,7 +269,7 @@ function EntrepriseList({ entreprises, isLoading, isError, error, selectedId, on
       </div>
       <div className="p-3 border-t text-xs text-muted-foreground flex items-center justify-between rounded-b-lg bg-zinc-200/50">
         <span>{entreprises.length} entreprise{entreprises.length !== 1 ? 's' : ''}</span>
-        {isEditing && (
+        {!isEditing && (
           <Button size="sm" variant="ghost" onClick={onNew} disabled={isCreating} className="text-accent hover:text-accent hover:bg-accent/10">
             <Plus className="h-3.5 w-3.5 mr-1" />Nouveau
           </Button>

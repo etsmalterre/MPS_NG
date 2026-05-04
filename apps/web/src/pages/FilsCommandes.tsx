@@ -428,6 +428,7 @@ export function FilsCommandes() {
             statusFilter={statusFilter}
             onStatusFilterChange={handleStatusFilterChange}
             onNew={() => setCreateOpen(true)}
+            isEditing={isEditing}
           />
         }
         detailHeader={
@@ -542,7 +543,7 @@ function CommandeList({
   selectedId, onSelect,
   searchQuery, onSearchChange,
   statusFilter, onStatusFilterChange,
-  onNew,
+  onNew, isEditing,
 }: {
   rows: CommandeListRow[]
   isLoading: boolean
@@ -555,6 +556,7 @@ function CommandeList({
   statusFilter: 'all' | 'en_cours' | 'terminee'
   onStatusFilterChange: (s: 'all' | 'en_cours' | 'terminee') => void
   onNew: () => void
+  isEditing: boolean
 }) {
   return (
     <div className="flex flex-col h-full rounded-lg border shadow-sm bg-zinc-100/80">
@@ -654,12 +656,14 @@ function CommandeList({
         })}
       </div>
 
-      {/* Footer with count + Nouveau button */}
+      {/* Footer with count + Nouvelle button */}
       <div className="p-3 border-t text-xs text-muted-foreground flex items-center justify-between rounded-b-lg bg-zinc-200/50">
         <span>{rows.length} commande{rows.length !== 1 ? 's' : ''}</span>
-        <Button size="sm" variant="ghost" onClick={onNew} className="text-accent hover:text-accent hover:bg-accent/10">
-          <Plus className="h-3.5 w-3.5 mr-1" />Nouvelle
-        </Button>
+        {!isEditing && (
+          <Button size="sm" variant="ghost" onClick={onNew} className="text-accent hover:text-accent hover:bg-accent/10">
+            <Plus className="h-3.5 w-3.5 mr-1" />Nouvelle
+          </Button>
+        )}
       </div>
     </div>
   )

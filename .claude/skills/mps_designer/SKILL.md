@@ -291,7 +291,7 @@ Item content:
 ```tsx
 <div className="p-3 border-t text-xs text-muted-foreground flex items-center justify-between rounded-b-lg bg-zinc-200/50">
   <span>{count} entreprise{plural}</span>
-  {isEditing && (
+  {!isEditing && (
     <Button size="sm" variant="ghost" className="text-accent hover:text-accent hover:bg-accent/10">
       <Plus className="h-3.5 w-3.5 mr-1" />Nouveau
     </Button>
@@ -299,7 +299,20 @@ Item content:
 </div>
 ```
 
-"Nouveau" button only visible in edit mode.
+#### "+ Nouveau" button — standard behavior
+
+The new-item button at the bottom of the left list MUST follow this contract on every master-detail screen:
+
+1. **Visibility**: shown only in **view mode** (`{!isEditing && ...}`). Hidden in edit mode.
+   - **Why**: clicking it while editing would silently navigate away and auto-enter edit mode on the new item, losing unsaved changes on the current one. Hiding the button is simpler and more honest than an unsaved-changes guard.
+2. **Click behavior** — pick one based on what initial data the entity needs:
+   - **Inline-create** (default, used by Entreprises, FilsGestion, FilsReferences): POST a placeholder row (`nom: 'Nouvelle entreprise'`, sensible defaults) directly. No dialog.
+   - **Modal** (used when the row needs real data up front — FilsCommandes asks for fournisseur+date+payment+addresses; EtudesColoris asks for client+ref fini+sous-traitant+libellé): a small focused dialog with only the fields needed to make the row meaningful.
+3. **After save** (both paths): `setSelectedId(newId)` + auto-enter edit mode (typically via an `autoEditForId` effect that fires once after the detail loads).
+
+**Exception**: table-centric screens (`FilsStock`) put the button in the header, gate it on permissions instead of edit mode, and may skip auto-edit. The exception is the table layout itself, not a license to deviate elsewhere.
+
+**Placeholder screens**: when implementing a not-yet-built menu entry (Marketing, Transferts, Tombé Métier, etc.), default to the standard above from day one — don't reinvent.
 
 ### Empty/Loading States
 

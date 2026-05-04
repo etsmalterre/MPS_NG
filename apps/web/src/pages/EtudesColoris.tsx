@@ -811,15 +811,17 @@ function EtudeList({
         <span>
           {etudes.length} / {totalCount} étude{totalCount !== 1 ? 's' : ''}
         </span>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="text-accent hover:text-accent hover:bg-accent/10"
-          onClick={onNewClick}
-        >
-          <Plus className="h-3.5 w-3.5 mr-1" />
-          Nouveau
-        </Button>
+        {!isEditing && (
+          <Button
+            size="sm"
+            variant="ghost"
+            className="text-accent hover:text-accent hover:bg-accent/10"
+            onClick={onNewClick}
+          >
+            <Plus className="h-3.5 w-3.5 mr-1" />
+            Nouveau
+          </Button>
+        )}
       </div>
     </div>
   )

@@ -164,6 +164,8 @@ Full details in `claude_doc/hfsql_odbc.md`. These are the non-negotiable rules f
 
 **Status management**: user-controlled primary state goes to the **sidebar footer pill** (not a header badge), regardless of how many values it can take. Binary → split toggle button (`FilsCommandes`); 3+ values → menu button + popover (`EtudesColoris`). See `mps_designer §29`.
 
+**"+ Nouveau" button**: at the bottom of every master-detail left list, visible **only in view mode** (`{!isEditing && ...}`). Click either inline-creates a placeholder row (Entreprises, FilsGestion, FilsReferences) or opens a small initial-data modal (FilsCommandes, EtudesColoris) — pick based on whether the row needs real data up front. After save: `setSelectedId(newId)` + auto-enter edit mode. `FilsStock` is exempt (table layout, header button, permission-gated). See `mps_designer §5`.
+
 **Sidebar logo**: `public/logo-full.png` (expanded, `h-10 mx-auto`) / `public/logo-small.png` (collapsed, `h-8 mx-auto`).
 
 ## Conventions
