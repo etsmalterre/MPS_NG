@@ -173,9 +173,11 @@ referencesFilRouter.get('/:id', async (req: Request, res: Response) => {
     ) as any
     refNormalised = refFixed[0]
 
-    // Variantes — colori_fil is all ASCII
+    // Variantes — colori_fil is all ASCII. NB: colori_fil.IDfournisseur is
+    // misleading legacy data (see project memory). Real fournisseur↔coloris
+    // links live in asso_colorisfil_frs and are loaded below.
     const varianteRows = await query(
-      `SELECT IDcolori_fil, IDref_fil, reference, prix_kg, stock_mini, commentaire, IDfournisseur FROM colori_fil WHERE IDref_fil = ${id} ORDER BY reference`,
+      `SELECT IDcolori_fil, IDref_fil, reference, prix_kg, stock_mini, commentaire FROM colori_fil WHERE IDref_fil = ${id} ORDER BY reference`,
     )
     const variantesFixed = await fixEncoding(
       varianteRows as any,
@@ -184,24 +186,46 @@ referencesFilRouter.get('/:id', async (req: Request, res: Response) => {
       ['reference', 'commentaire'],
     )
 
-    // For each variante, count linked fournisseurs via asso_colorisfil_frs
+    // For each variante, load the linked fournisseurs via asso_colorisfil_frs
+    // (one batched query joined against fournisseur for the names).
     const coloriIds = variantesFixed.map((v: any) => Number(v.IDcolori_fil)).filter(Boolean)
-    const fournisseursByVariante = new Map<number, number>()
+    const fournisseursByVariante = new Map<
+      number,
+      Array<{ IDfournisseur: number; nom: string | null }>
+    >()
     if (coloriIds.length > 0) {
-      const rows2 = await query<{ IDcolori_fil: number; n: number }>(
-        `SELECT IDcolori_fil, COUNT(*) AS n FROM asso_colorisfil_frs WHERE IDcolori_fil IN (${coloriIds.join(',')}) GROUP BY IDcolori_fil`,
+      const linkRows = await query<{
+        IDcolori_fil: number
+        IDfournisseur: number
+        nom: string | null
+      }>(
+        `SELECT a.IDcolori_fil, a.IDfournisseur, f.nom
+           FROM asso_colorisfil_frs a
+           JOIN fournisseur f ON a.IDfournisseur = f.IDfournisseur
+          WHERE a.IDcolori_fil IN (${coloriIds.join(',')})
+          ORDER BY f.nom`,
       )
-      for (const r of rows2) fournisseursByVariante.set(Number(r.IDcolori_fil), Number(r.n))
+      const fixedLinks = await fixEncoding(linkRows as any, 'fournisseur', 'IDfournisseur', ['nom'])
+      for (const r of fixedLinks as any[]) {
+        const key = Number(r.IDcolori_fil)
+        const arr = fournisseursByVariante.get(key) ?? []
+        arr.push({ IDfournisseur: Number(r.IDfournisseur), nom: r.nom ?? null })
+        fournisseursByVariante.set(key, arr)
+      }
     }
-    const variantes = variantesFixed.map((v: any) => ({
-      IDcolori_fil: Number(v.IDcolori_fil),
-      IDref_fil: Number(v.IDref_fil),
-      reference: v.reference ?? null,
-      prix_kg: toNumOrNull(v.prix_kg),
-      stock_mini: toNumOrNull(v.stock_mini),
-      commentaire: v.commentaire ?? null,
-      fournisseurs_count: fournisseursByVariante.get(Number(v.IDcolori_fil)) ?? 0,
-    }))
+    const variantes = variantesFixed.map((v: any) => {
+      const frs = fournisseursByVariante.get(Number(v.IDcolori_fil)) ?? []
+      return {
+        IDcolori_fil: Number(v.IDcolori_fil),
+        IDref_fil: Number(v.IDref_fil),
+        reference: v.reference ?? null,
+        prix_kg: toNumOrNull(v.prix_kg),
+        stock_mini: toNumOrNull(v.stock_mini),
+        commentaire: v.commentaire ?? null,
+        fournisseurs_count: frs.length,
+        fournisseurs: frs,
+      }
+    })
 
     // Composition — asso_fil_matiere (accented columns). SELECT * and normalise.
     const assoRows = await query(`SELECT * FROM asso_fil_matiere WHERE IDRef_fil = ${id}`)
@@ -480,8 +504,10 @@ referencesFilRouter.post('/:id/variantes', async (req: Request, res: Response) =
       return
     }
     const b = parsed.data
+    // NB: colori_fil.IDfournisseur is deprecated legacy metadata — fournisseur
+    // links go into asso_colorisfil_frs via /:id/variantes/:coloriId/fournisseurs.
     await query(
-      `INSERT INTO colori_fil (IDref_fil, reference, prix_kg, stock_mini, commentaire, IDfournisseur) VALUES (${id}, '${esc(b.reference)}', ${b.prix_kg ?? 0}, ${b.stock_mini ?? 0}, '${esc(b.commentaire ?? '')}', 0)`,
+      `INSERT INTO colori_fil (IDref_fil, reference, prix_kg, stock_mini, commentaire) VALUES (${id}, '${esc(b.reference)}', ${b.prix_kg ?? 0}, ${b.stock_mini ?? 0}, '${esc(b.commentaire ?? '')}')`,
     )
     // Fetch the new id — match by (IDref_fil, reference) and take the latest
     const rows = await query<{ IDcolori_fil: number }>(
@@ -573,6 +599,98 @@ referencesFilRouter.delete('/:id/variantes/:coloriId', async (req: Request, res:
     res.status(500).json({ error: 'Internal server error' })
   }
 })
+
+// ──────────────────────────────────────────────────────────
+// VARIANTE ↔ FOURNISSEUR links (asso_colorisfil_frs)
+// ──────────────────────────────────────────────────────────
+// The M:N join between colori_fil and fournisseur. POST is idempotent
+// (skips if already linked). DELETE is scoped to the parent ref so a
+// stray coloriId from another reference can't be touched via this URL.
+
+// Helper: validate that the coloris belongs to the ref AND the fournisseur
+// exists. Returns null on success, or an Express response error on failure.
+async function verifyVarianteFournisseurScope(
+  refId: number,
+  coloriId: number,
+  fournisseurId: number,
+): Promise<{ status: number; error: string } | null> {
+  if (!Number.isFinite(refId) || refId <= 0) return { status: 400, error: 'Invalid ref id' }
+  if (!Number.isFinite(coloriId) || coloriId <= 0) return { status: 400, error: 'Invalid coloris id' }
+  if (!Number.isFinite(fournisseurId) || fournisseurId <= 0) {
+    return { status: 400, error: 'Invalid fournisseur id' }
+  }
+  const variante = await query<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM colori_fil WHERE IDcolori_fil = ${coloriId} AND IDref_fil = ${refId}`,
+  )
+  if (Number(variante[0]?.n ?? 0) === 0) {
+    return { status: 404, error: 'Variante not found for this reference' }
+  }
+  const frs = await query<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM fournisseur WHERE IDfournisseur = ${fournisseurId}`,
+  )
+  if (Number(frs[0]?.n ?? 0) === 0) {
+    return { status: 404, error: 'Fournisseur not found' }
+  }
+  return null
+}
+
+// POST /api/references-fil/:id/variantes/:coloriId/fournisseurs/:fournisseurId
+referencesFilRouter.post(
+  '/:id/variantes/:coloriId/fournisseurs/:fournisseurId',
+  async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id, 10)
+      const coloriId = parseInt(req.params.coloriId, 10)
+      const fournisseurId = parseInt(req.params.fournisseurId, 10)
+
+      const scopeError = await verifyVarianteFournisseurScope(id, coloriId, fournisseurId)
+      if (scopeError) {
+        res.status(scopeError.status).json({ error: scopeError.error })
+        return
+      }
+
+      // Idempotent — skip if the link already exists
+      const existing = await query<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM asso_colorisfil_frs WHERE IDcolori_fil = ${coloriId} AND IDfournisseur = ${fournisseurId}`,
+      )
+      if (Number(existing[0]?.n ?? 0) === 0) {
+        await query(
+          `INSERT INTO asso_colorisfil_frs (IDfournisseur, IDcolori_fil) VALUES (${fournisseurId}, ${coloriId})`,
+        )
+      }
+      res.status(201).json({ ok: true })
+    } catch (err) {
+      console.error('Error linking fournisseur to variante:', err)
+      res.status(500).json({ error: 'Internal server error' })
+    }
+  },
+)
+
+// DELETE /api/references-fil/:id/variantes/:coloriId/fournisseurs/:fournisseurId
+referencesFilRouter.delete(
+  '/:id/variantes/:coloriId/fournisseurs/:fournisseurId',
+  async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id, 10)
+      const coloriId = parseInt(req.params.coloriId, 10)
+      const fournisseurId = parseInt(req.params.fournisseurId, 10)
+
+      const scopeError = await verifyVarianteFournisseurScope(id, coloriId, fournisseurId)
+      if (scopeError) {
+        res.status(scopeError.status).json({ error: scopeError.error })
+        return
+      }
+
+      await query(
+        `DELETE FROM asso_colorisfil_frs WHERE IDcolori_fil = ${coloriId} AND IDfournisseur = ${fournisseurId}`,
+      )
+      res.json({ ok: true })
+    } catch (err) {
+      console.error('Error unlinking fournisseur from variante:', err)
+      res.status(500).json({ error: 'Internal server error' })
+    }
+  },
+)
 
 // ──────────────────────────────────────────────────────────
 // COMPOSITION (asso_fil_matiere) — Windows-only writes

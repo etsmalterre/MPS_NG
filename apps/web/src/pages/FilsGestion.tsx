@@ -27,6 +27,7 @@ import {
   ChevronDown,
   Upload,
   MessageSquare,
+  Palette,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -561,6 +562,24 @@ function DetailMain({ fournisseur, isLoading, hasSelection, isEditing, fournisse
                   {ref.nb_fil != null && ref.nb_fil > 0 && <span>{ref.nb_fil} fil{ref.nb_fil > 1 ? 's' : ''}</span>}
                   {ref.nb_brin != null && ref.nb_brin > 0 && <span>{ref.nb_brin} brin{ref.nb_brin > 1 ? 's' : ''}</span>}
                   <span className="ml-auto">{ref.coloris.length} coloris</span>
+                </div>
+              )}
+              {/* Coloris chips: actual references this fournisseur supplies */}
+              {ref.coloris.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {ref.coloris.map((c, ci) => (
+                    <Badge
+                      key={ci}
+                      variant="secondary"
+                      className="text-[10px] py-0 px-1.5 gap-1"
+                      title={c.colori_prix_kg != null && c.colori_prix_kg > 0
+                        ? `${c.colori_prix_kg} €/kg`
+                        : undefined}
+                    >
+                      <Palette className="h-2.5 w-2.5" />
+                      {c.colori_reference}
+                    </Badge>
+                  ))}
                 </div>
               )}
             </div>

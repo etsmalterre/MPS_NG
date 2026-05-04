@@ -2128,6 +2128,28 @@ onDelete={() => {
 
 Deleting is a valid exit path that implicitly discards. The guard should never ask "save or discard?" when the user is deleting the record entirely.
 
+### 28.5b Hard-block exit on validation failure (`shouldBlockExit` / `onExitBlocked`)
+
+For screens with a hard validation rule that must be satisfied before the user can leave edit mode (e.g. composition must total 100% in `FilsReferences.tsx`), `useUnsavedGuard` accepts two extra optional fields:
+
+```tsx
+const guard = useUnsavedGuard({
+  isDirty,
+  save: async () => { await saveMutation.mutateAsync() },
+  onDiscard: () => cancelEdit(),
+  shouldBlockExit: isEditing && !compositionOk,    // hard-block flag
+  onExitBlocked: () => { showCompositionAlert() }, // surface your own UI
+})
+```
+
+When `shouldBlockExit` is `true`:
+- Route navigation (sidebar clicks, menu changes, browser back) is intercepted; `onExitBlocked` fires and the route is reset — the unsaved-changes dialog does NOT open
+- `guard.guardAction(fn)` calls (left-list selection, back button, drawer close) refuse to run; `onExitBlocked` fires instead
+
+The caller is responsible for surfacing the explanation — typically a one-button `AlertDialog` describing the violated rule. The hook is intentionally agnostic about the UI: it just refuses to exit and lets you tell the user why.
+
+Note that the in-page Annuler / Enregistrer buttons aren't routed through the guard — wrap their handlers with the same validation function used by `onExitBlocked` so they're also blocked. Reference: `FilsReferences.tsx` → `blockExitIfBadComposition`.
+
 ### 28.6 Hooks-before-returns (CLAUDE.md rule reinforced)
 
 `useBlocker` is a React hook called from inside `useUnsavedGuard`. Since pages call `useUnsavedGuard` at their top level, this is fine in normal flow. But: **every hook in the page component (including `useState`, `useRef`, `useMemo`, `useCallback`, `useMutation`, `useQuery`, `useUnsavedGuard`) must be declared before any early `return`**. Violating this crashes production builds with React error #310 (dev builds may appear to work).

@@ -4,6 +4,14 @@ import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { useUnsavedGuard } from '@/hooks/useUnsavedGuard'
 import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import {
   Search,
   Loader2,
   AlertCircle,
@@ -59,6 +67,7 @@ interface Variante {
   stock_mini: number | null
   commentaire: string | null
   fournisseurs_count: number
+  fournisseurs: { IDfournisseur: number; nom: string | null }[]
 }
 
 interface Composition {
@@ -335,6 +344,32 @@ export function FilsReferences() {
   const { data: detail, isLoading: detailLoading } = useRefFilDetail(selectedId)
   const { data: unites } = useUnitesLookup()
 
+  const compositionTotalPct = useMemo(() => {
+    if (!detail) return 0
+    return detail.composition.reduce(
+      (s, c) => s + (Number(c.pourcentage) || 0) * 100,
+      0,
+    )
+  }, [detail])
+  const compositionOk = Math.abs(compositionTotalPct - 100) < 0.01
+
+  const [saveBlockedReason, setSaveBlockedReason] = useState<string | null>(null)
+  useEffect(() => {
+    if (!isEditing && saveBlockedReason) setSaveBlockedReason(null)
+    else if (compositionOk && saveBlockedReason) setSaveBlockedReason(null)
+  }, [compositionOk, isEditing, saveBlockedReason])
+
+  /** Guard for any action that exits edit mode (Enregistrer or Annuler). Returns
+   *  true when blocked — caller should not proceed. Surfaces the alert dialog. */
+  const blockExitIfBadComposition = useCallback((): boolean => {
+    if (compositionOk) return false
+    const fmt = Math.round(compositionTotalPct * 1000) / 1000
+    setSaveBlockedReason(
+      `La composition doit totaliser 100% (actuellement ${fmt}%). Corrigez la composition avant de quitter le mode édition.`,
+    )
+    return true
+  }, [compositionOk, compositionTotalPct])
+
   // Auto-select first on initial load
   useEffect(() => {
     if (refs && refs.length > 0 && selectedId === null) {
@@ -454,6 +489,10 @@ export function FilsReferences() {
       await saveMutation.mutateAsync()
     },
     onDiscard: () => cancelEdit(),
+    shouldBlockExit: isEditing && !compositionOk,
+    onExitBlocked: () => {
+      blockExitIfBadComposition()
+    },
   })
 
   const handleSelect = useCallback(
@@ -505,10 +544,14 @@ export function FilsReferences() {
             onDraftChange={setDraft}
             onStartEdit={startEdit}
             onCancelEdit={() => {
+              if (blockExitIfBadComposition()) return
               setDirtyKeys(new Set())
               cancelEdit()
             }}
-            onSave={() => saveMutation.mutate()}
+            onSave={() => {
+              if (blockExitIfBadComposition()) return
+              saveMutation.mutate()
+            }}
             isSaving={saveMutation.isPending}
             onDelete={() => {
               setDeleteError(null)
@@ -567,6 +610,23 @@ export function FilsReferences() {
           deleteMutation.mutate()
         }}
       />
+      <AlertDialog
+        open={saveBlockedReason !== null}
+        onOpenChange={(o) => { if (!o) setSaveBlockedReason(null) }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertCircle className="h-5 w-5 text-destructive" />
+              Composition incomplète
+            </AlertDialogTitle>
+            <AlertDialogDescription>{saveBlockedReason}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="gap-2 sm:gap-2 mt-4">
+            <Button onClick={() => setSaveBlockedReason(null)}>OK</Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   )
 }
@@ -869,8 +929,8 @@ function DetailMain({
         onMutationSuccess={onMutationSuccess}
         reportDirty={reportDirty}
       />
-      <StockAggregateCard detail={detail} isEditing={isEditing} />
-      <CommandesAggregateCard detail={detail} isEditing={isEditing} />
+      {!isEditing && <StockAggregateCard detail={detail} isEditing={isEditing} />}
+      {!isEditing && <CommandesAggregateCard detail={detail} isEditing={isEditing} />}
     </div>
   )
 }
@@ -1125,9 +1185,12 @@ function CompositionCard({
     setEditingId(c.IDasso_fil_matiere)
     setShowForm(false)
     setErrorMsg(null)
+    // Round to 3 decimals to strip the float32 round-trip artifact
+    // (HFSQL stores REAL, so 0.99 comes back as 0.9900000095).
+    const pctValue = Math.round((c.pourcentage ?? 0) * 100 * 1000) / 1000
     setForm({
       IDmatiere: c.IDmatiere,
-      pourcentage: String((c.pourcentage ?? 0) * 100),
+      pourcentage: String(pctValue),
       bio: !!c.bio,
       recycle: !!c.recycle,
     })
@@ -1162,7 +1225,15 @@ function CompositionCard({
               <Plus className="h-3.5 w-3.5" />
             </Button>
           )}
-          <Badge variant="secondary" className="text-xs ml-auto">
+          {!totalOk && (
+            <Badge
+              className="text-xs ml-auto bg-destructive/10 text-destructive ring-1 ring-destructive/20"
+              title="La composition doit totaliser 100%"
+            >
+              {Math.round(totalPct * 1000) / 1000}%
+            </Badge>
+          )}
+          <Badge variant="secondary" className={cn('text-xs', totalOk && 'ml-auto')}>
             {detail.composition.length}
           </Badge>
           <ChevronDown className={cn('h-4 w-4 text-muted-foreground transition-transform', open && 'rotate-180')} />
@@ -1411,6 +1482,32 @@ function VariantesCard({
     [],
   )
 
+  // Fournisseurs catalog — reused with the FilsGestion query key so the cache
+  // is shared. Loaded only once the card is opened (via `enabled: open`).
+  const { data: allFournisseurs } = useQuery<Array<{ IDfournisseur: number; nom: string | null }>>({
+    queryKey: ['fournisseurs'],
+    queryFn: () => apiFetch('/fournisseurs'),
+    enabled: open && isEditing,
+  })
+
+  const linkFrsMut = useMutation({
+    mutationFn: (args: { coloriId: number; fournisseurId: number }) =>
+      apiFetch(
+        `/references-fil/${refFilId}/variantes/${args.coloriId}/fournisseurs/${args.fournisseurId}`,
+        { method: 'POST' },
+      ),
+    onSuccess: () => onMutationSuccess(),
+  })
+
+  const unlinkFrsMut = useMutation({
+    mutationFn: (args: { coloriId: number; fournisseurId: number }) =>
+      apiFetch(
+        `/references-fil/${refFilId}/variantes/${args.coloriId}/fournisseurs/${args.fournisseurId}`,
+        { method: 'DELETE' },
+      ),
+    onSuccess: () => onMutationSuccess(),
+  })
+
   const resetForm = () => {
     setShowForm(false)
     setEditingId(null)
@@ -1586,6 +1683,72 @@ function VariantesCard({
                         <div className="flex items-start gap-1.5 mt-2 ml-9">
                           <MessageSquare className="h-3 w-3 text-muted-foreground/50 flex-shrink-0 mt-0.5" />
                           <p className="text-[11px] text-muted-foreground italic">{v.commentaire.trim()}</p>
+                        </div>
+                      )}
+                      {(isEditing || v.fournisseurs.length > 0) && (
+                        <div className="mt-2 ml-9 flex flex-wrap items-center gap-1.5">
+                          <Factory className="h-3 w-3 text-muted-foreground/60 flex-shrink-0" />
+                          {v.fournisseurs.length === 0 ? (
+                            <span className="text-[11px] text-muted-foreground italic">
+                              Aucun fournisseur lié
+                            </span>
+                          ) : (
+                            v.fournisseurs.map((f) => (
+                              <Badge
+                                key={f.IDfournisseur}
+                                variant="secondary"
+                                className="text-[10px] py-0 px-1.5 gap-1"
+                              >
+                                {f.nom ?? '—'}
+                                {isEditing && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      unlinkFrsMut.mutate({
+                                        coloriId: v.IDcolori_fil,
+                                        fournisseurId: f.IDfournisseur,
+                                      })
+                                    }
+                                    disabled={unlinkFrsMut.isPending}
+                                    className="ml-0.5 rounded-full hover:bg-destructive/20 hover:text-destructive p-0.5 -mr-1 transition-colors"
+                                    title="Retirer ce fournisseur"
+                                  >
+                                    <X className="h-2.5 w-2.5" />
+                                  </button>
+                                )}
+                              </Badge>
+                            ))
+                          )}
+                          {isEditing && (
+                            <select
+                              value=""
+                              onChange={(e) => {
+                                const fid = parseInt(e.target.value, 10)
+                                if (!fid) return
+                                linkFrsMut.mutate({
+                                  coloriId: v.IDcolori_fil,
+                                  fournisseurId: fid,
+                                })
+                                e.target.value = ''
+                              }}
+                              disabled={linkFrsMut.isPending || !allFournisseurs}
+                              className="h-6 px-1.5 text-[10px] rounded-md border border-input bg-white hover:bg-accent/5 cursor-pointer disabled:cursor-not-allowed"
+                            >
+                              <option value="">+ Ajouter un fournisseur</option>
+                              {(allFournisseurs ?? [])
+                                .filter(
+                                  (f) =>
+                                    !v.fournisseurs.some(
+                                      (linked) => linked.IDfournisseur === f.IDfournisseur,
+                                    ),
+                                )
+                                .map((f) => (
+                                  <option key={f.IDfournisseur} value={f.IDfournisseur}>
+                                    {f.nom ?? `#${f.IDfournisseur}`}
+                                  </option>
+                                ))}
+                            </select>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1865,54 +2028,48 @@ function DetailSidebar({
         </button>
       </div>
       <div className="flex-1 overflow-y-auto p-3 space-y-3 scrollbar-transparent">
-        <div
-          className={cn(
-            'p-3 rounded-lg border bg-card shadow-sm space-y-2',
-            isEditing && editSectionClass,
-          )}
-        >
-          <p className="text-xs font-semibold text-muted-foreground">Statistiques</p>
-          <KV
-            label="Variantes"
-            value={<span className="tabular-nums">{detail.variantes.length}</span>}
-          />
-          <KV
-            label="Fournisseurs distincts"
-            value={<span className="tabular-nums">{detail.fournisseurs.length}</span>}
-          />
-          <KV
-            label="Stock actuel"
-            value={<span className="tabular-nums">{fmtNum(detail.stock_total_kg, 1)} kg</span>}
-          />
-          <KV
-            label="En commande"
-            value={<span className="tabular-nums">{fmtNum(detail.commande_total_kg, 1)} kg</span>}
-          />
-        </div>
-        <div
-          className={cn(
-            'p-3 rounded-lg border bg-card shadow-sm space-y-2',
-            isEditing && editSectionClass,
-          )}
-        >
-          <p className="text-xs font-semibold text-muted-foreground">Fournisseurs</p>
-          {detail.fournisseurs.length === 0 ? (
-            <p className="text-xs text-muted-foreground italic">Aucun fournisseur lié</p>
-          ) : (
-            <div className="space-y-1">
-              {detail.fournisseurs.map((f) => (
-                <a
-                  key={f.IDfournisseur}
-                  href="/fils/gestion"
-                  className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-accent/5 transition-colors text-sm"
-                >
-                  <Factory className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
-                  <span className="truncate">{f.nom ?? '—'}</span>
-                </a>
-              ))}
-            </div>
-          )}
-        </div>
+        {!isEditing && (
+          <div className="p-3 rounded-lg border bg-card shadow-sm space-y-2">
+            <p className="text-xs font-semibold text-muted-foreground">Statistiques</p>
+            <KV
+              label="Variantes"
+              value={<span className="tabular-nums">{detail.variantes.length}</span>}
+            />
+            <KV
+              label="Fournisseurs distincts"
+              value={<span className="tabular-nums">{detail.fournisseurs.length}</span>}
+            />
+            <KV
+              label="Stock actuel"
+              value={<span className="tabular-nums">{fmtNum(detail.stock_total_kg, 1)} kg</span>}
+            />
+            <KV
+              label="En commande"
+              value={<span className="tabular-nums">{fmtNum(detail.commande_total_kg, 1)} kg</span>}
+            />
+          </div>
+        )}
+        {!isEditing && (
+          <div className="p-3 rounded-lg border bg-card shadow-sm space-y-2">
+            <p className="text-xs font-semibold text-muted-foreground">Fournisseurs</p>
+            {detail.fournisseurs.length === 0 ? (
+              <p className="text-xs text-muted-foreground italic">Aucun fournisseur lié</p>
+            ) : (
+              <div className="space-y-1">
+                {detail.fournisseurs.map((f) => (
+                  <a
+                    key={f.IDfournisseur}
+                    href="/fils/gestion"
+                    className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-accent/5 transition-colors text-sm"
+                  >
+                    <Factory className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                    <span className="truncate">{f.nom ?? '—'}</span>
+                  </a>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         <div
           className={cn(
             'p-3 rounded-lg border bg-card shadow-sm space-y-2',

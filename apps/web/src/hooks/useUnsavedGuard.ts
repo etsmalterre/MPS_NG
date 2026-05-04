@@ -6,6 +6,15 @@ interface UseUnsavedGuardOptions {
   isDirty: boolean
   save: () => Promise<void>
   onDiscard?: () => void
+  /**
+   * Optional hard-block flag. When `true`, the guard refuses any exit AND
+   * does NOT open the unsaved-changes dialog — instead it calls
+   * `onExitBlocked` so the caller can surface its own UI (e.g. an alert).
+   * Use this for hard validation that must be fixed before leaving the
+   * current row, regardless of what's in the dirty draft.
+   */
+  shouldBlockExit?: boolean
+  onExitBlocked?: () => void
 }
 
 /**
@@ -22,27 +31,43 @@ interface UseUnsavedGuardOptions {
  * with the deferred navigation. On failure the dialog stays open so the user
  * can retry or abandon.
  */
-export function useUnsavedGuard({ isDirty, save, onDiscard }: UseUnsavedGuardOptions) {
+export function useUnsavedGuard({
+  isDirty,
+  save,
+  onDiscard,
+  shouldBlockExit,
+  onExitBlocked,
+}: UseUnsavedGuardOptions) {
   const [showDialog, setShowDialog] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const pendingActionRef = useRef<(() => void) | null>(null)
 
-  const blocker = useBlocker(isDirty)
+  // Block route navigation whenever the form is dirty OR the caller asks for a
+  // hard block. The effect below decides which UI to surface.
+  const blocker = useBlocker(isDirty || !!shouldBlockExit)
 
   useEffect(() => {
-    if (blocker.state === 'blocked') {
-      setShowDialog(true)
+    if (blocker.state !== 'blocked') return
+    if (shouldBlockExit) {
+      onExitBlocked?.()
+      blocker.reset?.()
+      return
     }
-  }, [blocker.state])
+    setShowDialog(true)
+  }, [blocker.state, shouldBlockExit, onExitBlocked])
 
   const guardAction = useCallback((action: () => void) => {
+    if (shouldBlockExit) {
+      onExitBlocked?.()
+      return
+    }
     if (isDirty) {
       pendingActionRef.current = action
       setShowDialog(true)
     } else {
       action()
     }
-  }, [isDirty])
+  }, [isDirty, shouldBlockExit, onExitBlocked])
 
   const handleAction = useCallback(async (action: UnsavedChangesAction) => {
     const isBlocked = blocker.state === 'blocked'
