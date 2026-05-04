@@ -253,28 +253,29 @@ referencesFilRouter.get('/:id', async (req: Request, res: Response) => {
       matiere_libelle: matiereLabelByld.get(Number(a.IDmatiere)) ?? null,
     }))
 
-    // Aggregated stock (kg) across all variants, in-progress lots only
-    // stock_fil.terminé is accented — we can safely SELECT all stock rows for
-    // this ref_fil and filter termine in JS (same approach as stock.ts list).
+    // Aggregated stock (kg) across all variants, in-progress lots only.
+    // stock_fil.terminé is accented — we SELECT all stock rows for this
+    // ref_fil and filter termine in JS (same approach as stock.ts list).
+    // Always query, even when there are no variantes — stock_fil rows can
+    // exist with IDcolori_fil = 0 or pointing at a since-deleted coloris,
+    // and the aggregate total/lot count must include them.
     let stockTotalKg = 0
     let stockLots = 0
     const stockPerVariante = new Map<number, { total_kg: number; lots: number }>()
-    if (coloriIds.length > 0) {
-      const stockRows = await query(`SELECT * FROM stock_fil WHERE IDref_fil = ${id}`)
-      for (const sr of stockRows) {
-        const r = sr as any
-        const termine = Number(r['terminé'] ?? r.termin ?? 0)
-        if (termine !== 0) continue
-        const coloriId = Number(r.IDcolori_fil)
-        const kg = Number(r.stock) || 0
-        stockTotalKg += kg
-        stockLots += 1
-        if (coloriId > 0) {
-          const cur = stockPerVariante.get(coloriId) ?? { total_kg: 0, lots: 0 }
-          cur.total_kg += kg
-          cur.lots += 1
-          stockPerVariante.set(coloriId, cur)
-        }
+    const stockRows = await query(`SELECT * FROM stock_fil WHERE IDref_fil = ${id}`)
+    for (const sr of stockRows) {
+      const r = sr as any
+      const termine = Number(r['terminé'] ?? r.termin ?? 0)
+      if (termine !== 0) continue
+      const coloriId = Number(r.IDcolori_fil)
+      const kg = Number(r.stock) || 0
+      stockTotalKg += kg
+      stockLots += 1
+      if (coloriId > 0) {
+        const cur = stockPerVariante.get(coloriId) ?? { total_kg: 0, lots: 0 }
+        cur.total_kg += kg
+        cur.lots += 1
+        stockPerVariante.set(coloriId, cur)
       }
     }
 
@@ -334,6 +335,43 @@ referencesFilRouter.get('/:id', async (req: Request, res: Response) => {
       lots: v.lots,
     }))
 
+    // Offer history: every offre_fil row for this ref, joined to fournisseur
+    // and (optional) colori_fil. Newest first by stored DATE (YYYYMMDD).
+    const offreRows = await query<{
+      IDoffre_fil: number
+      IDfournisseur: number
+      fournisseur_nom: string | null
+      IDcolori_fil: number
+      colori_reference: string | null
+      prix: number | null
+      quantite: number | null
+      DATE: string | null
+      observation: string | null
+    }>(
+      `SELECT o.IDoffre_fil, o.IDfournisseur, f.nom AS fournisseur_nom,
+              o.IDcolori_fil, col.reference AS colori_reference,
+              o.prix, o.quantite, o.DATE, o.observation
+         FROM offre_fil o
+         LEFT JOIN fournisseur f ON o.IDfournisseur = f.IDfournisseur
+         LEFT JOIN colori_fil col ON o.IDcolori_fil = col.IDcolori_fil
+        WHERE o.IDref_fil = ${id}
+        ORDER BY o.DATE DESC, o.IDoffre_fil DESC`,
+    )
+    const offreFrsFixed = await fixEncoding(offreRows, 'fournisseur', 'IDfournisseur', ['fournisseur_nom'])
+    const offreColFixed = await fixEncoding(offreFrsFixed, 'colori_fil', 'IDcolori_fil', ['colori_reference'])
+    const offreFinal = await fixEncoding(offreColFixed, 'offre_fil', 'IDoffre_fil', ['observation'])
+    const offres = offreFinal.map((r: any) => ({
+      IDoffre_fil: Number(r.IDoffre_fil),
+      IDfournisseur: Number(r.IDfournisseur) || 0,
+      fournisseur_nom: r.fournisseur_nom ?? null,
+      IDcolori_fil: Number(r.IDcolori_fil) || 0,
+      colori_reference: r.colori_reference ?? null,
+      prix: toNumOrNull(r.prix),
+      quantite: toNumOrNull(r.quantite),
+      date: r.DATE ?? null,
+      observation: r.observation ?? null,
+    }))
+
     res.json({
       ...refNormalised,
       variantes,
@@ -344,6 +382,7 @@ referencesFilRouter.get('/:id', async (req: Request, res: Response) => {
       commande_total_kg: commandeTotalKg,
       commande_lignes: commandeLignes,
       commande_history: commandeHistory,
+      offres,
       fournisseurs,
     })
   } catch (err) {
@@ -691,6 +730,95 @@ referencesFilRouter.delete(
     }
   },
 )
+
+// ──────────────────────────────────────────────────────────
+// OFFRE_FIL — supplier price quotes per ref_fil
+// ──────────────────────────────────────────────────────────
+// Employees record price quotes received from suppliers so the team has a
+// running picture of the market. unite=1 corresponds to €/kg in legacy data
+// and is hardcoded for new rows (only value ever observed in production).
+
+const offreFilBody = z.object({
+  IDfournisseur: z.number().int().positive(),
+  IDcolori_fil: z.number().int().nonnegative().optional(),
+  prix: z.number().nonnegative(),
+  quantite: z.number().nonnegative().optional(),
+  date: z.string().regex(/^\d{8}$/), // YYYYMMDD
+  observation: z.string().max(500).optional(),
+})
+
+// POST /api/references-fil/:id/offres
+referencesFilRouter.post('/:id/offres', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const parsed = offreFilBody.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Validation failed', details: parsed.error.issues })
+      return
+    }
+    const b = parsed.data
+
+    // Scope guard: ref must exist
+    const ref = await query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM ref_fil WHERE IDref_fil = ${id}`,
+    )
+    if (Number(ref[0]?.n ?? 0) === 0) {
+      res.status(404).json({ error: 'Reference not found' })
+      return
+    }
+    // Scope guard: if a coloris is specified, it must belong to this ref
+    if (b.IDcolori_fil && b.IDcolori_fil > 0) {
+      const col = await query<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM colori_fil WHERE IDcolori_fil = ${b.IDcolori_fil} AND IDref_fil = ${id}`,
+      )
+      if (Number(col[0]?.n ?? 0) === 0) {
+        res.status(400).json({ error: 'Coloris does not belong to this reference' })
+        return
+      }
+    }
+    const frs = await query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM fournisseur WHERE IDfournisseur = ${b.IDfournisseur}`,
+    )
+    if (Number(frs[0]?.n ?? 0) === 0) {
+      res.status(404).json({ error: 'Fournisseur not found' })
+      return
+    }
+
+    await query(
+      `INSERT INTO offre_fil (IDref_fil, IDfournisseur, IDcolori_fil, prix, unite, quantite, DATE, observation)
+       VALUES (${id}, ${b.IDfournisseur}, ${b.IDcolori_fil ?? 0}, ${b.prix}, 1, ${b.quantite ?? 0}, '${esc(b.date)}', '${esc(b.observation ?? '')}')`,
+    )
+    res.status(201).json({ ok: true })
+  } catch (err) {
+    console.error('Error creating offre_fil:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// DELETE /api/references-fil/:id/offres/:offreId
+referencesFilRouter.delete('/:id/offres/:offreId', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    const offreId = parseInt(req.params.offreId, 10)
+    if (isNaN(id) || isNaN(offreId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    // Scope guard: offre must belong to this ref
+    const scope = await query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM offre_fil WHERE IDoffre_fil = ${offreId} AND IDref_fil = ${id}`,
+    )
+    if (Number(scope[0]?.n ?? 0) === 0) {
+      res.status(404).json({ error: 'Offre not found for this reference' })
+      return
+    }
+    await query(`DELETE FROM offre_fil WHERE IDoffre_fil = ${offreId}`)
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error deleting offre_fil:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
 
 // ──────────────────────────────────────────────────────────
 // COMPOSITION (asso_fil_matiere) — Windows-only writes

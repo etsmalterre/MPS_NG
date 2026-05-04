@@ -31,6 +31,7 @@ import {
   MessageSquare,
   Palette,
   Factory,
+  Tag,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -104,6 +105,18 @@ interface CommandeHistoryRow {
   fournisseur_nom: string | null
 }
 
+interface OffreFilRow {
+  IDoffre_fil: number
+  IDfournisseur: number
+  fournisseur_nom: string | null
+  IDcolori_fil: number
+  colori_reference: string | null
+  prix: number | null
+  quantite: number | null
+  date: string | null
+  observation: string | null
+}
+
 interface RefFilDetail extends RefFilListRow {
   variantes: Variante[]
   composition: Composition[]
@@ -113,6 +126,7 @@ interface RefFilDetail extends RefFilListRow {
   commande_total_kg: number
   commande_lignes: number
   commande_history: CommandeHistoryRow[]
+  offres: OffreFilRow[]
   fournisseurs: FournisseurRef[]
 }
 
@@ -800,20 +814,6 @@ function DetailHeader({
           ) : (
             <div>
               <h1 className="text-2xl font-heading font-bold tracking-tight truncate">{detail?.reference}</h1>
-              <div className="flex gap-1.5 mt-1 flex-wrap">
-                {!!detail?.bio && (
-                  <Badge className="badge-success text-[10px] py-0 px-1.5 gap-1">
-                    <Leaf className="h-2.5 w-2.5" />
-                    Bio
-                  </Badge>
-                )}
-                {!!detail?.recycle && (
-                  <Badge className="bg-teal-500/10 text-teal-700 ring-1 ring-teal-500/20 text-[10px] py-0 px-1.5 gap-1">
-                    <Recycle className="h-2.5 w-2.5" />
-                    Recyclé
-                  </Badge>
-                )}
-              </div>
             </div>
           )}
         </div>
@@ -931,6 +931,13 @@ function DetailMain({
       />
       {!isEditing && <StockAggregateCard detail={detail} isEditing={isEditing} />}
       {!isEditing && <CommandesAggregateCard detail={detail} isEditing={isEditing} />}
+      <OffresHistoryCard
+        detail={detail}
+        isEditing={isEditing}
+        refFilId={refFilId}
+        onMutationSuccess={onMutationSuccess}
+        reportDirty={reportDirty}
+      />
     </div>
   )
 }
@@ -956,6 +963,20 @@ function SpecsCard({
       <CardHeader className="flex flex-row items-center gap-2 p-4 space-y-0 pb-2">
         <Package className="h-4 w-4 text-accent" />
         <CardTitle className="text-sm font-semibold">Spécifications</CardTitle>
+        <div className="ml-auto flex gap-1.5 flex-wrap">
+          {!!detail.bio && (
+            <Badge className="badge-success text-[10px] py-0 px-1.5 gap-1">
+              <Leaf className="h-2.5 w-2.5" />
+              Bio
+            </Badge>
+          )}
+          {!!detail.recycle && (
+            <Badge className="bg-teal-500/10 text-teal-700 ring-1 ring-teal-500/20 text-[10px] py-0 px-1.5 gap-1">
+              <Recycle className="h-2.5 w-2.5" />
+              Recyclé
+            </Badge>
+          )}
+        </div>
       </CardHeader>
       <CardContent className="pb-4">
         {isEditing ? (
@@ -1023,34 +1044,29 @@ function SpecsCard({
             </div>
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-x-6 gap-y-2">
-            <KV
-              label="Titrage"
-              value={
-                detail.titrage != null && detail.titrage > 0
+          <div className="flex flex-wrap items-baseline gap-x-10 gap-y-2">
+            <div className="flex items-baseline gap-2">
+              <span className="text-xs text-muted-foreground">Titrage</span>
+              <span className="text-lg font-semibold tabular-nums">
+                {detail.titrage != null && detail.titrage > 0
                   ? `${fmtNum(detail.titrage, 0)}${uniteNom ? ` ${uniteNom}` : ''}`
-                  : '—'
-              }
-            />
-            <KV label="Fil / Brin" value={`${detail.nb_fil ?? '—'} / ${detail.nb_brin ?? '—'}`} />
-            <KV
-              label="Prix moyen"
-              value={detail.prix_kg != null && detail.prix_kg > 0 ? `${fmtNum(detail.prix_kg, 2)} €/kg` : '—'}
-            />
-            <KV
-              label="Flags"
-              value={
-                <span className="inline-flex gap-1">
-                  {!!detail.bio && <Badge className="badge-success text-[10px] py-0 px-1.5">Bio</Badge>}
-                  {!!detail.recycle && (
-                    <Badge className="bg-teal-500/10 text-teal-700 ring-1 ring-teal-500/20 text-[10px] py-0 px-1.5">
-                      Recyclé
-                    </Badge>
-                  )}
-                  {!detail.bio && !detail.recycle && '—'}
-                </span>
-              }
-            />
+                  : '—'}
+              </span>
+            </div>
+            <div className="flex items-baseline gap-2">
+              <span className="text-xs text-muted-foreground">Fil / Brin</span>
+              <span className="text-lg font-semibold tabular-nums">
+                {`${detail.nb_fil ?? '—'} / ${detail.nb_brin ?? '—'}`}
+              </span>
+            </div>
+            <div className="flex items-baseline gap-2">
+              <span className="text-xs text-muted-foreground">Prix de base</span>
+              <span className="text-lg font-semibold tabular-nums">
+                {detail.prix_kg != null && detail.prix_kg > 0
+                  ? `${fmtNum(detail.prix_kg, 2)} €/kg`
+                  : '—'}
+              </span>
+            </div>
           </div>
         )}
       </CardContent>
@@ -1615,7 +1631,7 @@ function VariantesCard({
         {open && (
           <CardContent className="space-y-2 pb-3">
             {detail.variantes.length === 0 && !showForm && (
-              <p className="text-sm text-muted-foreground italic">Aucune variante</p>
+              <p className="text-sm text-muted-foreground italic">Aucun coloris</p>
             )}
             {detail.variantes.map((v) => {
               const isRowEditing = editingId === v.IDcolori_fil
@@ -1628,7 +1644,7 @@ function VariantesCard({
                       onCancel={resetForm}
                       onSave={() => updateMut.mutate(v.IDcolori_fil)}
                       isSaving={updateMut.isPending}
-                      title="Modifier la variante"
+                      title="Modifier le coloris"
                     />
                   ) : (
                     <div
@@ -1763,7 +1779,7 @@ function VariantesCard({
                 onCancel={resetForm}
                 onSave={() => createMut.mutate()}
                 isSaving={createMut.isPending}
-                title="Nouvelle variante"
+                title="Nouveau coloris"
               />
             )}
           </CardContent>
@@ -1771,7 +1787,7 @@ function VariantesCard({
       </Card>
       <ConfirmDialog
         open={deleteTarget !== null}
-        title="Supprimer la variante"
+        title="Supprimer le coloris"
         description={
           deleteError(errorMsg, deleteTarget)
         }
@@ -1996,6 +2012,345 @@ function CommandesAggregateCard({
   )
 }
 
+// ── Offres History Card ────────────────────────────────
+// Supplier price quotes per ref_fil. Visible in both modes (employees record
+// new quotes during edit mode). Add via inline form, delete via hover-trash.
+
+interface OffreDraft {
+  IDfournisseur: number
+  IDcolori_fil: number
+  date: string // YYYY-MM-DD (HTML input format)
+  prix: string
+  quantite: string
+  observation: string
+}
+
+function emptyOffreDraft(): OffreDraft {
+  const today = new Date()
+  const yyyy = today.getFullYear()
+  const mm = String(today.getMonth() + 1).padStart(2, '0')
+  const dd = String(today.getDate()).padStart(2, '0')
+  return {
+    IDfournisseur: 0,
+    IDcolori_fil: 0,
+    date: `${yyyy}-${mm}-${dd}`,
+    prix: '',
+    quantite: '',
+    observation: '',
+  }
+}
+
+function OffresHistoryCard({
+  detail,
+  isEditing,
+  refFilId,
+  onMutationSuccess,
+  reportDirty,
+}: {
+  detail: RefFilDetail
+  isEditing: boolean
+  refFilId: number | null
+  onMutationSuccess: () => void
+  reportDirty: (key: string, dirty: boolean) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [showForm, setShowForm] = useState(false)
+  const [form, setForm] = useState<OffreDraft>(emptyOffreDraft())
+  const [deleteTarget, setDeleteTarget] = useState<OffreFilRow | null>(null)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const offres = detail.offres ?? []
+
+  const reportDirtyRef = useRef(reportDirty)
+  useEffect(() => {
+    reportDirtyRef.current = reportDirty
+  })
+  useEffect(() => {
+    reportDirtyRef.current('ref-fil-offres', showForm)
+  }, [showForm])
+  useEffect(
+    () => () => {
+      reportDirtyRef.current('ref-fil-offres', false)
+    },
+    [],
+  )
+
+  const { data: allFournisseurs } = useQuery<Array<{ IDfournisseur: number; nom: string | null }>>({
+    queryKey: ['fournisseurs'],
+    queryFn: () => apiFetch('/fournisseurs'),
+    enabled: open && isEditing,
+  })
+
+  const resetForm = () => {
+    setForm(emptyOffreDraft())
+    setShowForm(false)
+    setErrorMsg(null)
+  }
+
+  const createMut = useMutation({
+    mutationFn: () =>
+      apiFetch(`/references-fil/${refFilId}/offres`, {
+        method: 'POST',
+        body: JSON.stringify({
+          IDfournisseur: form.IDfournisseur,
+          IDcolori_fil: form.IDcolori_fil || 0,
+          date: form.date.replace(/-/g, ''),
+          prix: Number(form.prix) || 0,
+          quantite: form.quantite ? Number(form.quantite) : 0,
+          observation: form.observation || undefined,
+        }),
+      }),
+    onSuccess: () => {
+      onMutationSuccess()
+      resetForm()
+    },
+    onError: async () => {
+      try {
+        const res = await fetch(
+          `${import.meta.env.VITE_API_URL || 'http://localhost:3002/api'}/references-fil/${refFilId}/offres`,
+          {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              IDfournisseur: form.IDfournisseur,
+              IDcolori_fil: form.IDcolori_fil || 0,
+              date: form.date.replace(/-/g, ''),
+              prix: Number(form.prix) || 0,
+              quantite: form.quantite ? Number(form.quantite) : 0,
+              observation: form.observation || undefined,
+            }),
+          },
+        )
+        if (!res.ok) {
+          const body = await res.json().catch(() => null)
+          setErrorMsg(String(body?.error ?? 'Erreur'))
+        }
+      } catch {
+        setErrorMsg('Erreur réseau')
+      }
+    },
+  })
+
+  const deleteMut = useMutation({
+    mutationFn: (offreId: number) =>
+      apiFetch(`/references-fil/${refFilId}/offres/${offreId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      onMutationSuccess()
+      setDeleteTarget(null)
+    },
+  })
+
+  const canSubmit =
+    form.IDfournisseur > 0 && Number(form.prix) > 0 && /^\d{4}-\d{2}-\d{2}$/.test(form.date)
+
+  return (
+    <>
+      <Card className={cn('card-premium', isEditing && editSectionClass)}>
+        <CardHeader
+          className="flex flex-row items-center gap-2 p-4 space-y-0 pb-2 cursor-pointer select-none"
+          onClick={() => setOpen(!open)}
+        >
+          <Tag className="h-4 w-4 text-accent" />
+          <CardTitle className="text-sm font-semibold">Historique des offres</CardTitle>
+          {isEditing && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-6 w-6 p-0 text-accent hover:text-accent hover:bg-accent/10"
+              onClick={(e) => {
+                e.stopPropagation()
+                setShowForm(true)
+                setErrorMsg(null)
+                if (!open) setOpen(true)
+              }}
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          <Badge variant="secondary" className="text-xs ml-auto">
+            {offres.length}
+          </Badge>
+          <ChevronDown className={cn('h-4 w-4 text-muted-foreground transition-transform', open && 'rotate-180')} />
+        </CardHeader>
+        {open && (
+          <CardContent className="space-y-2 pb-4">
+            {showForm && isEditing && (
+              <div className="rounded-lg border border-accent/25 bg-accent/[0.03] p-3 space-y-2">
+                <p className="text-xs font-semibold text-accent uppercase tracking-wide">
+                  Nouvelle offre
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-muted-foreground">Fournisseur</label>
+                    <select
+                      value={form.IDfournisseur}
+                      onChange={(e) =>
+                        setForm({ ...form, IDfournisseur: parseInt(e.target.value, 10) || 0 })
+                      }
+                      className={cn(inputClass, 'cursor-pointer')}
+                    >
+                      <option value={0}>—</option>
+                      {(allFournisseurs ?? []).map((f) => (
+                        <option key={f.IDfournisseur} value={f.IDfournisseur}>
+                          {f.nom ?? `#${f.IDfournisseur}`}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      Coloris (optionnel)
+                    </label>
+                    <select
+                      value={form.IDcolori_fil}
+                      onChange={(e) =>
+                        setForm({ ...form, IDcolori_fil: parseInt(e.target.value, 10) || 0 })
+                      }
+                      className={cn(inputClass, 'cursor-pointer')}
+                    >
+                      <option value={0}>Tous les coloris</option>
+                      {detail.variantes.map((v) => (
+                        <option key={v.IDcolori_fil} value={v.IDcolori_fil}>
+                          {v.reference ?? `#${v.IDcolori_fil}`}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-muted-foreground">Date</label>
+                    <input
+                      type="date"
+                      value={form.date}
+                      onChange={(e) => setForm({ ...form, date: e.target.value })}
+                      className={inputClass}
+                    />
+                  </div>
+                  <LabeledInput
+                    label="Prix (€/kg)"
+                    type="number"
+                    step="0.01"
+                    value={form.prix}
+                    onChange={(v) => setForm({ ...form, prix: v })}
+                  />
+                  <LabeledInput
+                    label="Quantité (kg)"
+                    type="number"
+                    value={form.quantite}
+                    onChange={(v) => setForm({ ...form, quantite: v })}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-muted-foreground">
+                    Observation (optionnel)
+                  </label>
+                  <textarea
+                    value={form.observation}
+                    onChange={(e) => setForm({ ...form, observation: e.target.value })}
+                    rows={2}
+                    className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+                  />
+                </div>
+                {errorMsg && <p className="text-xs text-destructive">{errorMsg}</p>}
+                <div className="flex justify-end gap-2 pt-1">
+                  <Button variant="outline" size="sm" onClick={resetForm}>
+                    <X className="h-3.5 w-3.5 mr-1.5" />
+                    Annuler
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => createMut.mutate()}
+                    disabled={!canSubmit || createMut.isPending}
+                  >
+                    <Save className="h-3.5 w-3.5 mr-1.5" />
+                    Enregistrer
+                  </Button>
+                </div>
+              </div>
+            )}
+            {offres.length === 0 && !showForm ? (
+              <p className="text-sm text-muted-foreground italic">Aucune offre enregistrée</p>
+            ) : (
+              <div className="space-y-1.5">
+                {offres.map((o) => (
+                  <div
+                    key={o.IDoffre_fil}
+                    className={cn(
+                      'group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3',
+                      'border-l-amber-400/60',
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-amber-400/10">
+                          <Tag className="h-3.5 w-3.5 text-amber-600" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium truncate">
+                            {o.fournisseur_nom ?? '—'}
+                          </p>
+                          <p className="text-[11px] text-muted-foreground tabular-nums">
+                            {o.date ? formatHfsqlDate(o.date) : '—'}
+                            {o.colori_reference && (
+                              <span> · {o.colori_reference}</span>
+                            )}
+                            {o.quantite != null && o.quantite > 0 && (
+                              <span> · {fmtNum(o.quantite, 0)} kg</span>
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <span className="text-sm font-semibold tabular-nums">
+                          {o.prix != null ? `${fmtNum(o.prix, 2)} €/kg` : '—'}
+                        </span>
+                        {isEditing && (
+                          <button
+                            onClick={() => setDeleteTarget(o)}
+                            className="opacity-0 group-hover:opacity-100 p-0.5 text-destructive hover:text-destructive/80 transition-opacity"
+                            title="Supprimer"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {!!o.observation?.trim() && (
+                      <div className="flex items-start gap-1.5 mt-2 ml-9">
+                        <MessageSquare className="h-3 w-3 text-muted-foreground/50 flex-shrink-0 mt-0.5" />
+                        <p className="text-[11px] text-muted-foreground italic">
+                          {o.observation.trim()}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        )}
+      </Card>
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Supprimer l'offre"
+        description={
+          deleteTarget
+            ? `${deleteTarget.fournisseur_nom ?? '—'} · ${
+                deleteTarget.date ? formatHfsqlDate(deleteTarget.date) : '—'
+              } sera supprimée.`
+            : undefined
+        }
+        isPending={deleteMut.isPending}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (deleteTarget) deleteMut.mutate(deleteTarget.IDoffre_fil)
+        }}
+      />
+    </>
+  )
+}
+
 // ── Right Panel: Sidebar ───────────────────────────────
 
 function DetailSidebar({
@@ -2032,7 +2387,7 @@ function DetailSidebar({
           <div className="p-3 rounded-lg border bg-card shadow-sm space-y-2">
             <p className="text-xs font-semibold text-muted-foreground">Statistiques</p>
             <KV
-              label="Variantes"
+              label="Coloris"
               value={<span className="tabular-nums">{detail.variantes.length}</span>}
             />
             <KV
