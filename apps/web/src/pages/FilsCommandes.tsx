@@ -820,13 +820,21 @@ function LignesSection({
     date_livraison: '',
   })
 
-  // Close line forms when editing is turned off globally
+  // Lines are locked when the commande is terminée. Header edits remain
+  // allowed; to modify lines the user must reopen the commande via the
+  // sidebar status pill. Server enforces this too — UI just hides the
+  // affordances. See commandes-fil.ts §refuseIfTerminee.
+  const linesLocked = commande.etat === 1
+
+  // Close line forms when editing is turned off globally, or when the
+  // commande gets auto-closed mid-edit (e.g. user toggled the last line
+  // to terminé and the server flipped commande.etat).
   useEffect(() => {
-    if (!isEditing) {
+    if (!isEditing || linesLocked) {
       setEditingLineId(null)
       setShowLineForm(false)
     }
-  }, [isEditing])
+  }, [isEditing, linesLocked])
 
   // Surface sub-form dirty state to the page so the unsaved-changes guard
   // can catch navigation while a line form is open.
@@ -944,7 +952,7 @@ function LignesSection({
           <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
             <BobineIcon className="h-12 w-12 mb-3 opacity-40" />
             <p className="text-sm">Aucune ligne</p>
-            {isEditing && (
+            {isEditing && !linesLocked && (
               <Button variant="outline" size="sm" className="mt-3" onClick={startAddLine}>
                 <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter une ligne
               </Button>
@@ -970,6 +978,7 @@ function LignesSection({
                 key={l.IDref_fil_commande}
                 line={l}
                 isEditing={isEditing}
+                linesLocked={linesLocked}
                 isStockDrawerOpen={stockDrawerLineId === l.IDref_fil_commande}
                 onEdit={() => startEditLine(l)}
                 onDelete={() => setDeleteLineConfirmId(l.IDref_fil_commande)}
@@ -980,7 +989,7 @@ function LignesSection({
           })
         )}
 
-        {isEditing && showLineForm && (
+        {isEditing && !linesLocked && showLineForm && (
           <InlineForm
             title="Nouvelle ligne"
             onSave={() => createLineMut.mutate()}
@@ -991,7 +1000,7 @@ function LignesSection({
           </InlineForm>
         )}
 
-        {isEditing && commande.lignes.length > 0 && !showLineForm && editingLineId === null && (
+        {isEditing && !linesLocked && commande.lignes.length > 0 && !showLineForm && editingLineId === null && (
           <Button
             variant="ghost"
             size="sm"
@@ -1049,10 +1058,11 @@ function LignesSection({
 }
 
 function LineCard({
-  line, isEditing, isStockDrawerOpen, onEdit, onDelete, onToggleEtat, onOpenStockDrawer,
+  line, isEditing, linesLocked, isStockDrawerOpen, onEdit, onDelete, onToggleEtat, onOpenStockDrawer,
 }: {
   line: LigneCommande
   isEditing: boolean
+  linesLocked: boolean
   isStockDrawerOpen: boolean
   onEdit: () => void
   onDelete: () => void
@@ -1102,7 +1112,7 @@ function LineCard({
             </Badge>
           )}
           <CommandeEtatBadge etat={line.etat} />
-          {isEditing && (
+          {isEditing && !linesLocked && (
             <div className="flex gap-0.5">
               <Button
                 variant="ghost" size="icon" className="h-6 w-6"

@@ -59,6 +59,55 @@ function dateStr(value: unknown): string {
   return /^\d{8}$/.test(s) ? s : ''
 }
 
+// ── Commande lifecycle helpers ───────────────────────────
+//
+// A "terminée" commande (etat=1) is locked: no line create/update/delete.
+// Re-opening (sidebar pill → etat=0) is the only path back to editing.
+// Conversely, when the last open line of an open commande gets toggled to
+// terminé, the commande auto-flips to terminée — see `maybeAutoCloseCommande`.
+
+async function loadCommandeEtat(commandeId: number): Promise<number | null> {
+  const rows = await query<{ etat: number | null }>(
+    `SELECT etat FROM commande_fil WHERE IDcommande_fil = ${commandeId}`
+  )
+  if (rows.length === 0) return null
+  return rows[0].etat ?? 0
+}
+
+async function loadCommandeIdForLine(lineId: number): Promise<number | null> {
+  const rows = await query<{ IDcommande_fil: number }>(
+    `SELECT IDcommande_fil FROM ref_fil_commande WHERE IDref_fil_commande = ${lineId}`
+  )
+  if (rows.length === 0) return null
+  return Number(rows[0].IDcommande_fil) || null
+}
+
+/** Send a 409 if the commande is closed. Returns true when the response was
+ *  written (caller must `return` immediately). */
+function refuseIfTerminee(res: Response, etat: number | null): boolean {
+  if (etat === 1) {
+    res.status(409).json({
+      error: 'commande_terminee',
+      message: 'Commande terminée — réouvrir la commande pour modifier les lignes.',
+    })
+    return true
+  }
+  return false
+}
+
+/** Flip commande_fil.etat to 1 when every line is terminé. Skips empty
+ *  commandes so a freshly-created header is not auto-closed. */
+async function maybeAutoCloseCommande(commandeId: number): Promise<void> {
+  const lines = await query<{ etat: number | null }>(
+    `SELECT etat FROM ref_fil_commande WHERE IDcommande_fil = ${commandeId}`
+  )
+  if (lines.length === 0) return
+  if (!lines.every((l) => Number(l.etat) === 1)) return
+  await query(
+    `UPDATE commande_fil SET etat = 1 WHERE IDcommande_fil = ${commandeId} AND etat = 0`
+  )
+}
+
 // ── Stock lookup helpers (used by /lignes/:ligneId/stock endpoints) ─────
 //
 // stock_fil has accented columns (terminé, controlé). On Linux the iODBC
@@ -780,6 +829,8 @@ commandesFilRouter.post('/:id/lignes', async (req: Request, res: Response) => {
     const d = parsed.data
     const dateLiv = dateStr(d.date_livraison)
 
+    if (refuseIfTerminee(res, await loadCommandeEtat(id))) return
+
     await query(
       `INSERT INTO ref_fil_commande (IDcommande_fil, IDref_fil, IDcolori_fil, quantite, unite, prix_unitaire, date_livraison, etat, date_notif) VALUES (${id}, ${d.IDref_fil}, ${d.IDcolori_fil}, ${n(d.quantite)}, ${d.unite ?? 1}, ${n(d.prix_unitaire)}, '${dateLiv}', ${d.etat ?? 0}, '')`
     )
@@ -804,6 +855,10 @@ commandesFilRouter.put('/lignes/:lineId', async (req: Request, res: Response) =>
     }
     const d = parsed.data
 
+    const commandeId = await loadCommandeIdForLine(lineId)
+    if (commandeId == null) { res.status(404).json({ error: 'Line not found' }); return }
+    if (refuseIfTerminee(res, await loadCommandeEtat(commandeId))) return
+
     const sets: string[] = []
     if (d.IDref_fil !== undefined) sets.push(`IDref_fil = ${d.IDref_fil}`)
     if (d.IDcolori_fil !== undefined) sets.push(`IDcolori_fil = ${d.IDcolori_fil}`)
@@ -816,6 +871,9 @@ commandesFilRouter.put('/lignes/:lineId', async (req: Request, res: Response) =>
     if (sets.length === 0) { res.status(400).json({ error: 'No fields to update' }); return }
 
     await query(`UPDATE ref_fil_commande SET ${sets.join(', ')} WHERE IDref_fil_commande = ${lineId}`)
+
+    if (d.etat === 1) await maybeAutoCloseCommande(commandeId)
+
     res.json({ ok: true })
   } catch (err) {
     console.error('Error updating ref_fil_commande:', err)
@@ -829,6 +887,11 @@ commandesFilRouter.delete('/lignes/:lineId', async (req: Request, res: Response)
   try {
     const lineId = parseInt(req.params.lineId, 10)
     if (isNaN(lineId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const commandeId = await loadCommandeIdForLine(lineId)
+    if (commandeId == null) { res.status(404).json({ error: 'Line not found' }); return }
+    if (refuseIfTerminee(res, await loadCommandeEtat(commandeId))) return
+
     await query(`DELETE FROM ref_fil_commande WHERE IDref_fil_commande = ${lineId}`)
     res.json({ ok: true })
   } catch (err) {
