@@ -1,3 +1,19 @@
+// Sous-traitants / Commandes — Phase 1.
+//
+// Mirrors `FilsCommandes.tsx` for the master-detail / sidebar / unsaved-guard
+// machinery. Specific to this screen:
+//   - header status is `est_soldee` BOOLEAN (not commande_fil's `etat` int)
+//   - per-line status is the legacy string `sstatut` — Phase 1 binary toggle
+//     maps to the literal values 'En_Cours' / 'Terminé'
+//   - lines reference ref_ecru / colori_ecru (Phase 1 = ennoblisseur flow)
+//   - no mode_paiement / echeance fields (don't exist on the entity)
+//   - line drawer is the "pièces" drawer:
+//       * affecter: link existing stock_ecru (tombé-de-métier rolls) to the line
+//       * réception: record stock_fini rolls returned dyed
+//   - "Délai initial" indicator on each line when date_delai !== date_livraison
+//   - Phase 1 gates create + line CRUD to **Ennoblisseur** sous-traitants only;
+//     existing non-ennoblisseur commandes remain readable.
+
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
@@ -5,6 +21,7 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { useUnsavedGuard } from '@/hooks/useUnsavedGuard'
 import {
   ShoppingCart,
+  Building2,
   Search,
   Loader2,
   AlertCircle,
@@ -17,7 +34,6 @@ import {
   Save,
   Trash2,
   MessageSquare,
-  Leaf,
   CheckCircle2,
   Clock,
   Package,
@@ -33,7 +49,7 @@ import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
-import { BobineIcon } from '@/components/icons/BobineIcon'
+import { FabricRollIcon } from '@/components/icons/FabricRollIcon'
 import { SendEmailDialog } from '@/components/email/SendEmailDialog'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
@@ -41,62 +57,77 @@ import { fmtNum } from '@/lib/format'
 import { apiFetch, API_URL } from '@/lib/api'
 import { postEmail } from '@/lib/email'
 
+// ── Constants ──────────────────────────────────────────
+
+const TYPE_ENNOBLISSEUR = 'Ennoblisseur'
+const SSTATUT_OPEN = 'En_Cours'
+const SSTATUT_DONE = 'Terminé'
+
+// IDtype_sst values from production: 1 Tricoteur, 2 Ennoblisseur, 3 Autre,
+// 4 Confectionneur. The PopoverSelect for "Type sous-traitant" is keyed on
+// these ids. Phase 1 only lists Ennoblisseur; the others land in Phase 2
+// once their drawer flows are built.
+const TYPE_SST_ID_BY_LABEL: Record<string, number> = {
+  Tricoteur: 1,
+  Ennoblisseur: 2,
+  Autre: 3,
+  Confectionneur: 4,
+}
+const TYPE_SST_LABEL_BY_ID: Record<number, string> = {
+  1: 'Tricoteur',
+  2: 'Ennoblisseur',
+  3: 'Autre',
+  4: 'Confectionneur',
+}
+const TYPE_SST_OPTIONS_PHASE1: Array<{ id: number; primary: string }> = [
+  { id: TYPE_SST_ID_BY_LABEL.Ennoblisseur, primary: 'Ennoblisseur' },
+]
+
+function isLineDone(sstatut: string | null | undefined): boolean {
+  return (sstatut ?? '').trim() === SSTATUT_DONE
+}
+
 // ── Types ──────────────────────────────────────────────
 
 interface CommandeListRow {
-  IDcommande_fil: number
-  IDfournisseur: number
+  IDcommande_sous_traitant: number
+  IDsous_traitant: number
   date_commande: string | null
-  etat: number | null
+  est_soldee: number | null
   commentaire: string | null
-  fournisseur_nom: string
-  total_kg: number
+  sous_traitant_nom: string
+  sous_traitant_type: string | null
   total_eur: number
+  total_qte: number
   nb_lignes: number
   earliest_delivery: string | null
 }
 
 interface LigneCommande {
-  IDref_fil_commande: number
-  IDcommande_fil: number
-  IDref_fil: number
-  IDcolori_fil: number
+  IDligne_commande_sous_traitant: number
+  IDcommande_sous_traitant: number
+  type: number | null
+  IDreference: number | null
+  IDColoris: number | null
   quantite: number | null
   unite: number | null
-  prix_unitaire: number | null
+  prix: number | null
   date_livraison: string | null
-  etat: number | null
-  ref_fil: string | null
+  date_delai: string | null
+  date_reception: string | null
+  commentaire: string | null
+  sstatut: string | null
+  num_facture: string | null
+  ref_label: string | null
+  ref_kind: 'ecru' | 'fini' | 'fil' | null
   colori_reference: string | null
-  ref_fil_bio: number | null
-  nb_lots_lies?: number
-  total_kg_lie?: number
-}
-
-interface StockLotLite {
-  IDstock_fil: number
-  IDfournisseur: number
-  IDref_fil: number
-  IDcolori_fil: number
-  IDref_fil_commande: number | null
-  stock: number | null
-  stock_initial: number | null
-  lot: string | null
-  lot_frs: string | null
-  emplacement: string | null
-  date_entree: string | null
-  niveau: number | null
-  termine: number | null
-  controle: number | null
-  bio: number | null
-  ref_fil: string | null
-  colori_reference: string | null
-  fournisseur_nom: string | null
-}
-
-interface LineStockPayload {
-  linked: StockLotLite[]
-  available: StockLotLite[]
+  // Drawer-fed per-line aggregates. The line's actual € total is
+  // `total_kg_ecru_lie × prix` (the user-entered prix is €/Kg, applied to
+  // the real attached weight, not the nominal qty in Ml).
+  nb_ecru_lies?: number
+  total_kg_ecru_lie?: number
+  nb_fini_recu?: number
+  total_metrage_fini_recu?: number
 }
 
 interface AdresseLite {
@@ -111,48 +142,35 @@ interface AdresseLite {
 }
 
 interface CommandeDetail {
-  IDcommande_fil: number
-  IDfournisseur: number
+  IDcommande_sous_traitant: number
+  IDsous_traitant: number
   date_commande: string | null
-  etat: number | null
+  est_soldee: number | null
   commentaire: string | null
   journal: string | null
-  IDadresse_fournisseur: number | null
+  IDadresse_sous_traitant: number | null
   IDadresse_livraison: number | null
-  IDmode_paiement: number | null
-  IDecheance: number | null
-  fournisseur_nom: string
-  mode_paiement_libelle: string | null
-  echeance_libelle: string | null
-  adresse_facturation: AdresseLite | null
+  sous_traitant_nom: string
+  sous_traitant_tel: string | null
+  sous_traitant_type: string | null
+  sous_traitant_IDtype_sst: number
+  adresse_sous_traitant: AdresseLite | null
   adresse_livraison: AdresseLite | null
   lignes: LigneCommande[]
 }
 
-interface ModePaiement {
-  IDmode_paiement: number
-  libelle: string
-}
-
-interface Echeance {
-  IDecheance: number
-  libelle: string
-  nb_jours: number
-}
-
-interface FournisseurLite {
-  IDfournisseur: number
+interface SousTraitantLite {
+  IDsous_traitant: number
   nom: string
+  tel: string | null
+  IDtype_sst: number | null
+  type: string | null
 }
 
-interface RefFilLookup {
-  IDcolori_fil: number
-  colori_reference: string | null
-  colori_prix_kg: number | null
-  IDref_fil: number
-  ref_fil_reference: string | null
-  bio: number | null
-  titrage: number | null
+interface RefFiniLookup {
+  IDref_fini: number
+  ref_fini: string
+  designation: string
 }
 
 interface AdresseLookup extends AdresseLite {
@@ -161,27 +179,81 @@ interface AdresseLookup extends AdresseLite {
   est_defaut_livraison: number
 }
 
-// ── API helpers ────────────────────────────────────────
-// Shared apiFetch + API_URL — see apps/web/src/lib/api.ts
+interface MagasinLite {
+  IDmagasin: number
+  nom: string
+}
+
+// Pieces drawer payload
+interface StockEcruLite {
+  IDstock_ecru: number
+  numero: string | null
+  lot: string | null
+  poids: number | null
+  metrage: number | null
+  IDref_ecru: number
+  IDcolori_ecru: number
+  IDmagasin: number
+  IDordre_fabrication: number
+  date_saisie: string | null
+}
+interface StockFiniLite {
+  IDstock_fini: number
+  numero: string | null
+  lot: string | null
+  poids: number | null
+  metrage: number | null
+  IDref_fini: number
+  IDColoris: number
+  IDstock_ecru: number
+  IDmagasin: number
+  date_saisie: string | null
+  observations: string | null
+}
+interface PiecesPayload {
+  ecruLinked: StockEcruLite[]
+  ecruAvailable: StockEcruLite[]
+  finiReceived: StockFiniLite[]
+}
 
 // ── Shared styling ─────────────────────────────────────
 
 const inputClass = 'w-full h-8 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring'
 const editSectionClass = 'border-l-4 border-l-accent/70 bg-accent/[0.03]'
 
+// Build a PopoverSelect option for an adresse: name on top + collapsed
+// "street · cp ville · pays" descriptor below so the user can verify the
+// pick at a glance from the dropdown.
+function adresseOption(a: AdresseLookup) {
+  const street = [a.adresse1, a.adresse2, a.adresse3].filter((s) => !!s && s.trim()).join(' · ')
+  const cityLine = [a.cp, a.ville].filter((s) => !!s && s.toString().trim()).join(' ')
+  const descLines = [street, cityLine, a.pays || '']
+    .map((s) => (s ?? '').trim())
+    .filter((s) => s.length > 0)
+  return {
+    id: a.IDadresse,
+    primary: a.nom || `Adresse #${a.IDadresse}`,
+    secondary: a.ville ?? undefined,
+    description: descLines.length > 0 ? descLines.join('\n') : undefined,
+  }
+}
+
 // ── Status helpers ─────────────────────────────────────
 
-function CommandeEtatBadge({ etat, className }: { etat: number | null; className?: string }) {
-  if (etat === 1) return <Badge variant="success" className={cn('text-[10px] py-0 gap-1', className)}><CheckCircle2 className="h-2.5 w-2.5" />Terminée</Badge>
+function CommandeEtatBadge({ est_soldee, className }: { est_soldee: number | null; className?: string }) {
+  if (est_soldee === 1) return <Badge variant="success" className={cn('text-[10px] py-0 gap-1', className)}><CheckCircle2 className="h-2.5 w-2.5" />Terminée</Badge>
   return <Badge variant="default" className={cn('text-[10px] py-0 gap-1', className)}><Clock className="h-2.5 w-2.5" />En cours</Badge>
 }
 
-// Returns a delivery-urgency flag based on the earliest line delivery date.
-// 'late'  = today >= delivery date, OR no delivery date specified (red left edge)
-// 'soon'  = delivery date is within the next 3 days (amber left edge)
-// null    = not urgent, or commande is terminée
-function deliveryUrgency(earliestHfsql: string | null, etat: number | null): 'late' | 'soon' | null {
-  if (etat === 1) return null
+function LineSstatutBadge({ sstatut, className }: { sstatut: string | null; className?: string }) {
+  if (isLineDone(sstatut)) {
+    return <Badge variant="success" className={cn('text-[10px] py-0 gap-1', className)}><CheckCircle2 className="h-2.5 w-2.5" />Terminée</Badge>
+  }
+  return <Badge variant="default" className={cn('text-[10px] py-0 gap-1', className)}><Clock className="h-2.5 w-2.5" />En cours</Badge>
+}
+
+function deliveryUrgency(earliestHfsql: string | null, est_soldee: number | null): 'late' | 'soon' | null {
+  if (est_soldee === 1) return null
   if (!earliestHfsql || !/^\d{8}$/.test(earliestHfsql)) return 'late'
   const y = Number(earliestHfsql.slice(0, 4))
   const m = Number(earliestHfsql.slice(4, 6)) - 1
@@ -196,8 +268,8 @@ function deliveryUrgency(earliestHfsql: string | null, etat: number | null): 'la
   return null
 }
 
-function etatColors(etat: number | null) {
-  if (etat === 1) {
+function lineEtatColors(sstatut: string | null) {
+  if (isLineDone(sstatut)) {
     return {
       border: 'border-l-green-500/60',
       iconBg: 'bg-green-500/10',
@@ -211,76 +283,70 @@ function etatColors(etat: number | null) {
   }
 }
 
+function isEnnoblisseurType(type: string | null): boolean {
+  if (!type) return false
+  return type.trim().toLowerCase() === TYPE_ENNOBLISSEUR.toLowerCase()
+}
+
 // ── Main Page ──────────────────────────────────────────
 
-export function FilsCommandes() {
+export function SousTraitantsCommandes() {
   const queryClient = useQueryClient()
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'en_cours' | 'terminee'>('en_cours')
   const [isEditing, setIsEditing] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
-  const [stockDrawerLineId, setStockDrawerLineId] = useState<number | null>(null)
+  const [piecesDrawerLineId, setPiecesDrawerLineId] = useState<number | null>(null)
   const [emailModalOpen, setEmailModalOpen] = useState(false)
-  // Set by CreateCommandeDialog's onCreated; watched by an effect that flips
-  // the screen into edit mode once the detail for the new commande loads.
+  const [printModalOpen, setPrintModalOpen] = useState(false)
   const [autoEditForId, setAutoEditForId] = useState<number | null>(null)
-  // Page-level in-app delete confirmation (replaces native confirm()).
   const [deleteCommandeConfirmOpen, setDeleteCommandeConfirmOpen] = useState(false)
 
-  // Edit-mode draft state for the header
+  // Edit-mode draft state
   const [editDateCommande, setEditDateCommande] = useState('')
   const [editCommentaire, setEditCommentaire] = useState('')
   const [editJournal, setEditJournal] = useState('')
-  const [editIDModePaiement, setEditIDModePaiement] = useState<number>(0)
-  const [editIDEcheance, setEditIDEcheance] = useState<number>(0)
-  const [editIDAdresseFacturation, setEditIDAdresseFacturation] = useState<number>(0)
+  const [editIDAdresseSousTraitant, setEditIDAdresseSousTraitant] = useState<number>(0)
   const [editIDAdresseLivraison, setEditIDAdresseLivraison] = useState<number>(0)
 
-  // Snapshot of the draft at edit-start, used to compute `isDirty`.
   const originalDraftRef = useRef<{
     dateCommande: string
     commentaire: string
     journal: string
-    IDmodePaiement: number
-    IDecheance: number
-    IDadresseFact: number
+    IDadresseSt: number
     IDadresseLiv: number
   } | null>(null)
 
-  // Surfaced from LignesSection via callback — true if a line edit/new form is open.
   const [linesDirty, setLinesDirty] = useState(false)
 
   const { data: commandes, isLoading, isError, error } = useQuery<CommandeListRow[]>({
-    queryKey: ['commandes-fil', statusFilter],
-    queryFn: () => apiFetch(`/commandes-fil?etat=${statusFilter}`),
+    queryKey: ['commandes-sst', statusFilter],
+    queryFn: () => apiFetch(`/commandes-sous-traitant?status=${statusFilter}`),
   })
 
   const { data: detail, isLoading: detailLoading } = useQuery<CommandeDetail>({
-    queryKey: ['commande-fil', selectedId],
-    queryFn: () => apiFetch(`/commandes-fil/${selectedId}`),
+    queryKey: ['commande-sst', selectedId],
+    queryFn: () => apiFetch(`/commandes-sous-traitant/${selectedId}`),
     enabled: selectedId !== null,
   })
 
   // Auto-select first on load
   useEffect(() => {
     if (commandes && commandes.length > 0 && selectedId === null) {
-      setSelectedId(commandes[0].IDcommande_fil)
+      setSelectedId(commandes[0].IDcommande_sous_traitant)
     }
   }, [commandes, selectedId])
 
-  // Reset the stock-linkage drawer every time the active commande changes.
-  // Without this the previous commande's drawer state leaks into the next
-  // one: the rows container stays shrunk to max-h-[40%], no drawer renders
-  // (the new commande has no matching line id), and the totals footer
-  // floats up next to the rows list instead of staying pinned at the bottom.
+  // Reset the pieces drawer when the active commande changes — avoids stale
+  // drawer state leaking into the next commande's lines.
   useEffect(() => {
-    setStockDrawerLineId(null)
+    setPiecesDrawerLineId(null)
   }, [selectedId])
 
   const invalidateAll = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['commandes-fil'] })
-    queryClient.invalidateQueries({ queryKey: ['commande-fil', selectedId] })
+    queryClient.invalidateQueries({ queryKey: ['commandes-sst'] })
+    queryClient.invalidateQueries({ queryKey: ['commande-sst', selectedId] })
   }, [queryClient, selectedId])
 
   const startEdit = useCallback(() => {
@@ -289,27 +355,21 @@ export function FilsCommandes() {
       dateCommande: hfsqlDateToInput(detail.date_commande),
       commentaire: detail.commentaire?.trim() ?? '',
       journal: detail.journal?.trim() ?? '',
-      IDmodePaiement: detail.IDmode_paiement ?? 0,
-      IDecheance: detail.IDecheance ?? 0,
-      IDadresseFact: detail.IDadresse_fournisseur ?? 0,
+      IDadresseSt: detail.IDadresse_sous_traitant ?? 0,
       IDadresseLiv: detail.IDadresse_livraison ?? 0,
     }
     setEditDateCommande(snapshot.dateCommande)
     setEditCommentaire(snapshot.commentaire)
     setEditJournal(snapshot.journal)
-    setEditIDModePaiement(snapshot.IDmodePaiement)
-    setEditIDEcheance(snapshot.IDecheance)
-    setEditIDAdresseFacturation(snapshot.IDadresseFact)
+    setEditIDAdresseSousTraitant(snapshot.IDadresseSt)
     setEditIDAdresseLivraison(snapshot.IDadresseLiv)
     originalDraftRef.current = snapshot
-    setStockDrawerLineId(null) // Edit mode hides the stock drawer
+    setPiecesDrawerLineId(null)
     setIsEditing(true)
   }, [detail])
 
   const cancelEdit = useCallback(() => setIsEditing(false), [])
 
-  // Dirty check: any header field differs from the edit-start snapshot,
-  // OR any sub-form (new line, line edit) is open.
   const isDirty = useMemo(() => {
     if (!isEditing) return false
     const o = originalDraftRef.current
@@ -317,24 +377,20 @@ export function FilsCommandes() {
     if (editDateCommande !== o.dateCommande) return true
     if (editCommentaire !== o.commentaire) return true
     if (editJournal !== o.journal) return true
-    if (editIDModePaiement !== o.IDmodePaiement) return true
-    if (editIDEcheance !== o.IDecheance) return true
-    if (editIDAdresseFacturation !== o.IDadresseFact) return true
+    if (editIDAdresseSousTraitant !== o.IDadresseSt) return true
     if (editIDAdresseLivraison !== o.IDadresseLiv) return true
     if (linesDirty) return true
     return false
-  }, [isEditing, editDateCommande, editCommentaire, editJournal, editIDModePaiement, editIDEcheance, editIDAdresseFacturation, editIDAdresseLivraison, linesDirty])
+  }, [isEditing, editDateCommande, editCommentaire, editJournal, editIDAdresseSousTraitant, editIDAdresseLivraison, linesDirty])
 
   const saveHeaderMut = useMutation({
-    mutationFn: () => apiFetch(`/commandes-fil/${selectedId}`, {
+    mutationFn: () => apiFetch(`/commandes-sous-traitant/${selectedId}`, {
       method: 'PUT',
       body: JSON.stringify({
         date_commande: inputDateToHfsql(editDateCommande),
         commentaire: editCommentaire,
         journal: editJournal,
-        IDmode_paiement: editIDModePaiement || 0,
-        IDecheance: editIDEcheance || 0,
-        IDadresse_fournisseur: editIDAdresseFacturation || 0,
+        IDadresse_sous_traitant: editIDAdresseSousTraitant || 0,
         IDadresse_livraison: editIDAdresseLivraison || 0,
       }),
     }),
@@ -342,26 +398,20 @@ export function FilsCommandes() {
   })
 
   const deleteMut = useMutation({
-    mutationFn: (id: number) => apiFetch(`/commandes-fil/${id}`, { method: 'DELETE' }),
+    mutationFn: (id: number) => apiFetch(`/commandes-sous-traitant/${id}`, { method: 'DELETE' }),
     onSuccess: (_data, deletedId) => {
-      // Pick the next commande to surface *before* invalidation, while the
-      // cached list still contains the full pre-delete set. The
-      // auto-select-first effect reads stale data during the refetch gap,
-      // so we set the new selection explicitly here instead of nulling it.
-      const cached = queryClient.getQueryData<CommandeListRow[]>(['commandes-fil', statusFilter]) ?? []
-      const remaining = cached.filter((c) => c.IDcommande_fil !== deletedId)
-      queryClient.invalidateQueries({ queryKey: ['commandes-fil'] })
+      const cached = queryClient.getQueryData<CommandeListRow[]>(['commandes-sst', statusFilter]) ?? []
+      const remaining = cached.filter((c) => c.IDcommande_sous_traitant !== deletedId)
+      queryClient.invalidateQueries({ queryKey: ['commandes-sst'] })
       setIsEditing(false)
       setDeleteCommandeConfirmOpen(false)
-      setSelectedId(remaining.length > 0 ? remaining[0].IDcommande_fil : null)
+      setSelectedId(remaining.length > 0 ? remaining[0].IDcommande_sous_traitant : null)
     },
   })
 
-  // Auto-enter edit mode after a new commande is created: CreateCommandeDialog
-  // sets `autoEditForId`, then we wait for the detail query to finish loading
-  // before calling startEdit — it needs `detail` to snapshot the draft.
+  // Auto-enter edit mode after create
   useEffect(() => {
-    if (autoEditForId !== null && detail?.IDcommande_fil === autoEditForId) {
+    if (autoEditForId !== null && detail?.IDcommande_sous_traitant === autoEditForId) {
       startEdit()
       setAutoEditForId(null)
     }
@@ -370,18 +420,14 @@ export function FilsCommandes() {
 
   const guard = useUnsavedGuard({
     isDirty,
-    save: async () => {
-      await saveHeaderMut.mutateAsync()
-    },
-    onDiscard: () => {
-      setIsEditing(false)
-    },
+    save: async () => { await saveHeaderMut.mutateAsync() },
+    onDiscard: () => { setIsEditing(false) },
   })
 
   const toggleEtatMut = useMutation({
-    mutationFn: (newEtat: number) => apiFetch(`/commandes-fil/${selectedId}`, {
+    mutationFn: (newEtat: number) => apiFetch(`/commandes-sous-traitant/${selectedId}/etat`, {
       method: 'PUT',
-      body: JSON.stringify({ etat: newEtat }),
+      body: JSON.stringify({ est_soldee: newEtat }),
     }),
     onSuccess: invalidateAll,
   })
@@ -397,7 +443,6 @@ export function FilsCommandes() {
     guard.guardAction(() => {
       setIsEditing(false)
       setStatusFilter(s)
-      // Clear selection so the auto-select effect picks the first row of the new list
       setSelectedId(null)
     })
   }, [guard])
@@ -407,8 +452,8 @@ export function FilsCommandes() {
     if (!searchQuery.trim()) return commandes
     const q = searchQuery.toLowerCase()
     return commandes.filter((c) =>
-      String(c.IDcommande_fil).includes(q)
-      || (c.fournisseur_nom ?? '').toLowerCase().includes(q)
+      String(c.IDcommande_sous_traitant).includes(q)
+      || (c.sous_traitant_nom ?? '').toLowerCase().includes(q)
       || (c.commentaire ?? '').toLowerCase().includes(q)
     )
   }, [commandes, searchQuery])
@@ -442,11 +487,7 @@ export function FilsCommandes() {
             onSave={() => saveHeaderMut.mutate()}
             isSaving={saveHeaderMut.isPending}
             onDelete={() => setDeleteCommandeConfirmOpen(true)}
-            onPrintClick={() => {
-              if (selectedId !== null) {
-                window.open(`${API_URL}/commandes-fil/${selectedId}/pdf`, '_blank')
-              }
-            }}
+            onPrintClick={() => setPrintModalOpen(true)}
             onEmailClick={() => setEmailModalOpen(true)}
           />
         }
@@ -458,8 +499,8 @@ export function FilsCommandes() {
             isEditing={isEditing}
             onMutationSuccess={invalidateAll}
             onLinesDirtyChange={setLinesDirty}
-            stockDrawerLineId={stockDrawerLineId}
-            onOpenStockDrawer={setStockDrawerLineId}
+            piecesDrawerLineId={piecesDrawerLineId}
+            onOpenPiecesDrawer={setPiecesDrawerLineId}
           />
         }
         sidebar={selectedId !== null ? (
@@ -473,15 +514,11 @@ export function FilsCommandes() {
             onEditCommentaireChange={setEditCommentaire}
             editJournal={editJournal}
             onEditJournalChange={setEditJournal}
-            editIDModePaiement={editIDModePaiement}
-            onEditIDModePaiementChange={setEditIDModePaiement}
-            editIDEcheance={editIDEcheance}
-            onEditIDEcheanceChange={setEditIDEcheance}
-            editIDAdresseFacturation={editIDAdresseFacturation}
-            onEditIDAdresseFacturationChange={setEditIDAdresseFacturation}
+            editIDAdresseSousTraitant={editIDAdresseSousTraitant}
+            onEditIDAdresseSousTraitantChange={setEditIDAdresseSousTraitant}
             editIDAdresseLivraison={editIDAdresseLivraison}
             onEditIDAdresseLivraisonChange={setEditIDAdresseLivraison}
-            onToggleEtat={() => toggleEtatMut.mutate(detail?.etat === 1 ? 0 : 1)}
+            onToggleEtat={() => toggleEtatMut.mutate(detail?.est_soldee === 1 ? 0 : 1)}
             isTogglingEtat={toggleEtatMut.isPending}
           />
         ) : null}
@@ -501,10 +538,8 @@ export function FilsCommandes() {
         onClose={() => setCreateOpen(false)}
         onCreated={(newId) => {
           setCreateOpen(false)
-          queryClient.invalidateQueries({ queryKey: ['commandes-fil'] })
+          queryClient.invalidateQueries({ queryKey: ['commandes-sst'] })
           setSelectedId(newId)
-          // Flag the new commande so the effect flips into edit mode as
-          // soon as its detail query resolves.
           setAutoEditForId(newId)
         }}
       />
@@ -512,25 +547,53 @@ export function FilsCommandes() {
       <ConfirmDialog
         open={deleteCommandeConfirmOpen}
         title="Supprimer la commande"
-        description="Cette action supprimera la commande et toutes ses lignes. Elle est irréversible."
+        description="Cette action supprimera la commande, toutes ses lignes et libérera les rouleaux écru affectés. Elle est irréversible."
         confirmLabel="Supprimer"
         isPending={deleteMut.isPending}
         onCancel={() => setDeleteCommandeConfirmOpen(false)}
-        onConfirm={() => {
-          if (selectedId !== null) deleteMut.mutate(selectedId)
-        }}
+        onConfirm={() => { if (selectedId !== null) deleteMut.mutate(selectedId) }}
       />
+
+      {/* "En developpement" placeholder for the print button per §18.A-bis */}
+      <Dialog open={printModalOpen} onOpenChange={setPrintModalOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Printer className="h-5 w-5 text-accent" />
+              Imprimer
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+            <Printer className="h-12 w-12 mb-3 opacity-40" />
+            <p className="text-sm font-medium">PDF disponible</p>
+            <p className="text-xs mt-1">Le PDF s'ouvre via le bouton « Envoyer un email » ci-contre.</p>
+            {selectedId !== null && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={() => {
+                  window.open(`${API_URL}/commandes-sous-traitant/${selectedId}/pdf`, '_blank')
+                  setPrintModalOpen(false)
+                }}
+              >
+                <FileText className="h-3.5 w-3.5 mr-1.5" />Ouvrir le PDF
+              </Button>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {selectedId !== null && (
         <SendEmailDialog
           open={emailModalOpen}
           onClose={() => setEmailModalOpen(false)}
-          contextLabel={detail?.fournisseur_nom ?? undefined}
-          queryKey={['commande-fil-email-defaults', selectedId]}
-          loadDefaults={() => apiFetch(`/commandes-fil/${selectedId}/email-defaults`)}
-          pdfUrl={`${API_URL}/commandes-fil/${selectedId}/pdf`}
-          pdfAttachmentLabel={`commande-fournisseur-${selectedId}.pdf`}
-          onSend={(p) => postEmail(`${API_URL}/commandes-fil/${selectedId}/email`, p, { includeAttachPdf: true })}
+          contextLabel={detail?.sous_traitant_nom ?? undefined}
+          queryKey={['commande-sst-email-defaults', selectedId]}
+          loadDefaults={() => apiFetch(`/commandes-sous-traitant/${selectedId}/email-defaults`)}
+          pdfUrl={`${API_URL}/commandes-sous-traitant/${selectedId}/pdf`}
+          pdfAttachmentLabel={`commande-sous-traitant-${selectedId}.pdf`}
+          onSend={(p) => postEmail(`${API_URL}/commandes-sous-traitant/${selectedId}/email`, p, { includeAttachPdf: true })}
         />
       )}
     </>
@@ -561,13 +624,12 @@ function CommandeList({
 }) {
   return (
     <div className="flex flex-col h-full rounded-lg border shadow-sm bg-zinc-100/80">
-      {/* Search + filter header */}
       <div className="p-3 border-b rounded-t-lg bg-zinc-200/50 space-y-2">
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <input
             type="text"
-            placeholder="Rechercher (n°, fournisseur...)"
+            placeholder="Rechercher (n°, sous-traitant...)"
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
             autoComplete="off"
@@ -596,7 +658,6 @@ function CommandeList({
         </div>
       </div>
 
-      {/* Scrollable list body */}
       <div className="flex-1 overflow-auto p-3 space-y-2 scrollbar-transparent">
         {isLoading ? (
           <div className="flex items-center justify-center py-8"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>
@@ -607,12 +668,12 @@ function CommandeList({
           </div>
         ) : rows.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-            <ShoppingCart className="h-12 w-12 mb-3 opacity-50" />
+            <Building2 className="h-12 w-12 mb-3 opacity-50" />
             <p className="text-sm">Aucune commande</p>
           </div>
         ) : rows.map((row) => {
-          const isSelected = selectedId === row.IDcommande_fil
-          const urgency = deliveryUrgency(row.earliest_delivery, row.etat)
+          const isSelected = selectedId === row.IDcommande_sous_traitant
+          const urgency = deliveryUrgency(row.earliest_delivery, row.est_soldee)
           const selectedRingClass =
             urgency === 'late' ? 'border-red-500 ring-1 ring-red-500'
             : urgency === 'soon' ? 'border-amber-500 ring-1 ring-amber-500'
@@ -623,31 +684,30 @@ function CommandeList({
             : 'border-border hover:border-zinc-400/60'
           return (
             <div
-              key={row.IDcommande_fil}
-              onClick={() => onSelect(row.IDcommande_fil)}
+              key={row.IDcommande_sous_traitant}
+              onClick={() => onSelect(row.IDcommande_sous_traitant)}
               className={cn(
                 'p-3 border rounded-lg cursor-pointer transition-all bg-white',
                 isSelected ? selectedRingClass : hoverClass,
-                // Inset left-edge strip via box-shadow — coexists with ring via --tw-shadow
                 urgency === 'late' && 'shadow-[inset_4px_0_0_0_rgb(239_68_68)]',
                 urgency === 'soon' && 'shadow-[inset_4px_0_0_0_rgb(245_158_11)]'
               )}
             >
               <div className="flex items-center gap-2">
-                <ShoppingCart className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-                <span className="font-medium text-sm">N° {row.IDcommande_fil}</span>
-                <CommandeEtatBadge etat={row.etat} className="ml-auto" />
+                <Building2 className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                <span className="font-medium text-sm">N° {row.IDcommande_sous_traitant}</span>
+                <CommandeEtatBadge est_soldee={row.est_soldee} className="ml-auto" />
               </div>
-              <p className="text-xs text-muted-foreground mt-1 truncate">{row.fournisseur_nom || '—'}</p>
+              <p className="text-xs text-muted-foreground mt-1 truncate">{row.sous_traitant_nom || '—'}</p>
               <div className="flex items-center gap-2 mt-1 text-[11px] text-muted-foreground">
                 {row.date_commande && <span>{formatHfsqlDate(row.date_commande)}</span>}
-                {row.total_kg > 0 && (
-                  <span className="ml-auto px-1.5 py-0.5 rounded bg-zinc-200/80 tabular-nums">
-                    {fmtNum(row.total_kg)} kg
+                {!!row.sous_traitant_type && (
+                  <span className="px-1.5 py-0.5 rounded bg-accent/10 text-accent text-[10px]">
+                    {row.sous_traitant_type}
                   </span>
                 )}
                 {row.total_eur > 0 && (
-                  <span className="px-1.5 py-0.5 rounded bg-accent/10 font-medium text-foreground tabular-nums">
+                  <span className="ml-auto px-1.5 py-0.5 rounded bg-zinc-200/80 font-medium tabular-nums">
                     {fmtNum(row.total_eur)} €
                   </span>
                 )}
@@ -657,7 +717,6 @@ function CommandeList({
         })}
       </div>
 
-      {/* Footer with count + Nouvelle button */}
       <div className="p-3 border-t text-xs text-muted-foreground flex items-center justify-between rounded-b-lg bg-zinc-200/50">
         <span>{rows.length} commande{rows.length !== 1 ? 's' : ''}</span>
         {!isEditing && (
@@ -694,7 +753,7 @@ function DetailHeader({
     <div className="flex-shrink-0 pt-0.5">
       <div className="flex items-center gap-3">
         <div className={cn('h-11 w-11 rounded-lg flex items-center justify-center', isEditing ? 'bg-accent/15' : 'icon-box-gold')}>
-          <ShoppingCart className="h-5 w-5" />
+          <Building2 className="h-5 w-5" />
         </div>
         <div className="min-w-0 flex-1">
           {isLoading ? (
@@ -702,10 +761,13 @@ function DetailHeader({
           ) : (
             <div className="flex items-center gap-3">
               <h1 className="text-2xl font-heading font-bold tracking-tight truncate">
-                N° {commande?.IDcommande_fil}
-                <span className="text-muted-foreground font-normal"> · {commande?.fournisseur_nom || '—'}</span>
+                N° {commande?.IDcommande_sous_traitant}
+                <span className="text-muted-foreground font-normal"> · {commande?.sous_traitant_nom || '—'}</span>
               </h1>
               <div className="flex items-center gap-2 flex-shrink-0">
+                {!!commande?.sous_traitant_type && (
+                  <Badge variant="secondary" className="text-xs">{commande.sous_traitant_type}</Badge>
+                )}
                 {commande?.date_commande && (
                   <Badge variant="secondary" className="text-xs">{formatHfsqlDate(commande.date_commande)}</Badge>
                 )}
@@ -757,7 +819,7 @@ function DetailHeader({
 // ── Center: Detail Main ────────────────────────────────
 
 function DetailMain({
-  commande, isLoading, hasSelection, isEditing, onMutationSuccess, onLinesDirtyChange, stockDrawerLineId, onOpenStockDrawer,
+  commande, isLoading, hasSelection, isEditing, onMutationSuccess, onLinesDirtyChange, piecesDrawerLineId, onOpenPiecesDrawer,
 }: {
   commande: CommandeDetail | null
   isLoading: boolean
@@ -765,13 +827,13 @@ function DetailMain({
   isEditing: boolean
   onMutationSuccess: () => void
   onLinesDirtyChange: (dirty: boolean) => void
-  stockDrawerLineId: number | null
-  onOpenStockDrawer: (lineId: number | null) => void
+  piecesDrawerLineId: number | null
+  onOpenPiecesDrawer: (lineId: number | null) => void
 }) {
   if (!hasSelection) return (
     <div className="flex-1 flex items-center justify-center">
       <div className="text-center space-y-3">
-        <div className="icon-box-gold h-16 w-16 mx-auto"><ShoppingCart className="h-8 w-8" /></div>
+        <div className="icon-box-gold h-16 w-16 mx-auto"><Building2 className="h-8 w-8" /></div>
         <p className="text-muted-foreground text-sm">Sélectionnez une commande dans la liste</p>
       </div>
     </div>
@@ -779,19 +841,29 @@ function DetailMain({
   if (isLoading) return <div className="flex-1 flex items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-accent" /></div>
   if (!commande) return null
 
-  const totalKg = commande.lignes.reduce((s, l) => s + (l.quantite != null ? Number(l.quantite) : 0), 0)
-  const totalEur = commande.lignes.reduce((s, l) => s + (l.quantite != null && l.prix_unitaire != null ? Number(l.quantite) * Number(l.prix_unitaire) : 0), 0)
+  // Nominal projection (qty × prix) and actual (attached kg × prix). The
+  // line cards show both; the footer surfaces the actual € total because
+  // that's what will actually be billed.
+  const totalQte = commande.lignes.reduce((s, l) => s + (l.quantite != null ? Number(l.quantite) : 0), 0)
+  const totalKgEcru = commande.lignes.reduce((s, l) => s + (Number(l.total_kg_ecru_lie) || 0), 0)
+  const totalMetrageFini = commande.lignes.reduce((s, l) => s + (Number(l.total_metrage_fini_recu) || 0), 0)
+  const totalEurReal = commande.lignes.reduce(
+    (s, l) => s + ((Number(l.total_kg_ecru_lie) || 0) * (Number(l.prix) || 0)),
+    0,
+  )
 
   return (
     <LignesSection
       commande={commande}
       isEditing={isEditing}
-      totalKg={totalKg}
-      totalEur={totalEur}
+      totalQte={totalQte}
+      totalKgEcru={totalKgEcru}
+      totalMetrageFini={totalMetrageFini}
+      totalEurReal={totalEurReal}
       onMutationSuccess={onMutationSuccess}
       onLinesDirtyChange={onLinesDirtyChange}
-      stockDrawerLineId={stockDrawerLineId}
-      onOpenStockDrawer={onOpenStockDrawer}
+      piecesDrawerLineId={piecesDrawerLineId}
+      onOpenPiecesDrawer={onOpenPiecesDrawer}
     />
   )
 }
@@ -799,37 +871,37 @@ function DetailMain({
 // ── Center: Lignes Section ─────────────────────────────
 
 function LignesSection({
-  commande, isEditing, totalKg, totalEur, onMutationSuccess, onLinesDirtyChange, stockDrawerLineId, onOpenStockDrawer,
+  commande, isEditing, totalQte, totalKgEcru, totalMetrageFini, totalEurReal,
+  onMutationSuccess, onLinesDirtyChange, piecesDrawerLineId, onOpenPiecesDrawer,
 }: {
   commande: CommandeDetail
   isEditing: boolean
-  totalKg: number
-  totalEur: number
+  totalQte: number
+  totalKgEcru: number
+  totalMetrageFini: number
+  totalEurReal: number
   onMutationSuccess: () => void
   onLinesDirtyChange: (dirty: boolean) => void
-  stockDrawerLineId: number | null
-  onOpenStockDrawer: (lineId: number | null) => void
+  piecesDrawerLineId: number | null
+  onOpenPiecesDrawer: (lineId: number | null) => void
 }) {
   const [editingLineId, setEditingLineId] = useState<number | null>(null)
   const [showLineForm, setShowLineForm] = useState(false)
   const [deleteLineConfirmId, setDeleteLineConfirmId] = useState<number | null>(null)
+  // For ennoblisseur lines, IDreference holds an IDref_fini (the desired
+  // dyed/finished reference). The drawer maps fini → écru via ref_fini.IDref_ecru
+  // when offering compatible greige rolls.
   const [lineForm, setLineForm] = useState({
-    IDref_fil: 0,
-    IDcolori_fil: 0,
+    IDreference: 0,
+    IDColoris: 0,
     quantite: '',
-    prix_unitaire: '',
+    prix: '',
     date_livraison: '',
   })
 
-  // Lines are locked when the commande is terminée. Header edits remain
-  // allowed; to modify lines the user must reopen the commande via the
-  // sidebar status pill. Server enforces this too — UI just hides the
-  // affordances. See commandes-fil.ts §refuseIfTerminee.
-  const linesLocked = commande.etat === 1
+  const linesLocked = commande.est_soldee === 1
+  const isEnnoblisseur = isEnnoblisseurType(commande.sous_traitant_type)
 
-  // Close line forms when editing is turned off globally, or when the
-  // commande gets auto-closed mid-edit (e.g. user toggled the last line
-  // to terminé and the server flipped commande.etat).
   useEffect(() => {
     if (!isEditing || linesLocked) {
       setEditingLineId(null)
@@ -837,47 +909,32 @@ function LignesSection({
     }
   }, [isEditing, linesLocked])
 
-  // Surface sub-form dirty state to the page so the unsaved-changes guard
-  // can catch navigation while a line form is open.
   useEffect(() => {
     onLinesDirtyChange(showLineForm || editingLineId !== null)
   }, [showLineForm, editingLineId, onLinesDirtyChange])
 
-  const { data: refLookup } = useQuery<RefFilLookup[]>({
-    queryKey: ['commande-fil-refs', commande.IDfournisseur],
-    queryFn: () => apiFetch(`/commandes-fil/lookups/refs-fil?fournisseur=${commande.IDfournisseur}`),
-    enabled: isEditing && !!commande.IDfournisseur,
+  // Phase 1: ennoblisseur line picker is a flat list of ref_fini. Other
+  // line types can't add lines (the affordance is hidden) but existing
+  // lines render as-is via their resolved labels.
+  const { data: refLookup } = useQuery<RefFiniLookup[]>({
+    queryKey: ['commande-sst-refs-fini'],
+    queryFn: () => apiFetch('/commandes-sous-traitant/lookups/refs-fini'),
+    enabled: isEditing && isEnnoblisseur,
   })
 
-  // Group lookup refs by IDref_fil (one entry per ref, with an array of coloris)
-  const refsGrouped = useMemo(() => {
-    if (!refLookup) return []
-    const map = new Map<number, { IDref_fil: number; reference: string; bio: boolean; coloris: { IDcolori_fil: number; reference: string }[] }>()
-    for (const r of refLookup) {
-      if (!map.has(r.IDref_fil)) {
-        map.set(r.IDref_fil, {
-          IDref_fil: r.IDref_fil,
-          reference: r.ref_fil_reference ?? '—',
-          bio: !!r.bio,
-          coloris: [],
-        })
-      }
-      map.get(r.IDref_fil)!.coloris.push({
-        IDcolori_fil: r.IDcolori_fil,
-        reference: r.colori_reference ?? '—',
-      })
-    }
-    return Array.from(map.values())
-  }, [refLookup])
-
   const createLineMut = useMutation({
-    mutationFn: () => apiFetch(`/commandes-fil/${commande.IDcommande_fil}/lignes`, {
+    mutationFn: () => apiFetch(`/commandes-sous-traitant/${commande.IDcommande_sous_traitant}/lignes`, {
       method: 'POST',
       body: JSON.stringify({
-        IDref_fil: lineForm.IDref_fil,
-        IDcolori_fil: lineForm.IDcolori_fil,
+        IDreference: lineForm.IDreference,
+        // IDColoris on a fini line points at ref_fini_colori (the legacy
+        // table — see commandes-sous-traitant.ts /lookups/colori-fini).
+        IDColoris: lineForm.IDColoris,
         quantite: Number(lineForm.quantite) || 0,
-        prix_unitaire: Number(lineForm.prix_unitaire) || 0,
+        prix: Number(lineForm.prix) || 0,
+        // unite=0 → "Ml" (mètre linéaire), the only unit ennoblisseur
+        // commandes use in Phase 1.
+        unite: 0,
         date_livraison: inputDateToHfsql(lineForm.date_livraison),
       }),
     }),
@@ -885,13 +942,13 @@ function LignesSection({
   })
 
   const updateLineMut = useMutation({
-    mutationFn: (lineId: number) => apiFetch(`/commandes-fil/lignes/${lineId}`, {
+    mutationFn: (lineId: number) => apiFetch(`/commandes-sous-traitant/lignes/${lineId}`, {
       method: 'PUT',
       body: JSON.stringify({
-        IDref_fil: lineForm.IDref_fil,
-        IDcolori_fil: lineForm.IDcolori_fil,
+        IDreference: lineForm.IDreference,
+        IDColoris: lineForm.IDColoris,
         quantite: Number(lineForm.quantite) || 0,
-        prix_unitaire: Number(lineForm.prix_unitaire) || 0,
+        prix: Number(lineForm.prix) || 0,
         date_livraison: inputDateToHfsql(lineForm.date_livraison),
       }),
     }),
@@ -899,182 +956,222 @@ function LignesSection({
   })
 
   const deleteLineMut = useMutation({
-    mutationFn: (lineId: number) => apiFetch(`/commandes-fil/lignes/${lineId}`, { method: 'DELETE' }),
+    mutationFn: (lineId: number) => apiFetch(`/commandes-sous-traitant/lignes/${lineId}`, { method: 'DELETE' }),
     onSuccess: onMutationSuccess,
   })
 
-  const toggleLineEtatMut = useMutation({
-    mutationFn: ({ lineId, etat }: { lineId: number; etat: number }) =>
-      apiFetch(`/commandes-fil/lignes/${lineId}`, {
+  const toggleLineSstatutMut = useMutation({
+    mutationFn: ({ lineId, sstatut }: { lineId: number; sstatut: string }) =>
+      apiFetch(`/commandes-sous-traitant/lignes/${lineId}`, {
         method: 'PUT',
-        body: JSON.stringify({ etat }),
+        body: JSON.stringify({ sstatut }),
       }),
     onSuccess: onMutationSuccess,
   })
 
   const resetLineForm = () => {
-    setLineForm({ IDref_fil: 0, IDcolori_fil: 0, quantite: '', prix_unitaire: '', date_livraison: '' })
+    setLineForm({ IDreference: 0, IDColoris: 0, quantite: '', prix: '', date_livraison: '' })
     setShowLineForm(false)
+  }
+
+  // HFSQL stores quantites as float32 — round-trip via String() leaks digits
+  // like "36,20000076293945". Format to a clean decimal for the input.
+  const fmtNumberInput = (v: number | null | undefined): string => {
+    if (v == null) return ''
+    const n = Number(v)
+    if (Number.isNaN(n)) return ''
+    // Up to 2 decimals, trim trailing zeros and a dangling dot.
+    return n.toFixed(2).replace(/\.?0+$/, '')
   }
 
   const startEditLine = (l: LigneCommande) => {
     setShowLineForm(false)
-    setEditingLineId(l.IDref_fil_commande)
+    setEditingLineId(l.IDligne_commande_sous_traitant)
     setLineForm({
-      IDref_fil: l.IDref_fil,
-      IDcolori_fil: l.IDcolori_fil,
-      quantite: l.quantite != null ? String(l.quantite) : '',
-      prix_unitaire: l.prix_unitaire != null ? String(l.prix_unitaire) : '',
+      IDreference: l.IDreference ?? 0,
+      IDColoris: l.IDColoris ?? 0,
+      quantite: fmtNumberInput(l.quantite),
+      prix: fmtNumberInput(l.prix),
       date_livraison: hfsqlDateToInput(l.date_livraison),
     })
   }
 
   const startAddLine = () => {
     setEditingLineId(null)
-    setLineForm({ IDref_fil: 0, IDcolori_fil: 0, quantite: '', prix_unitaire: '', date_livraison: '' })
+    setLineForm({ IDreference: 0, IDColoris: 0, quantite: '', prix: '', date_livraison: '' })
     setShowLineForm(true)
   }
 
-  const drawerOpen = stockDrawerLineId !== null && !isEditing
+  // Pieces drawer is only available for ennoblisseur sous-traitants in Phase 1.
+  const drawerOpen = piecesDrawerLineId !== null && !isEditing && isEnnoblisseur
   const drawerLigne = drawerOpen
-    ? commande.lignes.find((l) => l.IDref_fil_commande === stockDrawerLineId) ?? null
+    ? commande.lignes.find((l) => l.IDligne_commande_sous_traitant === piecesDrawerLineId) ?? null
     : null
 
   return (
     <>
-    <div className="flex-1 min-h-0 flex flex-col">
-      <div
-        className={cn(
-          'overflow-auto space-y-2 p-1 scrollbar-transparent',
-          drawerOpen ? 'flex-shrink-0 max-h-[40%]' : 'flex-1 min-h-0'
-        )}
-      >
-        {commande.lignes.length === 0 && !showLineForm ? (
-          <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-            <BobineIcon className="h-12 w-12 mb-3 opacity-40" />
-            <p className="text-sm">Aucune ligne</p>
-            {isEditing && !linesLocked && (
-              <Button variant="outline" size="sm" className="mt-3" onClick={startAddLine}>
-                <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter une ligne
-              </Button>
-            )}
-          </div>
-        ) : (
-          commande.lignes.map((l) => {
-            if (isEditing && editingLineId === l.IDref_fil_commande) {
+      <div className="flex-1 min-h-0 flex flex-col">
+        <div
+          className={cn(
+            'overflow-auto space-y-2 p-1 scrollbar-transparent',
+            drawerOpen ? 'flex-shrink-0 max-h-[40%]' : 'flex-1 min-h-0'
+          )}
+        >
+          {commande.lignes.length === 0 && !showLineForm ? (
+            <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+              <FabricRollIcon className="h-12 w-12 mb-3 opacity-40" />
+              <p className="text-sm">Aucune ligne</p>
+              {isEditing && !linesLocked && isEnnoblisseur && (
+                <Button variant="outline" size="sm" className="mt-3" onClick={startAddLine}>
+                  <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter une ligne
+                </Button>
+              )}
+              {isEditing && !linesLocked && !isEnnoblisseur && (
+                <p className="text-[11px] text-muted-foreground italic mt-3 max-w-xs text-center">
+                  L'ajout de ligne n'est disponible pour ce type de sous-traitant qu'à partir de la phase 2.
+                </p>
+              )}
+            </div>
+          ) : (
+            commande.lignes.map((l) => {
+              if (isEditing && editingLineId === l.IDligne_commande_sous_traitant) {
+                return (
+                  <InlineForm
+                    key={l.IDligne_commande_sous_traitant}
+                    title="Modifier la ligne"
+                    onSave={() => updateLineMut.mutate(l.IDligne_commande_sous_traitant)}
+                    onCancel={() => { setEditingLineId(null); resetLineForm() }}
+                    isSaving={updateLineMut.isPending}
+                  >
+                    <LineFormFields form={lineForm} setForm={setLineForm} refsFini={refLookup ?? []} editable={isEnnoblisseur} />
+                  </InlineForm>
+                )
+              }
               return (
-                <InlineForm
-                  key={l.IDref_fil_commande}
-                  title="Modifier la ligne"
-                  onSave={() => updateLineMut.mutate(l.IDref_fil_commande)}
-                  onCancel={() => { setEditingLineId(null); resetLineForm() }}
-                  isSaving={updateLineMut.isPending}
-                >
-                  <LineFormFields form={lineForm} setForm={setLineForm} refsGrouped={refsGrouped} />
-                </InlineForm>
+                <LineCard
+                  key={l.IDligne_commande_sous_traitant}
+                  line={l}
+                  isEditing={isEditing}
+                  linesLocked={linesLocked}
+                  isEnnoblisseur={isEnnoblisseur}
+                  isDrawerOpen={piecesDrawerLineId === l.IDligne_commande_sous_traitant}
+                  onEdit={() => startEditLine(l)}
+                  onDelete={() => setDeleteLineConfirmId(l.IDligne_commande_sous_traitant)}
+                  onToggleSstatut={() => toggleLineSstatutMut.mutate({
+                    lineId: l.IDligne_commande_sous_traitant,
+                    sstatut: isLineDone(l.sstatut) ? SSTATUT_OPEN : SSTATUT_DONE,
+                  })}
+                  onOpenDrawer={onOpenPiecesDrawer}
+                />
               )
-            }
-            return (
-              <LineCard
-                key={l.IDref_fil_commande}
-                line={l}
-                isEditing={isEditing}
-                linesLocked={linesLocked}
-                isStockDrawerOpen={stockDrawerLineId === l.IDref_fil_commande}
-                onEdit={() => startEditLine(l)}
-                onDelete={() => setDeleteLineConfirmId(l.IDref_fil_commande)}
-                onToggleEtat={() => toggleLineEtatMut.mutate({ lineId: l.IDref_fil_commande, etat: l.etat === 1 ? 0 : 1 })}
-                onOpenStockDrawer={onOpenStockDrawer}
-              />
-            )
-          })
+            })
+          )}
+
+          {isEditing && !linesLocked && isEnnoblisseur && showLineForm && (
+            <InlineForm
+              title="Nouvelle ligne"
+              onSave={() => createLineMut.mutate()}
+              onCancel={resetLineForm}
+              isSaving={createLineMut.isPending}
+            >
+              <LineFormFields form={lineForm} setForm={setLineForm} refsFini={refLookup ?? []} editable={true} />
+            </InlineForm>
+          )}
+
+          {isEditing && !linesLocked && isEnnoblisseur && commande.lignes.length > 0 && !showLineForm && editingLineId === null && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={startAddLine}
+              className="w-full text-muted-foreground hover:text-accent hover:bg-accent/5 border border-dashed border-border/60 hover:border-accent/40"
+            >
+              <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter une ligne
+            </Button>
+          )}
+        </div>
+
+        {drawerOpen && drawerLigne && (
+          <div className="flex-1 min-h-0 flex flex-col mt-3 rounded-lg border border-border/60 overflow-hidden bg-zinc-50/80 animate-in slide-in-from-bottom-4 fade-in-0 duration-200">
+            <PiecesDrawer
+              commandeId={commande.IDcommande_sous_traitant}
+              ligne={drawerLigne}
+              onClose={() => onOpenPiecesDrawer(null)}
+              onSuccess={onMutationSuccess}
+            />
+          </div>
         )}
 
-        {isEditing && !linesLocked && showLineForm && (
-          <InlineForm
-            title="Nouvelle ligne"
-            onSave={() => createLineMut.mutate()}
-            onCancel={resetLineForm}
-            isSaving={createLineMut.isPending}
-          >
-            <LineFormFields form={lineForm} setForm={setLineForm} refsGrouped={refsGrouped} />
-          </InlineForm>
-        )}
-
-        {isEditing && !linesLocked && commande.lignes.length > 0 && !showLineForm && editingLineId === null && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={startAddLine}
-            className="w-full text-muted-foreground hover:text-accent hover:bg-accent/5 border border-dashed border-border/60 hover:border-accent/40"
-          >
-            <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter une ligne
-          </Button>
+        {commande.lignes.length > 0 && (
+          <div className="flex-shrink-0 mt-3 pt-3 border-t border-border/60 flex items-center justify-between text-sm font-medium">
+            <span className="text-muted-foreground text-xs uppercase tracking-wide">
+              Total · {commande.lignes.length} ligne{commande.lignes.length > 1 ? 's' : ''}
+            </span>
+            <div className="flex items-center gap-4 tabular-nums">
+              <span className="text-muted-foreground text-xs">Prévu {fmtNum(totalQte, 1)} Ml</span>
+              {totalKgEcru > 0 && (
+                <span className="text-muted-foreground text-xs">
+                  · {fmtNum(totalKgEcru, 1)} kg affectés
+                </span>
+              )}
+              {totalMetrageFini > 0 && (
+                <span className="text-green-700 text-xs">
+                  · {fmtNum(totalMetrageFini, 1)} Ml reçus
+                </span>
+              )}
+              <span className="text-accent text-base">{fmtNum(totalEurReal, 2)} €</span>
+            </div>
+          </div>
         )}
       </div>
 
-      {/* In-screen stock linkage drawer — grows into the center panel below the lines list */}
-      {drawerOpen && drawerLigne && (
-        <div className="flex-1 min-h-0 flex flex-col mt-3 rounded-lg border border-border/60 overflow-hidden bg-zinc-50/80 animate-in slide-in-from-bottom-4 fade-in-0 duration-200">
-          <StockLinkDrawer
-            commandeId={commande.IDcommande_fil}
-            ligne={drawerLigne}
-            onClose={() => onOpenStockDrawer(null)}
-            onSuccess={onMutationSuccess}
-          />
-        </div>
-      )}
-
-      {/* Totals footer pinned at bottom */}
-      {commande.lignes.length > 0 && (
-        <div className="flex-shrink-0 mt-3 pt-3 border-t border-border/60 flex items-center justify-between text-sm font-medium">
-          <span className="text-muted-foreground text-xs uppercase tracking-wide">
-            Total · {commande.lignes.length} ligne{commande.lignes.length > 1 ? 's' : ''}
-          </span>
-          <div className="flex items-center gap-4 tabular-nums">
-            <span>{fmtNum(totalKg, 1)} kg</span>
-            <span className="text-accent text-base">{fmtNum(totalEur, 2)} €</span>
-          </div>
-        </div>
-      )}
-    </div>
-
-    <ConfirmDialog
-      open={deleteLineConfirmId !== null}
-      title="Supprimer la ligne"
-      description="Cette ligne de commande sera supprimée définitivement."
-      confirmLabel="Supprimer"
-      isPending={deleteLineMut.isPending}
-      onCancel={() => setDeleteLineConfirmId(null)}
-      onConfirm={() => {
-        if (deleteLineConfirmId !== null) {
-          deleteLineMut.mutate(deleteLineConfirmId, {
-            onSuccess: () => setDeleteLineConfirmId(null),
-          })
-        }
-      }}
-    />
+      <ConfirmDialog
+        open={deleteLineConfirmId !== null}
+        title="Supprimer la ligne"
+        description="Cette ligne sera supprimée et les rouleaux écru affectés seront libérés."
+        confirmLabel="Supprimer"
+        isPending={deleteLineMut.isPending}
+        onCancel={() => setDeleteLineConfirmId(null)}
+        onConfirm={() => {
+          if (deleteLineConfirmId !== null) {
+            deleteLineMut.mutate(deleteLineConfirmId, {
+              onSuccess: () => setDeleteLineConfirmId(null),
+            })
+          }
+        }}
+      />
     </>
   )
 }
 
 function LineCard({
-  line, isEditing, linesLocked, isStockDrawerOpen, onEdit, onDelete, onToggleEtat, onOpenStockDrawer,
+  line, isEditing, linesLocked, isEnnoblisseur, isDrawerOpen, onEdit, onDelete, onToggleSstatut, onOpenDrawer,
 }: {
   line: LigneCommande
   isEditing: boolean
   linesLocked: boolean
-  isStockDrawerOpen: boolean
+  isEnnoblisseur: boolean
+  isDrawerOpen: boolean
   onEdit: () => void
   onDelete: () => void
-  onToggleEtat: () => void
-  onOpenStockDrawer: (lineId: number | null) => void
+  onToggleSstatut: () => void
+  onOpenDrawer: (lineId: number | null) => void
 }) {
-  const { border, iconBg, iconColor } = etatColors(line.etat)
-  const lineTotal = (Number(line.quantite) || 0) * (Number(line.prix_unitaire) || 0)
-  const nbLotsLies = line.nb_lots_lies ?? 0
-  const totalKgLie = line.total_kg_lie ?? 0
-  const clickable = !isEditing
+  const { border, iconBg, iconColor } = lineEtatColors(line.sstatut)
+  const prix = Number(line.prix) || 0
+  const qty = Number(line.quantite) || 0
+  const nbEcru = line.nb_ecru_lies ?? 0
+  const totalKgEcru = Number(line.total_kg_ecru_lie) || 0
+  const nbFini = line.nb_fini_recu ?? 0
+  const totalMetrageFini = Number(line.total_metrage_fini_recu) || 0
+  // Actual € total: sum of attached écru weight × prix/kg. Falls back to 0
+  // (and we hide the line) until the user attaches at least one roll.
+  const totalEur = totalKgEcru * prix
+  const clickable = !isEditing && isEnnoblisseur
+
+  // "Délai initial" indicator: HFSQL stores YYYYMMDD; show only when rescheduled.
+  const dateDelaiRaw = line.date_delai && /^\d{8}$/.test(line.date_delai) ? line.date_delai : ''
+  const dateLivRaw = line.date_livraison && /^\d{8}$/.test(line.date_livraison) ? line.date_livraison : ''
+  const showDelaiInitial = !!dateDelaiRaw && !!dateLivRaw && dateDelaiRaw !== dateLivRaw
 
   return (
     <div
@@ -1082,49 +1179,50 @@ function LineCard({
         'group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3',
         border,
         clickable && 'cursor-pointer hover:bg-zinc-100 hover:border-accent/40 transition-colors',
-        isStockDrawerOpen && 'ring-1 ring-accent bg-accent/[0.06] border-accent/50'
+        isDrawerOpen && 'ring-1 ring-accent bg-accent/[0.06] border-accent/50'
       )}
-      onClick={clickable ? () => onOpenStockDrawer(isStockDrawerOpen ? null : line.IDref_fil_commande) : undefined}
+      onClick={clickable ? () => onOpenDrawer(isDrawerOpen ? null : line.IDligne_commande_sous_traitant) : undefined}
     >
-      {/* Top row: icon + ref/coloris + badges/actions */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <div className={cn('h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0', iconBg)}>
-            <BobineIcon className={cn('h-3.5 w-3.5', iconColor)} />
+            <FabricRollIcon className={cn('h-3.5 w-3.5', iconColor)} />
           </div>
           <div className="min-w-0">
             <p className="text-sm font-medium truncate">
-              {line.ref_fil || '—'}
+              {line.ref_label || '—'}
               {line.colori_reference ? <span className="text-muted-foreground"> / {line.colori_reference}</span> : null}
             </p>
           </div>
         </div>
         <div className="flex items-center gap-1.5 flex-shrink-0">
-          {!!line.ref_fil_bio && (
-            <Badge className="bg-green-500/10 text-green-700 text-[10px] py-0 px-1.5 gap-0.5">
-              <Leaf className="h-2.5 w-2.5" />Bio
-            </Badge>
-          )}
-          {!isEditing && nbLotsLies > 0 && (
-            <Badge variant="secondary" className="text-[10px] py-0 px-1.5 gap-0.5">
+          {!isEditing && nbEcru > 0 && (
+            <Badge variant="secondary" className="text-[10px] py-0 px-1.5 gap-0.5" title={`${nbEcru} rouleau${nbEcru > 1 ? 'x' : ''} affecté${nbEcru > 1 ? 's' : ''}`}>
               <Package className="h-2.5 w-2.5" />
-              {nbLotsLies} lot{nbLotsLies > 1 ? 's' : ''}
-              {totalKgLie > 0 ? ` · ${fmtNum(totalKgLie, 1)} kg` : ''}
+              {fmtNum(totalKgEcru, 1)} kg
             </Badge>
           )}
-          <CommandeEtatBadge etat={line.etat} />
+          {!isEditing && nbFini > 0 && (
+            <Badge className="bg-green-500/10 text-green-700 text-[10px] py-0 px-1.5 gap-0.5" title={`${nbFini} rouleau${nbFini > 1 ? 'x' : ''} reçu${nbFini > 1 ? 's' : ''}`}>
+              <Package className="h-2.5 w-2.5" />
+              {fmtNum(totalMetrageFini, 0)} Ml reçus
+            </Badge>
+          )}
+          <LineSstatutBadge sstatut={line.sstatut} />
           {isEditing && !linesLocked && (
             <div className="flex gap-0.5">
               <Button
                 variant="ghost" size="icon" className="h-6 w-6"
-                onClick={(e) => { e.stopPropagation(); onToggleEtat() }}
-                title={line.etat === 1 ? 'Marquer en cours' : 'Marquer livrée'}
+                onClick={(e) => { e.stopPropagation(); onToggleSstatut() }}
+                title={isLineDone(line.sstatut) ? 'Marquer en cours' : 'Marquer terminée'}
               >
-                {line.etat === 1 ? <Clock className="h-3 w-3" /> : <CheckCircle2 className="h-3 w-3" />}
+                {isLineDone(line.sstatut) ? <Clock className="h-3 w-3" /> : <CheckCircle2 className="h-3 w-3" />}
               </Button>
-              <Button variant="ghost" size="icon" className="h-6 w-6" onClick={(e) => { e.stopPropagation(); onEdit() }}>
-                <Pencil className="h-3 w-3" />
-              </Button>
+              {isEnnoblisseur && (
+                <Button variant="ghost" size="icon" className="h-6 w-6" onClick={(e) => { e.stopPropagation(); onEdit() }}>
+                  <Pencil className="h-3 w-3" />
+                </Button>
+              )}
               <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive hover:text-destructive" onClick={(e) => { e.stopPropagation(); onDelete() }}>
                 <Trash2 className="h-3 w-3" />
               </Button>
@@ -1132,17 +1230,17 @@ function LineCard({
           )}
         </div>
       </div>
-      {/* Bottom row: quantite · prix · total · livraison */}
+      {/* "Prévu" row — the user's projection: nominal qty × prix. */}
       <div className="flex items-center gap-3 mt-2 ml-9 text-[11px] text-muted-foreground tabular-nums">
-        {line.quantite != null && <span>{fmtNum(Number(line.quantite), 1)} kg</span>}
-        {line.prix_unitaire != null && Number(line.prix_unitaire) > 0 && (
-          <span>× {fmtNum(Number(line.prix_unitaire), 2)} €/kg</span>
+        {(qty > 0 || prix > 0) && (
+          <span className="text-muted-foreground">
+            <span className="text-[10px] uppercase tracking-wide opacity-70 mr-1">Prévu</span>
+            {qty > 0 ? `${fmtNum(qty, 1)} Ml` : '—'}
+            {prix > 0 && <span> × {fmtNum(prix, 2)} €/Kg</span>}
+          </span>
         )}
-        {lineTotal > 0 && (
-          <span className="font-medium text-foreground">→ {fmtNum(lineTotal, 2)} €</span>
-        )}
-        {line.date_livraison && (() => {
-          const lineUrgency = deliveryUrgency(line.date_livraison, line.etat)
+        {dateLivRaw && (() => {
+          const lineUrgency = deliveryUrgency(dateLivRaw, isLineDone(line.sstatut) ? 1 : 0)
           return (
             <span
               className={cn(
@@ -1151,18 +1249,44 @@ function LineCard({
                 lineUrgency === 'soon' && 'font-bold text-amber-600'
               )}
             >
-              Livraison {formatHfsqlDate(line.date_livraison)}
+              Livraison {formatHfsqlDate(dateLivRaw)}
             </span>
           )
         })()}
       </div>
+      {/* "Réel" row — only when something has actually been attached or
+          received. Shows the bill computed from real attached weight. */}
+      {(totalKgEcru > 0 || totalMetrageFini > 0) && (
+        <div className="flex items-center gap-3 mt-1 ml-9 text-[11px] tabular-nums">
+          <span className="text-[10px] uppercase tracking-wide text-muted-foreground opacity-70">Réel</span>
+          {totalKgEcru > 0 && (
+            <span className="text-muted-foreground">
+              {fmtNum(totalKgEcru, 1)} kg affectés
+              {prix > 0 && (
+                <span className="text-foreground font-medium"> → {fmtNum(totalEur, 2)} €</span>
+              )}
+            </span>
+          )}
+          {totalMetrageFini > 0 && (
+            <span className="text-green-700">
+              · {fmtNum(totalMetrageFini, 1)} Ml reçus
+            </span>
+          )}
+        </div>
+      )}
+      {showDelaiInitial && (
+        <div className="flex items-center gap-1.5 mt-1 ml-9 text-[11px] text-muted-foreground italic">
+          <Clock className="h-3 w-3 opacity-50 flex-shrink-0" />
+          <span>Délai initial: {formatHfsqlDate(dateDelaiRaw)}</span>
+        </div>
+      )}
     </div>
   )
 }
 
-// ── Stock linkage drawer ───────────────────────────────
+// ── Pieces drawer (ennoblisseur-only) ──────────────────
 
-function StockLinkDrawer({
+function PiecesDrawer({
   commandeId, ligne, onClose, onSuccess,
 }: {
   commandeId: number
@@ -1171,54 +1295,110 @@ function StockLinkDrawer({
   onSuccess: () => void
 }) {
   const queryClient = useQueryClient()
-  const queryKey = ['commande-fil-stock', commandeId, ligne.IDref_fil_commande]
+  const queryKey = ['commande-sst-pieces', commandeId, ligne.IDligne_commande_sous_traitant] as const
 
-  const { data, isLoading, isError } = useQuery<LineStockPayload>({
+  const { data, isLoading, isError } = useQuery<PiecesPayload>({
     queryKey,
-    queryFn: () => apiFetch(`/commandes-fil/${commandeId}/lignes/${ligne.IDref_fil_commande}/stock`),
+    queryFn: () => apiFetch(`/commandes-sous-traitant/${commandeId}/lignes/${ligne.IDligne_commande_sous_traitant}/pieces`),
   })
 
-  const linkMut = useMutation({
-    mutationFn: (stockId: number) => apiFetch(
-      `/commandes-fil/${commandeId}/lignes/${ligne.IDref_fil_commande}/stock/${stockId}`,
+  const linkEcruMut = useMutation({
+    mutationFn: (stockEcruId: number) => apiFetch(
+      `/commandes-sous-traitant/${commandeId}/lignes/${ligne.IDligne_commande_sous_traitant}/pieces/ecru/${stockEcruId}`,
       { method: 'PUT' }
     ),
-    onSuccess: (payload: LineStockPayload) => {
+    onSuccess: (payload: PiecesPayload) => {
       queryClient.setQueryData(queryKey, payload)
       onSuccess()
     },
   })
 
-  const unlinkMut = useMutation({
-    mutationFn: (stockId: number) => apiFetch(
-      `/commandes-fil/${commandeId}/lignes/${ligne.IDref_fil_commande}/stock/${stockId}`,
+  const unlinkEcruMut = useMutation({
+    mutationFn: (stockEcruId: number) => apiFetch(
+      `/commandes-sous-traitant/${commandeId}/lignes/${ligne.IDligne_commande_sous_traitant}/pieces/ecru/${stockEcruId}`,
       { method: 'DELETE' }
     ),
-    onSuccess: (payload: LineStockPayload) => {
+    onSuccess: (payload: PiecesPayload) => {
       queryClient.setQueryData(queryKey, payload)
       onSuccess()
     },
   })
 
-  const linked = data?.linked ?? []
-  const available = data?.available ?? []
+  const deleteFiniMut = useMutation({
+    mutationFn: (stockFiniId: number) => apiFetch(
+      `/commandes-sous-traitant/${commandeId}/lignes/${ligne.IDligne_commande_sous_traitant}/pieces/fini/${stockFiniId}`,
+      { method: 'DELETE' }
+    ),
+    onSuccess: (payload: PiecesPayload) => {
+      queryClient.setQueryData(queryKey, payload)
+      onSuccess()
+    },
+  })
+
+  const [deleteFiniConfirm, setDeleteFiniConfirm] = useState<StockFiniLite | null>(null)
+  const [showReceptionForm, setShowReceptionForm] = useState(false)
+  const [activeTab, setActiveTab] = useState<'affectes' | 'reception'>('affectes')
+
+  const ecruLinked = data?.ecruLinked ?? []
+  const ecruAvailable = data?.ecruAvailable ?? []
+  const finiReceived = data?.finiReceived ?? []
+
+  // Roll-ups for tab summaries — give the user a glance answer to "how
+  // much have I attached / received" without scrolling rows.
+  const totalKgAffectes = ecruLinked.reduce((s, r) => s + (Number(r.poids) || 0), 0)
+  const totalMlReception = finiReceived.reduce((s, r) => s + (Number(r.metrage) || 0), 0)
+
+  const tabs = [
+    {
+      key: 'affectes' as const,
+      label: 'Affectés',
+      icon: Package,
+      summary: ecruLinked.length > 0
+        ? `${ecruLinked.length} · ${fmtNum(totalKgAffectes, 1)} kg`
+        : `${ecruAvailable.length} dispo.`,
+    },
+    {
+      key: 'reception' as const,
+      label: 'Réception',
+      icon: FabricRollIcon,
+      summary: finiReceived.length > 0
+        ? `${finiReceived.length} · ${fmtNum(totalMlReception, 1)} Ml`
+        : 'En attente',
+    },
+  ]
 
   return (
     <div className="flex flex-col h-full min-h-0 overflow-hidden">
-      {/* Minimal top bar: close button only — line info is already visible in the list above */}
-      <div className="flex-shrink-0 px-2 py-1 border-b bg-zinc-200/50 flex items-center justify-end">
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={onClose}
-          className="h-7 w-7"
-          title="Fermer"
-        >
-          <X className="h-3.5 w-3.5" />
-        </Button>
+      {/* Tab bar lives in the existing top gray strip alongside the close X. */}
+      <div className="flex-shrink-0 flex items-stretch border-b bg-zinc-200/50 pl-1">
+        {tabs.map((t) => {
+          const Icon = t.icon
+          const active = activeTab === t.key
+          return (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => setActiveTab(t.key)}
+              className={cn(
+                'flex items-center gap-2 px-3 py-2 text-xs font-medium transition-colors border-b-2 -mb-px cursor-pointer',
+                active
+                  ? 'border-accent text-accent bg-white/60'
+                  : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-white/30',
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              <span>{t.label}</span>
+              <span className="text-[10px] text-muted-foreground tabular-nums">{t.summary}</span>
+            </button>
+          )
+        })}
+        <div className="ml-auto flex items-center pr-1">
+          <Button variant="ghost" size="icon" onClick={onClose} className="h-7 w-7" title="Fermer">
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        </div>
       </div>
 
-      {/* Body */}
       <div className="flex-1 overflow-y-auto p-3 space-y-4 scrollbar-transparent">
         {isLoading && (
           <div className="space-y-2">
@@ -1231,102 +1411,172 @@ function StockLinkDrawer({
             <p className="text-sm">Erreur de chargement</p>
           </div>
         )}
-        {!isLoading && !isError && linked.length === 0 && available.length === 0 && (
-          <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-            <Package className="h-8 w-8 mb-2 opacity-50" />
-            <p className="text-sm font-medium">Aucun lot en stock</p>
-            <p className="text-xs mt-1">Aucun lot de fil correspondant à cette ligne n'est encore entré en stock.</p>
-          </div>
+
+        {!isLoading && !isError && activeTab === 'affectes' && (
+          <>
+            {/* Linked écru rolls */}
+            <section>
+              <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
+                Tombé métier — affectés ({ecruLinked.length}{ecruLinked.length > 0 ? ` · ${fmtNum(totalKgAffectes, 1)} kg` : ''})
+              </h3>
+              {ecruLinked.length === 0 ? (
+                <p className="text-xs text-muted-foreground italic">Aucun rouleau affecté.</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {ecruLinked.map((roll) => (
+                    <EcruRollRow
+                      key={roll.IDstock_ecru}
+                      roll={roll}
+                      action="unlink"
+                      onAction={() => unlinkEcruMut.mutate(roll.IDstock_ecru)}
+                      isBusy={unlinkEcruMut.isPending && unlinkEcruMut.variables === roll.IDstock_ecru}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+
+            {/* Available écru rolls */}
+            <section>
+              <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
+                Tombé métier — disponibles ({ecruAvailable.length})
+              </h3>
+              {ecruAvailable.length === 0 ? (
+                <p className="text-xs text-muted-foreground italic">
+                  Aucun rouleau écru disponible pour cette référence + coloris.
+                </p>
+              ) : (
+                <div className="space-y-1.5">
+                  {ecruAvailable.map((roll) => (
+                    <EcruRollRow
+                      key={roll.IDstock_ecru}
+                      roll={roll}
+                      action="link"
+                      onAction={() => linkEcruMut.mutate(roll.IDstock_ecru)}
+                      isBusy={linkEcruMut.isPending && linkEcruMut.variables === roll.IDstock_ecru}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+
+          </>
         )}
 
-        {linked.length > 0 && (
-          <section>
-            <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
-              Lots liés ({linked.length})
-            </h3>
-            <div className="space-y-1.5">
-              {linked.map((lot) => (
-                <StockLotRow
-                  key={lot.IDstock_fil}
-                  lot={lot}
-                  action="unlink"
-                  onAction={() => unlinkMut.mutate(lot.IDstock_fil)}
-                  isBusy={unlinkMut.isPending && unlinkMut.variables === lot.IDstock_fil}
+        {!isLoading && !isError && activeTab === 'reception' && (
+          <>
+            {/* Réceptions finis */}
+            <section>
+              <div className="flex items-center justify-between mb-1.5">
+                <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
+                  Rouleaux finis reçus ({finiReceived.length}{finiReceived.length > 0 ? ` · ${fmtNum(totalMlReception, 1)} Ml` : ''})
+                </h3>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-[11px] text-accent hover:text-accent hover:bg-accent/10"
+                  onClick={() => setShowReceptionForm(true)}
+                >
+                  <Plus className="h-3 w-3 mr-1" />
+                  Nouvelle réception
+                </Button>
+              </div>
+              {finiReceived.length === 0 && !showReceptionForm ? (
+                <p className="text-xs text-muted-foreground italic">Aucun rouleau reçu pour le moment.</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {finiReceived.map((roll) => (
+                    <FiniRollRow
+                      key={roll.IDstock_fini}
+                      roll={roll}
+                      onDelete={() => setDeleteFiniConfirm(roll)}
+                    />
+                  ))}
+                  {showReceptionForm && (
+                    <ReceptionForm
+                      commandeId={commandeId}
+                      ligne={ligne}
+                      ecruLinked={ecruLinked}
+                      onCancel={() => setShowReceptionForm(false)}
+                      onCreated={(payload) => {
+                        queryClient.setQueryData(queryKey, payload)
+                        onSuccess()
+                        setShowReceptionForm(false)
+                      }}
+                    />
+                  )}
+                </div>
+              )}
+              {finiReceived.length === 0 && showReceptionForm && (
+                <ReceptionForm
+                  commandeId={commandeId}
+                  ligne={ligne}
+                  ecruLinked={ecruLinked}
+                  onCancel={() => setShowReceptionForm(false)}
+                  onCreated={(payload) => {
+                    queryClient.setQueryData(queryKey, payload)
+                    onSuccess()
+                    setShowReceptionForm(false)
+                  }}
                 />
-              ))}
-            </div>
-          </section>
-        )}
-
-        {available.length > 0 && (
-          <section>
-            <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
-              Lots disponibles ({available.length})
-            </h3>
-            <div className="space-y-1.5">
-              {available.map((lot) => (
-                <StockLotRow
-                  key={lot.IDstock_fil}
-                  lot={lot}
-                  action="link"
-                  onAction={() => linkMut.mutate(lot.IDstock_fil)}
-                  isBusy={linkMut.isPending && linkMut.variables === lot.IDstock_fil}
-                />
-              ))}
-            </div>
-          </section>
-        )}
-
-        {!isLoading && !isError && linked.length > 0 && available.length === 0 && (
-          <p className="text-xs text-muted-foreground italic text-center">
-            Aucun lot supplémentaire disponible pour ce fournisseur.
-          </p>
+              )}
+            </section>
+          </>
         )}
       </div>
+
+      <ConfirmDialog
+        open={deleteFiniConfirm !== null}
+        title="Annuler la réception"
+        description={deleteFiniConfirm
+          ? `Le rouleau fini « ${deleteFiniConfirm.numero || `#${deleteFiniConfirm.IDstock_fini}`} » sera supprimé du stock. Cette action ne peut pas être annulée.`
+          : undefined}
+        confirmLabel="Supprimer"
+        isPending={deleteFiniMut.isPending}
+        onCancel={() => setDeleteFiniConfirm(null)}
+        onConfirm={() => {
+          if (deleteFiniConfirm) {
+            deleteFiniMut.mutate(deleteFiniConfirm.IDstock_fini, {
+              onSuccess: () => setDeleteFiniConfirm(null),
+            })
+          }
+        }}
+      />
     </div>
   )
 }
 
-function StockLotRow({
-  lot, action, onAction, isBusy,
+function EcruRollRow({
+  roll, action, onAction, isBusy,
 }: {
-  lot: StockLotLite
+  roll: StockEcruLite
   action: 'link' | 'unlink'
   onAction: () => void
   isBusy: boolean
 }) {
-  const stockKg = Number(lot.stock) || 0
-  const initialKg = Number(lot.stock_initial) || 0
   return (
     <div className="rounded-lg border border-border/60 bg-white p-3 flex items-center gap-3">
       <div className="h-8 w-8 rounded-md bg-zinc-100 flex items-center justify-center flex-shrink-0">
-        <BobineIcon className="h-4 w-4 text-muted-foreground" />
+        <FabricRollIcon className="h-4 w-4 text-muted-foreground" />
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-sm font-semibold truncate">Lot {lot.lot || '—'}</span>
-          {lot.lot_frs && (
-            <span className="text-xs text-muted-foreground truncate">· frs: {lot.lot_frs}</span>
-          )}
-          {!!lot.bio && (
-            <Badge className="bg-green-500/10 text-green-700 text-[10px] py-0 px-1.5 gap-0.5">
-              <Leaf className="h-2.5 w-2.5" />Bio
-            </Badge>
-          )}
-          {!!lot.termine && (
-            <Badge variant="secondary" className="text-[10px] py-0 px-1.5">Terminé</Badge>
+          <span className="text-sm font-semibold truncate">
+            {roll.numero || `#${roll.IDstock_ecru}`}
+          </span>
+          {roll.lot && (
+            <span className="text-xs text-muted-foreground truncate">· lot {roll.lot}</span>
           )}
         </div>
         <div className="flex items-center gap-3 mt-1 text-[11px] text-muted-foreground tabular-nums">
-          <span className="font-medium text-foreground">{fmtNum(stockKg, 1)} kg</span>
-          {initialKg > 0 && initialKg !== stockKg && (
-            <span>/ {fmtNum(initialKg, 1)} kg initial</span>
+          {Number(roll.poids) > 0 && (
+            <span className="font-medium text-foreground">{fmtNum(Number(roll.poids), 1)} kg</span>
           )}
-          {lot.emplacement && (
-            <span className="flex items-center gap-0.5"><MapPin className="h-2.5 w-2.5" />{lot.emplacement}</span>
+          {Number(roll.metrage) > 0 && (
+            <span>{fmtNum(Number(roll.metrage), 1)} m</span>
           )}
-          {lot.date_entree && (
-            <span>entré {formatHfsqlDate(lot.date_entree)}</span>
+          {roll.date_saisie && (
+            <span>entré {formatHfsqlDate(roll.date_saisie)}</span>
           )}
         </div>
       </div>
@@ -1344,48 +1594,244 @@ function StockLotRow({
         ) : (
           <Unlink className="h-3.5 w-3.5 mr-1.5" />
         )}
-        {action === 'link' ? 'Lier' : 'Dissocier'}
+        {action === 'link' ? 'Affecter' : 'Retirer'}
       </Button>
     </div>
   )
 }
 
-function LineFormFields({
-  form, setForm, refsGrouped,
+function FiniRollRow({
+  roll, onDelete,
 }: {
-  form: { IDref_fil: number; IDcolori_fil: number; quantite: string; prix_unitaire: string; date_livraison: string }
-  setForm: (f: typeof form) => void
-  refsGrouped: { IDref_fil: number; reference: string; bio: boolean; coloris: { IDcolori_fil: number; reference: string }[] }[]
+  roll: StockFiniLite
+  onDelete: () => void
 }) {
-  const selectedRef = refsGrouped.find((r) => r.IDref_fil === form.IDref_fil)
-  const coloris = selectedRef?.coloris ?? []
+  return (
+    <div className="group rounded-lg border border-border/60 bg-white p-3 flex items-center gap-3">
+      <div className="h-8 w-8 rounded-md bg-green-500/10 flex items-center justify-center flex-shrink-0">
+        <FabricRollIcon className="h-4 w-4 text-green-600" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-semibold truncate">
+            {roll.numero || `#${roll.IDstock_fini}`}
+          </span>
+          {roll.lot && (
+            <span className="text-xs text-muted-foreground truncate">· lot {roll.lot}</span>
+          )}
+          {roll.IDstock_ecru > 0 && (
+            <Badge variant="secondary" className="text-[10px] py-0 px-1.5">
+              issu de écru #{roll.IDstock_ecru}
+            </Badge>
+          )}
+        </div>
+        <div className="flex items-center gap-3 mt-1 text-[11px] text-muted-foreground tabular-nums">
+          {Number(roll.poids) > 0 && (
+            <span className="font-medium text-foreground">{fmtNum(Number(roll.poids), 1)} kg</span>
+          )}
+          {Number(roll.metrage) > 0 && (
+            <span>{fmtNum(Number(roll.metrage), 1)} m</span>
+          )}
+          {roll.date_saisie && (
+            <span>reçu {formatHfsqlDate(roll.date_saisie)}</span>
+          )}
+        </div>
+        {!!roll.observations?.trim() && (
+          <p className="text-[11px] text-muted-foreground italic mt-1">{roll.observations.trim()}</p>
+        )}
+      </div>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-7 w-7 text-destructive hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+        onClick={onDelete}
+        title="Annuler cette réception"
+      >
+        <Trash2 className="h-3.5 w-3.5" />
+      </Button>
+    </div>
+  )
+}
+
+function ReceptionForm({
+  commandeId, ligne, ecruLinked, onCancel, onCreated,
+}: {
+  commandeId: number
+  ligne: LigneCommande
+  ecruLinked: StockEcruLite[]
+  onCancel: () => void
+  onCreated: (payload: PiecesPayload) => void
+}) {
+  const [numero, setNumero] = useState('')
+  const [lot, setLot] = useState('')
+  const [poids, setPoids] = useState('')
+  const [metrage, setMetrage] = useState('')
+  const [idStockEcru, setIdStockEcru] = useState<number>(0)
+  const [idRefFini, setIdRefFini] = useState<number>(0)
+  const [idMagasin, setIdMagasin] = useState<number>(0)
+  const [observations, setObservations] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
+  const { data: refsFini } = useQuery<RefFiniLookup[]>({
+    queryKey: ['commande-sst-refs-fini'],
+    queryFn: () => apiFetch('/commandes-sous-traitant/lookups/refs-fini'),
+  })
+  const { data: magasins } = useQuery<MagasinLite[]>({
+    queryKey: ['commande-sst-magasins'],
+    queryFn: () => apiFetch('/commandes-sous-traitant/lookups/magasins'),
+  })
+
+  const createMut = useMutation({
+    mutationFn: (): Promise<PiecesPayload> => apiFetch(
+      `/commandes-sous-traitant/${commandeId}/lignes/${ligne.IDligne_commande_sous_traitant}/pieces/fini`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          numero,
+          lot: lot || undefined,
+          poids: Number(poids) || 0,
+          metrage: Number(metrage) || 0,
+          IDstock_ecru: idStockEcru || undefined,
+          IDref_fini: idRefFini,
+          // IDColoris is inherited server-side from the source écru's
+          // IDcolori_ecru when IDstock_ecru is set.
+          IDmagasin: idMagasin || undefined,
+          observations: observations || undefined,
+        }),
+      },
+    ),
+    onSuccess: (payload: PiecesPayload) => onCreated(payload),
+    onError: (err: Error) => setError(err.message || 'Erreur'),
+  })
+
+  const canSave = numero.trim().length > 0 && idRefFini > 0
+
+  return (
+    <div className="rounded-lg border border-accent/25 bg-accent/[0.03] p-3 space-y-2">
+      <p className="text-xs font-semibold text-accent uppercase tracking-wide">Nouvelle réception</p>
+      <div className="grid grid-cols-2 gap-2">
+        <LabeledInput label="N°" value={numero} onChange={setNumero} autoFocus />
+        <LabeledInput label="Lot" value={lot} onChange={setLot} />
+        <LabeledInput label="Poids (kg)" type="number" value={poids} onChange={setPoids} />
+        <LabeledInput label="Métrage (m)" type="number" value={metrage} onChange={setMetrage} />
+      </div>
+      <div className="space-y-1">
+        <label className="text-xs font-medium text-muted-foreground">Source écru (optionnel)</label>
+        <PopoverSelect
+          options={ecruLinked.map((r) => {
+            const bits = [r.lot ? `lot ${r.lot}` : '', r.poids != null && Number(r.poids) > 0 ? `${fmtNum(Number(r.poids), 1)} kg` : '']
+              .filter(Boolean)
+              .join(' · ')
+            return {
+              id: r.IDstock_ecru,
+              primary: r.numero || `#${r.IDstock_ecru}`,
+              secondary: bits || undefined,
+            }
+          })}
+          value={idStockEcru}
+          onChange={setIdStockEcru}
+          emptyLabel="— Aucune source —"
+        />
+      </div>
+      <div className="space-y-1">
+        <label className="text-xs font-medium text-muted-foreground">Référence fini</label>
+        <SearchableCombobox<RefFiniLookup>
+          options={refsFini ?? []}
+          value={idRefFini}
+          onChange={setIdRefFini}
+          getId={(r) => r.IDref_fini}
+          getPrimary={(r) => r.ref_fini}
+          getSecondary={(r) => r.designation || null}
+          placeholder="Choisir une référence fini"
+        />
+        <p className="text-[10px] text-muted-foreground">
+          Le coloris est repris automatiquement du rouleau écru source.
+        </p>
+      </div>
+      <div className="space-y-1">
+        <label className="text-xs font-medium text-muted-foreground">Magasin</label>
+        <PopoverSelect
+          options={(magasins ?? []).map((m) => ({ id: m.IDmagasin, primary: m.nom }))}
+          value={idMagasin}
+          onChange={setIdMagasin}
+          emptyLabel="—"
+        />
+      </div>
+      <div className="space-y-1">
+        <label className="text-xs font-medium text-muted-foreground">Observations</label>
+        <textarea
+          value={observations}
+          onChange={(e) => setObservations(e.target.value)}
+          rows={2}
+          className="w-full rounded-md border border-input bg-white px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+        />
+      </div>
+      {!!error && (
+        <div className="flex items-start gap-1.5 text-xs text-destructive">
+          <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+          <span className="break-all">{error}</span>
+        </div>
+      )}
+      <div className="flex justify-end gap-2 pt-1">
+        <Button variant="outline" size="sm" onClick={onCancel}>Annuler</Button>
+        <Button size="sm" onClick={() => createMut.mutate()} disabled={!canSave || createMut.isPending}>
+          {createMut.isPending ? 'Enregistrement...' : 'Enregistrer'}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+// ── Line form fields ──────────────────────────────────
+
+function LineFormFields({
+  form, setForm, refsFini, editable,
+}: {
+  form: { IDreference: number; IDColoris: number; quantite: string; prix: string; date_livraison: string }
+  setForm: (f: typeof form) => void
+  refsFini: RefFiniLookup[]
+  editable: boolean
+}) {
+  // Coloris options for the picked ref_fini — `ref_fini_colori` rows whose
+  // IDref_fini matches. The PK there (IDref_fini_colori) is what gets stored
+  // in `ligne_commande_sous_traitant.IDColoris`.
+  const { data: colorisOptions } = useQuery<Array<{ IDref_fini_colori: number; reference: string }>>({
+    queryKey: ['commande-sst-colori-fini', form.IDreference],
+    queryFn: () => apiFetch(`/commandes-sous-traitant/lookups/colori-fini?ref_fini=${form.IDreference}`),
+    enabled: editable && form.IDreference > 0,
+  })
 
   return (
     <>
       <div className="space-y-1">
-        <label className="text-xs font-medium text-muted-foreground">Référence</label>
-        <SearchableCombobox<{ IDref_fil: number; reference: string; bio: boolean }>
-          options={refsGrouped}
-          value={form.IDref_fil}
-          onChange={(id) => setForm({ ...form, IDref_fil: id, IDcolori_fil: 0 })}
-          getId={(r) => r.IDref_fil}
-          getPrimary={(r) => `${r.reference}${r.bio ? ' (Bio)' : ''}`}
-          placeholder="Choisir une référence"
+        <label className="text-xs font-medium text-muted-foreground">Référence fini</label>
+        <SearchableCombobox<RefFiniLookup>
+          options={refsFini}
+          value={form.IDreference}
+          onChange={(id) => setForm({ ...form, IDreference: id, IDColoris: 0 })}
+          getId={(r) => r.IDref_fini}
+          getPrimary={(r) => r.ref_fini}
+          getSecondary={(r) => r.designation || null}
+          disabled={!editable}
+          placeholder="Choisir une référence fini"
         />
       </div>
       <div className="space-y-1">
         <label className="text-xs font-medium text-muted-foreground">Coloris</label>
         <PopoverSelect
-          options={coloris.map((c) => ({ id: c.IDcolori_fil, primary: c.reference }))}
-          value={form.IDcolori_fil}
-          onChange={(id) => setForm({ ...form, IDcolori_fil: id })}
-          disabled={!form.IDref_fil}
-          emptyLabel="— Choisir —"
+          options={(colorisOptions ?? []).map((c) => ({ id: c.IDref_fini_colori, primary: c.reference }))}
+          value={form.IDColoris}
+          onChange={(id) => setForm({ ...form, IDColoris: id })}
+          disabled={!editable || form.IDreference === 0}
+          emptyLabel={form.IDreference === 0 ? '— Choisir une référence d\'abord —' : '— Aucun —'}
         />
+        <p className="text-[10px] text-muted-foreground">
+          Le tombé métier écru à envoyer est sélectionné dans le tiroir « pièces ».
+        </p>
       </div>
       <div className="grid grid-cols-2 gap-2">
-        <LabeledInput label="Quantité (kg)" type="number" value={form.quantite} onChange={(v) => setForm({ ...form, quantite: v })} />
-        <LabeledInput label="Prix (€/kg)" type="number" value={form.prix_unitaire} onChange={(v) => setForm({ ...form, prix_unitaire: v })} />
+        <LabeledInput label="Quantité (Ml)" type="number" value={form.quantite} onChange={(v) => setForm({ ...form, quantite: v })} />
+        <LabeledInput label="Prix (€/Kg)" type="number" value={form.prix} onChange={(v) => setForm({ ...form, prix: v })} />
       </div>
       <LabeledInput label="Date livraison" type="date" value={form.date_livraison} onChange={(v) => setForm({ ...form, date_livraison: v })} />
     </>
@@ -1401,9 +1847,7 @@ function DetailSidebar({
   editDateCommande, onEditDateCommandeChange,
   editCommentaire, onEditCommentaireChange,
   editJournal, onEditJournalChange,
-  editIDModePaiement, onEditIDModePaiementChange,
-  editIDEcheance, onEditIDEcheanceChange,
-  editIDAdresseFacturation, onEditIDAdresseFacturationChange,
+  editIDAdresseSousTraitant, onEditIDAdresseSousTraitantChange,
   editIDAdresseLivraison, onEditIDAdresseLivraisonChange,
   onToggleEtat, isTogglingEtat,
 }: {
@@ -1416,12 +1860,8 @@ function DetailSidebar({
   onEditCommentaireChange: (v: string) => void
   editJournal: string
   onEditJournalChange: (v: string) => void
-  editIDModePaiement: number
-  onEditIDModePaiementChange: (v: number) => void
-  editIDEcheance: number
-  onEditIDEcheanceChange: (v: number) => void
-  editIDAdresseFacturation: number
-  onEditIDAdresseFacturationChange: (v: number) => void
+  editIDAdresseSousTraitant: number
+  onEditIDAdresseSousTraitantChange: (v: number) => void
   editIDAdresseLivraison: number
   onEditIDAdresseLivraisonChange: (v: number) => void
   onToggleEtat: () => void
@@ -1429,20 +1869,10 @@ function DetailSidebar({
 }) {
   const [activeTab, setActiveTab] = useState<SidebarTab>('info')
 
-  const { data: modesPaiement } = useQuery<ModePaiement[]>({
-    queryKey: ['lookup-modes-paiement'],
-    queryFn: () => apiFetch('/commandes-fil/lookups/modes-paiement'),
-    enabled: isEditing,
-  })
-  const { data: echeances } = useQuery<Echeance[]>({
-    queryKey: ['lookup-echeances'],
-    queryFn: () => apiFetch('/commandes-fil/lookups/echeances'),
-    enabled: isEditing,
-  })
   const { data: adresses } = useQuery<AdresseLookup[]>({
-    queryKey: ['commande-fil-adresses', commande?.IDfournisseur],
-    queryFn: () => apiFetch(`/commandes-fil/lookups/adresses?fournisseur=${commande?.IDfournisseur}`),
-    enabled: isEditing && !!commande?.IDfournisseur,
+    queryKey: ['commande-sst-adresses', commande?.IDsous_traitant],
+    queryFn: () => apiFetch(`/commandes-sous-traitant/lookups/adresses?sous_traitant=${commande?.IDsous_traitant}`),
+    enabled: isEditing && !!commande?.IDsous_traitant,
   })
 
   if (isLoading) return (
@@ -1467,68 +1897,62 @@ function DetailSidebar({
   return (
     <div className="w-96 flex-shrink-0 flex flex-col gap-3 min-h-0">
       <div className="flex-1 min-h-0 rounded-xl border flex flex-col overflow-hidden bg-zinc-100/80">
-      <div className="flex border-b p-1 gap-1 rounded-t-xl bg-zinc-200/50">
-        {tabs.map((tab) => {
-          const Icon = tab.icon
-          return (
-            <button
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
-              className={cn(
-                'flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-md transition-colors',
-                activeTab === tab.key
-                  ? 'bg-accent text-accent-foreground shadow-sm'
-                  : 'text-muted-foreground hover:bg-accent/10'
-              )}
-            >
-              <Icon className="h-3.5 w-3.5" />{tab.label}
-            </button>
-          )
-        })}
-      </div>
-      <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-transparent">
-        {activeTab === 'info' && (
-          <InfoTab
-            commande={commande}
-            isEditing={isEditing}
-            modesPaiement={modesPaiement ?? []}
-            echeances={echeances ?? []}
-            editDateCommande={editDateCommande}
-            onEditDateCommandeChange={onEditDateCommandeChange}
-            editCommentaire={editCommentaire}
-            onEditCommentaireChange={onEditCommentaireChange}
-            editIDModePaiement={editIDModePaiement}
-            onEditIDModePaiementChange={onEditIDModePaiementChange}
-            editIDEcheance={editIDEcheance}
-            onEditIDEcheanceChange={onEditIDEcheanceChange}
-          />
-        )}
-        {activeTab === 'adresses' && (
-          <AdressesTab
-            commande={commande}
-            isEditing={isEditing}
-            adresses={adresses ?? []}
-            editIDAdresseFacturation={editIDAdresseFacturation}
-            onEditIDAdresseFacturationChange={onEditIDAdresseFacturationChange}
-            editIDAdresseLivraison={editIDAdresseLivraison}
-            onEditIDAdresseLivraisonChange={onEditIDAdresseLivraisonChange}
-          />
-        )}
-        {activeTab === 'docs' && (
-          <DocsTab commande={commande} isEditing={isEditing} />
-        )}
-        {activeTab === 'journal' && (
-          <JournalTab
-            commande={commande}
-            isEditing={isEditing}
-            editJournal={editJournal}
-            onEditJournalChange={onEditJournalChange}
-          />
-        )}
-      </div>
+        <div className="flex border-b p-1 gap-1 rounded-t-xl bg-zinc-200/50">
+          {tabs.map((tab) => {
+            const Icon = tab.icon
+            return (
+              <button
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                className={cn(
+                  'flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-md transition-colors',
+                  activeTab === tab.key
+                    ? 'bg-accent text-accent-foreground shadow-sm'
+                    : 'text-muted-foreground hover:bg-accent/10'
+                )}
+              >
+                <Icon className="h-3.5 w-3.5" />{tab.label}
+              </button>
+            )
+          })}
+        </div>
+        <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-transparent">
+          {activeTab === 'info' && (
+            <InfoTab
+              commande={commande}
+              isEditing={isEditing}
+              editDateCommande={editDateCommande}
+              onEditDateCommandeChange={onEditDateCommandeChange}
+              editCommentaire={editCommentaire}
+              onEditCommentaireChange={onEditCommentaireChange}
+            />
+          )}
+          {activeTab === 'adresses' && (
+            <AdressesTab
+              commande={commande}
+              isEditing={isEditing}
+              adresses={adresses ?? []}
+              editIDAdresseSousTraitant={editIDAdresseSousTraitant}
+              onEditIDAdresseSousTraitantChange={onEditIDAdresseSousTraitantChange}
+              editIDAdresseLivraison={editIDAdresseLivraison}
+              onEditIDAdresseLivraisonChange={onEditIDAdresseLivraisonChange}
+            />
+          )}
+          {activeTab === 'docs' && (
+            <DocsTab commande={commande} isEditing={isEditing} />
+          )}
+          {activeTab === 'journal' && (
+            <JournalTab
+              commande={commande}
+              isEditing={isEditing}
+              editJournal={editJournal}
+              onEditJournalChange={onEditJournalChange}
+            />
+          )}
+        </div>
       </div>
       <StatusFooter
-        etat={commande.etat}
+        est_soldee={commande.est_soldee}
         onToggle={onToggleEtat}
         isToggling={isTogglingEtat}
         disabled={isEditing}
@@ -1540,14 +1964,14 @@ function DetailSidebar({
 // ── Sidebar Status Footer ──────────────────────────────
 
 function StatusFooter({
-  etat, onToggle, isToggling, disabled,
+  est_soldee, onToggle, isToggling, disabled,
 }: {
-  etat: number | null
+  est_soldee: number | null
   onToggle: () => void
   isToggling: boolean
   disabled: boolean
 }) {
-  const isTerminee = etat === 1
+  const isTerminee = est_soldee === 1
   const Icon = isTerminee ? CheckCircle2 : Clock
   const label = isTerminee ? 'Terminée' : 'En cours'
   const actionLabel = isTerminee ? 'Rouvrir' : 'Clôturer'
@@ -1581,30 +2005,25 @@ function StatusFooter({
 // ── Sidebar Tab: Info ──────────────────────────────────
 
 function InfoTab({
-  commande, isEditing, modesPaiement, echeances,
+  commande, isEditing,
   editDateCommande, onEditDateCommandeChange,
   editCommentaire, onEditCommentaireChange,
-  editIDModePaiement, onEditIDModePaiementChange,
-  editIDEcheance, onEditIDEcheanceChange,
 }: {
   commande: CommandeDetail
   isEditing: boolean
-  modesPaiement: ModePaiement[]
-  echeances: Echeance[]
   editDateCommande: string
   onEditDateCommandeChange: (v: string) => void
   editCommentaire: string
   onEditCommentaireChange: (v: string) => void
-  editIDModePaiement: number
-  onEditIDModePaiementChange: (v: number) => void
-  editIDEcheance: number
-  onEditIDEcheanceChange: (v: number) => void
 }) {
   return (
     <div className="space-y-3">
-      {/* Metadata card */}
       <div className={cn('p-3 rounded-lg border bg-card shadow-sm space-y-2', isEditing && editSectionClass)}>
-        <KV label="Fournisseur" value={commande.fournisseur_nom || '—'} />
+        <KV label="Sous-traitant" value={commande.sous_traitant_nom || '—'} />
+        <KV label="Type" value={commande.sous_traitant_type ?? '—'} />
+        {commande.sous_traitant_tel && (
+          <KV label="Téléphone" value={commande.sous_traitant_tel} />
+        )}
         <KV
           label="Date commande"
           value={isEditing ? (
@@ -1616,33 +2035,8 @@ function InfoTab({
             />
           ) : (commande.date_commande ? formatHfsqlDate(commande.date_commande) : '—')}
         />
-        <KV
-          label="Mode paiement"
-          value={isEditing ? (
-            <PopoverSelect
-              size="sm"
-              options={modesPaiement.map((m) => ({ id: m.IDmode_paiement, primary: m.libelle }))}
-              value={editIDModePaiement}
-              onChange={onEditIDModePaiementChange}
-              emptyLabel="—"
-            />
-          ) : (commande.mode_paiement_libelle || '—')}
-        />
-        <KV
-          label="Échéance"
-          value={isEditing ? (
-            <PopoverSelect
-              size="sm"
-              options={echeances.map((e) => ({ id: e.IDecheance, primary: e.libelle }))}
-              value={editIDEcheance}
-              onChange={onEditIDEcheanceChange}
-              emptyLabel="—"
-            />
-          ) : (commande.echeance_libelle || '—')}
-        />
       </div>
 
-      {/* Commentaire card */}
       <div className={cn('p-3 rounded-lg border bg-card shadow-sm', isEditing && editSectionClass)}>
         <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
           <MessageSquare className="h-3.5 w-3.5" />Commentaire
@@ -1652,7 +2046,7 @@ function InfoTab({
             value={editCommentaire}
             onChange={(e) => onEditCommentaireChange(e.target.value)}
             rows={4}
-            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+            className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
           />
         ) : commande.commentaire?.trim() ? (
           <p className="text-sm text-muted-foreground whitespace-pre-line">{commande.commentaire.trim()}</p>
@@ -1668,26 +2062,26 @@ function InfoTab({
 
 function AdressesTab({
   commande, isEditing, adresses,
-  editIDAdresseFacturation, onEditIDAdresseFacturationChange,
+  editIDAdresseSousTraitant, onEditIDAdresseSousTraitantChange,
   editIDAdresseLivraison, onEditIDAdresseLivraisonChange,
 }: {
   commande: CommandeDetail
   isEditing: boolean
   adresses: AdresseLookup[]
-  editIDAdresseFacturation: number
-  onEditIDAdresseFacturationChange: (v: number) => void
+  editIDAdresseSousTraitant: number
+  onEditIDAdresseSousTraitantChange: (v: number) => void
   editIDAdresseLivraison: number
   onEditIDAdresseLivraisonChange: (v: number) => void
 }) {
   return (
     <div className="space-y-3">
       <AdresseCard
-        label="Facturation"
-        adresse={commande.adresse_facturation}
+        label="Sous-traitant"
+        adresse={commande.adresse_sous_traitant}
         isEditing={isEditing}
         options={adresses}
-        selectedId={editIDAdresseFacturation}
-        onSelect={onEditIDAdresseFacturationChange}
+        selectedId={editIDAdresseSousTraitant}
+        onSelect={onEditIDAdresseSousTraitantChange}
       />
       <AdresseCard
         label="Livraison"
@@ -1712,9 +2106,6 @@ function AdresseCard({
   onSelect: (id: number) => void
 }) {
   const [pickerOpen, setPickerOpen] = useState(false)
-  // In edit mode, resolve the selected adresse from the lookup list so the preview
-  // reflects the draft selection (not the saved one). Fall back to the saved adresse
-  // if the lookup hasn't loaded yet.
   const displayAdresse: AdresseLite | null = isEditing
     ? (options.find((o) => o.IDadresse === selectedId) ?? adresse)
     : adresse
@@ -1777,7 +2168,7 @@ function AdressePickerDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <MapPin className="h-5 w-5 text-accent" />
-            Choisir une adresse de {label.toLowerCase()}
+            Choisir une adresse {label.toLowerCase()}
           </DialogTitle>
         </DialogHeader>
         <div className="max-h-[60vh] overflow-y-auto space-y-2 px-1">
@@ -1806,9 +2197,6 @@ function AdressePickerDialog({
                       <p className="font-medium text-sm truncate">{a.nom || `Adresse #${a.IDadresse}`}</p>
                       {!!a.est_defaut && (
                         <Badge variant="secondary" className="text-[10px] py-0">Principale</Badge>
-                      )}
-                      {!!a.est_defaut_facturation && (
-                        <Badge variant="outline" className="text-[10px] py-0">Facturation</Badge>
                       )}
                       {!!a.est_defaut_livraison && (
                         <Badge variant="outline" className="text-[10px] py-0">Livraison</Badge>
@@ -1844,7 +2232,6 @@ interface GedDocument {
   commentaire: string | null
   IDtype_doc: number
   type_nom: string | null
-  linked_lots: Array<{ IDstock_fil: number; lot: string | null }>
 }
 
 interface TypeDoc {
@@ -1854,12 +2241,12 @@ interface TypeDoc {
 
 function DocsTab({ commande, isEditing }: { commande: CommandeDetail; isEditing: boolean }) {
   const queryClient = useQueryClient()
-  const commandeId = commande.IDcommande_fil
-  const docsQueryKey = ['commande-fil-docs', commandeId] as const
+  const commandeId = commande.IDcommande_sous_traitant
+  const docsQueryKey = ['commande-sst-docs', commandeId] as const
 
   const { data, isLoading, error } = useQuery<GedDocument[]>({
     queryKey: docsQueryKey,
-    queryFn: () => apiFetch(`/commandes-fil/${commandeId}/documents`),
+    queryFn: () => apiFetch(`/commandes-sous-traitant/${commandeId}/documents`),
   })
 
   const [viewDoc, setViewDoc] = useState<GedDocument | null>(null)
@@ -1869,11 +2256,12 @@ function DocsTab({ commande, isEditing }: { commande: CommandeDetail; isEditing:
 
   const invalidate = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: docsQueryKey })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queryClient, commandeId])
 
   const deleteMut = useMutation({
     mutationFn: (idged: number) =>
-      apiFetch(`/commandes-fil/${commandeId}/documents/${idged}`, { method: 'DELETE' }),
+      apiFetch(`/commandes-sous-traitant/${commandeId}/documents/${idged}`, { method: 'DELETE' }),
     onSuccess: invalidate,
   })
 
@@ -1884,20 +2272,18 @@ function DocsTab({ commande, isEditing }: { commande: CommandeDetail; isEditing:
           <Loader2 className="h-4 w-4 animate-spin text-accent" />
         </div>
       )}
-
       {!!error && (
         <div className="flex items-center gap-1.5 py-3 text-xs text-destructive">
           <AlertCircle className="h-3.5 w-3.5" />
           <span>Erreur de chargement</span>
         </div>
       )}
-
       {!isLoading && !error && !data?.length && (
         <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
           <FileText className="h-10 w-10 mb-3 opacity-40" />
           <p className="text-sm font-medium">Aucun document</p>
           <p className="text-[11px] mt-1 text-center">
-            Les bons de commande, factures et autres documents liés à cette commande apparaîtront ici.
+            Bons de retour ennoblisseur, soumissions, factures et autres documents apparaîtront ici.
           </p>
         </div>
       )}
@@ -1925,26 +2311,12 @@ function DocsTab({ commande, isEditing }: { commande: CommandeDetail; isEditing:
                       <p className="text-[11px] text-muted-foreground truncate">{doc.type_nom}</p>
                     )}
                   </div>
-                  {doc.linked_lots.length > 0 && (
-                    <div
-                      className="flex items-center gap-1 min-w-0 max-w-[45%]"
-                      title={doc.linked_lots.map((l) => `Lot ${l.lot || '—'}`).join(', ')}
-                    >
-                      <BobineIcon className="h-3 w-3 text-accent flex-shrink-0" />
-                      <p className="text-[10px] text-muted-foreground truncate">
-                        {doc.linked_lots.map((l) => `Lot ${l.lot || '—'}`).join(', ')}
-                      </p>
-                    </div>
-                  )}
                   {isEditing && (
                     <Button
                       variant="ghost"
                       size="icon"
                       className="h-6 w-6 text-destructive hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setDeleteDocConfirm(doc)
-                      }}
+                      onClick={(e) => { e.stopPropagation(); setDeleteDocConfirm(doc) }}
                       title="Supprimer"
                     >
                       <Trash2 className="h-3 w-3" />
@@ -1974,12 +2346,7 @@ function DocsTab({ commande, isEditing }: { commande: CommandeDetail; isEditing:
         </Button>
       )}
 
-      <DocViewDialog
-        commandeId={commandeId}
-        doc={viewDoc}
-        onClose={() => setViewDoc(null)}
-      />
-
+      <DocViewDialog commandeId={commandeId} doc={viewDoc} onClose={() => setViewDoc(null)} />
       <DocCreateEditDialog
         open={createOpen || editingDoc !== null}
         commandeId={commandeId}
@@ -1991,7 +2358,7 @@ function DocsTab({ commande, isEditing }: { commande: CommandeDetail; isEditing:
       <ConfirmDialog
         open={deleteDocConfirm !== null}
         title="Supprimer le document"
-        description={deleteDocConfirm ? `« ${deleteDocConfirm.nom?.trim() || `Document #${deleteDocConfirm.IDged}`} » sera supprimé définitivement.` : undefined}
+        description={deleteDocConfirm ? `« ${deleteDocConfirm.nom?.trim() || `Document #${deleteDocConfirm.IDged}`} » sera supprimé définitivement.` : undefined}
         confirmLabel="Supprimer"
         isPending={deleteMut.isPending}
         onCancel={() => setDeleteDocConfirm(null)}
@@ -2007,22 +2374,16 @@ function DocsTab({ commande, isEditing }: { commande: CommandeDetail; isEditing:
   )
 }
 
-interface DocLotsPayload {
-  linked: StockLotLite[]
-  available: StockLotLite[]
-}
-
 function DocCreateEditDialog({
   open, commandeId, doc, onClose, onSuccess,
 }: {
   open: boolean
   commandeId: number
-  doc: GedDocument | null  // null = create mode
+  doc: GedDocument | null
   onClose: () => void
   onSuccess: () => void
 }) {
   const isNew = doc === null
-  const queryClient = useQueryClient()
   const [nom, setNom] = useState('')
   const [idTypeDoc, setIdTypeDoc] = useState<number>(0)
   const [commentaire, setCommentaire] = useState('')
@@ -2031,86 +2392,13 @@ function DocCreateEditDialog({
   const [removeFichier, setRemoveFichier] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [pendingLotId, setPendingLotId] = useState<number | null>(null)
-  // "all lots" (default) vs "specific selection". Initialized from server
-  // state on first data arrival: zero stock_fil_ged rows = "all".
-  const [allLotsMode, setAllLotsMode] = useState(true)
-  const modeInitializedRef = useRef(false)
 
   const { data: typeDocs } = useQuery<TypeDoc[]>({
-    queryKey: ['types-doc'],
-    queryFn: () => apiFetch('/fournisseurs/type-doc'),
+    queryKey: ['commande-sst-types-doc'],
+    queryFn: () => apiFetch('/commandes-sous-traitant/lookups/type-doc'),
     enabled: open,
   })
 
-  // Doc ↔ lot linkage — only meaningful once the doc has an IDged (i.e.
-  // in edit mode). At create time the lots section stays hidden until the
-  // user re-opens the dialog after the initial save.
-  const lotsQueryKey = ['commande-fil-doc-lots', commandeId, doc?.IDged ?? 0] as const
-  const { data: lotsData, isLoading: lotsLoading } = useQuery<DocLotsPayload>({
-    queryKey: lotsQueryKey,
-    queryFn: () => apiFetch(`/commandes-fil/${commandeId}/documents/${doc!.IDged}/lots`),
-    enabled: open && !isNew && doc !== null,
-  })
-
-  const toggleLotMut = useMutation({
-    mutationFn: async ({ stockId, linked }: { stockId: number; linked: boolean }): Promise<DocLotsPayload> => {
-      const method = linked ? 'DELETE' : 'PUT'
-      return apiFetch(`/commandes-fil/${commandeId}/documents/${doc!.IDged}/lots/${stockId}`, { method })
-    },
-    onMutate: ({ stockId }) => { setPendingLotId(stockId) },
-    onSuccess: (payload) => {
-      queryClient.setQueryData(lotsQueryKey, payload)
-      // Keep the parent docs list in sync — the linked_lots field on each
-      // card reflects stock_fil_ged and must refresh after any toggle.
-      queryClient.invalidateQueries({ queryKey: ['commande-fil-docs', commandeId] })
-      setPendingLotId(null)
-    },
-    onError: () => { setPendingLotId(null) },
-  })
-
-  const clearLotsMut = useMutation({
-    mutationFn: (): Promise<DocLotsPayload> =>
-      apiFetch(`/commandes-fil/${commandeId}/documents/${doc!.IDged}/lots`, { method: 'DELETE' }),
-    onSuccess: (payload) => {
-      queryClient.setQueryData(lotsQueryKey, payload)
-      queryClient.invalidateQueries({ queryKey: ['commande-fil-docs', commandeId] })
-    },
-  })
-
-  // Initialize the toggle state from the first server payload: if the doc
-  // has no per-lot rows, treat it as "applies to all lots" by default.
-  useEffect(() => {
-    if (!open) { modeInitializedRef.current = false; return }
-    if (lotsData && !modeInitializedRef.current) {
-      setAllLotsMode(lotsData.linked.length === 0)
-      modeInitializedRef.current = true
-    }
-  }, [open, lotsData])
-
-  const handleAllLotsToggle = (nextAll: boolean) => {
-    setAllLotsMode(nextAll)
-    // Flipping back to "all" clears any previously-selected specific links.
-    if (nextAll && lotsData && lotsData.linked.length > 0) {
-      clearLotsMut.mutate()
-    }
-  }
-
-  // Combined + sorted list for stable rendering (linked on top, then
-  // available, each sorted by ref / colori / lot).
-  const lotRows = useMemo(() => {
-    if (!lotsData) return [] as Array<StockLotLite & { isLinked: boolean }>
-    const sortFn = (a: StockLotLite, b: StockLotLite) =>
-      (a.ref_fil ?? '').localeCompare(b.ref_fil ?? '') ||
-      (a.colori_reference ?? '').localeCompare(b.colori_reference ?? '') ||
-      (a.lot ?? '').localeCompare(b.lot ?? '')
-    return [
-      ...[...lotsData.linked].sort(sortFn).map((l) => ({ ...l, isLinked: true })),
-      ...[...lotsData.available].sort(sortFn).map((l) => ({ ...l, isLinked: false })),
-    ]
-  }, [lotsData])
-
-  // Reset form whenever the dialog opens (or the target doc changes).
   useEffect(() => {
     if (!open) return
     setNom(doc?.nom ?? '')
@@ -2125,7 +2413,6 @@ function DocCreateEditDialog({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, doc?.IDged])
 
-  // Clean up blob URL when dialog closes.
   useEffect(() => {
     if (!open && newFileUrl) {
       URL.revokeObjectURL(newFileUrl)
@@ -2160,11 +2447,9 @@ function DocCreateEditDialog({
       if (removeFichier && !newFile) formData.append('remove_fichier', '1')
 
       const url = isNew
-        ? `${API_URL}/commandes-fil/${commandeId}/documents`
-        : `${API_URL}/commandes-fil/${commandeId}/documents/${doc!.IDged}`
+        ? `${API_URL}/commandes-sous-traitant/${commandeId}/documents`
+        : `${API_URL}/commandes-sous-traitant/${commandeId}/documents/${doc!.IDged}`
       const method = isNew ? 'POST' : 'PUT'
-      // Raw fetch with credentials: the shared apiFetch forces JSON, which
-      // would clobber multer's multipart boundary.
       const res = await fetch(url, { method, body: formData, credentials: 'include' })
       if (!res.ok) {
         const txt = await res.text().catch(() => '')
@@ -2177,11 +2462,10 @@ function DocCreateEditDialog({
     }
   }
 
-  // Preview source: freshly-picked file blob OR existing stored blob OR nothing.
   const previewUrl = newFileUrl
     ? newFileUrl
     : !isNew && !removeFichier && doc
-      ? `${API_URL}/commandes-fil/${commandeId}/documents/${doc.IDged}/fichier#view=FitH`
+      ? `${API_URL}/commandes-sous-traitant/${commandeId}/documents/${doc.IDged}/fichier#view=FitH`
       : null
 
   if (!open) return null
@@ -2196,7 +2480,6 @@ function DocCreateEditDialog({
           </DialogTitle>
         </DialogHeader>
         <div className="flex-1 min-h-0 flex gap-4">
-          {/* Left: form fields */}
           <div className="w-80 flex-shrink-0 overflow-y-auto space-y-3 px-1">
             <LabeledInput label="Nom" value={nom} onChange={setNom} autoFocus />
             <div className="space-y-1">
@@ -2217,94 +2500,6 @@ function DocCreateEditDialog({
                 className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
               />
             </div>
-            {!isNew && doc && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-lg border border-border/60 bg-white shadow-sm">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5 text-xs font-semibold">
-                      <BobineIcon className="h-3.5 w-3.5 text-accent" />
-                      <span>Appliquer à tous les lots</span>
-                    </div>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">
-                      {allLotsMode
-                        ? 'Ce document concerne toute la commande'
-                        : lotsData
-                          ? `${lotsData.linked.length} lot${lotsData.linked.length > 1 ? 's' : ''} sélectionné${lotsData.linked.length > 1 ? 's' : ''}`
-                          : 'Sélection spécifique'}
-                    </p>
-                  </div>
-                  {clearLotsMut.isPending && <Loader2 className="h-3 w-3 animate-spin text-accent flex-shrink-0" />}
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={allLotsMode}
-                    disabled={lotsLoading || clearLotsMut.isPending}
-                    onClick={() => handleAllLotsToggle(!allLotsMode)}
-                    className={cn(
-                      'relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full transition-colors',
-                      'focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
-                      'disabled:opacity-50 disabled:cursor-not-allowed',
-                      allLotsMode ? 'bg-accent shadow-inner' : 'bg-zinc-300 hover:bg-zinc-400/80',
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200 ease-out',
-                        allLotsMode ? 'translate-x-[18px]' : 'translate-x-0.5',
-                      )}
-                    />
-                  </button>
-                </div>
-
-                {!allLotsMode && (
-                  <div className="rounded-md border border-input bg-white max-h-48 overflow-y-auto scrollbar-transparent">
-                    {lotsLoading && (
-                      <div className="flex items-center justify-center py-4">
-                        <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" />
-                      </div>
-                    )}
-                    {!lotsLoading && lotRows.length === 0 && (
-                      <p className="px-2 py-3 text-[11px] text-muted-foreground italic text-center">
-                        Aucun lot de fil pour cette commande
-                      </p>
-                    )}
-                    {!lotsLoading && lotRows.length > 0 && (
-                      <ul>
-                        {lotRows.map((lot) => {
-                          const isPending = pendingLotId === lot.IDstock_fil
-                          return (
-                            <li
-                              key={lot.IDstock_fil}
-                              className="flex items-center gap-2 px-2 py-1.5 border-b border-border/40 last:border-0 hover:bg-accent/5"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={lot.isLinked}
-                                disabled={isPending || toggleLotMut.isPending}
-                                onChange={() => toggleLotMut.mutate({ stockId: lot.IDstock_fil, linked: lot.isLinked })}
-                                className="h-3.5 w-3.5 rounded border-input text-accent focus:ring-2 focus:ring-ring cursor-pointer disabled:cursor-not-allowed"
-                              />
-                              <div className="min-w-0 flex-1">
-                                <p className="text-[11px] font-medium truncate">
-                                  {lot.ref_fil ?? '—'}
-                                  {!!lot.colori_reference && <span className="text-muted-foreground"> · {lot.colori_reference}</span>}
-                                </p>
-                                <p className="text-[10px] text-muted-foreground truncate">
-                                  Lot {lot.lot || '—'}
-                                  {lot.stock != null && <span> · {fmtNum(Number(lot.stock), 1)} kg</span>}
-                                  {!!lot.bio && <span className="text-green-600"> · Bio</span>}
-                                </p>
-                              </div>
-                              {isPending && <Loader2 className="h-3 w-3 animate-spin text-accent flex-shrink-0" />}
-                            </li>
-                          )
-                        })}
-                      </ul>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
             {!!error && (
               <div className="flex items-start gap-1.5 text-xs text-destructive">
                 <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
@@ -2312,8 +2507,6 @@ function DocCreateEditDialog({
               </div>
             )}
           </div>
-
-          {/* Right: viewer + file controls + action buttons */}
           <div className="flex-1 min-w-0 flex flex-col gap-2">
             <div className="flex-1 min-h-0 rounded-lg border border-border/60 bg-zinc-50 overflow-hidden">
               {previewUrl ? (
@@ -2372,12 +2565,13 @@ function DocViewDialog({
   useEffect(() => {
     if (!doc) { setFichierOk(null); return }
     setFichierOk(null)
-    fetch(`${API_URL}/commandes-fil/${commandeId}/documents/${doc.IDged}/fichier`, {
+    fetch(`${API_URL}/commandes-sous-traitant/${commandeId}/documents/${doc.IDged}/fichier`, {
       method: 'HEAD',
       credentials: 'include',
     })
       .then((r) => setFichierOk(r.ok))
       .catch(() => setFichierOk(false))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc?.IDged, commandeId])
 
   if (!doc) return null
@@ -2385,12 +2579,9 @@ function DocViewDialog({
   return (
     <Dialog open={!!doc} onOpenChange={() => onClose()}>
       {fichierOk ? (
-        <div
-          className="relative z-50 w-[60vw] max-w-3xl h-[95vh]"
-          onClick={(e) => e.stopPropagation()}
-        >
+        <div className="relative z-50 w-[60vw] max-w-3xl h-[95vh]" onClick={(e) => e.stopPropagation()}>
           <iframe
-            src={`${API_URL}/commandes-fil/${commandeId}/documents/${doc.IDged}/fichier#view=FitH`}
+            src={`${API_URL}/commandes-sous-traitant/${commandeId}/documents/${doc.IDged}/fichier#view=FitH`}
             className="w-full h-full rounded-lg"
             title={doc.nom ?? 'Document'}
           />
@@ -2432,7 +2623,7 @@ function JournalTab({
           onChange={(e) => onEditJournalChange(e.target.value)}
           rows={16}
           placeholder="Entrées de journal..."
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y font-mono"
+          className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y font-mono"
         />
       ) : commande.journal?.trim() ? (
         <p className="text-sm text-muted-foreground whitespace-pre-line font-mono">{commande.journal.trim()}</p>
@@ -2443,7 +2634,7 @@ function JournalTab({
   )
 }
 
-// ── Create Dialog ──────────────────────────────────────
+// ── Create Dialog (filtered to Ennoblisseur) ───────────
 
 function CreateCommandeDialog({
   open, onClose, onCreated,
@@ -2452,74 +2643,66 @@ function CreateCommandeDialog({
   onClose: () => void
   onCreated: (newId: number) => void
 }) {
-  const [fournisseurId, setFournisseurId] = useState<number>(0)
+  // Phase 1: typeSst is locked to "Ennoblisseur" — kept as state so the
+  // field is visible (and ready to expand to Tricoteur / Confectionneur in
+  // Phase 2 by simply enabling the other options).
+  const [typeSst, setTypeSst] = useState<string>(TYPE_ENNOBLISSEUR)
+  const [sousTraitantId, setSousTraitantId] = useState<number>(0)
   const [dateCommande, setDateCommande] = useState<string>(() => new Date().toISOString().slice(0, 10))
-  const [modePaiementId, setModePaiementId] = useState<number>(0)
-  const [echeanceId, setEcheanceId] = useState<number>(0)
-  const [adresseFactId, setAdresseFactId] = useState<number>(0)
+  const [adresseStId, setAdresseStId] = useState<number>(0)
   const [adresseLivId, setAdresseLivId] = useState<number>(0)
   const [commentaire, setCommentaire] = useState('')
 
-  const { data: fournisseurs } = useQuery<FournisseurLite[]>({
-    queryKey: ['fournisseurs-lite'],
-    queryFn: () => apiFetch('/fournisseurs'),
-    enabled: open,
-  })
-  const { data: modesPaiement } = useQuery<ModePaiement[]>({
-    queryKey: ['lookup-modes-paiement'],
-    queryFn: () => apiFetch('/commandes-fil/lookups/modes-paiement'),
-    enabled: open,
-  })
-  const { data: echeances } = useQuery<Echeance[]>({
-    queryKey: ['lookup-echeances'],
-    queryFn: () => apiFetch('/commandes-fil/lookups/echeances'),
-    enabled: open,
+  // Sous-traitants list filtered by the picked type.
+  const { data: sousTraitants } = useQuery<SousTraitantLite[]>({
+    queryKey: ['create-cmd-sst-sous-traitants', typeSst],
+    queryFn: () => apiFetch(`/commandes-sous-traitant/lookups/sous-traitants?type=${typeSst.toLowerCase()}`),
+    enabled: open && !!typeSst,
   })
   const { data: adresses } = useQuery<AdresseLookup[]>({
-    queryKey: ['create-commande-adresses', fournisseurId],
-    queryFn: () => apiFetch(`/commandes-fil/lookups/adresses?fournisseur=${fournisseurId}`),
-    enabled: open && fournisseurId > 0,
+    queryKey: ['create-cmd-sst-adresses', sousTraitantId],
+    queryFn: () => apiFetch(`/commandes-sous-traitant/lookups/adresses?sous_traitant=${sousTraitantId}`),
+    enabled: open && sousTraitantId > 0,
   })
 
-  // Auto-select default addresses when supplier changes
   useEffect(() => {
     if (!adresses) return
-    const defaultFact = adresses.find((a) => a.est_defaut_facturation) ?? adresses.find((a) => a.est_defaut) ?? adresses[0]
+    const defaultSt = adresses.find((a) => a.est_defaut) ?? adresses[0]
     const defaultLiv = adresses.find((a) => a.est_defaut_livraison) ?? adresses.find((a) => a.est_defaut) ?? adresses[0]
-    setAdresseFactId(defaultFact?.IDadresse ?? 0)
+    setAdresseStId(defaultSt?.IDadresse ?? 0)
     setAdresseLivId(defaultLiv?.IDadresse ?? 0)
   }, [adresses])
 
-  // Reset when dialog closes
   useEffect(() => {
     if (!open) {
-      setFournisseurId(0)
+      setTypeSst(TYPE_ENNOBLISSEUR)
+      setSousTraitantId(0)
       setDateCommande(new Date().toISOString().slice(0, 10))
-      setModePaiementId(0)
-      setEcheanceId(0)
-      setAdresseFactId(0)
+      setAdresseStId(0)
       setAdresseLivId(0)
       setCommentaire('')
     }
   }, [open])
 
+  // Switching the type clears the sous-traitant pick (the previous one
+  // doesn't necessarily belong to the new type).
+  useEffect(() => { setSousTraitantId(0) }, [typeSst])
+
   const createMut = useMutation({
-    mutationFn: () => apiFetch('/commandes-fil', {
+    mutationFn: () => apiFetch('/commandes-sous-traitant', {
       method: 'POST',
       body: JSON.stringify({
-        IDfournisseur: fournisseurId,
+        IDsous_traitant: sousTraitantId,
         date_commande: inputDateToHfsql(dateCommande),
-        IDmode_paiement: modePaiementId || 0,
-        IDecheance: echeanceId || 0,
-        IDadresse_fournisseur: adresseFactId || 0,
+        IDadresse_sous_traitant: adresseStId || 0,
         IDadresse_livraison: adresseLivId || 0,
         commentaire,
       }),
     }),
-    onSuccess: (data: { IDcommande_fil: number }) => onCreated(data.IDcommande_fil),
+    onSuccess: (data: { IDcommande_sous_traitant: number }) => onCreated(data.IDcommande_sous_traitant),
   })
 
-  const canSave = fournisseurId > 0 && dateCommande.length > 0
+  const canSave = sousTraitantId > 0 && dateCommande.length > 0
 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
@@ -2527,19 +2710,30 @@ function CreateCommandeDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <ShoppingCart className="h-5 w-5 text-accent" />
-            Nouvelle commande
+            Nouvelle commande sous-traitant
           </DialogTitle>
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1">
-            <label className="text-xs font-medium text-muted-foreground">Fournisseur</label>
-            <SearchableCombobox<FournisseurLite>
-              options={fournisseurs ?? []}
-              value={fournisseurId}
-              onChange={setFournisseurId}
-              getId={(f) => f.IDfournisseur}
-              getPrimary={(f) => f.nom}
-              placeholder="Choisir un fournisseur"
+            <label className="text-xs font-medium text-muted-foreground">Type sous-traitant</label>
+            <PopoverSelect
+              options={TYPE_SST_OPTIONS_PHASE1}
+              value={TYPE_SST_ID_BY_LABEL[typeSst] ?? TYPE_SST_ID_BY_LABEL.Ennoblisseur}
+              onChange={(id) => setTypeSst(TYPE_SST_LABEL_BY_ID[id] ?? TYPE_ENNOBLISSEUR)}
+              hideEmpty
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Sous-traitant</label>
+            <PopoverSelect
+              options={(sousTraitants ?? []).map((s) => ({
+                id: s.IDsous_traitant,
+                primary: s.nom ?? `#${s.IDsous_traitant}`,
+              }))}
+              value={sousTraitantId}
+              onChange={setSousTraitantId}
+              disabled={!typeSst}
+              emptyLabel="— Choisir —"
             />
           </div>
           <div className="space-y-1">
@@ -2551,25 +2745,29 @@ function CreateCommandeDialog({
               className={cn(inputClass, 'h-9')}
             />
           </div>
-          <div className="grid grid-cols-2 gap-2">
-            <div className="space-y-1">
-              <label className="text-xs font-medium text-muted-foreground">Mode paiement</label>
-              <PopoverSelect
-                options={(modesPaiement ?? []).map((m) => ({ id: m.IDmode_paiement, primary: m.libelle }))}
-                value={modePaiementId}
-                onChange={setModePaiementId}
-                emptyLabel="—"
-              />
-            </div>
-            <div className="space-y-1">
-              <label className="text-xs font-medium text-muted-foreground">Échéance</label>
-              <PopoverSelect
-                options={(echeances ?? []).map((e) => ({ id: e.IDecheance, primary: e.libelle }))}
-                value={echeanceId}
-                onChange={setEcheanceId}
-                emptyLabel="—"
-              />
-            </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Adresse sous-traitant</label>
+            <PopoverSelect
+              options={(adresses ?? []).map(adresseOption)}
+              value={adresseStId}
+              onChange={setAdresseStId}
+              disabled={!adresses?.length}
+              // Once the sous-traitant has at least one address, force the
+              // user to pick one — no "—" escape hatch.
+              hideEmpty={(adresses?.length ?? 0) > 0}
+              emptyLabel="—"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Adresse livraison</label>
+            <PopoverSelect
+              options={(adresses ?? []).map(adresseOption)}
+              value={adresseLivId}
+              onChange={setAdresseLivId}
+              disabled={!adresses?.length}
+              hideEmpty={(adresses?.length ?? 0) > 0}
+              emptyLabel="—"
+            />
           </div>
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Commentaire</label>
@@ -2577,7 +2775,7 @@ function CreateCommandeDialog({
               value={commentaire}
               onChange={(e) => setCommentaire(e.target.value)}
               rows={3}
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+              className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
             />
           </div>
         </div>

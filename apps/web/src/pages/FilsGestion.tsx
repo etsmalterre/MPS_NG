@@ -33,6 +33,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import { PopoverSelect } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { BobineIcon } from '@/components/icons/BobineIcon'
 import { cn } from '@/lib/utils'
@@ -790,13 +791,14 @@ function CertificatEditDialog({ cert, onClose, fournisseurId, onSuccess, isNew }
             </div>
             <div className="space-y-1">
               <label className="text-xs font-medium text-muted-foreground">Type de document</label>
-              <select value={idTypeDoc} onChange={(e) => setIdTypeDoc(parseInt(e.target.value, 10))}
-                className={cn(inputClass, 'cursor-pointer')}>
-                <option value={0}>— Aucun —</option>
-                {typeDocs?.filter((t) => t.nom.toLowerCase().includes('cert')).map((t) => (
-                  <option key={t.IDtype_doc} value={t.IDtype_doc}>{t.nom}</option>
-                ))}
-              </select>
+              <PopoverSelect
+                options={(typeDocs ?? [])
+                  .filter((t) => t.nom.toLowerCase().includes('cert'))
+                  .map((t) => ({ id: t.IDtype_doc, primary: t.nom }))}
+                value={idTypeDoc}
+                onChange={setIdTypeDoc}
+                emptyLabel="— Aucun —"
+              />
             </div>
           </div>
 

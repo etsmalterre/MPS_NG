@@ -36,6 +36,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { BobineIcon } from '@/components/icons/BobineIcon'
 import { cn } from '@/lib/utils'
@@ -991,18 +992,12 @@ function SpecsCard({
               />
               <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">Unité de titrage</label>
-                <select
+                <PopoverSelect
+                  options={unites.map((u) => ({ id: u.IDunite_titrage, primary: u.nomenclature }))}
                   value={draft.IDunite_titrage}
-                  onChange={(e) => onDraftChange({ ...draft, IDunite_titrage: Number(e.target.value) })}
-                  className={cn(inputClass, 'cursor-pointer')}
-                >
-                  <option value={0}>—</option>
-                  {unites.map((u) => (
-                    <option key={u.IDunite_titrage} value={u.IDunite_titrage}>
-                      {u.nomenclature}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(id) => onDraftChange({ ...draft, IDunite_titrage: id })}
+                  emptyLabel="—"
+                />
               </div>
             </div>
             <div className="grid grid-cols-3 gap-2">
@@ -1400,18 +1395,12 @@ function CompositionForm({
       <div className="grid grid-cols-2 gap-2">
         <div className="space-y-1">
           <label className="text-xs font-medium text-muted-foreground">Matière</label>
-          <select
+          <PopoverSelect
+            options={matieres.map((m) => ({ id: m.IDmatiere_premiere, primary: m.libelle }))}
             value={form.IDmatiere}
-            onChange={(e) => onFormChange({ ...form, IDmatiere: Number(e.target.value) })}
-            className={cn(inputClass, 'cursor-pointer')}
-          >
-            <option value={0}>— Choisir —</option>
-            {matieres.map((m) => (
-              <option key={m.IDmatiere_premiere} value={m.IDmatiere_premiere}>
-                {m.libelle}
-              </option>
-            ))}
-          </select>
+            onChange={(id) => onFormChange({ ...form, IDmatiere: id })}
+            emptyLabel="— Choisir —"
+          />
         </div>
         <LabeledInput
           label="Pourcentage (%)"
@@ -1736,34 +1725,30 @@ function VariantesCard({
                             ))
                           )}
                           {isEditing && (
-                            <select
-                              value=""
-                              onChange={(e) => {
-                                const fid = parseInt(e.target.value, 10)
+                            <PopoverSelect
+                              size="sm"
+                              // Action-trigger pattern: the value never sticks. The
+                              // emptyLabel doubles as the button label; selecting an
+                              // option fires the link mutation immediately.
+                              value={0}
+                              onChange={(fid) => {
                                 if (!fid) return
-                                linkFrsMut.mutate({
-                                  coloriId: v.IDcolori_fil,
-                                  fournisseurId: fid,
-                                })
-                                e.target.value = ''
+                                linkFrsMut.mutate({ coloriId: v.IDcolori_fil, fournisseurId: fid })
                               }}
                               disabled={linkFrsMut.isPending || !allFournisseurs}
-                              className="h-6 px-1.5 text-[10px] rounded-md border border-input bg-white hover:bg-accent/5 cursor-pointer disabled:cursor-not-allowed"
-                            >
-                              <option value="">+ Ajouter un fournisseur</option>
-                              {(allFournisseurs ?? [])
+                              emptyLabel="+ Ajouter un fournisseur"
+                              options={(allFournisseurs ?? [])
                                 .filter(
                                   (f) =>
                                     !v.fournisseurs.some(
                                       (linked) => linked.IDfournisseur === f.IDfournisseur,
                                     ),
                                 )
-                                .map((f) => (
-                                  <option key={f.IDfournisseur} value={f.IDfournisseur}>
-                                    {f.nom ?? `#${f.IDfournisseur}`}
-                                  </option>
-                                ))}
-                            </select>
+                                .map((f) => ({
+                                  id: f.IDfournisseur,
+                                  primary: f.nom ?? `#${f.IDfournisseur}`,
+                                }))}
+                            />
                           )}
                         </div>
                       )}
@@ -2182,39 +2167,28 @@ function OffresHistoryCard({
                 <div className="grid grid-cols-2 gap-2">
                   <div className="space-y-1">
                     <label className="text-xs font-medium text-muted-foreground">Fournisseur</label>
-                    <select
+                    <SearchableCombobox<{ IDfournisseur: number; nom: string | null }>
+                      options={allFournisseurs ?? []}
                       value={form.IDfournisseur}
-                      onChange={(e) =>
-                        setForm({ ...form, IDfournisseur: parseInt(e.target.value, 10) || 0 })
-                      }
-                      className={cn(inputClass, 'cursor-pointer')}
-                    >
-                      <option value={0}>—</option>
-                      {(allFournisseurs ?? []).map((f) => (
-                        <option key={f.IDfournisseur} value={f.IDfournisseur}>
-                          {f.nom ?? `#${f.IDfournisseur}`}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={(id) => setForm({ ...form, IDfournisseur: id })}
+                      getId={(f) => f.IDfournisseur}
+                      getPrimary={(f) => f.nom ?? `#${f.IDfournisseur}`}
+                      placeholder="Choisir un fournisseur"
+                    />
                   </div>
                   <div className="space-y-1">
                     <label className="text-xs font-medium text-muted-foreground">
                       Coloris (optionnel)
                     </label>
-                    <select
+                    <PopoverSelect
+                      options={detail.variantes.map((v) => ({
+                        id: v.IDcolori_fil,
+                        primary: v.reference ?? `#${v.IDcolori_fil}`,
+                      }))}
                       value={form.IDcolori_fil}
-                      onChange={(e) =>
-                        setForm({ ...form, IDcolori_fil: parseInt(e.target.value, 10) || 0 })
-                      }
-                      className={cn(inputClass, 'cursor-pointer')}
-                    >
-                      <option value={0}>Tous les coloris</option>
-                      {detail.variantes.map((v) => (
-                        <option key={v.IDcolori_fil} value={v.IDcolori_fil}>
-                          {v.reference ?? `#${v.IDcolori_fil}`}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={(id) => setForm({ ...form, IDcolori_fil: id })}
+                      emptyLabel="Tous les coloris"
+                    />
                   </div>
                 </div>
                 <div className="grid grid-cols-3 gap-2">

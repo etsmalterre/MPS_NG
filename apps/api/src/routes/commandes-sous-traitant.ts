@@ -1,0 +1,1989 @@
+// Commandes sous-traitant — orders sent to subcontractors (knitters,
+// dyers, makers). Phase 1 focuses on the **Ennoblisseur** (dyeing) flow:
+// the order line references a `ref_ecru` greige reference + coloris, and
+// the user can attach existing tombé-de-métier rolls (`stock_ecru`) to be
+// sent to the dyer, then record the dyed rolls coming back (`stock_fini`).
+//
+// Mirrors the shape of `commandes-fil.ts` — every public concept here
+// (header CRUD, line CRUD, status toggle, polymorphic ged docs, PDF,
+// email) follows the same pattern. Differences are domain-specific:
+//
+// - Header status field is `est_soldee` BOOLEAN (0/1), not `etat` SMALLINT.
+// - Per-line status is `sstatut` VARCHAR — Phase 1 maps the binary toggle
+//   to the literal values `'En_Cours'` / `'Terminé'`. Other legacy values
+//   (`Notification`, `Soumis_Au_Client`, …) are preserved on read but the
+//   binary toggle never produces them.
+// - `ligne_commande_sous_traitant.date_delai` preserves the **original**
+//   delivery date the first time `date_livraison` is rescheduled. After
+//   that, `date_delai` is frozen.
+// - Yarn allocation (commande_fil's `stock_fil.IDref_fil_commande` pattern)
+//   is replaced here by `stock_ecru.IDref_commande_affectation` and
+//   `stock_fini.IDref_commande_source` — both pointing at
+//   `IDligne_commande_sous_traitant`. Verified empirically against legacy
+//   data by `inspect-pieces-flow.ts`.
+
+import { Router, type Request, type Response, type Router as RouterType } from 'express'
+import { z } from 'zod'
+import multer from 'multer'
+import { renderToBuffer } from '@react-pdf/renderer'
+import React from 'react'
+import { query, queryRaw, fixEncoding } from '../lib/hfsql-auto.js'
+import {
+  CommandeSoustraitantPdf,
+  type CommandeSoustraitantPdfData,
+} from '../lib/pdf/CommandeSoustraitantPdf.js'
+import { sendMail } from '../lib/gmail.js'
+import { getUserEmail } from '../lib/user-emails.js'
+import { stripRtf, wrapRtf } from '../lib/rtf-utils.js'
+
+const upload = multer({ storage: multer.memoryStorage() })
+
+export const commandesSousTraitantRouter: RouterType = Router()
+
+// ── Status string conventions ───────────────────────────
+//
+// Legacy `sstatut` values (count from production HFSQL):
+//   "Terminé" 4616, "Notification" 1101, "En_Cours" 859, "Soumis_Au_Client"
+//   259, "Non_Affecté" 186, "Attente_Delai" 128, "Delai_Expiré" 46,
+//   "Non_Envoye" 18, "En_Contrôle" 15, "En_Création" 11, "A_Soumettre" 6,
+//   "En_Reprise" 2.
+// The binary toggle in the UI maps to "En_Cours" / "Terminé" only. Any
+// other legacy value reads as "in progress" for the toggle (the line is
+// not done) but is preserved on save.
+
+const STATUT_DONE = 'Terminé'
+const STATUT_OPEN = 'En_Cours'
+function isLineDone(sstatut: string | null | undefined): boolean {
+  return (sstatut ?? '').trim() === STATUT_DONE
+}
+
+// ── Types ────────────────────────────────────────────────
+
+interface CommandeSousTraitantHeader {
+  IDcommande_sous_traitant: number
+  IDsous_traitant: number
+  IDadresse_sous_traitant: number | null
+  IDadresse_livraison: number | null
+  date_commande: string | null
+  commentaire: string | null
+  est_soldee: number | null
+  IDdossier: number | null
+  IDcommande_client: number | null
+  date_notif: string | null
+  IDligne_commande_client: number | null
+  journal: string | null
+}
+
+// ── Helpers ──────────────────────────────────────────────
+
+function esc(value: string): string {
+  return value.replace(/'/g, "''")
+}
+
+function n(value: unknown): number {
+  if (value === null || value === undefined || value === '') return 0
+  const parsed = Number(value)
+  return isNaN(parsed) ? 0 : parsed
+}
+
+/** Keep only digits from a YYYYMMDD-ish input. Accepts 'YYYY-MM-DD' or 'YYYYMMDD' or ''. */
+function dateStr(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  const s = String(value).replace(/-/g, '')
+  return /^\d{8}$/.test(s) ? s : ''
+}
+
+// ── Commande lifecycle helpers ───────────────────────────
+
+async function loadCommandeSoldee(commandeId: number): Promise<number | null> {
+  const rows = await query<{ est_soldee: number | null }>(
+    `SELECT est_soldee FROM commande_sous_traitant WHERE IDcommande_sous_traitant = ${commandeId}`,
+  )
+  if (rows.length === 0) return null
+  return rows[0].est_soldee ?? 0
+}
+
+async function loadCommandeIdForLine(lineId: number): Promise<number | null> {
+  const rows = await query<{ IDcommande_sous_traitant: number }>(
+    `SELECT IDcommande_sous_traitant FROM ligne_commande_sous_traitant WHERE IDligne_commande_sous_traitant = ${lineId}`,
+  )
+  if (rows.length === 0) return null
+  return Number(rows[0].IDcommande_sous_traitant) || null
+}
+
+function refuseIfTerminee(res: Response, est_soldee: number | null): boolean {
+  if (est_soldee === 1) {
+    res.status(409).json({
+      error: 'commande_terminee',
+      message: 'Commande terminée — réouvrir la commande pour modifier les lignes.',
+    })
+    return true
+  }
+  return false
+}
+
+/** Flip est_soldee to 1 when every line is in the done state. */
+async function maybeAutoCloseCommande(commandeId: number): Promise<void> {
+  const lines = await query<{ sstatut: string | null }>(
+    `SELECT sstatut FROM ligne_commande_sous_traitant WHERE IDcommande_sous_traitant = ${commandeId}`,
+  )
+  if (lines.length === 0) return
+  if (!lines.every((l) => isLineDone(l.sstatut))) return
+  await query(
+    `UPDATE commande_sous_traitant SET est_soldee = 1 WHERE IDcommande_sous_traitant = ${commandeId} AND est_soldee = 0`,
+  )
+}
+
+/** Look up the type label for a sous-traitant — used to gate ennoblisseur features. */
+async function loadSousTraitantType(IDsous_traitant: number): Promise<{ IDtype_sst: number; type: string | null } | null> {
+  const rows = await query<{ IDtype_sst: number; type: unknown }>(
+    `SELECT st.IDtype_sst, CONVERT(ts.type USING 'UTF-8') AS type
+     FROM sous_traitant st
+     LEFT JOIN type_sst ts ON st.IDtype_sst = ts.IDtype_sst
+     WHERE st.IDsous_traitant = ${IDsous_traitant}`,
+  )
+  if (rows.length === 0) return null
+  const r = rows[0]
+  let typeStr: string | null = null
+  if (r.type instanceof ArrayBuffer) typeStr = Buffer.from(r.type).toString('utf8')
+  else if (typeof r.type === 'string') typeStr = r.type
+  return { IDtype_sst: Number(r.IDtype_sst) || 0, type: typeStr }
+}
+
+// ── Validation schemas ───────────────────────────────────
+
+const commandeBody = z.object({
+  IDsous_traitant: z.number().int().positive(),
+  date_commande: z.string().optional(),
+  IDadresse_sous_traitant: z.number().int().nonnegative().optional(),
+  IDadresse_livraison: z.number().int().nonnegative().optional(),
+  commentaire: z.string().optional(),
+  journal: z.string().optional(),
+  est_soldee: z.number().int().min(0).max(1).optional(),
+})
+
+const ligneBody = z.object({
+  type: z.number().int().optional(),
+  IDreference: z.number().int().nonnegative().optional(),
+  IDColoris: z.number().int().nonnegative().optional(),
+  quantite: z.number().optional(),
+  unite: z.number().int().optional(),
+  prix: z.number().optional(),
+  date_livraison: z.string().optional(),
+  sstatut: z.string().optional(),
+  commentaire: z.string().optional(),
+})
+
+// ── Lookups ──────────────────────────────────────────────
+
+commandesSousTraitantRouter.get('/lookups/sous-traitants', async (req: Request, res: Response) => {
+  try {
+    const typeFilter = String(req.query.type ?? '').trim().toLowerCase()
+    // Joining sous_traitant with type_sst + CONVERT() in one query collapses
+    // the result set to a single row in HFSQL ODBC (likely a quirk with the
+    // reserved-word column `type`). Split into two queries and merge in JS.
+    // Note: do NOT CONVERT(tel) here — it silently truncates the result
+    // set in HFSQL ODBC (suspect: empty/non-text values choke the CONVERT
+    // function in this driver). `tel` is plain digits + spaces, no accents,
+    // so it doesn't need decoding anyway.
+    const rows = await query<{ IDsous_traitant: number; nom: unknown; tel: unknown; IDtype_sst: number | null }>(
+      `SELECT IDsous_traitant,
+              CONVERT(nom USING 'UTF-8') AS nom,
+              tel,
+              IDtype_sst
+       FROM sous_traitant
+       WHERE est_visible = 1
+       ORDER BY nom`,
+    )
+    const decode = (v: unknown): string | null => {
+      if (v instanceof ArrayBuffer) return Buffer.from(v).toString('utf8')
+      if (typeof v === 'string') return v
+      return null
+    }
+    const typeMap = new Map<number, string>()
+    const tsRows = await query<{ IDtype_sst: number; v: unknown }>(
+      `SELECT IDtype_sst, CONVERT(type USING 'UTF-8') AS v FROM type_sst`,
+    )
+    for (const t of tsRows) {
+      const lbl = decode((t as any).v)
+      if (lbl !== null) typeMap.set(Number(t.IDtype_sst), lbl)
+    }
+    const decoded = rows.map((r) => ({
+      IDsous_traitant: Number(r.IDsous_traitant),
+      nom: decode(r.nom),
+      tel: decode(r.tel),
+      IDtype_sst: r.IDtype_sst,
+      type: r.IDtype_sst ? typeMap.get(Number(r.IDtype_sst)) ?? null : null,
+    }))
+    const filtered = typeFilter
+      ? decoded.filter((r) => (r.type ?? '').toLowerCase().includes(typeFilter))
+      : decoded
+    res.json(filtered)
+  } catch (err) {
+    console.error('Error fetching sous-traitants lookup:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+commandesSousTraitantRouter.get('/lookups/adresses', async (req: Request, res: Response) => {
+  try {
+    const sid = parseInt(String(req.query.sous_traitant ?? ''), 10)
+    if (isNaN(sid)) { res.status(400).json({ error: 'sous_traitant query parameter required' }); return }
+
+    const rows = await query(
+      `SELECT * FROM adresse WHERE IDsous_traitant = ${sid} AND (est_visible IS NULL OR est_visible = 1) ORDER BY est_defaut DESC, IDadresse`,
+    )
+    const fixed = await fixEncoding(rows, 'adresse', 'IDadresse', [
+      'nom',
+      'adresse1',
+      'adresse2',
+      'adresse3',
+      'ville',
+      'pays',
+      'commentaire',
+    ])
+    res.json(fixed)
+  } catch (err) {
+    console.error('Error fetching adresses lookup:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Phase 1: ref_ecru + colori_ecru pairs for the line picker (ennoblisseur flow).
+// Two flat queries are merged in JS — JOINs in HFSQL ODBC sometimes truncate
+// the result set (the same quirk we hit on sous_traitant + type_sst).
+commandesSousTraitantRouter.get('/lookups/refs-ecru', async (_req: Request, res: Response) => {
+  try {
+    const refRows = await query<{ IDref_ecru: number; reference: string | null }>(
+      `SELECT IDref_ecru, reference FROM ref_ecru ORDER BY reference`,
+    )
+    const fixedRefs = await fixEncoding(refRows, 'ref_ecru', 'IDref_ecru', ['reference'])
+
+    const coloriRows = await query<{ IDcolori_ecru: number; IDref_ecru: number; reference: string | null }>(
+      `SELECT IDcolori_ecru, IDref_ecru, reference FROM colori_ecru ORDER BY reference`,
+    )
+    const fixedColoris = await fixEncoding(coloriRows, 'colori_ecru', 'IDcolori_ecru', ['reference'])
+
+    const refLabel = new Map<number, string>()
+    for (const r of fixedRefs) refLabel.set(r.IDref_ecru, r.reference ?? '')
+
+    res.json(
+      fixedColoris.map((c) => ({
+        IDref_ecru: Number(c.IDref_ecru),
+        IDcolori_ecru: Number(c.IDcolori_ecru),
+        ref_ecru: refLabel.get(Number(c.IDref_ecru)) ?? '',
+        colori_reference: c.reference ?? '',
+      })),
+    )
+  } catch (err) {
+    console.error('Error fetching refs-ecru lookup:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ref_fini list for the line picker / reception form.
+commandesSousTraitantRouter.get('/lookups/refs-fini', async (_req: Request, res: Response) => {
+  try {
+    const rows = await query<{ IDref_fini: number; reference: string | null; designation: string | null }>(
+      `SELECT IDref_fini, reference, designation FROM ref_fini ORDER BY reference`,
+    )
+    const fixed = await fixEncoding(rows, 'ref_fini', 'IDref_fini', ['reference', 'designation'])
+    res.json(
+      fixed.map((r) => ({
+        IDref_fini: Number(r.IDref_fini),
+        ref_fini: r.reference ?? '',
+        designation: r.designation ?? '',
+      })),
+    )
+  } catch (err) {
+    console.error('Error fetching refs-fini lookup:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Coloris options for a given ref_fini. The legacy table is `ref_fini_colori`
+// (NOT `colori_fini`, which is a different M:N junction). Each row is one
+// (ref_fini, coloris) pair — `IDref_fini_colori` is the ID stored in
+// `ligne_commande_sous_traitant.IDColoris` and `stock_fini.IDColoris`.
+commandesSousTraitantRouter.get('/lookups/colori-fini', async (req: Request, res: Response) => {
+  try {
+    const refFiniId = parseInt(String(req.query.ref_fini ?? ''), 10)
+    if (isNaN(refFiniId) || refFiniId <= 0) {
+      res.status(400).json({ error: 'ref_fini query parameter required' })
+      return
+    }
+    const rows = await query<{ IDref_fini_colori: number; reference: string | null }>(
+      `SELECT IDref_fini_colori, reference FROM ref_fini_colori
+       WHERE IDref_fini = ${refFiniId}
+       ORDER BY reference`,
+    )
+    const fixed = await fixEncoding(rows, 'ref_fini_colori', 'IDref_fini_colori', ['reference'])
+    res.json(
+      fixed.map((r) => ({
+        IDref_fini_colori: Number(r.IDref_fini_colori),
+        reference: r.reference ?? '',
+      })),
+    )
+  } catch (err) {
+    console.error('Error fetching colori-fini lookup:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Reuse the same magasin lookup that other screens will need.
+commandesSousTraitantRouter.get('/lookups/magasins', async (_req: Request, res: Response) => {
+  try {
+    const rows = await query<{ IDmagasin: number; nom: string | null }>(
+      `SELECT IDmagasin, nom FROM magasin ORDER BY nom`,
+    )
+    const fixed = await fixEncoding(rows, 'magasin', 'IDmagasin', ['nom'])
+    res.json(fixed)
+  } catch (err) {
+    console.error('Error fetching magasins lookup:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── List all commandes ───────────────────────────────────
+
+commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
+  try {
+    const q = String(req.query.q ?? '').trim()
+    const stFilter = parseInt(String(req.query.sous_traitant ?? ''), 10)
+    const statusFilter = String(req.query.status ?? 'all')
+
+    const whereParts: string[] = []
+    if (!isNaN(stFilter)) whereParts.push(`cst.IDsous_traitant = ${stFilter}`)
+    if (statusFilter === 'en_cours') whereParts.push(`cst.est_soldee = 0`)
+    else if (statusFilter === 'terminee') whereParts.push(`cst.est_soldee = 1`)
+    const whereSql = whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : ''
+
+    const commandes = await query<any>(
+      `SELECT cst.IDcommande_sous_traitant, cst.IDsous_traitant, cst.date_commande, cst.est_soldee, cst.commentaire
+       FROM commande_sous_traitant cst
+       ${whereSql}
+       ORDER BY cst.date_commande DESC, cst.IDcommande_sous_traitant DESC`,
+    )
+    const fixedCommandes = await fixEncoding(
+      commandes,
+      'commande_sous_traitant',
+      'IDcommande_sous_traitant',
+      ['commentaire'],
+    )
+    // Strip RTF for list-card snippets too (it's used as a search-haystack
+    // and for the truncated display).
+    for (const c of fixedCommandes as any[]) {
+      if (c.commentaire) c.commentaire = stripRtf(c.commentaire) || null
+    }
+
+    // Bulk-resolve sous-traitant nom + type label. The JOIN with type_sst
+    // truncates results in HFSQL ODBC, so we run two flat queries and merge.
+    const stIds = Array.from(
+      new Set(fixedCommandes.map((c: any) => Number(c.IDsous_traitant)).filter((x) => !isNaN(x) && x > 0)),
+    )
+    const stInfo = new Map<number, { nom: string; type: string | null }>()
+    if (stIds.length > 0) {
+      const decode = (v: unknown): string | null => {
+        if (v instanceof ArrayBuffer) return Buffer.from(v).toString('utf8')
+        if (typeof v === 'string') return v
+        return null
+      }
+      const stRows = await query<{ IDsous_traitant: number; nom: unknown; IDtype_sst: number | null }>(
+        `SELECT IDsous_traitant, CONVERT(nom USING 'UTF-8') AS nom, IDtype_sst
+         FROM sous_traitant
+         WHERE IDsous_traitant IN (${stIds.join(',')})`,
+      )
+      const typeIdsNeeded = Array.from(new Set(stRows.map((s) => Number(s.IDtype_sst) || 0).filter((x) => x > 0)))
+      const typeMap = new Map<number, string>()
+      if (typeIdsNeeded.length > 0) {
+        const tsRows = await query<{ IDtype_sst: number; v: unknown }>(
+          `SELECT IDtype_sst, CONVERT(type USING 'UTF-8') AS v FROM type_sst WHERE IDtype_sst IN (${typeIdsNeeded.join(',')})`,
+        )
+        for (const t of tsRows) {
+          const lbl = decode((t as any).v)
+          if (lbl !== null) typeMap.set(Number(t.IDtype_sst), lbl)
+        }
+      }
+      for (const s of stRows) {
+        stInfo.set(Number(s.IDsous_traitant), {
+          nom: decode(s.nom) ?? '',
+          type: s.IDtype_sst ? typeMap.get(Number(s.IDtype_sst)) ?? null : null,
+        })
+      }
+    }
+
+    // Bulk fetch line aggregates. `total_eur` is the **actual** total
+    // (sum of attached écru kg × prix), not the nominal qty × prix — for
+    // ennoblisseur lines, the user enters qty (Ml) and prix (€/Kg) as
+    // *projections*, and the bill comes from the weights of the écru rolls
+    // they attach via the pieces drawer.
+    const ids = fixedCommandes.map((c: any) => c.IDcommande_sous_traitant).filter(Boolean)
+    const totalsMap = new Map<number, {
+      total_eur: number
+      total_qte: number
+      nb_lignes: number
+      earliest_delivery: string | null
+    }>()
+    if (ids.length > 0) {
+      const [lignes, ecruWeights] = await Promise.all([
+        query<any>(
+          `SELECT IDligne_commande_sous_traitant, IDcommande_sous_traitant, quantite, prix, date_livraison, sstatut
+           FROM ligne_commande_sous_traitant
+           WHERE IDcommande_sous_traitant IN (${ids.join(',')})`,
+        ),
+        query<{ IDref_commande_affectation: number; poids: number | null }>(
+          // Sum of écru weight per affected line — joining via the IN list
+          // so the planner can use the index on stock_ecru.IDref_commande_affectation.
+          `SELECT IDref_commande_affectation, poids
+           FROM stock_ecru
+           WHERE IDref_commande_affectation IN (
+             SELECT IDligne_commande_sous_traitant FROM ligne_commande_sous_traitant
+             WHERE IDcommande_sous_traitant IN (${ids.join(',')})
+           )`,
+        ),
+      ])
+      const kgByLine = new Map<number, number>()
+      for (const e of ecruWeights) {
+        const lid = Number(e.IDref_commande_affectation) || 0
+        if (lid === 0) continue
+        kgByLine.set(lid, (kgByLine.get(lid) ?? 0) + (Number(e.poids) || 0))
+      }
+      for (const l of lignes) {
+        const id = Number(l.IDcommande_sous_traitant)
+        const lid = Number(l.IDligne_commande_sous_traitant)
+        const acc = totalsMap.get(id) ?? { total_eur: 0, total_qte: 0, nb_lignes: 0, earliest_delivery: null }
+        const qty = Number(l.quantite) || 0
+        const price = Number(l.prix) || 0
+        const affectedKg = kgByLine.get(lid) ?? 0
+        acc.total_qte += qty
+        acc.total_eur += affectedKg * price
+        acc.nb_lignes += 1
+        if (!isLineDone(typeof l.sstatut === 'string' ? l.sstatut : null)) {
+          const dl = typeof l.date_livraison === 'string' ? l.date_livraison : ''
+          if (/^\d{8}$/.test(dl) && (acc.earliest_delivery === null || dl < acc.earliest_delivery)) {
+            acc.earliest_delivery = dl
+          }
+        }
+        totalsMap.set(id, acc)
+      }
+    }
+
+    const qLower = q.toLowerCase()
+    const result = fixedCommandes
+      .map((c: any) => {
+        const totals = totalsMap.get(Number(c.IDcommande_sous_traitant)) ?? {
+          total_eur: 0,
+          total_qte: 0,
+          nb_lignes: 0,
+          earliest_delivery: null,
+        }
+        const sst = stInfo.get(Number(c.IDsous_traitant))
+        return {
+          ...c,
+          sous_traitant_nom: sst?.nom ?? '',
+          sous_traitant_type: sst?.type ?? null,
+          ...totals,
+        }
+      })
+      .filter((c: any) => {
+        if (!q) return true
+        const hay = `${c.IDcommande_sous_traitant} ${c.sous_traitant_nom ?? ''} ${c.commentaire ?? ''}`.toLowerCase()
+        return hay.includes(qLower)
+      })
+
+    res.json(result)
+  } catch (err) {
+    console.error('Error fetching commandes-sous-traitant:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Get one commande with full detail ────────────────────
+
+commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const rows = await query<CommandeSousTraitantHeader>(
+      `SELECT * FROM commande_sous_traitant WHERE IDcommande_sous_traitant = ${id}`,
+    )
+    if (rows.length === 0) { res.status(404).json({ error: 'Commande not found' }); return }
+
+    const fixedHeader = await fixEncoding(
+      rows,
+      'commande_sous_traitant',
+      'IDcommande_sous_traitant',
+      ['commentaire', 'journal'],
+    )
+    const header = fixedHeader[0] as any
+    // commentaire + journal are stored as RTF by the legacy app — strip
+    // formatting for the new UI. Round-trip back to RTF on save (PUT).
+    if (header) {
+      header.commentaire = stripRtf(header.commentaire) || null
+      header.journal = stripRtf(header.journal) || null
+    }
+
+    const [stRows, adresseStRows, adresseLivRows, lignes] = await Promise.all([
+      // Two flat queries are merged below; the JOIN with type_sst truncates
+      // result sets in HFSQL ODBC. CONVERT(tel) also truncates so we read
+      // it raw — no accents in phone numbers anyway.
+      query<{ IDsous_traitant: number; nom: unknown; tel: unknown; IDtype_sst: number }>(
+        `SELECT IDsous_traitant,
+                CONVERT(nom USING 'UTF-8') AS nom,
+                tel,
+                IDtype_sst
+         FROM sous_traitant
+         WHERE IDsous_traitant = ${n(header.IDsous_traitant)}`,
+      ),
+      header.IDadresse_sous_traitant
+        ? query(`SELECT * FROM adresse WHERE IDadresse = ${n(header.IDadresse_sous_traitant)}`)
+        : Promise.resolve([]),
+      header.IDadresse_livraison
+        ? query(`SELECT * FROM adresse WHERE IDadresse = ${n(header.IDadresse_livraison)}`)
+        : Promise.resolve([]),
+      // `type` is uppercased by HFSQL ODBC (reserved word) — alias to a
+      // safe key.
+      query(
+        `SELECT lcs.IDligne_commande_sous_traitant, lcs.IDcommande_sous_traitant,
+                lcs.type AS type_kind, lcs.IDreference, lcs.IDColoris,
+                lcs.quantite, lcs.unite, lcs.prix, lcs.date_livraison, lcs.date_delai,
+                lcs.date_reception, lcs.commentaire, lcs.sstatut, lcs.num_facture
+         FROM ligne_commande_sous_traitant lcs
+         WHERE lcs.IDcommande_sous_traitant = ${id}
+         ORDER BY lcs.IDligne_commande_sous_traitant`,
+      ),
+    ])
+
+    const decode = (v: unknown): string | null => {
+      if (v instanceof ArrayBuffer) return Buffer.from(v).toString('utf8')
+      if (typeof v === 'string') return v
+      return null
+    }
+    const sst = (stRows[0] ?? null) as any
+    const sousTraitantNom = decode(sst?.nom) ?? ''
+    const sousTraitantTel = decode(sst?.tel) ?? null
+    const sousTraitantIDtypeSst = sst ? Number(sst.IDtype_sst) || 0 : 0
+    let sousTraitantType: string | null = null
+    if (sousTraitantIDtypeSst > 0) {
+      const tsRows = await query<{ v: unknown }>(
+        `SELECT CONVERT(type USING 'UTF-8') AS v FROM type_sst WHERE IDtype_sst = ${sousTraitantIDtypeSst}`,
+      )
+      if (tsRows.length > 0) sousTraitantType = decode((tsRows[0] as any).v)
+    }
+
+    const fixedAdresseSt = await fixEncoding(adresseStRows, 'adresse', 'IDadresse', [
+      'nom',
+      'adresse1',
+      'adresse2',
+      'adresse3',
+      'ville',
+      'pays',
+    ])
+    const fixedAdresseLiv = await fixEncoding(adresseLivRows, 'adresse', 'IDadresse', [
+      'nom',
+      'adresse1',
+      'adresse2',
+      'adresse3',
+      'ville',
+      'pays',
+    ])
+    const fixedLignes = (await fixEncoding(
+      lignes,
+      'ligne_commande_sous_traitant',
+      'IDligne_commande_sous_traitant',
+      ['commentaire', 'sstatut', 'num_facture'],
+    )) as any[]
+
+    // Resolve ref labels per line — type-aware. The line's `type` SMALLINT
+    // (aliased as `type_kind` here) discriminates which catalog IDreference
+    // belongs to:
+    //   type=2 → ref_fini   (ennoblisseur — Phase 1 default)
+    //   type=1 → ref_fil    (yarn — tricoteur)
+    //   type=0 → ref_ecru   (greige — confectionneur or legacy)
+    // We can't trust a triple-fallback by table because the same numeric ID
+    // can exist in two of the three catalogs (e.g. IDref_ecru=294 collides
+    // with IDref_fini=294, "Escrime imprimée" vs whatever ref_ecru#294 is) —
+    // so the user picks fini and the card surfaces ecru's reference. Always
+    // route by type, fall back to the other catalogs only if the chosen
+    // table doesn't have the ID (defensive against bad legacy data).
+    const refIds = Array.from(new Set(fixedLignes.map((l) => Number(l.IDreference) || 0).filter((x) => x > 0)))
+    const colorisIds = Array.from(new Set(fixedLignes.map((l) => Number(l.IDColoris) || 0).filter((x) => x > 0)))
+    const ecruMap = new Map<number, string>()
+    const finiMap = new Map<number, string>()
+    const filMap = new Map<number, string>()
+    if (refIds.length > 0) {
+      // Build all three maps in parallel; we'll pick the right one per line below.
+      const [ecruRows, finiRows, filRows] = await Promise.all([
+        query<{ IDref_ecru: number; reference: string | null }>(
+          `SELECT IDref_ecru, reference FROM ref_ecru WHERE IDref_ecru IN (${refIds.join(',')})`,
+        ),
+        query<{ IDref_fini: number; reference: string | null }>(
+          `SELECT IDref_fini, reference FROM ref_fini WHERE IDref_fini IN (${refIds.join(',')})`,
+        ),
+        query<{ IDref_fil: number; reference: string | null }>(
+          `SELECT IDref_fil, reference FROM ref_fil WHERE IDref_fil IN (${refIds.join(',')})`,
+        ),
+      ])
+      for (const r of await fixEncoding(ecruRows, 'ref_ecru', 'IDref_ecru', ['reference']))
+        ecruMap.set(r.IDref_ecru, r.reference ?? '')
+      for (const r of await fixEncoding(finiRows, 'ref_fini', 'IDref_fini', ['reference']))
+        finiMap.set(r.IDref_fini, r.reference ?? '')
+      for (const r of await fixEncoding(filRows, 'ref_fil', 'IDref_fil', ['reference']))
+        filMap.set(r.IDref_fil, r.reference ?? '')
+    }
+    // Per-line resolver: pick the catalog matching `type`, fall back to the
+    // others only if the primary catalog doesn't have the ID.
+    function resolveRef(IDref: number, typeKind: number): { label: string; kind: 'ecru' | 'fini' | 'fil' | null } {
+      if (IDref <= 0) return { label: '', kind: null }
+      const tryFini = () => finiMap.has(IDref) ? { label: finiMap.get(IDref)!, kind: 'fini' as const } : null
+      const tryEcru = () => ecruMap.has(IDref) ? { label: ecruMap.get(IDref)!, kind: 'ecru' as const } : null
+      const tryFil = () => filMap.has(IDref) ? { label: filMap.get(IDref)!, kind: 'fil' as const } : null
+      let order: Array<() => { label: string; kind: 'ecru' | 'fini' | 'fil' } | null>
+      if (typeKind === 2) order = [tryFini, tryEcru, tryFil]
+      else if (typeKind === 1) order = [tryFil, tryEcru, tryFini]
+      else order = [tryEcru, tryFini, tryFil]
+      for (const fn of order) {
+        const hit = fn()
+        if (hit) return hit
+      }
+      return { label: '', kind: null }
+    }
+    // Per-type coloris resolution. type=2 (fini/ennoblisseur) → ref_fini_colori;
+    // type=0 (ecru) → colori_ecru; we also pre-fetch both maps here so a
+    // legacy line with a mismatched type still resolves (defensive).
+    const colorisFiniMap = new Map<number, string>()
+    const colorisEcruMap = new Map<number, string>()
+    if (colorisIds.length > 0) {
+      const [finiC, ecruC] = await Promise.all([
+        query<{ IDref_fini_colori: number; reference: string | null }>(
+          `SELECT IDref_fini_colori, reference FROM ref_fini_colori WHERE IDref_fini_colori IN (${colorisIds.join(',')})`,
+        ),
+        query<{ IDcolori_ecru: number; reference: string | null }>(
+          `SELECT IDcolori_ecru, reference FROM colori_ecru WHERE IDcolori_ecru IN (${colorisIds.join(',')})`,
+        ),
+      ])
+      for (const c of await fixEncoding(finiC, 'ref_fini_colori', 'IDref_fini_colori', ['reference']))
+        colorisFiniMap.set(c.IDref_fini_colori, c.reference ?? '')
+      for (const c of await fixEncoding(ecruC, 'colori_ecru', 'IDcolori_ecru', ['reference']))
+        colorisEcruMap.set(c.IDcolori_ecru, c.reference ?? '')
+    }
+    function resolveColoris(IDcoloris: number, typeKind: number): string {
+      if (IDcoloris <= 0) return ''
+      if (typeKind === 2) return colorisFiniMap.get(IDcoloris) ?? colorisEcruMap.get(IDcoloris) ?? ''
+      return colorisEcruMap.get(IDcoloris) ?? colorisFiniMap.get(IDcoloris) ?? ''
+    }
+
+    // Pieces aggregates per line. The line price math works off these:
+    // - `total_kg_ecru_lie` is the sum of poids over écru rolls affected to
+    //   the line — multiplied by `prix` it yields the actual € total
+    //   (qty × prix is treated as a *nominal* projection, not the bill).
+    // - `total_metrage_fini_recu` is the running metrage of dyed rolls
+    //   received back, surfaced so the user can see how much of the order
+    //   has actually returned.
+    const lineIds = fixedLignes.map((l) => Number(l.IDligne_commande_sous_traitant)).filter((x) => x > 0)
+    interface LineAgg {
+      nb_ecru_lies: number
+      total_kg_ecru_lie: number
+      nb_fini_recu: number
+      total_metrage_fini_recu: number
+    }
+    const newAgg = (): LineAgg => ({ nb_ecru_lies: 0, total_kg_ecru_lie: 0, nb_fini_recu: 0, total_metrage_fini_recu: 0 })
+    const piecesByLine = new Map<number, LineAgg>()
+    if (lineIds.length > 0) {
+      const [ecruRows, finiRows] = await Promise.all([
+        query<{ IDref_commande_affectation: number; poids: number | null }>(
+          `SELECT IDref_commande_affectation, poids
+           FROM stock_ecru
+           WHERE IDref_commande_affectation IN (${lineIds.join(',')})`,
+        ),
+        query<{ IDref_commande_source: number; metrage: number | null }>(
+          `SELECT IDref_commande_source, metrage
+           FROM stock_fini
+           WHERE IDref_commande_source IN (${lineIds.join(',')})`,
+        ),
+      ])
+      for (const r of ecruRows) {
+        const lid = Number(r.IDref_commande_affectation) || 0
+        if (lid === 0) continue
+        const acc = piecesByLine.get(lid) ?? newAgg()
+        acc.nb_ecru_lies += 1
+        acc.total_kg_ecru_lie += Number(r.poids) || 0
+        piecesByLine.set(lid, acc)
+      }
+      for (const r of finiRows) {
+        const lid = Number(r.IDref_commande_source) || 0
+        if (lid === 0) continue
+        const acc = piecesByLine.get(lid) ?? newAgg()
+        acc.nb_fini_recu += 1
+        acc.total_metrage_fini_recu += Number(r.metrage) || 0
+        piecesByLine.set(lid, acc)
+      }
+    }
+
+    const lignesEnriched = fixedLignes.map((l) => {
+      const refId = Number(l.IDreference) || 0
+      const colId = Number(l.IDColoris) || 0
+      const typeKind = Number((l as any).type_kind) || 0
+      const resolved = resolveRef(refId, typeKind)
+      const agg = piecesByLine.get(Number(l.IDligne_commande_sous_traitant)) ?? newAgg()
+      return {
+        ...l,
+        ref_label: resolved.label || null,
+        ref_kind: resolved.kind,
+        colori_reference: resolveColoris(colId, typeKind) || null,
+        ...agg,
+      }
+    })
+
+    res.json({
+      ...header,
+      sous_traitant_nom: sousTraitantNom,
+      sous_traitant_tel: sousTraitantTel,
+      sous_traitant_type: sousTraitantType,
+      sous_traitant_IDtype_sst: sousTraitantIDtypeSst,
+      adresse_sous_traitant: fixedAdresseSt[0] ?? null,
+      adresse_livraison: fixedAdresseLiv[0] ?? null,
+      lignes: lignesEnriched,
+    })
+  } catch (err) {
+    console.error('Error fetching commande-sous-traitant detail:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── PDF + email helpers ─────────────────────────────────
+
+function formatHfsqlDateFr(raw: string | null | undefined): string {
+  if (!raw) return ''
+  const s = String(raw)
+  if (/^\d{8}$/.test(s)) return `${s.slice(6, 8)}/${s.slice(4, 6)}/${s.slice(0, 4)}`
+  return ''
+}
+
+const FRENCH_MONTHS = [
+  'janvier', 'février', 'mars', 'avril', 'mai', 'juin',
+  'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre',
+] as const
+
+function formatHfsqlDateLongFr(raw: string | null | undefined): string {
+  if (!raw) return ''
+  const s = String(raw)
+  if (!/^\d{8}$/.test(s)) return ''
+  const day = parseInt(s.slice(6, 8), 10)
+  const month = parseInt(s.slice(4, 6), 10)
+  const year = s.slice(0, 4)
+  if (month < 1 || month > 12) return ''
+  return `${day} ${FRENCH_MONTHS[month - 1]} ${year}`
+}
+
+function cleanAddrField(s: string | null | undefined): string | null {
+  if (!s) return null
+  const t = String(s).trim()
+  if (!t) return null
+  if (/^[.\-_·•\s]+$/.test(t)) return null
+  return t
+}
+
+function cleanAddress(a: any | null) {
+  if (!a) return null
+  return {
+    nom: cleanAddrField(a.nom),
+    adresse1: cleanAddrField(a.adresse1),
+    adresse2: cleanAddrField(a.adresse2),
+    adresse3: cleanAddrField(a.adresse3),
+    cp: cleanAddrField(a.cp),
+    ville: cleanAddrField(a.ville),
+    pays: cleanAddrField(a.pays),
+  }
+}
+
+async function buildCommandePdfData(id: number): Promise<CommandeSoustraitantPdfData | null> {
+  const rows = await query<CommandeSousTraitantHeader>(
+    `SELECT * FROM commande_sous_traitant WHERE IDcommande_sous_traitant = ${id}`,
+  )
+  if (rows.length === 0) return null
+  const fixedHeader = await fixEncoding(
+    rows,
+    'commande_sous_traitant',
+    'IDcommande_sous_traitant',
+    ['commentaire', 'journal'],
+  )
+  const header = fixedHeader[0] as any
+  if (header) header.commentaire = stripRtf(header.commentaire) || null
+
+  const [stRows, adresseStRows, adresseLivRows, lignes] = await Promise.all([
+    query<{ IDsous_traitant: number; nom: unknown }>(
+      `SELECT IDsous_traitant, CONVERT(nom USING 'UTF-8') AS nom FROM sous_traitant WHERE IDsous_traitant = ${n(header.IDsous_traitant)}`,
+    ),
+    header.IDadresse_sous_traitant
+      ? query(`SELECT * FROM adresse WHERE IDadresse = ${n(header.IDadresse_sous_traitant)}`)
+      : Promise.resolve([]),
+    header.IDadresse_livraison
+      ? query(`SELECT * FROM adresse WHERE IDadresse = ${n(header.IDadresse_livraison)}`)
+      : Promise.resolve([]),
+    query(
+      // type aliased — see detail endpoint comment on the HFSQL reserved-word
+      // quirk that uppercases `type` otherwise.
+      `SELECT lcs.IDligne_commande_sous_traitant, lcs.type AS type_kind, lcs.IDreference,
+              lcs.IDColoris, lcs.quantite, lcs.unite, lcs.prix, lcs.date_livraison, lcs.date_delai
+       FROM ligne_commande_sous_traitant lcs
+       WHERE lcs.IDcommande_sous_traitant = ${id}
+       ORDER BY lcs.IDligne_commande_sous_traitant`,
+    ),
+  ])
+  const decode = (v: unknown): string | null => {
+    if (v instanceof ArrayBuffer) return Buffer.from(v).toString('utf8')
+    if (typeof v === 'string') return v
+    return null
+  }
+  const sousTraitantNom = decode((stRows[0] as any)?.nom) ?? ''
+
+  const fixedAdresseSt = await fixEncoding(adresseStRows, 'adresse', 'IDadresse', [
+    'nom', 'adresse1', 'adresse2', 'adresse3', 'ville', 'pays',
+  ])
+  const fixedAdresseLiv = await fixEncoding(adresseLivRows, 'adresse', 'IDadresse', [
+    'nom', 'adresse1', 'adresse2', 'adresse3', 'ville', 'pays',
+  ])
+  const fixedLignes = lignes as any[]
+
+  // Per-line attached écru weight — needed to compute the actual € total
+  // on the bon de commande (Ml × €/Kg is unitless garbage, see the line
+  // card refactor on the screen).
+  const lineIdsForKg = fixedLignes.map((l) => Number(l.IDligne_commande_sous_traitant)).filter((x) => x > 0)
+  const kgByLine = new Map<number, number>()
+  if (lineIdsForKg.length > 0) {
+    const ecruWeights = await query<{ IDref_commande_affectation: number; poids: number | null }>(
+      `SELECT IDref_commande_affectation, poids FROM stock_ecru
+       WHERE IDref_commande_affectation IN (${lineIdsForKg.join(',')})`,
+    )
+    for (const e of ecruWeights) {
+      const lid = Number(e.IDref_commande_affectation) || 0
+      if (lid === 0) continue
+      kgByLine.set(lid, (kgByLine.get(lid) ?? 0) + (Number(e.poids) || 0))
+    }
+  }
+
+  // Type-aware ref label resolution — see the detail endpoint for the
+  // reasoning. Same pattern: build all 3 maps, pick by `type_kind`.
+  const refIds = Array.from(new Set(fixedLignes.map((l) => Number(l.IDreference) || 0).filter((x) => x > 0)))
+  const colorisIds = Array.from(new Set(fixedLignes.map((l) => Number(l.IDColoris) || 0).filter((x) => x > 0)))
+  const ecruMap = new Map<number, string>()
+  const finiMap = new Map<number, string>()
+  const filMap = new Map<number, string>()
+  const colorisFiniMap = new Map<number, string>()
+  const colorisEcruMap = new Map<number, string>()
+  if (refIds.length > 0) {
+    const [ecru, fini, fil] = await Promise.all([
+      query<{ IDref_ecru: number; reference: string | null }>(
+        `SELECT IDref_ecru, reference FROM ref_ecru WHERE IDref_ecru IN (${refIds.join(',')})`,
+      ),
+      query<{ IDref_fini: number; reference: string | null }>(
+        `SELECT IDref_fini, reference FROM ref_fini WHERE IDref_fini IN (${refIds.join(',')})`,
+      ),
+      query<{ IDref_fil: number; reference: string | null }>(
+        `SELECT IDref_fil, reference FROM ref_fil WHERE IDref_fil IN (${refIds.join(',')})`,
+      ),
+    ])
+    for (const r of await fixEncoding(ecru, 'ref_ecru', 'IDref_ecru', ['reference']))
+      ecruMap.set(r.IDref_ecru, r.reference ?? '')
+    for (const r of await fixEncoding(fini, 'ref_fini', 'IDref_fini', ['reference']))
+      finiMap.set(r.IDref_fini, r.reference ?? '')
+    for (const r of await fixEncoding(fil, 'ref_fil', 'IDref_fil', ['reference']))
+      filMap.set(r.IDref_fil, r.reference ?? '')
+  }
+  function resolveRef(IDref: number, typeKind: number): string {
+    if (IDref <= 0) return ''
+    const tryFini = () => finiMap.get(IDref)
+    const tryEcru = () => ecruMap.get(IDref)
+    const tryFil = () => filMap.get(IDref)
+    let order: Array<() => string | undefined>
+    if (typeKind === 2) order = [tryFini, tryEcru, tryFil]
+    else if (typeKind === 1) order = [tryFil, tryEcru, tryFini]
+    else order = [tryEcru, tryFini, tryFil]
+    for (const fn of order) {
+      const hit = fn()
+      if (hit !== undefined) return hit
+    }
+    return ''
+  }
+  if (colorisIds.length > 0) {
+    const [finiC, ecruC] = await Promise.all([
+      query<{ IDref_fini_colori: number; reference: string | null }>(
+        `SELECT IDref_fini_colori, reference FROM ref_fini_colori WHERE IDref_fini_colori IN (${colorisIds.join(',')})`,
+      ),
+      query<{ IDcolori_ecru: number; reference: string | null }>(
+        `SELECT IDcolori_ecru, reference FROM colori_ecru WHERE IDcolori_ecru IN (${colorisIds.join(',')})`,
+      ),
+    ])
+    for (const c of await fixEncoding(finiC, 'ref_fini_colori', 'IDref_fini_colori', ['reference']))
+      colorisFiniMap.set(c.IDref_fini_colori, c.reference ?? '')
+    for (const c of await fixEncoding(ecruC, 'colori_ecru', 'IDcolori_ecru', ['reference']))
+      colorisEcruMap.set(c.IDcolori_ecru, c.reference ?? '')
+  }
+  function resolveColoris(IDcoloris: number, typeKind: number): string {
+    if (IDcoloris <= 0) return ''
+    if (typeKind === 2) return colorisFiniMap.get(IDcoloris) ?? colorisEcruMap.get(IDcoloris) ?? ''
+    return colorisEcruMap.get(IDcoloris) ?? colorisFiniMap.get(IDcoloris) ?? ''
+  }
+
+  const earliestDelivery = (fixedLignes
+    .map((l) => (typeof l.date_livraison === 'string' ? l.date_livraison : ''))
+    .filter((s: string) => /^\d{8}$/.test(s)) as string[])
+    .sort()[0] ?? null
+
+  return {
+    numero: String(header.IDcommande_sous_traitant),
+    dateCommande: formatHfsqlDateLongFr(header.date_commande),
+    sousTraitantNom: sousTraitantNom || '—',
+    sousTraitantAdresse: cleanAddress(fixedAdresseSt[0] as any),
+    adresseLivraison: cleanAddress(fixedAdresseLiv[0] as any),
+    delaiLivraison: earliestDelivery ? formatHfsqlDateLongFr(earliestDelivery) : null,
+    commentaire: (header.commentaire ?? null) as string | null,
+    lignes: fixedLignes.map((l) => {
+      const refId = Number(l.IDreference) || 0
+      const colId = Number(l.IDColoris) || 0
+      const typeKind = Number(l.type_kind) || 0
+      const lid = Number(l.IDligne_commande_sous_traitant) || 0
+      const dl = formatHfsqlDateFr(l.date_livraison) || null
+      const ddRaw = typeof l.date_delai === 'string' ? l.date_delai : ''
+      const dd = formatHfsqlDateFr(ddRaw) || null
+      return {
+        ref_label: resolveRef(refId, typeKind) || null,
+        colori_reference: resolveColoris(colId, typeKind) || null,
+        quantite: l.quantite == null ? null : Number(l.quantite),
+        prix: l.prix == null ? null : Number(l.prix),
+        total_kg_ecru_lie: kgByLine.get(lid) ?? 0,
+        date_livraison: dl,
+        date_delai: dd && dl && dd !== dl ? dd : null,
+      }
+    }),
+  }
+}
+
+async function renderCommandePdfBuffer(data: CommandeSoustraitantPdfData): Promise<Buffer> {
+  return renderToBuffer(
+    React.createElement(CommandeSoustraitantPdf, { data }) as unknown as React.ReactElement<
+      import('@react-pdf/renderer').DocumentProps
+    >,
+  )
+}
+
+commandesSousTraitantRouter.get('/:id/pdf', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const data = await buildCommandePdfData(id)
+    if (!data) { res.status(404).json({ error: 'Commande not found' }); return }
+
+    const buffer = await renderCommandePdfBuffer(data)
+
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="commande-sous-traitant-${data.numero}.pdf"`,
+    )
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.send(buffer)
+  } catch (err) {
+    console.error('Error rendering commande-sous-traitant PDF:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Email defaults + send ────────────────────────────────
+
+interface EmailRecipientPayload {
+  email: string
+  name?: string
+  source: 'contact'
+  contactId: number
+}
+
+interface EmailDefaultsPayload {
+  recipients: { selected: EmailRecipientPayload[]; suggestions: EmailRecipientPayload[] }
+  subject: string
+  body: string
+  sousTraitantNom: string
+  numero: string
+}
+
+async function buildEmailDefaults(id: number): Promise<EmailDefaultsPayload | null> {
+  const rows = await query<{ IDsous_traitant: number }>(
+    `SELECT IDsous_traitant FROM commande_sous_traitant WHERE IDcommande_sous_traitant = ${id}`,
+  )
+  if (rows.length === 0) return null
+  const idSt = n((rows[0] as any).IDsous_traitant)
+
+  const [stRows, contactRows] = await Promise.all([
+    query<{ IDsous_traitant: number; nom: unknown }>(
+      `SELECT IDsous_traitant, CONVERT(nom USING 'UTF-8') AS nom FROM sous_traitant WHERE IDsous_traitant = ${idSt}`,
+    ),
+    query<{
+      IDcontact: number
+      nom: string | null
+      prenom: string | null
+      mail: string | null
+      envoi_commande: number | null
+      est_visible: number | null
+    }>(
+      `SELECT IDcontact, nom, prenom, mail, envoi_commande, est_visible
+       FROM contact
+       WHERE IDsous_traitant = ${idSt}`,
+    ),
+  ])
+  const decode = (v: unknown): string | null => {
+    if (v instanceof ArrayBuffer) return Buffer.from(v).toString('utf8')
+    if (typeof v === 'string') return v
+    return null
+  }
+  const sousTraitantNom = decode((stRows[0] as any)?.nom) ?? ''
+  const fixedContacts = await fixEncoding(contactRows, 'contact', 'IDcontact', ['nom', 'prenom', 'mail'])
+
+  const selected: EmailRecipientPayload[] = []
+  const suggestions: EmailRecipientPayload[] = []
+  const seen = new Set<string>()
+  for (const c of fixedContacts as any[]) {
+    if (c.est_visible === 0) continue
+    const raw = (c.mail ?? '').toString().trim()
+    if (!raw) continue
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) continue
+    const key = raw.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    const displayName = [c.prenom, c.nom]
+      .map((s: string | null) => (s ?? '').toString().trim())
+      .filter((s: string) => s.length > 0)
+      .join(' ')
+    const recipient: EmailRecipientPayload = {
+      email: raw,
+      source: 'contact',
+      contactId: n(c.IDcontact),
+    }
+    if (displayName) recipient.name = displayName
+    if (c.envoi_commande === 1) selected.push(recipient)
+    else suggestions.push(recipient)
+  }
+
+  const numero = String(id)
+  const subject = `Bon de commande sous-traitant N°${numero} — ETS Malterre`
+  const body =
+    `Bonjour,\n\n` +
+    `Veuillez trouver ci-joint notre bon de commande N°${numero}${sousTraitantNom ? ` à destination de ${sousTraitantNom}` : ''}.\n\n` +
+    `Merci de bien vouloir nous confirmer la bonne réception de cette commande.\n\n` +
+    `Cordialement,\n` +
+    `ETS Malterre`
+
+  return { recipients: { selected, suggestions }, subject, body, sousTraitantNom, numero }
+}
+
+commandesSousTraitantRouter.get('/:id/email-defaults', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const defaults = await buildEmailDefaults(id)
+    if (!defaults) { res.status(404).json({ error: 'Commande not found' }); return }
+    res.json(defaults)
+  } catch (err) {
+    console.error('Error building email defaults:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+const extraAttachmentSchema = z.object({
+  filename: z.string().min(1).max(255),
+  content_base64: z.string().min(1),
+  content_type: z.string().min(1).max(100),
+})
+
+const emailBody = z.object({
+  to: z.array(z.string().email()).min(1, 'At least one recipient is required'),
+  cc: z.array(z.string().email()).optional(),
+  subject: z.string().min(1).max(500),
+  body: z.string().min(1).max(20000),
+  attach_pdf: z.boolean().optional(),
+  extra_attachments: z.array(extraAttachmentSchema).optional(),
+})
+
+commandesSousTraitantRouter.post('/:id/email', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
+
+    const parsed = emailBody.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return
+    }
+
+    const senderEmail = await getUserEmail(req.userId)
+    if (!senderEmail) {
+      res.status(400).json({
+        error: 'no_sender_email',
+        message:
+          "Aucune adresse email n'est associée à votre compte. Un administrateur doit en définir une dans Paramètres › Utilisateurs.",
+      })
+      return
+    }
+
+    const userRows = await query<{ prenom: string | null; nom: string | null }>(
+      `SELECT prenom, nom FROM utilisateur WHERE IDutilisateur = ${req.userId}`,
+    )
+    const fixedUser = await fixEncoding(userRows, 'utilisateur', 'IDutilisateur', ['prenom', 'nom'])
+    const u = (fixedUser[0] as any) ?? null
+    const displayName = u
+      ? [u.prenom, u.nom].filter((s: string | null) => s && s.trim()).map((s: string) => s.trim()).join(' ')
+      : ''
+    const fromName = displayName ? `${displayName} — ETS Malterre` : 'ETS Malterre'
+
+    const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
+    if (parsed.data.attach_pdf !== false) {
+      const data = await buildCommandePdfData(id)
+      if (!data) { res.status(404).json({ error: 'Commande not found' }); return }
+      const buffer = await renderCommandePdfBuffer(data)
+      attachments.push({
+        filename: `commande-sous-traitant-${data.numero}.pdf`,
+        content: buffer,
+        contentType: 'application/pdf',
+      })
+    }
+    for (const a of parsed.data.extra_attachments ?? []) {
+      attachments.push({
+        filename: a.filename,
+        content: Buffer.from(a.content_base64, 'base64'),
+        contentType: a.content_type,
+      })
+    }
+
+    const messageId = await sendMail({
+      from: senderEmail,
+      fromName,
+      to: parsed.data.to,
+      cc: parsed.data.cc,
+      subject: parsed.data.subject,
+      body: parsed.data.body,
+      attachments: attachments.length > 0 ? attachments : undefined,
+    })
+    res.json({ ok: true, messageId })
+  } catch (err) {
+    console.error('Error sending commande-sous-traitant email:', err)
+    const message = err instanceof Error ? err.message : 'Internal server error'
+    res.status(500).json({ error: 'send_failed', message })
+  }
+})
+
+// ── Create commande ──────────────────────────────────────
+
+commandesSousTraitantRouter.post('/', async (req: Request, res: Response) => {
+  try {
+    const parsed = commandeBody.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Validation failed', details: parsed.error.issues })
+      return
+    }
+    const d = parsed.data
+    const dateCmd = dateStr(d.date_commande)
+
+    // Wrap commentaire + journal in minimal RTF so the legacy WinDev app
+    // continues to read them.
+    const commentaireRtf = wrapRtf(d.commentaire ?? '')
+    const journalRtf = wrapRtf(d.journal ?? '')
+    await query(
+      `INSERT INTO commande_sous_traitant
+       (IDsous_traitant, date_commande, est_soldee, commentaire, journal,
+        IDadresse_sous_traitant, IDadresse_livraison, IDdossier, IDcommande_client, IDligne_commande_client)
+       VALUES (${d.IDsous_traitant}, '${dateCmd}', 0, '${esc(commentaireRtf)}', '${esc(journalRtf)}',
+               ${d.IDadresse_sous_traitant ?? 0}, ${d.IDadresse_livraison ?? 0}, 0, 0, 0)`,
+    )
+
+    const rows = await query<{ IDcommande_sous_traitant: number }>(
+      `SELECT IDcommande_sous_traitant FROM commande_sous_traitant
+       WHERE IDsous_traitant = ${d.IDsous_traitant}
+       ORDER BY IDcommande_sous_traitant DESC`,
+    )
+    const newId = rows[0]?.IDcommande_sous_traitant ?? null
+    if (newId == null) { res.status(500).json({ error: 'Insert lookup failed' }); return }
+    res.status(201).json({ IDcommande_sous_traitant: Number(newId) })
+  } catch (err) {
+    console.error('Error creating commande-sous-traitant:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Update commande header ───────────────────────────────
+
+commandesSousTraitantRouter.put('/:id', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const parsed = commandeBody.partial().safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Validation failed', details: parsed.error.issues })
+      return
+    }
+    const d = parsed.data
+
+    const sets: string[] = []
+    if (d.date_commande !== undefined) sets.push(`date_commande = '${dateStr(d.date_commande)}'`)
+    if (d.est_soldee !== undefined) sets.push(`est_soldee = ${d.est_soldee}`)
+    if (d.commentaire !== undefined) sets.push(`commentaire = '${esc(wrapRtf(d.commentaire))}'`)
+    if (d.journal !== undefined) sets.push(`journal = '${esc(wrapRtf(d.journal))}'`)
+    if (d.IDadresse_sous_traitant !== undefined) sets.push(`IDadresse_sous_traitant = ${d.IDadresse_sous_traitant}`)
+    if (d.IDadresse_livraison !== undefined) sets.push(`IDadresse_livraison = ${d.IDadresse_livraison}`)
+
+    if (sets.length === 0) { res.status(400).json({ error: 'No fields to update' }); return }
+
+    await query(
+      `UPDATE commande_sous_traitant SET ${sets.join(', ')} WHERE IDcommande_sous_traitant = ${id}`,
+    )
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error updating commande-sous-traitant:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Status toggle (binary est_soldee) ────────────────────
+
+commandesSousTraitantRouter.put('/:id/etat', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const parsed = z.object({ est_soldee: z.number().int().min(0).max(1) }).safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Validation failed', details: parsed.error.issues })
+      return
+    }
+    await query(
+      `UPDATE commande_sous_traitant SET est_soldee = ${parsed.data.est_soldee} WHERE IDcommande_sous_traitant = ${id}`,
+    )
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error toggling commande-sous-traitant etat:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Delete commande (cascade lines + clear ecru affectations) ──
+
+commandesSousTraitantRouter.delete('/:id', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    // Collect line ids to clear stock_ecru affectations.
+    const lines = await query<{ IDligne_commande_sous_traitant: number }>(
+      `SELECT IDligne_commande_sous_traitant FROM ligne_commande_sous_traitant WHERE IDcommande_sous_traitant = ${id}`,
+    )
+    const lineIds = lines.map((l) => Number(l.IDligne_commande_sous_traitant)).filter((x) => x > 0)
+    if (lineIds.length > 0) {
+      await query(
+        `UPDATE stock_ecru SET IDref_commande_affectation = 0
+         WHERE IDref_commande_affectation IN (${lineIds.join(',')})`,
+      )
+    }
+    await query(`DELETE FROM ligne_commande_sous_traitant WHERE IDcommande_sous_traitant = ${id}`)
+    await query(`DELETE FROM commande_sous_traitant WHERE IDcommande_sous_traitant = ${id}`)
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error deleting commande-sous-traitant:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Create line ──────────────────────────────────────────
+
+commandesSousTraitantRouter.post('/:id/lignes', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const parsed = ligneBody.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Validation failed', details: parsed.error.issues })
+      return
+    }
+    const d = parsed.data
+    const dateLiv = dateStr(d.date_livraison)
+
+    if (refuseIfTerminee(res, await loadCommandeSoldee(id))) return
+
+    // On creation, date_delai mirrors date_livraison so the "first reschedule"
+    // rule has a baseline to compare against later. `type` defaults to 2,
+    // the dominant legacy value for ennoblisseur lines (matches stock_ecru
+    // references; 4668/7247 legacy lines have type=2).
+    await query(
+      `INSERT INTO ligne_commande_sous_traitant
+       (IDcommande_sous_traitant, type, IDreference, IDColoris, quantite, unite, prix,
+        date_livraison, date_delai, sstatut, commentaire)
+       VALUES (${id}, ${d.type ?? 2}, ${d.IDreference ?? 0}, ${d.IDColoris ?? 0},
+               ${n(d.quantite)}, ${d.unite ?? 0}, ${n(d.prix)},
+               '${dateLiv}', '${dateLiv}', '${esc(d.sstatut ?? STATUT_OPEN)}', '${esc(d.commentaire ?? '')}')`,
+    )
+    res.status(201).json({ ok: true })
+  } catch (err) {
+    console.error('Error creating ligne_commande_sous_traitant:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Update line ──────────────────────────────────────────
+// Implements the first-change capture rule for date_delai: if the request
+// changes date_livraison AND the row's current date_delai equals the row's
+// current date_livraison (never been rescheduled before), promote the
+// previous date_livraison into date_delai before applying the new value.
+
+commandesSousTraitantRouter.put('/lignes/:lineId', async (req: Request, res: Response) => {
+  try {
+    const lineId = parseInt(req.params.lineId, 10)
+    if (isNaN(lineId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const parsed = ligneBody.partial().safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Validation failed', details: parsed.error.issues })
+      return
+    }
+    const d = parsed.data
+
+    const commandeId = await loadCommandeIdForLine(lineId)
+    if (commandeId == null) { res.status(404).json({ error: 'Line not found' }); return }
+    if (refuseIfTerminee(res, await loadCommandeSoldee(commandeId))) return
+
+    // Read current dates for the delai-initial preservation rule.
+    const currentRows = await query<{ date_livraison: string | null; date_delai: string | null }>(
+      `SELECT date_livraison, date_delai FROM ligne_commande_sous_traitant WHERE IDligne_commande_sous_traitant = ${lineId}`,
+    )
+    const cur = currentRows[0] ?? { date_livraison: '', date_delai: '' }
+
+    const sets: string[] = []
+    if (d.type !== undefined) sets.push(`type = ${d.type}`)
+    if (d.IDreference !== undefined) sets.push(`IDreference = ${d.IDreference}`)
+    if (d.IDColoris !== undefined) sets.push(`IDColoris = ${d.IDColoris}`)
+    if (d.quantite !== undefined) sets.push(`quantite = ${n(d.quantite)}`)
+    if (d.unite !== undefined) sets.push(`unite = ${d.unite}`)
+    if (d.prix !== undefined) sets.push(`prix = ${n(d.prix)}`)
+    if (d.commentaire !== undefined) sets.push(`commentaire = '${esc(d.commentaire)}'`)
+    if (d.sstatut !== undefined) sets.push(`sstatut = '${esc(d.sstatut)}'`)
+    if (d.date_livraison !== undefined) {
+      const nextLiv = dateStr(d.date_livraison)
+      const prevLiv = typeof cur.date_livraison === 'string' ? cur.date_livraison : ''
+      const prevDelai = typeof cur.date_delai === 'string' ? cur.date_delai : ''
+      // Capture-once rule: only promote prevLiv into date_delai if the line
+      // has never been rescheduled before (date_delai still equals
+      // date_livraison) AND this update actually changes date_livraison.
+      if (nextLiv !== prevLiv && prevDelai === prevLiv && prevLiv) {
+        sets.push(`date_delai = '${prevLiv}'`)
+      }
+      sets.push(`date_livraison = '${nextLiv}'`)
+    }
+
+    if (sets.length === 0) { res.status(400).json({ error: 'No fields to update' }); return }
+
+    await query(
+      `UPDATE ligne_commande_sous_traitant SET ${sets.join(', ')} WHERE IDligne_commande_sous_traitant = ${lineId}`,
+    )
+
+    if (d.sstatut !== undefined && isLineDone(d.sstatut)) {
+      await maybeAutoCloseCommande(commandeId)
+    }
+
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error updating ligne_commande_sous_traitant:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Delete line ──────────────────────────────────────────
+
+commandesSousTraitantRouter.delete('/lignes/:lineId', async (req: Request, res: Response) => {
+  try {
+    const lineId = parseInt(req.params.lineId, 10)
+    if (isNaN(lineId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const commandeId = await loadCommandeIdForLine(lineId)
+    if (commandeId == null) { res.status(404).json({ error: 'Line not found' }); return }
+    if (refuseIfTerminee(res, await loadCommandeSoldee(commandeId))) return
+
+    // Clear ecru affectations pointing at this line (rolls go back to stock).
+    await query(`UPDATE stock_ecru SET IDref_commande_affectation = 0 WHERE IDref_commande_affectation = ${lineId}`)
+    await query(`DELETE FROM ligne_commande_sous_traitant WHERE IDligne_commande_sous_traitant = ${lineId}`)
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error deleting ligne_commande_sous_traitant:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Pieces drawer (ennoblisseur flow) ────────────────────
+//
+// Each line of an ennoblisseur commande drives two flows:
+//   1. Affectation: take an existing stock_ecru roll (greige fabric we
+//      knitted in-house) and mark it as sent to this dyer for finishing.
+//      Wire: stock_ecru.IDref_commande_affectation = IDligne_commande_sous_traitant
+//   2. Reception: when the dyer returns the dyed roll, we record a new
+//      stock_fini row that references both the source écru roll and the
+//      sous-traitant commande line.
+//      Wire: stock_fini.IDref_commande_source = IDligne_commande_sous_traitant,
+//            stock_fini.IDstock_ecru = IDstock_ecru of the original.
+
+interface LineContext {
+  commandeId: number
+  /** The line's IDreference column — it's an IDref_fini. */
+  IDref_fini: number
+  /** The IDref_ecru that ref_fini maps to (via ref_fini.IDref_ecru). Used
+   *  to filter compatible écru rolls for the drawer. */
+  IDref_ecru: number
+}
+
+async function loadEnnoblisseurLineContext(
+  commandeId: number,
+  ligneId: number,
+): Promise<LineContext | null> {
+  const lineRows = await query<{
+    IDcommande_sous_traitant: number
+    IDreference: number | null
+  }>(
+    `SELECT IDcommande_sous_traitant, IDreference
+     FROM ligne_commande_sous_traitant
+     WHERE IDligne_commande_sous_traitant = ${ligneId}`,
+  )
+  if (lineRows.length === 0) return null
+  const line = lineRows[0] as any
+  if (Number(line.IDcommande_sous_traitant) !== commandeId) return null
+  const IDref_fini = Number(line.IDreference) || 0
+
+  // Resolve the écru ref via ref_fini.IDref_ecru — that's the ref the
+  // ennoblisseur receives (greige rolls of that ecru ref are dyed/finished
+  // into rolls of this fini ref).
+  let IDref_ecru = 0
+  if (IDref_fini > 0) {
+    const r = await query<{ IDref_ecru: number | null }>(
+      `SELECT IDref_ecru FROM ref_fini WHERE IDref_fini = ${IDref_fini}`,
+    )
+    IDref_ecru = Number((r[0] as any)?.IDref_ecru) || 0
+  }
+  return { commandeId, IDref_fini, IDref_ecru }
+}
+
+interface StockEcruLite {
+  IDstock_ecru: number
+  numero: string | null
+  lot: string | null
+  poids: number | null
+  metrage: number | null
+  IDref_ecru: number
+  IDcolori_ecru: number
+  IDmagasin: number
+  IDordre_fabrication: number
+  date_saisie: string | null
+}
+
+interface StockFiniLite {
+  IDstock_fini: number
+  numero: string | null
+  lot: string | null
+  poids: number | null
+  metrage: number | null
+  IDref_fini: number
+  IDColoris: number
+  IDstock_ecru: number
+  IDmagasin: number
+  date_saisie: string | null
+  observations: string | null
+}
+
+async function fetchPiecesPayload(ctx: LineContext, ligneId: number): Promise<{
+  ecruLinked: StockEcruLite[]
+  ecruAvailable: StockEcruLite[]
+  finiReceived: StockFiniLite[]
+}> {
+  // Linked écru rolls — those already affected to this line.
+  const linkedRows = await query<StockEcruLite>(
+    `SELECT IDstock_ecru, numero, lot, poids, metrage, IDref_ecru, IDcolori_ecru,
+            IDmagasin, IDordre_fabrication, date_saisie
+     FROM stock_ecru
+     WHERE IDref_commande_affectation = ${ligneId}
+     ORDER BY date_saisie DESC, IDstock_ecru DESC`,
+  )
+  const linked = await fixEncoding(linkedRows, 'stock_ecru', 'IDstock_ecru', ['numero', 'lot'])
+
+  // Available écru rolls — every roll of the ref_ecru that maps to this
+  // fini line, currently unaffected. Coloris is intentionally not filtered:
+  // the ennoblisseur dyes the écru regardless of its source coloris, so we
+  // present all matching écru rolls.
+  let available: StockEcruLite[] = []
+  if (ctx.IDref_ecru > 0) {
+    const availRows = await query<StockEcruLite>(
+      `SELECT IDstock_ecru, numero, lot, poids, metrage, IDref_ecru, IDcolori_ecru,
+              IDmagasin, IDordre_fabrication, date_saisie
+       FROM stock_ecru
+       WHERE IDref_ecru = ${ctx.IDref_ecru}
+         AND (IDref_commande_affectation IS NULL OR IDref_commande_affectation = 0)
+       ORDER BY date_saisie DESC, IDstock_ecru DESC`,
+    )
+    available = await fixEncoding(availRows, 'stock_ecru', 'IDstock_ecru', ['numero', 'lot'])
+  }
+
+  // Finis rolls already received against this line.
+  const finiRows = await query<StockFiniLite>(
+    `SELECT IDstock_fini, numero, lot, poids, metrage, IDref_fini, IDColoris,
+            IDstock_ecru, IDmagasin, date_saisie, observations
+     FROM stock_fini
+     WHERE IDref_commande_source = ${ligneId}
+     ORDER BY date_saisie DESC, IDstock_fini DESC`,
+  )
+  const fini = await fixEncoding(finiRows, 'stock_fini', 'IDstock_fini', ['numero', 'lot', 'observations'])
+
+  return {
+    ecruLinked: linked as StockEcruLite[],
+    ecruAvailable: available as StockEcruLite[],
+    finiReceived: fini as StockFiniLite[],
+  }
+}
+
+commandesSousTraitantRouter.get('/:commandeId/lignes/:ligneId/pieces', async (req: Request, res: Response) => {
+  try {
+    const commandeId = parseInt(req.params.commandeId, 10)
+    const ligneId = parseInt(req.params.ligneId, 10)
+    if (isNaN(commandeId) || isNaN(ligneId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const ctx = await loadEnnoblisseurLineContext(commandeId, ligneId)
+    if (!ctx) { res.status(404).json({ error: 'Line not found or does not belong to commande' }); return }
+    res.json(await fetchPiecesPayload(ctx, ligneId))
+  } catch (err) {
+    console.error('Error fetching line pieces:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+commandesSousTraitantRouter.put(
+  '/:commandeId/lignes/:ligneId/pieces/ecru/:stockEcruId',
+  async (req: Request, res: Response) => {
+    try {
+      const commandeId = parseInt(req.params.commandeId, 10)
+      const ligneId = parseInt(req.params.ligneId, 10)
+      const stockEcruId = parseInt(req.params.stockEcruId, 10)
+      if (isNaN(commandeId) || isNaN(ligneId) || isNaN(stockEcruId)) {
+        res.status(400).json({ error: 'Invalid ID' }); return
+      }
+      const ctx = await loadEnnoblisseurLineContext(commandeId, ligneId)
+      if (!ctx) { res.status(404).json({ error: 'Line not found or does not belong to commande' }); return }
+      if (refuseIfTerminee(res, await loadCommandeSoldee(commandeId))) return
+
+      // Verify the écru row's IDref_ecru matches the ref_fini.IDref_ecru
+      // resolved for this line, and that the roll is unassigned.
+      const ecruRows = await query<{
+        IDstock_ecru: number
+        IDref_ecru: number
+        IDref_commande_affectation: number | null
+      }>(
+        `SELECT IDstock_ecru, IDref_ecru, IDref_commande_affectation
+         FROM stock_ecru
+         WHERE IDstock_ecru = ${stockEcruId}`,
+      )
+      if (ecruRows.length === 0) { res.status(404).json({ error: 'Stock ecru not found' }); return }
+      const s = ecruRows[0] as any
+      if (Number(s.IDref_ecru) !== ctx.IDref_ecru) {
+        res.status(400).json({ error: 'Stock ecru ref does not match the line\'s fini ref mapping' })
+        return
+      }
+      const current = Number(s.IDref_commande_affectation) || 0
+      if (current !== 0 && current !== ligneId) {
+        res.status(409).json({ error: 'Stock ecru is already linked to another line' })
+        return
+      }
+
+      await query(
+        `UPDATE stock_ecru SET IDref_commande_affectation = ${ligneId} WHERE IDstock_ecru = ${stockEcruId}`,
+      )
+      res.json(await fetchPiecesPayload(ctx, ligneId))
+    } catch (err) {
+      console.error('Error linking ecru to line:', err)
+      res.status(500).json({ error: 'Internal server error' })
+    }
+  },
+)
+
+commandesSousTraitantRouter.delete(
+  '/:commandeId/lignes/:ligneId/pieces/ecru/:stockEcruId',
+  async (req: Request, res: Response) => {
+    try {
+      const commandeId = parseInt(req.params.commandeId, 10)
+      const ligneId = parseInt(req.params.ligneId, 10)
+      const stockEcruId = parseInt(req.params.stockEcruId, 10)
+      if (isNaN(commandeId) || isNaN(ligneId) || isNaN(stockEcruId)) {
+        res.status(400).json({ error: 'Invalid ID' }); return
+      }
+      const ctx = await loadEnnoblisseurLineContext(commandeId, ligneId)
+      if (!ctx) { res.status(404).json({ error: 'Line not found or does not belong to commande' }); return }
+      if (refuseIfTerminee(res, await loadCommandeSoldee(commandeId))) return
+
+      await query(
+        `UPDATE stock_ecru SET IDref_commande_affectation = 0
+         WHERE IDstock_ecru = ${stockEcruId} AND IDref_commande_affectation = ${ligneId}`,
+      )
+      res.json(await fetchPiecesPayload(ctx, ligneId))
+    } catch (err) {
+      console.error('Error unlinking ecru from line:', err)
+      res.status(500).json({ error: 'Internal server error' })
+    }
+  },
+)
+
+const finiBody = z.object({
+  numero: z.string().min(1).max(20),
+  lot: z.string().optional(),
+  poids: z.number().optional(),
+  metrage: z.number().optional(),
+  IDstock_ecru: z.number().int().nonnegative().optional(),
+  IDref_fini: z.number().int().positive(),
+  IDColoris: z.number().int().nonnegative().optional(),
+  IDmagasin: z.number().int().nonnegative().optional(),
+  observations: z.string().optional(),
+})
+
+commandesSousTraitantRouter.post(
+  '/:commandeId/lignes/:ligneId/pieces/fini',
+  async (req: Request, res: Response) => {
+    try {
+      const commandeId = parseInt(req.params.commandeId, 10)
+      const ligneId = parseInt(req.params.ligneId, 10)
+      if (isNaN(commandeId) || isNaN(ligneId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+      const ctx = await loadEnnoblisseurLineContext(commandeId, ligneId)
+      if (!ctx) { res.status(404).json({ error: 'Line not found or does not belong to commande' }); return }
+      if (refuseIfTerminee(res, await loadCommandeSoldee(commandeId))) return
+
+      const parsed = finiBody.safeParse(req.body)
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Validation failed', details: parsed.error.issues })
+        return
+      }
+      const d = parsed.data
+
+      // If a source écru roll is referenced, sanity check it points at this
+      // line and inherit its IDcolori_ecru into the new stock_fini's
+      // IDColoris (the dyed roll keeps the écru's coloris designation —
+      // simpler and avoids the stock_fini.IDColoris-vs-colori_fini
+      // mismatch in the legacy schema).
+      let inheritedIDColoris = d.IDColoris ?? 0
+      if (d.IDstock_ecru && d.IDstock_ecru > 0) {
+        const verify = await query<{ IDref_commande_affectation: number | null; IDcolori_ecru: number | null }>(
+          `SELECT IDref_commande_affectation, IDcolori_ecru FROM stock_ecru WHERE IDstock_ecru = ${d.IDstock_ecru}`,
+        )
+        if (verify.length === 0) {
+          res.status(400).json({ error: 'Source ecru not found' }); return
+        }
+        const aff = Number((verify[0] as any).IDref_commande_affectation) || 0
+        if (aff !== ligneId) {
+          res.status(400).json({ error: 'Source ecru is not affected to this line' }); return
+        }
+        if (!inheritedIDColoris) {
+          inheritedIDColoris = Number((verify[0] as any).IDcolori_ecru) || 0
+        }
+      }
+
+      const today = new Date()
+      const yyyy = String(today.getFullYear())
+      const mm = String(today.getMonth() + 1).padStart(2, '0')
+      const dd = String(today.getDate()).padStart(2, '0')
+      const dateSaisie = `${yyyy}${mm}${dd}`
+
+      await query(
+        `INSERT INTO stock_fini
+         (numero, lot, poids, metrage, IDref_fini, IDColoris, IDstock_ecru,
+          IDmagasin, IDref_commande_source, observations, date_saisie,
+          second_choix, destockage, don, IDProprietaire, IDcommande_donation, IDligne_commande_client, IDligne_expedition,
+          IDetat_stock_fini)
+         VALUES ('${esc(d.numero)}', '${esc(d.lot ?? '')}', ${n(d.poids)}, ${n(d.metrage)},
+                 ${d.IDref_fini}, ${inheritedIDColoris}, ${d.IDstock_ecru ?? 0},
+                 ${d.IDmagasin ?? 0}, ${ligneId}, '${esc(d.observations ?? '')}', '${dateSaisie}',
+                 0, 0, 0, 0, 0, 0, 0, 0)`,
+      )
+      res.status(201).json(await fetchPiecesPayload(ctx, ligneId))
+    } catch (err) {
+      console.error('Error creating stock_fini reception:', err)
+      res.status(500).json({ error: 'Internal server error' })
+    }
+  },
+)
+
+commandesSousTraitantRouter.delete(
+  '/:commandeId/lignes/:ligneId/pieces/fini/:stockFiniId',
+  async (req: Request, res: Response) => {
+    try {
+      const commandeId = parseInt(req.params.commandeId, 10)
+      const ligneId = parseInt(req.params.ligneId, 10)
+      const stockFiniId = parseInt(req.params.stockFiniId, 10)
+      if (isNaN(commandeId) || isNaN(ligneId) || isNaN(stockFiniId)) {
+        res.status(400).json({ error: 'Invalid ID' }); return
+      }
+      const ctx = await loadEnnoblisseurLineContext(commandeId, ligneId)
+      if (!ctx) { res.status(404).json({ error: 'Line not found or does not belong to commande' }); return }
+      if (refuseIfTerminee(res, await loadCommandeSoldee(commandeId))) return
+
+      // Refuse if the row already has downstream usage we'd be erasing silently.
+      const verify = await query<{
+        IDref_commande_source: number | null
+        IDligne_expedition: number | null
+        IDligne_commande_client: number | null
+        destockage: number | null
+      }>(
+        `SELECT IDref_commande_source, IDligne_expedition, IDligne_commande_client, destockage
+         FROM stock_fini
+         WHERE IDstock_fini = ${stockFiniId}`,
+      )
+      if (verify.length === 0) { res.status(404).json({ error: 'Stock fini not found' }); return }
+      const v = verify[0] as any
+      if (Number(v.IDref_commande_source) !== ligneId) {
+        res.status(400).json({ error: 'Stock fini is not linked to this line' }); return
+      }
+      if ((Number(v.IDligne_expedition) || 0) > 0
+        || (Number(v.IDligne_commande_client) || 0) > 0
+        || Number(v.destockage) === 1) {
+        res.status(409).json({
+          error: 'fini_already_used',
+          message:
+            "Ce rouleau a déjà été utilisé en aval (expédition / commande client / destockage). Annulez d'abord ces opérations dans le stock finis.",
+        })
+        return
+      }
+
+      await query(`DELETE FROM stock_fini WHERE IDstock_fini = ${stockFiniId}`)
+      res.json(await fetchPiecesPayload(ctx, ligneId))
+    } catch (err) {
+      console.error('Error deleting stock_fini reception:', err)
+      res.status(500).json({ error: 'Internal server error' })
+    }
+  },
+)
+
+// ── Documents (polymorphic GED) ──────────────────────────
+//
+// Discriminator: rows where IDcommande_sous_traitant = id AND
+// IDcommande_client = 0. The whitelist below was empirically derived from
+// production data — see inspect-pieces-flow.ts output:
+//   1=facture fil, 2=autre, 3=bl retour ennoblisseur (most common),
+//   4=bl retour tricoteur, 5=cert GOTS, 6=bl fournisseur, 15=soumission
+
+const COMMANDE_SST_DOC_TYPES = '1, 2, 3, 4, 5, 6, 15'
+
+commandesSousTraitantRouter.get('/:id/documents', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const rows = await query<{
+      IDged: number
+      nom: string | null
+      commentaire: string | null
+      IDtype_doc: number
+    }>(
+      `SELECT g.IDged, g.nom, g.commentaire, g.IDtype_doc
+       FROM ged g
+       WHERE g.IDcommande_sous_traitant = ${id}
+         AND g.IDcommande_client = 0
+         AND g.IDtype_doc IN (${COMMANDE_SST_DOC_TYPES})
+       ORDER BY g.IDged DESC`,
+    )
+    const fixed = await fixEncoding(rows, 'ged', 'IDged', ['nom', 'commentaire'])
+
+    const typeIds = Array.from(new Set(fixed.map((r) => r.IDtype_doc).filter((t) => t > 0)))
+    const typeMap = new Map<number, string>()
+    if (typeIds.length > 0) {
+      const typeRows = await query<{ IDtype_doc: number; nom: string }>(
+        `SELECT IDtype_doc, nom FROM type_doc WHERE IDtype_doc IN (${typeIds.join(',')})`,
+      )
+      const fixedTypes = await fixEncoding(typeRows, 'type_doc', 'IDtype_doc', ['nom'])
+      for (const t of fixedTypes) typeMap.set(t.IDtype_doc, t.nom)
+    }
+
+    const out = fixed.map((r) => ({
+      IDged: r.IDged,
+      nom: r.nom,
+      commentaire: r.commentaire,
+      IDtype_doc: r.IDtype_doc,
+      type_nom: typeMap.get(r.IDtype_doc) ?? null,
+    }))
+    res.json(out)
+  } catch (err) {
+    console.error('Error listing commande-sst documents:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+commandesSousTraitantRouter.get('/:id/documents/:idged/fichier', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    const idged = parseInt(req.params.idged, 10)
+    if (isNaN(id) || isNaN(idged)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const rows = await queryRaw(
+      `SELECT fichier FROM ged
+       WHERE IDged = ${idged}
+         AND IDcommande_sous_traitant = ${id}
+         AND IDcommande_client = 0
+         AND IDtype_doc IN (${COMMANDE_SST_DOC_TYPES})`,
+    )
+    if (rows.length === 0) { res.status(404).json({ error: 'Document not found' }); return }
+    const fichier = (rows[0] as any).fichier
+    if (fichier == null) { res.status(404).json({ error: 'No file attached' }); return }
+    let buf: Buffer
+    if (fichier instanceof ArrayBuffer) buf = Buffer.from(fichier)
+    else if (Buffer.isBuffer(fichier)) buf = fichier
+    else { res.status(404).json({ error: 'No file attached' }); return }
+    if (buf.length === 0 || (buf.length === 1 && buf[0] === 0)) {
+      res.status(404).json({ error: 'No file attached' }); return
+    }
+
+    let contentType = 'application/octet-stream'
+    if (buf.length >= 4) {
+      const h = buf.subarray(0, 4)
+      if (h[0] === 0x25 && h[1] === 0x50 && h[2] === 0x44 && h[3] === 0x46) contentType = 'application/pdf'
+      else if (h[0] === 0x89 && h[1] === 0x50 && h[2] === 0x4E && h[3] === 0x47) contentType = 'image/png'
+      else if (h[0] === 0xFF && h[1] === 0xD8) contentType = 'image/jpeg'
+    }
+    res.setHeader('Content-Type', contentType)
+    res.setHeader('Content-Disposition', 'inline')
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.end(buf)
+  } catch (err) {
+    console.error('Error serving commande-sst document:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+commandesSousTraitantRouter.post(
+  '/:id/documents',
+  upload.single('fichier'),
+  async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id, 10)
+      if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+      const cf = await query(
+        `SELECT IDcommande_sous_traitant FROM commande_sous_traitant WHERE IDcommande_sous_traitant = ${id}`,
+      )
+      if (cf.length === 0) { res.status(404).json({ error: 'Commande not found' }); return }
+
+      const nom = (req.body.nom ?? '').toString()
+      const commentaire = (req.body.commentaire ?? '').toString()
+      const idTypeDoc = parseInt(req.body.IDtype_doc, 10) || 0
+
+      // Note: IDreference is set to the commande id too (mirroring the
+      // legacy convention seen in commande_fil docs) so any future query
+      // that joined on IDreference still finds the rows.
+      await query(
+        `INSERT INTO ged (nom, commentaire, IDtype_doc, IDreference, IDcommande_client, IDcommande_sous_traitant, IDdossier)
+         VALUES ('${esc(nom)}', '${esc(commentaire)}', ${idTypeDoc}, ${id}, 0, ${id}, 0)`,
+      )
+
+      const newRows = await query<{ IDged: number }>(
+        `SELECT IDged FROM ged
+         WHERE IDcommande_sous_traitant = ${id}
+           AND IDcommande_client = 0
+           AND IDtype_doc = ${idTypeDoc}
+         ORDER BY IDged DESC`,
+      )
+      if (newRows.length === 0) { res.status(500).json({ error: 'Insert lookup failed' }); return }
+      const newId = newRows[0].IDged
+
+      if (req.file && req.file.buffer.length > 0) {
+        const hexStr = req.file.buffer.toString('hex')
+        await queryRaw(`UPDATE ged SET fichier = x'${hexStr}' WHERE IDged = ${newId}`)
+      }
+
+      res.status(201).json({ IDged: newId })
+    } catch (err) {
+      console.error('Error creating commande-sst document:', err)
+      res.status(500).json({ error: 'Internal server error' })
+    }
+  },
+)
+
+commandesSousTraitantRouter.put(
+  '/:id/documents/:idged',
+  upload.single('fichier'),
+  async (req: Request, res: Response) => {
+    try {
+      const id = parseInt(req.params.id, 10)
+      const idged = parseInt(req.params.idged, 10)
+      if (isNaN(id) || isNaN(idged)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+      const scope = await query(
+        `SELECT IDged FROM ged
+         WHERE IDged = ${idged}
+           AND IDcommande_sous_traitant = ${id}
+           AND IDcommande_client = 0
+           AND IDtype_doc IN (${COMMANDE_SST_DOC_TYPES})`,
+      )
+      if (scope.length === 0) { res.status(404).json({ error: 'Document not found' }); return }
+
+      const sets: string[] = []
+      if (req.body.nom !== undefined) sets.push(`nom = '${esc(String(req.body.nom))}'`)
+      if (req.body.commentaire !== undefined) sets.push(`commentaire = '${esc(String(req.body.commentaire))}'`)
+      if (req.body.IDtype_doc !== undefined) sets.push(`IDtype_doc = ${parseInt(req.body.IDtype_doc, 10) || 0}`)
+      if (sets.length > 0) {
+        await query(`UPDATE ged SET ${sets.join(', ')} WHERE IDged = ${idged}`)
+      }
+      if (req.file && req.file.buffer.length > 0) {
+        const hexStr = req.file.buffer.toString('hex')
+        await queryRaw(`UPDATE ged SET fichier = x'${hexStr}' WHERE IDged = ${idged}`)
+      } else if (req.body.remove_fichier === '1') {
+        await query(`UPDATE ged SET fichier = NULL WHERE IDged = ${idged}`)
+      }
+      res.json({ ok: true })
+    } catch (err) {
+      console.error('Error updating commande-sst document:', err)
+      res.status(500).json({ error: 'Internal server error' })
+    }
+  },
+)
+
+commandesSousTraitantRouter.delete('/:id/documents/:idged', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    const idged = parseInt(req.params.idged, 10)
+    if (isNaN(id) || isNaN(idged)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const scope = await query(
+      `SELECT IDged FROM ged
+       WHERE IDged = ${idged}
+         AND IDcommande_sous_traitant = ${id}
+         AND IDcommande_client = 0
+         AND IDtype_doc IN (${COMMANDE_SST_DOC_TYPES})`,
+    )
+    if (scope.length === 0) { res.status(404).json({ error: 'Document not found' }); return }
+    await query(`DELETE FROM ged WHERE IDged = ${idged}`)
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error deleting commande-sst document:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Reuse the type-doc lookup that fournisseurs already exposes (if the FE
+// relies on it). The list endpoint above already includes per-doc type_nom
+// resolution, so the FE often won't need this — but having the router
+// expose it locally avoids a cross-route dependency for the FE.
+commandesSousTraitantRouter.get('/lookups/type-doc', async (_req: Request, res: Response) => {
+  try {
+    const rows = await query<{ IDtype_doc: number; nom: string | null }>(
+      `SELECT IDtype_doc, nom FROM type_doc WHERE IDtype_doc IN (${COMMANDE_SST_DOC_TYPES}) ORDER BY nom`,
+    )
+    const fixed = await fixEncoding(rows, 'type_doc', 'IDtype_doc', ['nom'])
+    res.json(fixed)
+  } catch (err) {
+    console.error('Error listing sst type-doc:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Suppress unused-import noise for the type loader helper used only in
+// validation paths. (kept here intentionally for future ennoblisseur-only
+// gating logic on POST line, etc.)
+void loadSousTraitantType

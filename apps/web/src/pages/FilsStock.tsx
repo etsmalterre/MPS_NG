@@ -28,6 +28,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { BobineIcon } from '@/components/icons/BobineIcon'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
+import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
 import { apiFetch, API_URL } from '@/lib/api'
@@ -939,66 +940,50 @@ function NewStockFilDialog({ open, onOpenChange, onCreated }: NewStockFilDialogP
         <div className="grid grid-cols-2 gap-3 mt-3">
           <div className="col-span-2">
             <label className="text-xs text-muted-foreground mb-1 block">Fournisseur *</label>
-            <select
-              value={IDfournisseur}
-              onChange={(e) => setIDfournisseur(e.target.value ? parseInt(e.target.value, 10) : '')}
-              className="w-full h-9 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer"
-            >
-              <option value="">— Sélectionner —</option>
-              {fournisseursQuery.data?.map((f) => (
-                <option key={f.IDfournisseur} value={f.IDfournisseur}>
-                  {f.nom}
-                </option>
-              ))}
-            </select>
+            <SearchableCombobox<{ IDfournisseur: number; nom: string }>
+              options={fournisseursQuery.data ?? []}
+              value={typeof IDfournisseur === 'number' ? IDfournisseur : 0}
+              onChange={(id) => setIDfournisseur(id > 0 ? id : '')}
+              getId={(f) => f.IDfournisseur}
+              getPrimary={(f) => f.nom}
+              placeholder="Sélectionner un fournisseur"
+            />
           </div>
 
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Référence *</label>
-            <select
-              value={IDref_fil}
-              onChange={(e) => setIDrefFil(e.target.value ? parseInt(e.target.value, 10) : '')}
+            <PopoverSelect
+              options={uniqueRefs.map((r) => ({ id: r.IDref_fil, primary: r.reference }))}
+              value={typeof IDref_fil === 'number' ? IDref_fil : 0}
+              onChange={(id) => setIDrefFil(id > 0 ? id : '')}
               disabled={typeof IDfournisseur !== 'number' || fournisseurDetailQuery.isLoading}
-              className="w-full h-9 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer disabled:bg-zinc-100 disabled:text-muted-foreground disabled:cursor-not-allowed"
-            >
-              <option value="">
-                {typeof IDfournisseur !== 'number'
+              emptyLabel={
+                typeof IDfournisseur !== 'number'
                   ? '— Choisir un fournisseur —'
                   : fournisseurDetailQuery.isLoading
                     ? 'Chargement…'
                     : uniqueRefs.length === 0
                       ? 'Aucune référence'
-                      : '— Sélectionner —'}
-              </option>
-              {uniqueRefs.map((r) => (
-                <option key={r.IDref_fil} value={r.IDref_fil}>
-                  {r.reference}
-                </option>
-              ))}
-            </select>
+                      : '— Sélectionner —'
+              }
+            />
           </div>
 
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Coloris *</label>
-            <select
-              value={IDcolori_fil}
-              onChange={(e) => setIDcolori(e.target.value ? parseInt(e.target.value, 10) : '')}
+            <PopoverSelect
+              options={colorisForRef.map((r) => ({ id: r.IDcolori_fil, primary: r.colori_reference }))}
+              value={typeof IDcolori_fil === 'number' ? IDcolori_fil : 0}
+              onChange={(id) => setIDcolori(id > 0 ? id : '')}
               disabled={typeof IDref_fil !== 'number'}
-              className="w-full h-9 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring cursor-pointer disabled:bg-zinc-100 disabled:text-muted-foreground disabled:cursor-not-allowed"
-            >
-              <option value="">
-                {typeof IDref_fil !== 'number'
+              emptyLabel={
+                typeof IDref_fil !== 'number'
                   ? '— Choisir une référence —'
                   : colorisForRef.length === 0
                     ? 'Aucun coloris'
-                    : '— Sélectionner —'}
-              </option>
-              {colorisForRef.map((r) => (
-                <option key={r.IDcolori_fil} value={r.IDcolori_fil}>
-                  {r.colori_reference}
-                </option>
-              ))}
-            </select>
+                    : '— Sélectionner —'
+              }
+            />
           </div>
 
           <div>
