@@ -269,7 +269,7 @@ commandesFilRouter.get('/', async (req: Request, res: Response) => {
     const totalsMap = new Map<number, { total_kg: number; total_eur: number; nb_lignes: number; earliest_delivery: string | null }>()
     if (ids.length > 0) {
       const lignes = await query<any>(
-        `SELECT IDcommande_fil, quantite, prix_unitaire, date_livraison FROM ref_fil_commande WHERE IDcommande_fil IN (${ids.join(',')})`
+        `SELECT IDcommande_fil, quantite, prix_unitaire, date_livraison, etat FROM ref_fil_commande WHERE IDcommande_fil IN (${ids.join(',')})`
       )
       for (const l of lignes) {
         const id = Number(l.IDcommande_fil)
@@ -279,10 +279,14 @@ commandesFilRouter.get('/', async (req: Request, res: Response) => {
         acc.total_kg += qty
         acc.total_eur += qty * price
         acc.nb_lignes += 1
-        // Earliest non-empty YYYYMMDD across lines — zero-padded strings compare lexicographically
-        const dl = typeof l.date_livraison === 'string' ? l.date_livraison : ''
-        if (/^\d{8}$/.test(dl) && (acc.earliest_delivery === null || dl < acc.earliest_delivery)) {
-          acc.earliest_delivery = dl
+        // Earliest non-empty YYYYMMDD across OPEN lines only — terminé lines
+        // are already delivered and shouldn't drive the urgency color of the
+        // parent commande. Zero-padded strings compare lexicographically.
+        if (Number(l.etat) !== 1) {
+          const dl = typeof l.date_livraison === 'string' ? l.date_livraison : ''
+          if (/^\d{8}$/.test(dl) && (acc.earliest_delivery === null || dl < acc.earliest_delivery)) {
+            acc.earliest_delivery = dl
+          }
         }
         totalsMap.set(id, acc)
       }
