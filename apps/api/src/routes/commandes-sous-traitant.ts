@@ -35,6 +35,7 @@ import {
 import { sendMail } from '../lib/gmail.js'
 import { getUserEmail } from '../lib/user-emails.js'
 import { stripRtf, wrapRtf } from '../lib/rtf-utils.js'
+import { recalcLignePrix, hasTariffData, calcTarifSSTBreakdown, type PrixBreakdown } from '../lib/pricing-sst.js'
 
 const upload = multer({ storage: multer.memoryStorage() })
 
@@ -352,17 +353,39 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
     const stFilter = parseInt(String(req.query.sous_traitant ?? ''), 10)
     const statusFilter = String(req.query.status ?? 'all')
 
+    // Keyset pagination: the frontend can pass `limit` (default 100, max 500)
+    // and `before_id` (the last IDcommande_sous_traitant it has). We sort by
+    // ID descending so "before_id" means "give me older commandes". Sorting
+    // by ID rather than date_commande is required for keyset to be stable —
+    // and IDs are sequential so the visible order barely changes.
+    //
+    // When `q` is non-empty, pagination is bypassed entirely — the search
+    // needs to scan EVERY commande matching the status filter, not just
+    // the loaded page. The JS-side filter at the end of this handler does
+    // the actual matching against ID / sous-traitant nom / commentaire.
+    // We accept the slower payload here because the user is actively
+    // narrowing the result set, and they expect search to be exhaustive.
+    const isSearching = q.length > 0
+    const limitRaw = parseInt(String(req.query.limit ?? ''), 10)
+    const limit = isNaN(limitRaw) ? 100 : Math.min(Math.max(limitRaw, 1), 500)
+    const beforeIdRaw = parseInt(String(req.query.before_id ?? ''), 10)
+    const beforeId = isNaN(beforeIdRaw) || beforeIdRaw <= 0 ? null : beforeIdRaw
+
     const whereParts: string[] = []
     if (!isNaN(stFilter)) whereParts.push(`cst.IDsous_traitant = ${stFilter}`)
     if (statusFilter === 'en_cours') whereParts.push(`cst.est_soldee = 0`)
     else if (statusFilter === 'terminee') whereParts.push(`cst.est_soldee = 1`)
+    if (!isSearching && beforeId !== null) whereParts.push(`cst.IDcommande_sous_traitant < ${beforeId}`)
     const whereSql = whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : ''
 
+    // When searching we drop the TOP cap so the JS filter can scan every
+    // matching commande. Otherwise we keep TOP for the keyset page.
+    const topClause = isSearching ? '' : `TOP ${limit}`
     const commandes = await query<any>(
-      `SELECT cst.IDcommande_sous_traitant, cst.IDsous_traitant, cst.date_commande, cst.est_soldee, cst.commentaire
+      `SELECT ${topClause} cst.IDcommande_sous_traitant, cst.IDsous_traitant, cst.date_commande, cst.est_soldee, cst.commentaire
        FROM commande_sous_traitant cst
        ${whereSql}
-       ORDER BY cst.date_commande DESC, cst.IDcommande_sous_traitant DESC`,
+       ORDER BY cst.IDcommande_sous_traitant DESC`,
     )
     const fixedCommandes = await fixEncoding(
       commandes,
@@ -412,12 +435,29 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
       }
     }
 
-    // Bulk fetch line aggregates. `total_eur` is the **actual** total
-    // (sum of attached écru kg × prix), not the nominal qty × prix — for
-    // ennoblisseur lines, the user enters qty (Ml) and prix (€/Kg) as
-    // *projections*, and the bill comes from the weights of the écru rolls
-    // they attach via the pieces drawer.
-    const ids = fixedCommandes.map((c: any) => c.IDcommande_sous_traitant).filter(Boolean)
+    // Apply the search-q filter BEFORE computing line aggregates. The
+    // aggregate fetches (lignes + stock_ecru) scale with the IN-list size,
+    // and on `terminee` the IN list can be thousands of ids — that's the
+    // path that made "click 'terminé' → search 'foo'" take 20+ seconds.
+    // After this filter the survivor list is typically a handful for
+    // searches, so the aggregate joins stay cheap.
+    const qLower = q.toLowerCase()
+    const filteredCommandes = isSearching
+      ? fixedCommandes.filter((c: any) => {
+          const sst = stInfo.get(Number(c.IDsous_traitant))
+          const nom = sst?.nom ?? ''
+          const com = c.commentaire ?? ''
+          const hay = `${c.IDcommande_sous_traitant} ${nom} ${com}`.toLowerCase()
+          return hay.includes(qLower)
+        })
+      : fixedCommandes
+
+    // Bulk fetch line aggregates only for the survivors. `total_eur` is
+    // the **actual** total (sum of attached écru kg × prix), not the
+    // nominal qty × prix — for ennoblisseur lines, the user enters qty
+    // (Ml) and prix (€/Kg) as *projections*, and the bill comes from the
+    // weights of the écru rolls they attach via the pieces drawer.
+    const ids = filteredCommandes.map((c: any) => c.IDcommande_sous_traitant).filter(Boolean)
     const totalsMap = new Map<number, {
       total_eur: number
       total_qte: number
@@ -468,28 +508,21 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
       }
     }
 
-    const qLower = q.toLowerCase()
-    const result = fixedCommandes
-      .map((c: any) => {
-        const totals = totalsMap.get(Number(c.IDcommande_sous_traitant)) ?? {
-          total_eur: 0,
-          total_qte: 0,
-          nb_lignes: 0,
-          earliest_delivery: null,
-        }
-        const sst = stInfo.get(Number(c.IDsous_traitant))
-        return {
-          ...c,
-          sous_traitant_nom: sst?.nom ?? '',
-          sous_traitant_type: sst?.type ?? null,
-          ...totals,
-        }
-      })
-      .filter((c: any) => {
-        if (!q) return true
-        const hay = `${c.IDcommande_sous_traitant} ${c.sous_traitant_nom ?? ''} ${c.commentaire ?? ''}`.toLowerCase()
-        return hay.includes(qLower)
-      })
+    const result = filteredCommandes.map((c: any) => {
+      const totals = totalsMap.get(Number(c.IDcommande_sous_traitant)) ?? {
+        total_eur: 0,
+        total_qte: 0,
+        nb_lignes: 0,
+        earliest_delivery: null,
+      }
+      const sst = stInfo.get(Number(c.IDsous_traitant))
+      return {
+        ...c,
+        sous_traitant_nom: sst?.nom ?? '',
+        sous_traitant_type: sst?.type ?? null,
+        ...totals,
+      }
+    })
 
     res.json(result)
   } catch (err) {
@@ -612,14 +645,17 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
     const ecruMap = new Map<number, string>()
     const finiMap = new Map<number, string>()
     const filMap = new Map<number, string>()
+    // ref_fini.rendement (Ml/kg) — used by the frontend LineCard to compute
+    // "Ml potentiel" = totalKgEcru × rendement. Only populated for fini refs.
+    const finiRendementMap = new Map<number, number>()
     if (refIds.length > 0) {
       // Build all three maps in parallel; we'll pick the right one per line below.
       const [ecruRows, finiRows, filRows] = await Promise.all([
         query<{ IDref_ecru: number; reference: string | null }>(
           `SELECT IDref_ecru, reference FROM ref_ecru WHERE IDref_ecru IN (${refIds.join(',')})`,
         ),
-        query<{ IDref_fini: number; reference: string | null }>(
-          `SELECT IDref_fini, reference FROM ref_fini WHERE IDref_fini IN (${refIds.join(',')})`,
+        query<{ IDref_fini: number; reference: string | null; rendement: number | null }>(
+          `SELECT IDref_fini, reference, rendement FROM ref_fini WHERE IDref_fini IN (${refIds.join(',')})`,
         ),
         query<{ IDref_fil: number; reference: string | null }>(
           `SELECT IDref_fil, reference FROM ref_fil WHERE IDref_fil IN (${refIds.join(',')})`,
@@ -627,8 +663,10 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
       ])
       for (const r of await fixEncoding(ecruRows, 'ref_ecru', 'IDref_ecru', ['reference']))
         ecruMap.set(r.IDref_ecru, r.reference ?? '')
-      for (const r of await fixEncoding(finiRows, 'ref_fini', 'IDref_fini', ['reference']))
+      for (const r of await fixEncoding(finiRows, 'ref_fini', 'IDref_fini', ['reference'])) {
         finiMap.set(r.IDref_fini, r.reference ?? '')
+        finiRendementMap.set(r.IDref_fini, Number(r.rendement) || 0)
+      }
       for (const r of await fixEncoding(filRows, 'ref_fil', 'IDref_fil', ['reference']))
         filMap.set(r.IDref_fil, r.reference ?? '')
     }
@@ -727,14 +765,24 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
       const typeKind = Number((l as any).type_kind) || 0
       const resolved = resolveRef(refId, typeKind)
       const agg = piecesByLine.get(Number(l.IDligne_commande_sous_traitant)) ?? newAgg()
+      const refRendement = resolved.kind === 'fini' ? (finiRendementMap.get(refId) ?? 0) : 0
       return {
         ...l,
         ref_label: resolved.label || null,
         ref_kind: resolved.kind,
+        ref_rendement: refRendement,
         colori_reference: resolveColoris(colId, typeKind) || null,
         ...agg,
       }
     })
+
+    // Whether this commande's sous-traitant has any tariff catalog rows.
+    // Drives the frontend's "lock prix input" affordance: only suppliers
+    // present in `tranche_tarif_ennoblissement` get the auto-pricing
+    // read-only treatment. Suppliers like FRANCE TEINTURE (no catalog)
+    // keep manual prix entry. The flag is per-commande, not per-line,
+    // because IDsous_traitant is set once at commande creation.
+    const autoPricingEnabled = await hasTariffData(Number(header.IDsous_traitant) || 0)
 
     res.json({
       ...header,
@@ -745,6 +793,7 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
       adresse_sous_traitant: fixedAdresseSt[0] ?? null,
       adresse_livraison: fixedAdresseLiv[0] ?? null,
       lignes: lignesEnriched,
+      auto_pricing_enabled: autoPricingEnabled,
     })
   } catch (err) {
     console.error('Error fetching commande-sous-traitant detail:', err)
@@ -1470,6 +1519,18 @@ async function loadEnnoblisseurLineContext(
   return { commandeId, IDref_fini, IDref_ecru }
 }
 
+/** Quality defect recorded against an écru roll. Stored in the legacy
+ *  `defaut_qualite` table with a polymorphic link: when
+ *  `Type_Reference = 2`, `reference` is a stringified `IDstock_ecru`.
+ *  Multiple defects per piece are possible (each is its own row), so
+ *  the per-roll payload carries an array. */
+interface DefautQualite {
+  IDdefaut_qualite: number
+  description: string | null
+  type_defaut: string | null
+  taille_cm: number | null
+}
+
 interface StockEcruLite {
   IDstock_ecru: number
   numero: string | null
@@ -1481,6 +1542,27 @@ interface StockEcruLite {
   IDmagasin: number
   IDordre_fabrication: number
   date_saisie: string | null
+  // Quality + free-text notes. `second_choix` is the legacy
+  // 0-or-positive flag the textile industry uses to mark downgraded
+  // rolls ("second choix"). Surfaced as a destructive badge in the
+  // drawer; `observations` renders as the italic comment line.
+  second_choix: number | null
+  observations: string | null
+  /** Structured defects from `defaut_qualite` (visiteur-logged). Empty
+   *  array when the piece has none. Distinct from the free-text
+   *  `observations` field — both can coexist on the same roll. */
+  defects?: DefautQualite[]
+  // Customer reservation: when the sous-traitant order was created from
+  // a commande_client screen in the legacy ERP, the stock_ecru roll keeps
+  // a back-pointer to the originating client line. We chase the chain
+  // stock_ecru.IDligne_commande_client → ligne_commande_client.IDcommande_client
+  // → commande_client.IDclient → client.nom so the UI can tag the roll
+  // with the customer it's been earmarked for. Only set on linked rolls;
+  // the `ecruAvailable` list omits these fields (they're not needed in the
+  // picker UI, and including them would require resolving the chain for
+  // every unaffected roll of the ref).
+  IDligne_commande_client?: number
+  client_nom?: string | null
 }
 
 interface StockFiniLite {
@@ -1494,23 +1576,80 @@ interface StockFiniLite {
   IDstock_ecru: number
   IDmagasin: number
   date_saisie: string | null
+  // Two distinct free-text fields on stock_fini: the visitor's note
+  // (`observations`, captured when the roll is checked in) and the
+  // ennoblisseur's note (`observation_sst`). They're surfaced as two
+  // separate italic lines in the card so the source of each comment
+  // stays clear. `second_choix` mirrors the écru behaviour.
+  second_choix: number | null
   observations: string | null
+  observation_sst: string | null
 }
 
 async function fetchPiecesPayload(ctx: LineContext, ligneId: number): Promise<{
   ecruLinked: StockEcruLite[]
   ecruAvailable: StockEcruLite[]
   finiReceived: StockFiniLite[]
+  /** Current `ligne_commande_sous_traitant.prix` for this line. Surfaced
+   *  so the link/unlink endpoints can return the freshly-recalculated
+   *  price without forcing the frontend to refetch the whole commande
+   *  detail. Read from the row after any in-flight recalc has persisted. */
+  prix: number
 }> {
   // Linked écru rolls — those already affected to this line.
   const linkedRows = await query<StockEcruLite>(
     `SELECT IDstock_ecru, numero, lot, poids, metrage, IDref_ecru, IDcolori_ecru,
-            IDmagasin, IDordre_fabrication, date_saisie
+            IDmagasin, IDordre_fabrication, date_saisie, IDligne_commande_client,
+            second_choix, observations
      FROM stock_ecru
      WHERE IDref_commande_affectation = ${ligneId}
      ORDER BY date_saisie DESC, IDstock_ecru DESC`,
   )
-  const linked = await fixEncoding(linkedRows, 'stock_ecru', 'IDstock_ecru', ['numero', 'lot'])
+  const linkedFixed = await fixEncoding(linkedRows, 'stock_ecru', 'IDstock_ecru', ['numero', 'lot', 'observations'])
+
+  // Resolve each roll's client reservation in two batched JOIN hops.
+  // We can't do a 3-way JOIN here because the legacy bridge has issues
+  // with CONVERT() across joins (see CLAUDE.md), so we walk the chain
+  // ligne_commande_client → commande_client → client manually and
+  // assemble the name map.
+  const clientByLcc = new Map<number, string>()
+  const lccIds = Array.from(new Set(
+    linkedFixed.map((r) => Number(r.IDligne_commande_client) || 0).filter((x) => x > 0)
+  ))
+  if (lccIds.length > 0) {
+    const lccRows = await query<{ IDligne_commande_client: number; IDcommande_client: number }>(
+      `SELECT IDligne_commande_client, IDcommande_client
+       FROM ligne_commande_client
+       WHERE IDligne_commande_client IN (${lccIds.join(',')})`,
+    )
+    const ccIds = Array.from(new Set(
+      lccRows.map((r) => Number(r.IDcommande_client) || 0).filter((x) => x > 0)
+    ))
+    const clientIdByCC = new Map<number, number>()
+    if (ccIds.length > 0) {
+      const ccRows = await query<{ IDcommande_client: number; IDclient: number }>(
+        `SELECT IDcommande_client, IDclient FROM commande_client
+         WHERE IDcommande_client IN (${ccIds.join(',')})`,
+      )
+      for (const r of ccRows) clientIdByCC.set(Number(r.IDcommande_client), Number(r.IDclient))
+    }
+    const clientIds = Array.from(new Set(Array.from(clientIdByCC.values()).filter((x) => x > 0)))
+    const nameById = new Map<number, string>()
+    if (clientIds.length > 0) {
+      const clRows = await query<{ IDclient: number; nom: string | null }>(
+        `SELECT IDclient, nom FROM client WHERE IDclient IN (${clientIds.join(',')})`,
+      )
+      const fixedCl = await fixEncoding(clRows, 'client', 'IDclient', ['nom'])
+      for (const r of fixedCl) nameById.set(Number(r.IDclient), (r.nom ?? '').trim())
+    }
+    for (const r of lccRows) {
+      const cid = clientIdByCC.get(Number(r.IDcommande_client))
+      if (cid && cid > 0) {
+        const nm = nameById.get(cid)
+        if (nm) clientByLcc.set(Number(r.IDligne_commande_client), nm)
+      }
+    }
+  }
 
   // Available écru rolls — every roll of the ref_ecru that maps to this
   // fini line, currently unaffected. Coloris is intentionally not filtered:
@@ -1520,29 +1659,88 @@ async function fetchPiecesPayload(ctx: LineContext, ligneId: number): Promise<{
   if (ctx.IDref_ecru > 0) {
     const availRows = await query<StockEcruLite>(
       `SELECT IDstock_ecru, numero, lot, poids, metrage, IDref_ecru, IDcolori_ecru,
-              IDmagasin, IDordre_fabrication, date_saisie
+              IDmagasin, IDordre_fabrication, date_saisie,
+              second_choix, observations
        FROM stock_ecru
        WHERE IDref_ecru = ${ctx.IDref_ecru}
          AND (IDref_commande_affectation IS NULL OR IDref_commande_affectation = 0)
        ORDER BY date_saisie DESC, IDstock_ecru DESC`,
     )
-    available = await fixEncoding(availRows, 'stock_ecru', 'IDstock_ecru', ['numero', 'lot'])
+    available = await fixEncoding(availRows, 'stock_ecru', 'IDstock_ecru', ['numero', 'lot', 'observations'])
   }
+
+  // Batch-fetch structured defects from `defaut_qualite` for every écru
+  // roll we're about to return (linked + available). The link is
+  // polymorphic — Type_Reference=2 with reference (string) =
+  // IDstock_ecru. We group by IDstock_ecru and attach as `defects` so
+  // the UI can render them in the red banner alongside `observations`.
+  const allEcruIds = Array.from(new Set<number>([
+    ...linkedFixed.map((r) => Number(r.IDstock_ecru) || 0),
+    ...available.map((r) => Number(r.IDstock_ecru) || 0),
+  ].filter((x) => x > 0)))
+  const defectsByEcruId = new Map<number, DefautQualite[]>()
+  if (allEcruIds.length > 0) {
+    const inList = allEcruIds.map((id) => `'${id}'`).join(',')
+    const defaultRows = await query<{
+      IDdefaut_qualite: number
+      reference: string | null
+      description: string | null
+      type_defaut: string | null
+      taille_cm: number | null
+    }>(
+      `SELECT IDdefaut_qualite, reference, description, type_defaut, taille_cm
+       FROM defaut_qualite
+       WHERE Type_Reference = 2 AND reference IN (${inList})`,
+    )
+    const defaultsFixed = await fixEncoding(defaultRows, 'defaut_qualite', 'IDdefaut_qualite', ['description', 'type_defaut'])
+    for (const d of defaultsFixed as any[]) {
+      const refId = parseInt(String(d.reference ?? ''), 10)
+      if (!(refId > 0)) continue
+      const arr = defectsByEcruId.get(refId) ?? []
+      arr.push({
+        IDdefaut_qualite: Number(d.IDdefaut_qualite),
+        description: d.description ?? null,
+        type_defaut: d.type_defaut ?? null,
+        taille_cm: Number(d.taille_cm) || 0,
+      })
+      defectsByEcruId.set(refId, arr)
+    }
+  }
+
+  const linked = linkedFixed.map((r) => ({
+    ...r,
+    client_nom: clientByLcc.get(Number(r.IDligne_commande_client) || 0) ?? null,
+    defects: defectsByEcruId.get(Number(r.IDstock_ecru) || 0) ?? [],
+  }))
+  available = available.map((r) => ({
+    ...r,
+    defects: defectsByEcruId.get(Number(r.IDstock_ecru) || 0) ?? [],
+  }))
 
   // Finis rolls already received against this line.
   const finiRows = await query<StockFiniLite>(
     `SELECT IDstock_fini, numero, lot, poids, metrage, IDref_fini, IDColoris,
-            IDstock_ecru, IDmagasin, date_saisie, observations
+            IDstock_ecru, IDmagasin, date_saisie, observations, observation_sst, second_choix
      FROM stock_fini
      WHERE IDref_commande_source = ${ligneId}
      ORDER BY date_saisie DESC, IDstock_fini DESC`,
   )
-  const fini = await fixEncoding(finiRows, 'stock_fini', 'IDstock_fini', ['numero', 'lot', 'observations'])
+  const fini = await fixEncoding(finiRows, 'stock_fini', 'IDstock_fini', ['numero', 'lot', 'observations', 'observation_sst'])
+
+  // Read the line's current prix so the caller can patch the frontend
+  // detail cache without a full refetch. We re-read here (rather than
+  // passing it in) so the value reflects any recalc that ran between
+  // the link/unlink mutation and this fetch.
+  const prixRows = await query<{ prix: number | null }>(
+    `SELECT prix FROM ligne_commande_sous_traitant WHERE IDligne_commande_sous_traitant = ${ligneId}`,
+  )
+  const prix = Number(prixRows[0]?.prix) || 0
 
   return {
     ecruLinked: linked as StockEcruLite[],
     ecruAvailable: available as StockEcruLite[],
     finiReceived: fini as StockFiniLite[],
+    prix,
   }
 }
 
@@ -1559,6 +1757,98 @@ commandesSousTraitantRouter.get('/:commandeId/lignes/:ligneId/pieces', async (re
     res.status(500).json({ error: 'Internal server error' })
   }
 })
+
+// Breakdown of the current prix calculation for a line. Returns the
+// algorithm's full trace (base + treatments + multipliers) with
+// human-readable names resolved server-side, so the LineCard tooltip can
+// render an explanatory popover. Called on-demand when the user hovers
+// the Info icon next to "Prix unit.".
+commandesSousTraitantRouter.get(
+  '/:commandeId/lignes/:ligneId/prix-breakdown',
+  async (req: Request, res: Response) => {
+    try {
+      const commandeId = parseInt(req.params.commandeId, 10)
+      const ligneId = parseInt(req.params.ligneId, 10)
+      if (isNaN(commandeId) || isNaN(ligneId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+      // Resolve line + commande context.
+      const lineRows = await query<any>(
+        `SELECT IDcommande_sous_traitant, IDreference, IDColoris, type AS type_kind
+         FROM ligne_commande_sous_traitant
+         WHERE IDligne_commande_sous_traitant = ${ligneId}`,
+      )
+      if (lineRows.length === 0) { res.status(404).json({ error: 'Line not found' }); return }
+      const line = lineRows[0]
+      if (Number(line.IDcommande_sous_traitant) !== commandeId) { res.status(404).json({ error: 'Line does not belong to commande' }); return }
+      if (Number(line.type_kind) !== 2) { res.json({ enabled: false, reason: 'not-ennoblisseur' }); return }
+
+      const cmdRows = await query<{ IDsous_traitant: number }>(
+        `SELECT IDsous_traitant FROM commande_sous_traitant WHERE IDcommande_sous_traitant = ${commandeId}`,
+      )
+      const IDsous_traitant = Number(cmdRows[0]?.IDsous_traitant) || 0
+      if (!(await hasTariffData(IDsous_traitant))) {
+        res.json({ enabled: false, reason: 'no-tariff-data' })
+        return
+      }
+
+      const poidsRows = await query<{ total: number | null }>(
+        `SELECT SUM(poids) AS total FROM stock_ecru WHERE IDref_commande_affectation = ${ligneId}`,
+      )
+      const xPoids = Number(poidsRows[0]?.total) || 0
+
+      const bd: PrixBreakdown | null = await calcTarifSSTBreakdown({
+        xPoids,
+        IDsous_traitant,
+        IDref_fini: Number(line.IDreference) || 0,
+        IDref_fini_colori: Number(line.IDColoris) || 0,
+      })
+      if (!bd) { res.json({ enabled: false, reason: 'no-weight' }); return }
+
+      // Resolve human-readable names for the IDs in the breakdown.
+      const stRows = await query<{ nom: string | null }>(
+        `SELECT nom FROM sous_traitant WHERE IDsous_traitant = ${IDsous_traitant}`,
+      )
+      const sstFixed = await fixEncoding(stRows, 'sous_traitant', 'IDsous_traitant', ['nom'])
+      const sst_nom = ((sstFixed[0] as any)?.nom ?? '').trim()
+
+      let teinture_nom: string | null = null
+      if (bd.IDteinture > 0) {
+        const teintRows = await query<{ designation_interne: string | null; designation_externe: string | null }>(
+          `SELECT designation_interne, designation_externe FROM teinture WHERE IDteinture = ${bd.IDteinture}`,
+        )
+        const fixedT = await fixEncoding(teintRows, 'teinture', 'IDteinture', ['designation_interne', 'designation_externe'])
+        const t = fixedT[0] as any
+        teinture_nom = (t?.designation_externe || t?.designation_interne || '').trim() || null
+      }
+
+      // Collect all treatment ids we need names for (combination-covered
+      // + remaining-priced + unpriced).
+      const trtIds = new Set<number>()
+      if (bd.base?.kind === 'combination') for (const t of bd.base.covered) trtIds.add(t)
+      for (const t of bd.treatments) trtIds.add(t.IDtraitement)
+      for (const t of bd.unpriced_treatments) trtIds.add(t)
+      const trtNames = new Map<number, string>()
+      if (trtIds.size > 0) {
+        const trtRows = await query<{ IDtraitement: number; designation: string | null }>(
+          `SELECT IDtraitement, designation FROM traitement WHERE IDtraitement IN (${Array.from(trtIds).join(',')})`,
+        )
+        const fixedTrt = await fixEncoding(trtRows, 'traitement', 'IDtraitement', ['designation'])
+        for (const r of fixedTrt as any[]) trtNames.set(Number(r.IDtraitement), (r.designation ?? '').trim())
+      }
+
+      res.json({
+        enabled: true,
+        sst_nom,
+        teinture_nom,
+        traitement_names: Object.fromEntries(trtNames),
+        breakdown: bd,
+      })
+    } catch (err) {
+      console.error('Error computing prix breakdown:', err)
+      res.status(500).json({ error: 'Internal server error' })
+    }
+  },
+)
 
 commandesSousTraitantRouter.put(
   '/:commandeId/lignes/:ligneId/pieces/ecru/:stockEcruId',
@@ -1600,6 +1890,11 @@ commandesSousTraitantRouter.put(
       await query(
         `UPDATE stock_ecru SET IDref_commande_affectation = ${ligneId} WHERE IDstock_ecru = ${stockEcruId}`,
       )
+      // Auto-recompute the line's prix from the new total écru weight.
+      // Must run AFTER the link UPDATE so the SUM sees the new roll, and
+      // BEFORE fetchPiecesPayload so the payload's `prix` reflects the
+      // freshly-computed value. See pricing-sst.ts for the algorithm.
+      await recalcLignePrix(ligneId)
       res.json(await fetchPiecesPayload(ctx, ligneId))
     } catch (err) {
       console.error('Error linking ecru to line:', err)
@@ -1626,6 +1921,8 @@ commandesSousTraitantRouter.delete(
         `UPDATE stock_ecru SET IDref_commande_affectation = 0
          WHERE IDstock_ecru = ${stockEcruId} AND IDref_commande_affectation = ${ligneId}`,
       )
+      // Recompute prix now that the écru weight total has dropped.
+      await recalcLignePrix(ligneId)
       res.json(await fetchPiecesPayload(ctx, ligneId))
     } catch (err) {
       console.error('Error unlinking ecru from line:', err)

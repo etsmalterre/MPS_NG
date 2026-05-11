@@ -15,7 +15,8 @@
 //     existing non-ennoblisseur commandes remain readable.
 
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { createPortal } from 'react-dom'
+import { useQuery, useMutation, useQueryClient, useInfiniteQuery, type InfiniteData } from '@tanstack/react-query'
 import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { useUnsavedGuard } from '@/hooks/useUnsavedGuard'
@@ -34,6 +35,7 @@ import {
   Save,
   Trash2,
   MessageSquare,
+  AlertTriangle,
   CheckCircle2,
   Clock,
   Package,
@@ -43,13 +45,15 @@ import {
   AtSign,
   FileText,
   Upload,
+  Check,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
-import { FabricRollIcon } from '@/components/icons/FabricRollIcon'
+import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
+import { TmRollIcon } from '@/components/icons/TmRollIcon'
 import { SendEmailDialog } from '@/components/email/SendEmailDialog'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
@@ -120,6 +124,10 @@ interface LigneCommande {
   num_facture: string | null
   ref_label: string | null
   ref_kind: 'ecru' | 'fini' | 'fil' | null
+  // `ref_fini.rendement` in Ml/kg — used to compute "Ml potentiel" =
+  // total_kg_ecru_lie × rendement once écru rolls are attached. 0 means
+  // either not a fini line or the catalog has no rendement on file.
+  ref_rendement?: number
   colori_reference: string | null
   // Drawer-fed per-line aggregates. The line's actual € total is
   // `total_kg_ecru_lie × prix` (the user-entered prix is €/Kg, applied to
@@ -157,6 +165,11 @@ interface CommandeDetail {
   adresse_sous_traitant: AdresseLite | null
   adresse_livraison: AdresseLite | null
   lignes: LigneCommande[]
+  /** True when this commande's sous-traitant has rows in
+   *  `tranche_tarif_ennoblissement`. Drives the read-only lock on the
+   *  prix input — suppliers without a catalog (e.g. FRANCE TEINTURE)
+   *  keep manual prix entry instead. */
+  auto_pricing_enabled?: boolean
 }
 
 interface SousTraitantLite {
@@ -185,6 +198,18 @@ interface MagasinLite {
 }
 
 // Pieces drawer payload
+/** Quality defect logged in the legacy `defaut_qualite` table. Multiple
+ *  defects can be recorded per écru roll. The combo of `description`
+ *  (precise human-readable) + `type_defaut` (category) + `taille_cm`
+ *  size lets the UI render each defect as a structured red bullet
+ *  inside the defect banner. */
+interface DefautQualite {
+  IDdefaut_qualite: number
+  description: string | null
+  type_defaut: string | null
+  taille_cm: number | null
+}
+
 interface StockEcruLite {
   IDstock_ecru: number
   numero: string | null
@@ -196,6 +221,19 @@ interface StockEcruLite {
   IDmagasin: number
   IDordre_fabrication: number
   date_saisie: string | null
+  /** Textile industry quality flag — >0 means the roll is downgraded
+   *  ("second choix"). Surfaced as a destructive badge on the card. */
+  second_choix: number | null
+  /** Free-text inspection note captured by the visiteur (qualité
+   *  inspector). Rendered as an italic line under the card. */
+  observations: string | null
+  /** Structured defects from `defaut_qualite` — rendered inside the
+   *  red "Défaut" banner alongside `observations`. */
+  defects?: DefautQualite[]
+  // Customer reservation — populated only on linked rolls. See server-side
+  // comment on the same field for the full join chain.
+  IDligne_commande_client?: number
+  client_nom?: string | null
 }
 interface StockFiniLite {
   IDstock_fini: number
@@ -208,12 +246,24 @@ interface StockFiniLite {
   IDstock_ecru: number
   IDmagasin: number
   date_saisie: string | null
+  /** Same semantic as on écru — >0 = second choix. */
+  second_choix: number | null
+  /** Visiteur's note at reception. */
   observations: string | null
+  /** Ennoblisseur's note (separate from the visiteur's). Surfaced as a
+   *  second italic line so the source of each comment stays clear. */
+  observation_sst: string | null
 }
 interface PiecesPayload {
   ecruLinked: StockEcruLite[]
   ecruAvailable: StockEcruLite[]
   finiReceived: StockFiniLite[]
+  /** The line's `prix` (€/Kg) after any auto-recalc triggered by the
+   *  link/unlink mutation that produced this payload. Mirrors what the
+   *  server-side `recalcLignePrix` just wrote to HFSQL. Used to patch the
+   *  commande detail React Query cache so the LineCard re-renders with
+   *  the new value without a full refetch. */
+  prix: number
 }
 
 // ── Shared styling ─────────────────────────────────────
@@ -288,6 +338,18 @@ function isEnnoblisseurType(type: string | null): boolean {
   return type.trim().toLowerCase() === TYPE_ENNOBLISSEUR.toLowerCase()
 }
 
+// Debounce a fast-changing value (typically a search input). Returns the
+// last value that has been stable for `delay` ms. Used to throttle the
+// commandes list refetch while the user is still typing.
+function useDebouncedValue<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay)
+    return () => clearTimeout(t)
+  }, [value, delay])
+  return debounced
+}
+
 // ── Main Page ──────────────────────────────────────────
 
 export function SousTraitantsCommandes() {
@@ -320,10 +382,59 @@ export function SousTraitantsCommandes() {
 
   const [linesDirty, setLinesDirty] = useState(false)
 
-  const { data: commandes, isLoading, isError, error } = useQuery<CommandeListRow[]>({
-    queryKey: ['commandes-sst', statusFilter],
-    queryFn: () => apiFetch(`/commandes-sous-traitant?status=${statusFilter}`),
+  // Keyset-paginated list. The first fetch returns the 100 most recent
+  // commandes for the current statusFilter; each subsequent fetch passes
+  // the last-seen IDcommande_sous_traitant as `before_id`. Solves the
+  // "click 'terminé' → wait forever" problem on this multi-thousand-row
+  // table by capping the wire payload at 100 rows per round-trip.
+  //
+  // When the user types in the search box, we debounce the input (300 ms)
+  // and route the query through the same `useInfiniteQuery` but with `q`
+  // baked into the key + URL. The backend bypasses pagination for that
+  // case so the search scans every matching commande, not just the loaded
+  // page. The single page returned is treated as the "last" page (no
+  // `getNextPageParam` cursor), so the infinite-scroll logic naturally
+  // disables itself while searching.
+  const COMMANDES_PAGE_SIZE = 100
+  const debouncedSearch = useDebouncedValue(searchQuery.trim(), 300)
+  const isSearching = debouncedSearch.length > 0
+  const {
+    data: commandesPages,
+    isLoading,
+    isError,
+    error,
+    hasNextPage,
+    fetchNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery<CommandeListRow[], Error>({
+    queryKey: ['commandes-sst', statusFilter, debouncedSearch],
+    queryFn: async ({ pageParam }) => {
+      if (isSearching) {
+        return apiFetch(
+          `/commandes-sous-traitant?status=${statusFilter}&q=${encodeURIComponent(debouncedSearch)}`,
+        )
+      }
+      const cursor = typeof pageParam === 'number' && pageParam > 0
+        ? `&before_id=${pageParam}` : ''
+      return apiFetch(
+        `/commandes-sous-traitant?status=${statusFilter}&limit=${COMMANDES_PAGE_SIZE}${cursor}`,
+      )
+    },
+    initialPageParam: 0,
+    // While searching, the backend always returns the complete set in one
+    // page — never request more. Otherwise a short page (<100) signals
+    // end-of-list and a full page advances the cursor to the last id.
+    getNextPageParam: (lastPage) => {
+      if (isSearching) return undefined
+      if (!lastPage || lastPage.length < COMMANDES_PAGE_SIZE) return undefined
+      const last = lastPage[lastPage.length - 1]
+      return last?.IDcommande_sous_traitant ?? undefined
+    },
   })
+  const commandes = useMemo<CommandeListRow[] | undefined>(
+    () => commandesPages?.pages.flatMap((p) => p),
+    [commandesPages],
+  )
 
   const { data: detail, isLoading: detailLoading } = useQuery<CommandeDetail>({
     queryKey: ['commande-sst', selectedId],
@@ -400,8 +511,12 @@ export function SousTraitantsCommandes() {
   const deleteMut = useMutation({
     mutationFn: (id: number) => apiFetch(`/commandes-sous-traitant/${id}`, { method: 'DELETE' }),
     onSuccess: (_data, deletedId) => {
-      const cached = queryClient.getQueryData<CommandeListRow[]>(['commandes-sst', statusFilter]) ?? []
-      const remaining = cached.filter((c) => c.IDcommande_sous_traitant !== deletedId)
+      // The list cache is now an `InfiniteData<CommandeListRow[]>`. Flatten
+      // its pages to find the next-best row to auto-select once the current
+      // one is gone.
+      const cached = queryClient.getQueryData<InfiniteData<CommandeListRow[]>>(['commandes-sst', statusFilter])
+      const flat = cached?.pages.flatMap((p) => p) ?? []
+      const remaining = flat.filter((c) => c.IDcommande_sous_traitant !== deletedId)
       queryClient.invalidateQueries({ queryKey: ['commandes-sst'] })
       setIsEditing(false)
       setDeleteCommandeConfirmOpen(false)
@@ -475,6 +590,9 @@ export function SousTraitantsCommandes() {
             onStatusFilterChange={handleStatusFilterChange}
             onNew={() => setCreateOpen(true)}
             isEditing={isEditing}
+            hasNextPage={!!hasNextPage}
+            onLoadMore={() => { if (hasNextPage && !isFetchingNextPage) fetchNextPage() }}
+            isFetchingNextPage={isFetchingNextPage}
           />
         }
         detailHeader={
@@ -608,6 +726,7 @@ function CommandeList({
   searchQuery, onSearchChange,
   statusFilter, onStatusFilterChange,
   onNew, isEditing,
+  hasNextPage, onLoadMore, isFetchingNextPage,
 }: {
   rows: CommandeListRow[]
   isLoading: boolean
@@ -621,7 +740,33 @@ function CommandeList({
   onStatusFilterChange: (s: 'all' | 'en_cours' | 'terminee') => void
   onNew: () => void
   isEditing: boolean
+  /** True while the backend has more rows behind the current cursor. */
+  hasNextPage: boolean
+  /** Trigger the next page fetch. Caller debounces. */
+  onLoadMore: () => void
+  /** True while the next page is currently in-flight. */
+  isFetchingNextPage: boolean
 }) {
+  // IntersectionObserver-driven infinite scroll. The sentinel sits at the
+  // bottom of the list's scroll container; the moment it enters the
+  // viewport we call `onLoadMore`. The observer's `root` is the scroll
+  // container itself (not the page viewport) — otherwise the sentinel
+  // never intersects because the surrounding scroll-area clips it.
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const sentinelRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const root = scrollRef.current
+    const sentinel = sentinelRef.current
+    if (!root || !sentinel || !hasNextPage) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) onLoadMore()
+      },
+      { root, rootMargin: '200px 0px 200px 0px' },
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [hasNextPage, onLoadMore, rows.length])
   return (
     <div className="flex flex-col h-full rounded-lg border shadow-sm bg-zinc-100/80">
       <div className="p-3 border-b rounded-t-lg bg-zinc-200/50 space-y-2">
@@ -658,7 +803,7 @@ function CommandeList({
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto p-3 space-y-2 scrollbar-transparent">
+      <div ref={scrollRef} className="flex-1 overflow-auto p-3 space-y-2 scrollbar-transparent">
         {isLoading ? (
           <div className="flex items-center justify-center py-8"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>
         ) : isError ? (
@@ -715,10 +860,27 @@ function CommandeList({
             </div>
           )
         })}
+        {/* Bottom sentinel — invisible div that triggers `onLoadMore` when
+            scrolled into view. Rendered only when there are still pages to
+            fetch. The spinner below it appears while the new page is on
+            the wire so the user knows progress is happening. */}
+        {hasNextPage && !isLoading && !isError && rows.length > 0 && (
+          <>
+            <div ref={sentinelRef} aria-hidden="true" className="h-1" />
+            {isFetchingNextPage && (
+              <div className="flex items-center justify-center py-3 text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       <div className="p-3 border-t text-xs text-muted-foreground flex items-center justify-between rounded-b-lg bg-zinc-200/50">
-        <span>{rows.length} commande{rows.length !== 1 ? 's' : ''}</span>
+        <span>
+          {rows.length} commande{rows.length !== 1 ? 's' : ''}
+          {hasNextPage && <span className="text-muted-foreground/70"> (faire défiler pour charger plus)</span>}
+        </span>
         {!isEditing && (
           <Button size="sm" variant="ghost" onClick={onNew} className="text-accent hover:text-accent hover:bg-accent/10">
             <Plus className="h-3.5 w-3.5 mr-1" />Nouvelle
@@ -1019,7 +1181,7 @@ function LignesSection({
         >
           {commande.lignes.length === 0 && !showLineForm ? (
             <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-              <FabricRollIcon className="h-12 w-12 mb-3 opacity-40" />
+              <FiniRollIcon className="h-12 w-12 mb-3 opacity-40" />
               <p className="text-sm">Aucune ligne</p>
               {isEditing && !linesLocked && isEnnoblisseur && (
                 <Button variant="outline" size="sm" className="mt-3" onClick={startAddLine}>
@@ -1043,7 +1205,13 @@ function LignesSection({
                     onCancel={() => { setEditingLineId(null); resetLineForm() }}
                     isSaving={updateLineMut.isPending}
                   >
-                    <LineFormFields form={lineForm} setForm={setLineForm} refsFini={refLookup ?? []} editable={isEnnoblisseur} />
+                    <LineFormFields
+                      form={lineForm}
+                      setForm={setLineForm}
+                      refsFini={refLookup ?? []}
+                      editable={isEnnoblisseur}
+                      autoPricing={commande.auto_pricing_enabled}
+                    />
                   </InlineForm>
                 )
               }
@@ -1074,7 +1242,13 @@ function LignesSection({
               onCancel={resetLineForm}
               isSaving={createLineMut.isPending}
             >
-              <LineFormFields form={lineForm} setForm={setLineForm} refsFini={refLookup ?? []} editable={true} />
+              <LineFormFields
+                form={lineForm}
+                setForm={setLineForm}
+                refsFini={refLookup ?? []}
+                editable={true}
+                autoPricing={commande.auto_pricing_enabled}
+              />
             </InlineForm>
           )}
 
@@ -1095,6 +1269,7 @@ function LignesSection({
             <PiecesDrawer
               commandeId={commande.IDcommande_sous_traitant}
               ligne={drawerLigne}
+              commandeSoldee={commande.est_soldee === 1}
               onClose={() => onOpenPiecesDrawer(null)}
               onSuccess={onMutationSuccess}
             />
@@ -1159,13 +1334,35 @@ function LineCard({
   const { border, iconBg, iconColor } = lineEtatColors(line.sstatut)
   const prix = Number(line.prix) || 0
   const qty = Number(line.quantite) || 0
-  const nbEcru = line.nb_ecru_lies ?? 0
   const totalKgEcru = Number(line.total_kg_ecru_lie) || 0
-  const nbFini = line.nb_fini_recu ?? 0
   const totalMetrageFini = Number(line.total_metrage_fini_recu) || 0
   // Actual € total: sum of attached écru weight × prix/kg. Falls back to 0
   // (and we hide the line) until the user attaches at least one roll.
   const totalEur = totalKgEcru * prix
+  // Ml potentiel = kg écru affecté × rendement (Ml/kg from ref_fini).
+  // A pre-réception estimate of how much fini the order should yield, used
+  // to flag under/over-orders before the worker even starts dyeing.
+  const rendement = Number(line.ref_rendement) || 0
+  const mlPotentiel = totalKgEcru > 0 && rendement > 0 ? totalKgEcru * rendement : 0
+  // Tolerance bands vs the ordered Ml. Green is "ideal yield" (between qty
+  // and +5%), amber is "within tolerance" (qty-5% to qty+10% but outside the
+  // green sweet spot), red is everything else. null = undecidable (no qty
+  // or no rendement).
+  //
+  // Comparison is done on values rounded to 1 decimal (the display
+  // precision) so the colour always matches what the user reads on the
+  // card. Without this, e.g. potentiel=38.38 vs qty=38.40 — both shown as
+  // "38,4 Ml" — falls into the amber band by 0.02 Ml of float noise, even
+  // though the user reads two identical numbers and expects green.
+  const potentielStatus: 'green' | 'amber' | 'red' | null = (() => {
+    if (qty <= 0 || mlPotentiel <= 0) return null
+    const pR = Math.round(mlPotentiel * 10) / 10
+    const qR = Math.round(qty * 10) / 10
+    if (qR <= 0) return null
+    if (pR >= qR && pR <= qR * 1.05) return 'green'
+    if (pR > qR * 0.95 && pR < qR * 1.10) return 'amber'
+    return 'red'
+  })()
   const clickable = !isEditing && isEnnoblisseur
 
   // "Délai initial" indicator: HFSQL stores YYYYMMDD; show only when rescheduled.
@@ -1185,8 +1382,8 @@ function LineCard({
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
-          <div className={cn('h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0', iconBg)}>
-            <FabricRollIcon className={cn('h-3.5 w-3.5', iconColor)} />
+          <div className={cn('h-9 w-9 rounded-md flex items-center justify-center flex-shrink-0', iconBg)}>
+            <FiniRollIcon className={cn('h-6 w-6', iconColor)} />
           </div>
           <div className="min-w-0">
             <p className="text-sm font-medium truncate">
@@ -1196,18 +1393,6 @@ function LineCard({
           </div>
         </div>
         <div className="flex items-center gap-1.5 flex-shrink-0">
-          {!isEditing && nbEcru > 0 && (
-            <Badge variant="secondary" className="text-[10px] py-0 px-1.5 gap-0.5" title={`${nbEcru} rouleau${nbEcru > 1 ? 'x' : ''} affecté${nbEcru > 1 ? 's' : ''}`}>
-              <Package className="h-2.5 w-2.5" />
-              {fmtNum(totalKgEcru, 1)} kg
-            </Badge>
-          )}
-          {!isEditing && nbFini > 0 && (
-            <Badge className="bg-green-500/10 text-green-700 text-[10px] py-0 px-1.5 gap-0.5" title={`${nbFini} rouleau${nbFini > 1 ? 'x' : ''} reçu${nbFini > 1 ? 's' : ''}`}>
-              <Package className="h-2.5 w-2.5" />
-              {fmtNum(totalMetrageFini, 0)} Ml reçus
-            </Badge>
-          )}
           <LineSstatutBadge sstatut={line.sstatut} />
           {isEditing && !linesLocked && (
             <div className="flex gap-0.5">
@@ -1230,56 +1415,290 @@ function LineCard({
           )}
         </div>
       </div>
-      {/* "Prévu" row — the user's projection: nominal qty × prix. */}
-      <div className="flex items-center gap-3 mt-2 ml-9 text-[11px] text-muted-foreground tabular-nums">
-        {(qty > 0 || prix > 0) && (
-          <span className="text-muted-foreground">
-            <span className="text-[10px] uppercase tracking-wide opacity-70 mr-1">Prévu</span>
-            {qty > 0 ? `${fmtNum(qty, 1)} Ml` : '—'}
-            {prix > 0 && <span> × {fmtNum(prix, 2)} €/Kg</span>}
-          </span>
+      {/* Production metrics: Quantité commandée + Prix unitaire are two
+          independent inputs (the employee enters them separately at
+          line-creation), so they get their own rows. Then Affecté (kg +
+          potentiel Ml + €) and Reçu (actual Ml) appear as work progresses.
+          Each row is conditional on its values existing. */}
+      {/* Production metrics grid. Each row is intentionally one line tall
+          (label + value + right-aligned context) so vertical rhythm is
+          uniform — past versions stacked Livraison + Délai initial in the
+          right column of the Quantité row, which inflated that row to
+          ~32px while the others stayed ~20px and made the gap to "Prix
+          unit." feel off. The Délai initial reminder now sits inline next
+          to Livraison as a small italic parenthetical.
+
+          The line's € total (kg × prix) lives in its own footer row at
+          the bottom with a thin top divider — it's a SUMMARY of all the
+          metrics above, not a piece of the Affecté row. */}
+      <div className="mt-1.5 ml-12 space-y-1.5 text-sm tabular-nums">
+        {/* Quantité commandée — nominal Ml. The right side carries the
+            Livraison date; if a rescheduled date exists, the original
+            "(initial: ...)" date appears inline so this row stays a
+            single line. */}
+        {(qty > 0 || dateLivRaw) && (
+          <div className="flex items-center gap-3">
+            <span className="text-xs uppercase tracking-wide text-muted-foreground/80 w-24 flex-shrink-0">Quantité</span>
+            <span className="text-foreground">
+              {qty > 0 ? `${fmtNum(qty, 1)} Ml` : '—'}
+            </span>
+            {dateLivRaw && (() => {
+              const lineUrgency = deliveryUrgency(dateLivRaw, isLineDone(line.sstatut) ? 1 : 0)
+              return (
+                <span
+                  className={cn(
+                    'ml-auto flex items-baseline gap-2',
+                    lineUrgency === 'late' ? 'text-red-600'
+                      : lineUrgency === 'soon' ? 'text-amber-600'
+                      : 'text-foreground'
+                  )}
+                >
+                  <span className="font-medium">Livraison {formatHfsqlDate(dateLivRaw)}</span>
+                  {showDelaiInitial && (
+                    <span className="text-xs italic text-muted-foreground">
+                      (initial: {formatHfsqlDate(dateDelaiRaw)})
+                    </span>
+                  )}
+                </span>
+              )
+            })()}
+          </div>
         )}
-        {dateLivRaw && (() => {
-          const lineUrgency = deliveryUrgency(dateLivRaw, isLineDone(line.sstatut) ? 1 : 0)
-          return (
-            <span
-              className={cn(
-                'ml-auto',
-                lineUrgency === 'late' && 'font-bold text-red-600',
-                lineUrgency === 'soon' && 'font-bold text-amber-600'
-              )}
-            >
-              Livraison {formatHfsqlDate(dateLivRaw)}
-            </span>
-          )
-        })()}
+        {/* Prix unitaire — independent value, €/Kg of finished fabric. */}
+        {prix > 0 && (
+          <div className="flex items-center gap-3">
+            <span className="text-xs uppercase tracking-wide text-muted-foreground/80 w-24 flex-shrink-0">Prix unit.</span>
+            <span className="text-foreground">{fmtNum(prix, 2)} €/Kg</span>
+            <PrixBreakdownInfo
+              commandeId={line.IDcommande_sous_traitant}
+              ligneId={line.IDligne_commande_sous_traitant}
+            />
+          </div>
+        )}
+        {/* Affecté — once écru is linked. Total kg + derived potentiel
+            Ml (green/amber/red vs ordered Ml). The € total is no longer
+            on this row — it has its own footer line below. */}
+        {totalKgEcru > 0 && (
+          <div className="flex items-center gap-3">
+            <span className="text-xs uppercase tracking-wide text-muted-foreground/80 w-24 flex-shrink-0">Affecté</span>
+            <span className="text-foreground">{fmtNum(totalKgEcru, 1)} kg</span>
+            {mlPotentiel > 0 && (
+              <span
+                className={cn(
+                  'font-medium',
+                  potentielStatus === 'green' && 'text-green-700',
+                  potentielStatus === 'amber' && 'text-amber-600',
+                  potentielStatus === 'red' && 'text-red-600',
+                  potentielStatus === null && 'text-muted-foreground',
+                )}
+                title={qty > 0 ? `Commandé : ${fmtNum(qty, 1)} Ml` : undefined}
+              >
+                ~ {fmtNum(mlPotentiel, 1)} Ml
+              </span>
+            )}
+          </div>
+        )}
+        {/* Reçu — once fini rolls have come back. The optional tolerance
+            badge compares the received metrage to the ordered Ml: green
+            inside ±5 %, red outside. Hidden when qty is 0 (can't compute
+            a percentage against a zero baseline). */}
+        {totalMetrageFini > 0 && (
+          <div className="flex items-center gap-3">
+            <span className="text-xs uppercase tracking-wide text-muted-foreground/80 w-24 flex-shrink-0">Reçu</span>
+            <span className="font-medium text-green-700">{fmtNum(totalMetrageFini, 1)} Ml</span>
+            {qty > 0 && (() => {
+              const diffPct = (totalMetrageFini - qty) / qty * 100
+              const withinTolerance = Math.abs(diffPct) <= 5
+              const sign = diffPct >= 0 ? '+' : '−'
+              return (
+                <span
+                  className={cn(
+                    'text-xs font-medium',
+                    withinTolerance ? 'text-green-700' : 'text-red-600',
+                  )}
+                  title={`Commandé : ${fmtNum(qty, 1)} Ml`}
+                >
+                  ({sign}{fmtNum(Math.abs(diffPct), 1)} %)
+                </span>
+              )
+            })()}
+          </div>
+        )}
       </div>
-      {/* "Réel" row — only when something has actually been attached or
-          received. Shows the bill computed from real attached weight. */}
-      {(totalKgEcru > 0 || totalMetrageFini > 0) && (
-        <div className="flex items-center gap-3 mt-1 ml-9 text-[11px] tabular-nums">
-          <span className="text-[10px] uppercase tracking-wide text-muted-foreground opacity-70">Réel</span>
-          {totalKgEcru > 0 && (
-            <span className="text-muted-foreground">
-              {fmtNum(totalKgEcru, 1)} kg affectés
-              {prix > 0 && (
-                <span className="text-foreground font-medium"> → {fmtNum(totalEur, 2)} €</span>
-              )}
-            </span>
+    </div>
+  )
+}
+
+// ── Prix unit. tooltip — breakdown of the auto-calc ────
+
+interface PrixBreakdownData {
+  enabled: true
+  sst_nom: string
+  teinture_nom: string | null
+  traitement_names: Record<string, string>
+  breakdown: {
+    IDsous_traitant: number
+    xPoids: number
+    rendement: number
+    avec_teinture: number
+    IDteinture: number
+    matel_multiplier: number
+    base:
+      | { kind: 'combination'; IDtranche: number; covered: number[]; raw_prix: number; applied_prix: number }
+      | { kind: 'dye-only'; IDtranche: number; IDteinture: number; raw_prix: number; applied_prix: number }
+      | null
+    treatments: Array<{
+      IDtraitement: number
+      IDtranche: number
+      raw_prix: number
+      applied_prix: number
+      matel_applied: boolean
+    }>
+    unpriced_treatments: number[]
+    total: number
+  }
+}
+type PrixBreakdownResponse = PrixBreakdownData | { enabled: false; reason: string }
+
+function PrixBreakdownInfo({ commandeId, ligneId }: { commandeId: number; ligneId: number }) {
+  const [hovering, setHovering] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+
+  // Position the portal popover above the icon — fixed coordinates from
+  // the trigger's bounding rect. We compute on hover-in (not on every
+  // render) so it stays anchored even if a parent container scrolls.
+  useEffect(() => {
+    if (!hovering) { setPos(null); return }
+    const el = triggerRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    // Open above the icon, horizontally aligned to its left edge so the
+    // 280px popover doesn't overflow the right side of narrow cards.
+    setPos({ top: r.top - 8, left: r.left })
+  }, [hovering])
+
+  const { data, isLoading } = useQuery<PrixBreakdownResponse>({
+    queryKey: ['commande-sst-prix-breakdown', commandeId, ligneId],
+    queryFn: () => apiFetch(`/commandes-sous-traitant/${commandeId}/lignes/${ligneId}/prix-breakdown`),
+    enabled: hovering,
+    staleTime: 30_000,
+  })
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        onMouseEnter={() => setHovering(true)}
+        onMouseLeave={() => setHovering(false)}
+        onFocus={() => setHovering(true)}
+        onBlur={() => setHovering(false)}
+        onClick={(e) => e.stopPropagation()}
+        className="text-muted-foreground/60 hover:text-accent transition-colors cursor-help"
+        aria-label="Voir le détail du calcul"
+      >
+        <Info className="h-3 w-3" />
+      </button>
+      {hovering && pos && createPortal(
+        <div
+          style={{ position: 'fixed', top: pos.top, left: pos.left, transform: 'translateY(-100%)' }}
+          className="z-50 w-[300px] rounded-md border bg-popover shadow-lg p-3 text-[11px] text-popover-foreground animate-in fade-in-0 zoom-in-95 pointer-events-none"
+          role="tooltip"
+        >
+          <PrixBreakdownContent data={data} isLoading={isLoading} />
+        </div>,
+        document.body,
+      )}
+    </>
+  )
+}
+
+function PrixBreakdownContent({ data, isLoading }: { data: PrixBreakdownResponse | undefined; isLoading: boolean }) {
+  if (isLoading || !data) {
+    return <p className="text-muted-foreground">Chargement…</p>
+  }
+  if (!data.enabled) {
+    const reasons: Record<string, string> = {
+      'not-ennoblisseur': 'Ligne non-ennoblisseur (saisie manuelle).',
+      'no-tariff-data': 'Aucun tarif catalogue pour ce sous-traitant — prix saisi manuellement.',
+      'no-weight': 'Aucun rouleau écru affecté.',
+    }
+    return <p className="text-muted-foreground italic">{reasons[data.reason] ?? 'Calcul indisponible.'}</p>
+  }
+  const { sst_nom, teinture_nom, traitement_names, breakdown: bd } = data
+  const showMatelLine = bd.matel_multiplier !== 1
+  return (
+    <div className="space-y-2 tabular-nums">
+      {/* Header: sst + weight + (matel multiplier when applicable) */}
+      <div className="flex items-center justify-between gap-2 pb-1.5 border-b border-border/60">
+        <span className="font-semibold text-foreground">{sst_nom}</span>
+        <span className="text-muted-foreground">{fmtNum(bd.xPoids, 1)} kg</span>
+      </div>
+      {showMatelLine && (
+        <div className="flex items-center justify-between text-muted-foreground">
+          <span>Multiplicateur Matel</span>
+          <span>rendement {fmtNum(bd.rendement, 2)} → ×{fmtNum(bd.matel_multiplier, 2)}</span>
+        </div>
+      )}
+      {/* Base price */}
+      {!!bd.base && (
+        <div>
+          <p className="text-[10px] uppercase tracking-wide text-muted-foreground/80">Base</p>
+          {bd.base.kind === 'dye-only' && (
+            <div className="flex items-center justify-between mt-0.5">
+              <span className="text-foreground">{teinture_nom ?? `Teinture #${bd.base.IDteinture}`}</span>
+              <span className="text-foreground font-medium">
+                {bd.base.raw_prix === bd.base.applied_prix
+                  ? `${fmtNum(bd.base.raw_prix, 2)} €`
+                  : `${fmtNum(bd.base.raw_prix, 2)} × ${fmtNum(bd.matel_multiplier, 2)} = ${fmtNum(bd.base.applied_prix, 2)} €`}
+              </span>
+            </div>
           )}
-          {totalMetrageFini > 0 && (
-            <span className="text-green-700">
-              · {fmtNum(totalMetrageFini, 1)} Ml reçus
-            </span>
+          {bd.base.kind === 'combination' && (
+            <div className="flex items-start justify-between mt-0.5 gap-2">
+              <span className="text-foreground">
+                Combinaison ({bd.base.covered.map((id) => traitement_names[id] || `#${id}`).join(', ')})
+              </span>
+              <span className="text-foreground font-medium flex-shrink-0">{fmtNum(bd.base.applied_prix, 2)} €</span>
+            </div>
           )}
         </div>
       )}
-      {showDelaiInitial && (
-        <div className="flex items-center gap-1.5 mt-1 ml-9 text-[11px] text-muted-foreground italic">
-          <Clock className="h-3 w-3 opacity-50 flex-shrink-0" />
-          <span>Délai initial: {formatHfsqlDate(dateDelaiRaw)}</span>
+      {/* Remaining treatments */}
+      {bd.treatments.length > 0 && (
+        <div>
+          <p className="text-[10px] uppercase tracking-wide text-muted-foreground/80">Traitements</p>
+          <div className="space-y-0.5 mt-0.5">
+            {bd.treatments.map((t) => (
+              <div key={t.IDtraitement} className="flex items-center justify-between">
+                <span className="text-foreground">
+                  {traitement_names[t.IDtraitement] || `#${t.IDtraitement}`}
+                  {t.matel_applied && (
+                    <span className="ml-1 text-[9px] uppercase tracking-wide text-accent">×Matel</span>
+                  )}
+                </span>
+                <span className="text-foreground font-medium">
+                  {t.matel_applied
+                    ? `${fmtNum(t.raw_prix, 2)} × ${fmtNum(bd.matel_multiplier, 2)} = ${fmtNum(t.applied_prix, 2)} €`
+                    : `${fmtNum(t.applied_prix, 2)} €`}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
+      {/* Unpriced — shouldn't usually happen but worth surfacing for catalog gaps */}
+      {bd.unpriced_treatments.length > 0 && (
+        <p className="text-[10px] text-amber-700 italic">
+          Tarif manquant pour : {bd.unpriced_treatments.map((id) => traitement_names[id] || `#${id}`).join(', ')}
+        </p>
+      )}
+      {/* Total */}
+      <div className="flex items-center justify-between pt-1.5 border-t border-border/60">
+        <span className="font-semibold text-foreground">Total</span>
+        <span className="font-semibold text-foreground">{fmtNum(bd.total, 2)} €/Kg</span>
+      </div>
     </div>
   )
 }
@@ -1287,10 +1706,16 @@ function LineCard({
 // ── Pieces drawer (ennoblisseur-only) ──────────────────
 
 function PiecesDrawer({
-  commandeId, ligne, onClose, onSuccess,
+  commandeId, ligne, commandeSoldee, onClose, onSuccess,
 }: {
   commandeId: number
   ligne: LigneCommande
+  /** True when the parent commande is `est_soldee = 1` (terminée). In
+   *  that state the drawer is read-only: we hide the "+ Affecter" and
+   *  "+ Réceptionner" trigger buttons so the user can't mutate a closed
+   *  commande's pieces. (The detail-header status footer is the only
+   *  legitimate path back to en-cours.) */
+  commandeSoldee: boolean
   onClose: () => void
   onSuccess: () => void
 }) {
@@ -1302,6 +1727,25 @@ function PiecesDrawer({
     queryFn: () => apiFetch(`/commandes-sous-traitant/${commandeId}/lignes/${ligne.IDligne_commande_sous_traitant}/pieces`),
   })
 
+  // Patch the commande detail cache so the LineCard re-renders with the
+  // freshly-recalculated prix without waiting for a refetch. The parent's
+  // `onSuccess()` callback still fires after, which invalidates the detail
+  // query — so if the patch ever drifts from server truth, the next
+  // refetch corrects it.
+  const patchLinePrix = (newPrix: number) => {
+    queryClient.setQueryData<CommandeDetail | undefined>(['commande-sst', commandeId], (old) => {
+      if (!old) return old
+      return {
+        ...old,
+        lignes: old.lignes.map((l) =>
+          l.IDligne_commande_sous_traitant === ligne.IDligne_commande_sous_traitant
+            ? { ...l, prix: newPrix }
+            : l,
+        ),
+      }
+    })
+  }
+
   const linkEcruMut = useMutation({
     mutationFn: (stockEcruId: number) => apiFetch(
       `/commandes-sous-traitant/${commandeId}/lignes/${ligne.IDligne_commande_sous_traitant}/pieces/ecru/${stockEcruId}`,
@@ -1309,6 +1753,7 @@ function PiecesDrawer({
     ),
     onSuccess: (payload: PiecesPayload) => {
       queryClient.setQueryData(queryKey, payload)
+      patchLinePrix(payload.prix)
       onSuccess()
     },
   })
@@ -1320,6 +1765,7 @@ function PiecesDrawer({
     ),
     onSuccess: (payload: PiecesPayload) => {
       queryClient.setQueryData(queryKey, payload)
+      patchLinePrix(payload.prix)
       onSuccess()
     },
   })
@@ -1337,34 +1783,20 @@ function PiecesDrawer({
 
   const [deleteFiniConfirm, setDeleteFiniConfirm] = useState<StockFiniLite | null>(null)
   const [showReceptionForm, setShowReceptionForm] = useState(false)
-  const [activeTab, setActiveTab] = useState<'affectes' | 'reception'>('affectes')
+  const [showLinkEcruDialog, setShowLinkEcruDialog] = useState(false)
+  const [activeTab, setActiveTab] = useState<'affectes' | 'reception'>('reception')
 
   const ecruLinked = data?.ecruLinked ?? []
   const ecruAvailable = data?.ecruAvailable ?? []
   const finiReceived = data?.finiReceived ?? []
 
-  // Roll-ups for tab summaries — give the user a glance answer to "how
-  // much have I attached / received" without scrolling rows.
+  // Roll-up still used by the "Affectés" section header below the tab bar.
   const totalKgAffectes = ecruLinked.reduce((s, r) => s + (Number(r.poids) || 0), 0)
   const totalMlReception = finiReceived.reduce((s, r) => s + (Number(r.metrage) || 0), 0)
 
   const tabs = [
-    {
-      key: 'affectes' as const,
-      label: 'Affectés',
-      icon: Package,
-      summary: ecruLinked.length > 0
-        ? `${ecruLinked.length} · ${fmtNum(totalKgAffectes, 1)} kg`
-        : `${ecruAvailable.length} dispo.`,
-    },
-    {
-      key: 'reception' as const,
-      label: 'Réception',
-      icon: FabricRollIcon,
-      summary: finiReceived.length > 0
-        ? `${finiReceived.length} · ${fmtNum(totalMlReception, 1)} Ml`
-        : 'En attente',
-    },
+    { key: 'reception' as const, label: 'Réception', icon: FiniRollIcon },
+    { key: 'affectes' as const, label: 'Affectés', icon: TmRollIcon },
   ]
 
   return (
@@ -1386,9 +1818,8 @@ function PiecesDrawer({
                   : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-white/30',
               )}
             >
-              <Icon className="h-3.5 w-3.5" />
+              <Icon className="h-[18px] w-[18px]" />
               <span>{t.label}</span>
-              <span className="text-[10px] text-muted-foreground tabular-nums">{t.summary}</span>
             </button>
           )
         })}
@@ -1416,50 +1847,58 @@ function PiecesDrawer({
           <>
             {/* Linked écru rolls */}
             <section>
-              <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
-                Tombé métier — affectés ({ecruLinked.length}{ecruLinked.length > 0 ? ` · ${fmtNum(totalKgAffectes, 1)} kg` : ''})
-              </h3>
+              <div className="flex items-center justify-between mb-1.5">
+                <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
+                  Tombé métier — affectés ({ecruLinked.length}{ecruLinked.length > 0 ? ` · ${fmtNum(totalKgAffectes, 1)} kg` : ''})
+                </h3>
+                {!commandeSoldee && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-[11px] text-accent hover:text-accent hover:bg-accent/10"
+                    onClick={() => setShowLinkEcruDialog(true)}
+                  >
+                    <Plus className="h-3 w-3 mr-1" />
+                    Affecter
+                  </Button>
+                )}
+              </div>
               {ecruLinked.length === 0 ? (
                 <p className="text-xs text-muted-foreground italic">Aucun rouleau affecté.</p>
-              ) : (
-                <div className="space-y-1.5">
-                  {ecruLinked.map((roll) => (
-                    <EcruRollRow
-                      key={roll.IDstock_ecru}
-                      roll={roll}
-                      action="unlink"
-                      onAction={() => unlinkEcruMut.mutate(roll.IDstock_ecru)}
-                      isBusy={unlinkEcruMut.isPending && unlinkEcruMut.variables === roll.IDstock_ecru}
-                    />
-                  ))}
-                </div>
-              )}
+              ) : (() => {
+                // An écru can only be retired from the affectation if no fini
+                // roll has been received against it — once stock_fini exists
+                // with IDstock_ecru pointing here, the link is locked in.
+                const ecruIdsWithFini = new Set(
+                  finiReceived.map((f) => f.IDstock_ecru).filter((id) => id > 0)
+                )
+                return (
+                  <div className="space-y-1.5">
+                    {ecruLinked.map((roll) => (
+                      <EcruRollRow
+                        key={roll.IDstock_ecru}
+                        roll={roll}
+                        action="unlink"
+                        onAction={() => unlinkEcruMut.mutate(roll.IDstock_ecru)}
+                        isBusy={unlinkEcruMut.isPending && unlinkEcruMut.variables === roll.IDstock_ecru}
+                        hideAction={ecruIdsWithFini.has(roll.IDstock_ecru)}
+                      />
+                    ))}
+                  </div>
+                )
+              })()}
             </section>
-
-            {/* Available écru rolls */}
-            <section>
-              <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
-                Tombé métier — disponibles ({ecruAvailable.length})
-              </h3>
-              {ecruAvailable.length === 0 ? (
-                <p className="text-xs text-muted-foreground italic">
-                  Aucun rouleau écru disponible pour cette référence + coloris.
-                </p>
-              ) : (
-                <div className="space-y-1.5">
-                  {ecruAvailable.map((roll) => (
-                    <EcruRollRow
-                      key={roll.IDstock_ecru}
-                      roll={roll}
-                      action="link"
-                      onAction={() => linkEcruMut.mutate(roll.IDstock_ecru)}
-                      isBusy={linkEcruMut.isPending && linkEcruMut.variables === roll.IDstock_ecru}
-                    />
-                  ))}
-                </div>
-              )}
-            </section>
-
+            {showLinkEcruDialog && (
+              <LinkEcruDialog
+                available={ecruAvailable}
+                onBulkLink={async (ids) => {
+                  for (const id of ids) {
+                    await linkEcruMut.mutateAsync(id)
+                  }
+                }}
+                onClose={() => setShowLinkEcruDialog(false)}
+              />
+            )}
           </>
         )}
 
@@ -1471,17 +1910,19 @@ function PiecesDrawer({
                 <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
                   Rouleaux finis reçus ({finiReceived.length}{finiReceived.length > 0 ? ` · ${fmtNum(totalMlReception, 1)} Ml` : ''})
                 </h3>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 px-2 text-[11px] text-accent hover:text-accent hover:bg-accent/10"
-                  onClick={() => setShowReceptionForm(true)}
-                >
-                  <Plus className="h-3 w-3 mr-1" />
-                  Nouvelle réception
-                </Button>
+                {!commandeSoldee && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-[11px] text-accent hover:text-accent hover:bg-accent/10"
+                    onClick={() => setShowReceptionForm(true)}
+                  >
+                    <Plus className="h-3 w-3 mr-1" />
+                    Réceptionner
+                  </Button>
+                )}
               </div>
-              {finiReceived.length === 0 && !showReceptionForm ? (
+              {finiReceived.length === 0 ? (
                 <p className="text-xs text-muted-foreground italic">Aucun rouleau reçu pour le moment.</p>
               ) : (
                 <div className="space-y-1.5">
@@ -1492,35 +1933,22 @@ function PiecesDrawer({
                       onDelete={() => setDeleteFiniConfirm(roll)}
                     />
                   ))}
-                  {showReceptionForm && (
-                    <ReceptionForm
-                      commandeId={commandeId}
-                      ligne={ligne}
-                      ecruLinked={ecruLinked}
-                      onCancel={() => setShowReceptionForm(false)}
-                      onCreated={(payload) => {
-                        queryClient.setQueryData(queryKey, payload)
-                        onSuccess()
-                        setShowReceptionForm(false)
-                      }}
-                    />
-                  )}
                 </div>
               )}
-              {finiReceived.length === 0 && showReceptionForm && (
-                <ReceptionForm
-                  commandeId={commandeId}
-                  ligne={ligne}
-                  ecruLinked={ecruLinked}
-                  onCancel={() => setShowReceptionForm(false)}
-                  onCreated={(payload) => {
-                    queryClient.setQueryData(queryKey, payload)
-                    onSuccess()
-                    setShowReceptionForm(false)
-                  }}
-                />
-              )}
             </section>
+            {showReceptionForm && (
+              <ReceptionForm
+                commandeId={commandeId}
+                ligne={ligne}
+                ecruLinked={ecruLinked}
+                onCancel={() => setShowReceptionForm(false)}
+                onCreated={(payload) => {
+                  queryClient.setQueryData(queryKey, payload)
+                  onSuccess()
+                  setShowReceptionForm(false)
+                }}
+              />
+            )}
           </>
         )}
       </div>
@@ -1547,17 +1975,21 @@ function PiecesDrawer({
 }
 
 function EcruRollRow({
-  roll, action, onAction, isBusy,
+  roll, action, onAction, isBusy, hideAction,
 }: {
   roll: StockEcruLite
   action: 'link' | 'unlink'
   onAction: () => void
   isBusy: boolean
+  /** When true, the action button is omitted entirely. Used for linked
+   *  écru rolls that already have a received fini — at that point the
+   *  affectation is locked. */
+  hideAction?: boolean
 }) {
   return (
-    <div className="rounded-lg border border-border/60 bg-white p-3 flex items-center gap-3">
-      <div className="h-8 w-8 rounded-md bg-zinc-100 flex items-center justify-center flex-shrink-0">
-        <FabricRollIcon className="h-4 w-4 text-muted-foreground" />
+    <div className="group rounded-lg border border-border/60 bg-white p-3 flex items-center gap-3">
+      <div className="h-10 w-10 rounded-md bg-zinc-100 flex items-center justify-center flex-shrink-0">
+        <TmRollIcon className="h-7 w-7 text-muted-foreground" />
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 flex-wrap">
@@ -1579,23 +2011,150 @@ function EcruRollRow({
             <span>entré {formatHfsqlDate(roll.date_saisie)}</span>
           )}
         </div>
+        <RollNotes
+          secondChoix={Number(roll.second_choix) > 0}
+          observations={[
+            { label: null, text: roll.observations?.trim() ?? '' },
+          ]}
+          defects={roll.defects}
+        />
       </div>
-      <Button
-        size="sm"
-        variant={action === 'link' ? 'default' : 'outline'}
-        onClick={onAction}
-        disabled={isBusy}
-        className="flex-shrink-0"
-      >
-        {isBusy ? (
-          <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-        ) : action === 'link' ? (
-          <Link2 className="h-3.5 w-3.5 mr-1.5" />
+      {/* Client-reservation badge — pinned to the right end of the card,
+          just before the action button, so it reads as a "tag" on the
+          roll itself rather than a sub-detail of the title. */}
+      {!!roll.client_nom && (
+        <Badge
+          variant="secondary"
+          className="text-xs py-1 px-2 gap-1 flex-shrink-0"
+          title="Rouleau réservé à ce client"
+        >
+          <Building2 className="h-3 w-3" />
+          {roll.client_nom}
+        </Badge>
+      )}
+      {!hideAction && (
+        action === 'unlink' ? (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 text-destructive hover:text-destructive flex-shrink-0"
+            onClick={onAction}
+            disabled={isBusy}
+            title="Retirer ce rouleau de l'affectation"
+          >
+            {isBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Unlink className="h-3.5 w-3.5" />}
+          </Button>
         ) : (
-          <Unlink className="h-3.5 w-3.5 mr-1.5" />
-        )}
-        {action === 'link' ? 'Affecter' : 'Retirer'}
-      </Button>
+          <Button
+            size="sm"
+            variant="default"
+            onClick={onAction}
+            disabled={isBusy}
+            className="flex-shrink-0"
+          >
+            {isBusy ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Link2 className="h-3.5 w-3.5 mr-1.5" />}
+            Affecter
+          </Button>
+        )
+      )}
+    </div>
+  )
+}
+
+/** Shared notes block under a roll card. Two visual treatments:
+ *
+ *  1. `secondChoix = true` OR `defects` non-empty → loud red banner with
+ *     an AlertTriangle icon, a "DÉFAUT" header, the structured defects
+ *     (description + type + size when present) and the free-text
+ *     observations all rendered inside the banner in red. The user
+ *     must not miss this — a quality issue is the most important thing
+ *     on the card.
+ *
+ *  2. No defects AND `secondChoix = false`, but at least one non-empty
+ *     observation → muted italic lines with a MessageSquare icon so the
+ *     note has visual weight without screaming.
+ *
+ *  Each `observation` can carry a `label` ("Visiteur", "Ennoblisseur" on
+ *  fini rolls) that prefixes the text; pass `null` when there's only a
+ *  single source (écru). Empty observations are filtered out.
+ */
+function RollNotes({
+  secondChoix,
+  observations,
+  defects = [],
+}: {
+  secondChoix: boolean
+  observations: Array<{ label: string | null; text: string }>
+  defects?: DefautQualite[]
+}) {
+  const visibleObs = observations.filter((o) => o.text.length > 0)
+  const hasDefects = defects.length > 0
+  const isAlert = secondChoix || hasDefects
+  if (!isAlert && visibleObs.length === 0) return null
+
+  if (isAlert) {
+    return (
+      <div className="mt-2 flex items-start gap-1.5 rounded-md border border-red-300 bg-red-50 px-2 py-1.5">
+        <AlertTriangle className="h-3.5 w-3.5 text-red-600 mt-0.5 flex-shrink-0" />
+        <div className="min-w-0 flex-1 space-y-1">
+          <p className="text-[10px] font-bold uppercase tracking-wide text-red-700 leading-tight">
+            Défaut{secondChoix ? ' · 2e choix' : ''}
+          </p>
+          {/* Structured defects from defaut_qualite — each gets its own
+              bullet so multiple defects on the same roll are clearly
+              separated. Description is the primary text; if missing we
+              fall back to type_defaut + size to still surface something. */}
+          {hasDefects && (
+            <ul className="space-y-0.5">
+              {defects.map((d) => {
+                const desc = (d.description ?? '').trim()
+                const type = (d.type_defaut ?? '').trim()
+                const size = Number(d.taille_cm) || 0
+                const primary = desc || [type, size > 0 ? `${size} cm` : ''].filter(Boolean).join(' ')
+                if (!primary) return null
+                return (
+                  <li key={d.IDdefaut_qualite} className="text-xs text-red-700 leading-snug flex items-start gap-1">
+                    <span className="text-red-500 mt-0.5">•</span>
+                    <span>{primary}</span>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+          {/* Free-text observations also rendered inside the banner. */}
+          {visibleObs.map((o, i) => (
+            <p key={`obs-${i}`} className="text-xs text-red-700 leading-snug italic">
+              {o.label && (
+                <span className="font-semibold not-italic text-red-800">{o.label} : </span>
+              )}
+              {o.text}
+            </p>
+          ))}
+          {/* Edge: defect flag is on but neither defects nor obs exist. */}
+          {!hasDefects && visibleObs.length === 0 && (
+            <p className="text-xs text-red-700/80 italic">Sans description.</p>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="mt-1.5 space-y-0.5">
+      {visibleObs.map((o, i) => (
+        <p
+          key={i}
+          className="text-[11px] text-muted-foreground italic flex items-start gap-1.5 leading-snug"
+        >
+          <MessageSquare className="h-3 w-3 mt-0.5 opacity-60 flex-shrink-0" />
+          <span>
+            {o.label && (
+              <span className="font-medium not-italic text-muted-foreground/80">{o.label} : </span>
+            )}
+            {o.text}
+          </span>
+        </p>
+      ))}
     </div>
   )
 }
@@ -1608,8 +2167,8 @@ function FiniRollRow({
 }) {
   return (
     <div className="group rounded-lg border border-border/60 bg-white p-3 flex items-center gap-3">
-      <div className="h-8 w-8 rounded-md bg-green-500/10 flex items-center justify-center flex-shrink-0">
-        <FabricRollIcon className="h-4 w-4 text-green-600" />
+      <div className="h-10 w-10 rounded-md bg-green-500/10 flex items-center justify-center flex-shrink-0">
+        <FiniRollIcon className="h-7 w-7 text-green-600" />
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 flex-wrap">
@@ -1618,11 +2177,6 @@ function FiniRollRow({
           </span>
           {roll.lot && (
             <span className="text-xs text-muted-foreground truncate">· lot {roll.lot}</span>
-          )}
-          {roll.IDstock_ecru > 0 && (
-            <Badge variant="secondary" className="text-[10px] py-0 px-1.5">
-              issu de écru #{roll.IDstock_ecru}
-            </Badge>
           )}
         </div>
         <div className="flex items-center gap-3 mt-1 text-[11px] text-muted-foreground tabular-nums">
@@ -1636,9 +2190,13 @@ function FiniRollRow({
             <span>reçu {formatHfsqlDate(roll.date_saisie)}</span>
           )}
         </div>
-        {!!roll.observations?.trim() && (
-          <p className="text-[11px] text-muted-foreground italic mt-1">{roll.observations.trim()}</p>
-        )}
+        <RollNotes
+          secondChoix={Number(roll.second_choix) > 0}
+          observations={[
+            { label: 'Visiteur', text: roll.observations?.trim() ?? '' },
+            { label: 'Ennoblisseur', text: roll.observation_sst?.trim() ?? '' },
+          ]}
+        />
       </div>
       <Button
         variant="ghost"
@@ -1707,91 +2265,284 @@ function ReceptionForm({
   const canSave = numero.trim().length > 0 && idRefFini > 0
 
   return (
-    <div className="rounded-lg border border-accent/25 bg-accent/[0.03] p-3 space-y-2">
-      <p className="text-xs font-semibold text-accent uppercase tracking-wide">Nouvelle réception</p>
-      <div className="grid grid-cols-2 gap-2">
-        <LabeledInput label="N°" value={numero} onChange={setNumero} autoFocus />
-        <LabeledInput label="Lot" value={lot} onChange={setLot} />
-        <LabeledInput label="Poids (kg)" type="number" value={poids} onChange={setPoids} />
-        <LabeledInput label="Métrage (m)" type="number" value={metrage} onChange={setMetrage} />
-      </div>
-      <div className="space-y-1">
-        <label className="text-xs font-medium text-muted-foreground">Source écru (optionnel)</label>
-        <PopoverSelect
-          options={ecruLinked.map((r) => {
-            const bits = [r.lot ? `lot ${r.lot}` : '', r.poids != null && Number(r.poids) > 0 ? `${fmtNum(Number(r.poids), 1)} kg` : '']
-              .filter(Boolean)
-              .join(' · ')
-            return {
-              id: r.IDstock_ecru,
-              primary: r.numero || `#${r.IDstock_ecru}`,
-              secondary: bits || undefined,
-            }
-          })}
-          value={idStockEcru}
-          onChange={setIdStockEcru}
-          emptyLabel="— Aucune source —"
-        />
-      </div>
-      <div className="space-y-1">
-        <label className="text-xs font-medium text-muted-foreground">Référence fini</label>
-        <SearchableCombobox<RefFiniLookup>
-          options={refsFini ?? []}
-          value={idRefFini}
-          onChange={setIdRefFini}
-          getId={(r) => r.IDref_fini}
-          getPrimary={(r) => r.ref_fini}
-          getSecondary={(r) => r.designation || null}
-          placeholder="Choisir une référence fini"
-        />
-        <p className="text-[10px] text-muted-foreground">
-          Le coloris est repris automatiquement du rouleau écru source.
-        </p>
-      </div>
-      <div className="space-y-1">
-        <label className="text-xs font-medium text-muted-foreground">Magasin</label>
-        <PopoverSelect
-          options={(magasins ?? []).map((m) => ({ id: m.IDmagasin, primary: m.nom }))}
-          value={idMagasin}
-          onChange={setIdMagasin}
-          emptyLabel="—"
-        />
-      </div>
-      <div className="space-y-1">
-        <label className="text-xs font-medium text-muted-foreground">Observations</label>
-        <textarea
-          value={observations}
-          onChange={(e) => setObservations(e.target.value)}
-          rows={2}
-          className="w-full rounded-md border border-input bg-white px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring resize-y"
-        />
-      </div>
-      {!!error && (
-        <div className="flex items-start gap-1.5 text-xs text-destructive">
-          <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
-          <span className="break-all">{error}</span>
+    <Dialog open onOpenChange={(o) => { if (!o) onCancel() }}>
+      <DialogContent className="max-w-lg" onClose={onCancel}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <FiniRollIcon className="h-6 w-6 text-accent" />
+            Nouvelle réception
+          </DialogTitle>
+        </DialogHeader>
+        <div className="mt-4 space-y-3">
+          <div className="grid grid-cols-2 gap-2">
+            <LabeledInput label="N°" value={numero} onChange={setNumero} autoFocus />
+            <LabeledInput label="Lot" value={lot} onChange={setLot} />
+            <LabeledInput label="Poids (kg)" type="number" value={poids} onChange={setPoids} />
+            <LabeledInput label="Métrage (m)" type="number" value={metrage} onChange={setMetrage} />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Source écru (optionnel)</label>
+            <PopoverSelect
+              options={ecruLinked.map((r) => {
+                const bits = [r.lot ? `lot ${r.lot}` : '', r.poids != null && Number(r.poids) > 0 ? `${fmtNum(Number(r.poids), 1)} kg` : '']
+                  .filter(Boolean)
+                  .join(' · ')
+                return {
+                  id: r.IDstock_ecru,
+                  primary: r.numero || `#${r.IDstock_ecru}`,
+                  secondary: bits || undefined,
+                }
+              })}
+              value={idStockEcru}
+              onChange={setIdStockEcru}
+              emptyLabel="— Aucune source —"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Référence fini</label>
+            <SearchableCombobox<RefFiniLookup>
+              options={refsFini ?? []}
+              value={idRefFini}
+              onChange={setIdRefFini}
+              getId={(r) => r.IDref_fini}
+              getPrimary={(r) => r.ref_fini}
+              getSecondary={(r) => r.designation || null}
+              placeholder="Choisir une référence fini"
+            />
+            <p className="text-[10px] text-muted-foreground">
+              Le coloris est repris automatiquement du rouleau écru source.
+            </p>
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Magasin</label>
+            <PopoverSelect
+              options={(magasins ?? []).map((m) => ({ id: m.IDmagasin, primary: m.nom }))}
+              value={idMagasin}
+              onChange={setIdMagasin}
+              emptyLabel="—"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Observations</label>
+            <textarea
+              value={observations}
+              onChange={(e) => setObservations(e.target.value)}
+              rows={3}
+              className="w-full rounded-md border border-input bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+            />
+          </div>
+          {!!error && (
+            <div className="flex items-start gap-1.5 text-xs text-destructive">
+              <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+              <span className="break-all">{error}</span>
+            </div>
+          )}
         </div>
+        <DialogFooter className="mt-2">
+          <Button variant="outline" onClick={onCancel}>Annuler</Button>
+          <Button onClick={() => createMut.mutate()} disabled={!canSave || createMut.isPending}>
+            {createMut.isPending ? 'Enregistrement...' : 'Enregistrer'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function LinkEcruDialog({
+  available, onBulkLink, onClose,
+}: {
+  available: StockEcruLite[]
+  onBulkLink: (ids: number[]) => Promise<void>
+  onClose: () => void
+}) {
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [isLinking, setIsLinking] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const allSelected = available.length > 0 && selected.size === available.length
+  const selectedTotalKg = available
+    .filter((r) => selected.has(r.IDstock_ecru))
+    .reduce((s, r) => s + (Number(r.poids) || 0), 0)
+
+  const toggleAll = () => {
+    if (allSelected) setSelected(new Set())
+    else setSelected(new Set(available.map((r) => r.IDstock_ecru)))
+  }
+
+  const toggleOne = (id: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const handleSubmit = async () => {
+    if (selected.size === 0 || isLinking) return
+    setError(null)
+    setIsLinking(true)
+    try {
+      await onBulkLink(Array.from(selected))
+      onClose()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Erreur lors de l\'affectation')
+    } finally {
+      setIsLinking(false)
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o && !isLinking) onClose() }}>
+      <DialogContent className="max-w-lg" onClose={isLinking ? undefined : onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Package className="h-5 w-5 text-accent" />
+            Affecter un tombé métier
+          </DialogTitle>
+        </DialogHeader>
+        <div className="mt-4">
+          {available.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+              <Package className="h-12 w-12 mb-3 opacity-40" />
+              <p className="text-sm font-medium">Aucun rouleau disponible</p>
+              <p className="text-xs mt-1">Aucun rouleau écru ne correspond à cette référence et coloris.</p>
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between text-xs">
+                <button
+                  type="button"
+                  onClick={toggleAll}
+                  disabled={isLinking}
+                  className="text-accent hover:underline disabled:opacity-50 disabled:no-underline"
+                >
+                  {allSelected ? 'Tout désélectionner' : 'Tout sélectionner'}
+                </button>
+                <span className="text-muted-foreground tabular-nums">
+                  {selected.size} / {available.length}
+                  {selected.size > 0 && ` · ${fmtNum(selectedTotalKg, 1)} kg`}
+                </span>
+              </div>
+              <div className="space-y-1.5 max-h-[55vh] overflow-y-auto scrollbar-transparent p-0.5">
+                {available.map((roll) => (
+                  <SelectableEcruRow
+                    key={roll.IDstock_ecru}
+                    roll={roll}
+                    selected={selected.has(roll.IDstock_ecru)}
+                    onToggle={() => toggleOne(roll.IDstock_ecru)}
+                    disabled={isLinking}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+          {!!error && (
+            <div className="flex items-start gap-1.5 text-xs text-destructive mt-3">
+              <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+              <span className="break-all">{error}</span>
+            </div>
+          )}
+        </div>
+        <DialogFooter className="mt-4">
+          <Button variant="outline" onClick={onClose} disabled={isLinking}>Annuler</Button>
+          <Button onClick={handleSubmit} disabled={selected.size === 0 || isLinking}>
+            {isLinking ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                Affectation...
+              </>
+            ) : (
+              `Affecter${selected.size > 0 ? ` (${selected.size})` : ''}`
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function SelectableEcruRow({
+  roll, selected, onToggle, disabled,
+}: {
+  roll: StockEcruLite
+  selected: boolean
+  onToggle: () => void
+  disabled?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      disabled={disabled}
+      className={cn(
+        'w-full rounded-lg border bg-white p-3 flex items-center gap-3 text-left transition-colors',
+        selected
+          ? 'border-accent ring-1 ring-accent bg-accent/[0.06]'
+          : 'border-border/60 hover:border-accent/50 hover:bg-accent/[0.03]',
+        disabled && 'opacity-60 cursor-not-allowed',
       )}
-      <div className="flex justify-end gap-2 pt-1">
-        <Button variant="outline" size="sm" onClick={onCancel}>Annuler</Button>
-        <Button size="sm" onClick={() => createMut.mutate()} disabled={!canSave || createMut.isPending}>
-          {createMut.isPending ? 'Enregistrement...' : 'Enregistrer'}
-        </Button>
+    >
+      <div className={cn(
+        'h-5 w-5 rounded border flex items-center justify-center flex-shrink-0 transition-colors',
+        selected
+          ? 'bg-accent border-accent text-accent-foreground'
+          : 'bg-white border-input',
+      )}>
+        {selected && <Check className="h-3.5 w-3.5" />}
       </div>
-    </div>
+      <div className="h-10 w-10 rounded-md bg-zinc-100 flex items-center justify-center flex-shrink-0">
+        <TmRollIcon className="h-7 w-7 text-muted-foreground" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-semibold truncate">
+            {roll.numero || `#${roll.IDstock_ecru}`}
+          </span>
+          {roll.lot && (
+            <span className="text-xs text-muted-foreground truncate">· lot {roll.lot}</span>
+          )}
+        </div>
+        <div className="flex items-center gap-3 mt-1 text-[11px] text-muted-foreground tabular-nums">
+          {Number(roll.poids) > 0 && (
+            <span className="font-medium text-foreground">{fmtNum(Number(roll.poids), 1)} kg</span>
+          )}
+          {Number(roll.metrage) > 0 && (
+            <span>{fmtNum(Number(roll.metrage), 1)} m</span>
+          )}
+          {roll.date_saisie && (
+            <span>entré {formatHfsqlDate(roll.date_saisie)}</span>
+          )}
+        </div>
+        <RollNotes
+          secondChoix={Number(roll.second_choix) > 0}
+          observations={[
+            { label: null, text: roll.observations?.trim() ?? '' },
+          ]}
+          defects={roll.defects}
+        />
+      </div>
+    </button>
   )
 }
 
 // ── Line form fields ──────────────────────────────────
 
 function LineFormFields({
-  form, setForm, refsFini, editable,
+  form, setForm, refsFini, editable, autoPricing,
 }: {
   form: { IDreference: number; IDColoris: number; quantite: string; prix: string; date_livraison: string }
   setForm: (f: typeof form) => void
   refsFini: RefFiniLookup[]
   editable: boolean
+  /** When true (default), the Prix (€/Kg) input is read-only because the
+   *  server is auto-managing it via recalcLignePrix. Pass `false` for
+   *  out-of-catalog sous-traitants (e.g. FRANCE TEINTURE) where the algo
+   *  has no opinion — the user types prix manually in that case. */
+  autoPricing?: boolean
 }) {
+  const prixDisabled = autoPricing !== false
   // Coloris options for the picked ref_fini — `ref_fini_colori` rows whose
   // IDref_fini matches. The PK there (IDref_fini_colori) is what gets stored
   // in `ligne_commande_sous_traitant.IDColoris`.
@@ -1831,7 +2582,18 @@ function LineFormFields({
       </div>
       <div className="grid grid-cols-2 gap-2">
         <LabeledInput label="Quantité (Ml)" type="number" value={form.quantite} onChange={(v) => setForm({ ...form, quantite: v })} />
-        <LabeledInput label="Prix (€/Kg)" type="number" value={form.prix} onChange={(v) => setForm({ ...form, prix: v })} />
+        {/* Prix is server-managed only when the sous-traitant has tariff
+            data (`auto_pricing_enabled` on the commande detail). For
+            out-of-catalog suppliers (FRANCE TEINTURE, etc.) the field
+            stays editable so the user can enter a manual €/Kg. */}
+        <LabeledInput
+          label="Prix (€/Kg)"
+          type="number"
+          value={form.prix}
+          onChange={(v) => setForm({ ...form, prix: v })}
+          disabled={prixDisabled}
+          helper={prixDisabled ? 'Calculé automatiquement à partir des rouleaux affectés.' : undefined}
+        />
       </div>
       <LabeledInput label="Date livraison" type="date" value={form.date_livraison} onChange={(v) => setForm({ ...form, date_livraison: v })} />
     </>
@@ -1840,7 +2602,7 @@ function LineFormFields({
 
 // ── Right Panel: Sidebar with Tabs ─────────────────────
 
-type SidebarTab = 'info' | 'adresses' | 'docs' | 'journal'
+type SidebarTab = 'info' | 'adresses' | 'docs'
 
 function DetailSidebar({
   commande, isLoading, isEditing,
@@ -1887,11 +2649,13 @@ function DetailSidebar({
   )
   if (!commande) return null
 
+  // The Journal lives as a section *inside* the Info tab — no separate
+  // tab. Keeps the sidebar three-tabbed and lets the user see commentaire
+  // and journal entries side by side without flipping back and forth.
   const tabs: { key: SidebarTab; label: string; icon: React.ElementType }[] = [
     { key: 'info', label: 'Info', icon: Info },
     { key: 'adresses', label: 'Adresses', icon: MapPin },
     { key: 'docs', label: 'Docs', icon: FileText },
-    { key: 'journal', label: 'Journal', icon: BookOpen },
   ]
 
   return (
@@ -1925,6 +2689,8 @@ function DetailSidebar({
               onEditDateCommandeChange={onEditDateCommandeChange}
               editCommentaire={editCommentaire}
               onEditCommentaireChange={onEditCommentaireChange}
+              editJournal={editJournal}
+              onEditJournalChange={onEditJournalChange}
             />
           )}
           {activeTab === 'adresses' && (
@@ -1940,14 +2706,6 @@ function DetailSidebar({
           )}
           {activeTab === 'docs' && (
             <DocsTab commande={commande} isEditing={isEditing} />
-          )}
-          {activeTab === 'journal' && (
-            <JournalTab
-              commande={commande}
-              isEditing={isEditing}
-              editJournal={editJournal}
-              onEditJournalChange={onEditJournalChange}
-            />
           )}
         </div>
       </div>
@@ -2008,6 +2766,7 @@ function InfoTab({
   commande, isEditing,
   editDateCommande, onEditDateCommandeChange,
   editCommentaire, onEditCommentaireChange,
+  editJournal, onEditJournalChange,
 }: {
   commande: CommandeDetail
   isEditing: boolean
@@ -2015,6 +2774,8 @@ function InfoTab({
   onEditDateCommandeChange: (v: string) => void
   editCommentaire: string
   onEditCommentaireChange: (v: string) => void
+  editJournal: string
+  onEditJournalChange: (v: string) => void
 }) {
   return (
     <div className="space-y-3">
@@ -2052,6 +2813,28 @@ function InfoTab({
           <p className="text-sm text-muted-foreground whitespace-pre-line">{commande.commentaire.trim()}</p>
         ) : (
           <p className="text-sm text-muted-foreground italic">Aucun commentaire</p>
+        )}
+      </div>
+
+      {/* Journal — moved here from its own tab. Same content as the legacy
+          `JournalTab` rendered inline so commentaire and journal sit side
+          by side in one scroll. */}
+      <div className={cn('p-3 rounded-lg border bg-card shadow-sm', isEditing && editSectionClass)}>
+        <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
+          <BookOpen className="h-3.5 w-3.5" />Journal
+        </p>
+        {isEditing ? (
+          <textarea
+            value={editJournal}
+            onChange={(e) => onEditJournalChange(e.target.value)}
+            rows={12}
+            placeholder="Entrées de journal..."
+            className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y font-mono"
+          />
+        ) : commande.journal?.trim() ? (
+          <p className="text-sm text-muted-foreground whitespace-pre-line font-mono">{commande.journal.trim()}</p>
+        ) : (
+          <p className="text-sm text-muted-foreground italic">Aucune entrée de journal</p>
         )}
       </div>
     </div>
@@ -2602,38 +3385,6 @@ function DocViewDialog({
   )
 }
 
-// ── Sidebar Tab: Journal ───────────────────────────────
-
-function JournalTab({
-  commande, isEditing, editJournal, onEditJournalChange,
-}: {
-  commande: CommandeDetail
-  isEditing: boolean
-  editJournal: string
-  onEditJournalChange: (v: string) => void
-}) {
-  return (
-    <div className={cn('p-3 rounded-lg border bg-card shadow-sm', isEditing && editSectionClass)}>
-      <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
-        <BookOpen className="h-3.5 w-3.5" />Journal
-      </p>
-      {isEditing ? (
-        <textarea
-          value={editJournal}
-          onChange={(e) => onEditJournalChange(e.target.value)}
-          rows={16}
-          placeholder="Entrées de journal..."
-          className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y font-mono"
-        />
-      ) : commande.journal?.trim() ? (
-        <p className="text-sm text-muted-foreground whitespace-pre-line font-mono">{commande.journal.trim()}</p>
-      ) : (
-        <p className="text-sm text-muted-foreground italic">Aucune entrée de journal</p>
-      )}
-    </div>
-  )
-}
-
 // ── Create Dialog (filtered to Ennoblisseur) ───────────
 
 function CreateCommandeDialog({
@@ -2806,13 +3557,20 @@ function KV({ label, value }: { label: string; value: React.ReactNode }) {
 }
 
 function LabeledInput({
-  label, value, onChange, type = 'text', autoFocus,
+  label, value, onChange, type = 'text', autoFocus, disabled, helper,
 }: {
   label: string
   value: string
   onChange: (v: string) => void
   type?: string
   autoFocus?: boolean
+  /** When true the input becomes read-only and styled muted. Used by
+   *  fields whose value is computed by the server (e.g. ennoblisseur prix
+   *  driven by `recalcLignePrix`). */
+  disabled?: boolean
+  /** Optional secondary text rendered under a disabled input to explain
+   *  why the field is locked. */
+  helper?: string
 }) {
   return (
     <div className="space-y-1">
@@ -2825,8 +3583,12 @@ function LabeledInput({
         autoComplete="off"
         data-form-type="other"
         data-lpignore="true"
-        className={inputClass}
+        disabled={disabled}
+        className={cn(inputClass, disabled && 'bg-muted text-muted-foreground cursor-not-allowed')}
       />
+      {disabled && helper && (
+        <p className="text-[10px] text-muted-foreground italic">{helper}</p>
+      )}
     </div>
   )
 }

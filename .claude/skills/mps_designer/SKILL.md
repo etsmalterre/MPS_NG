@@ -1153,6 +1153,19 @@ Three variants are used in the app — pick the one that matches your use case.
 
 > **Critical hooks rule**: Any `useState` / `useQuery` / `useEffect` inside a dialog component must be declared **before** any `if (!cert) return null` early return. Hooks after conditional returns work in dev but crash production builds with React error #310. See the React Component Rules in `CLAUDE.md`.
 
+### 18.0 When to open a Dialog vs render inline
+
+A new form inside an already-bounded surface (sidebar tab, slide-up drawer, the in-screen drawer of §31, a sub-section card) competes for vertical space with everything else the host is showing. Promote the form to a Dialog when **both** of these are true:
+
+1. **The form is a side-feature of its host**, not a continuation of the host's primary purpose. The host has its own job (showing rolls already received, listing line items, displaying attached docs…) and this form opens a distinct sub-workflow that the host wasn't built to display.
+2. **Space is tight or the form is non-trivial** — the host is already 2+ containers deep (page → drawer → tab body, or page → sidebar → tab), OR the form has more than 2–3 fields, OR it includes a textarea / multi-line input that needs real height.
+
+Inline forms remain correct when **the form IS the host's primary mode** — e.g. the sidebar Contacts tab's "add contact" form (§9 `InlineForm`), where managing contacts is exactly what the tab is for. Per-row pencil-edits and inline field updates inside detail cards also stay inline because they're tightly coupled to the row they edit and the field set is tiny.
+
+Reference: `SousTraitantsCommandes.tsx` → `ReceptionForm` was originally rendered inline at the bottom of the line drawer's Réception tab. It met both criteria — the tab's purpose is to display received rolls (not create them), and at 3 containers deep with 8 fields + a textarea, the inline form crushed the existing roll list. Promoting it to a Dialog gave it dedicated breathing room and let the tab focus on its actual job.
+
+When in doubt, prototype inline first. If you reach for `overflow-y-auto` to make room, or start trimming labels / padding to squeeze the form in, that's the cue to lift it into a Dialog.
+
 ### A. Basic Form Dialog
 
 For simple forms — use `DialogContent` with header, body, and footer.
@@ -1166,14 +1179,26 @@ For simple forms — use `DialogContent` with header, body, and footer.
         Title
       </DialogTitle>
     </DialogHeader>
-    {/* Body content */}
-    <DialogFooter>
+    <div className="mt-4 space-y-3">
+      {/* Body content */}
+    </div>
+    <DialogFooter className="mt-4">
       <Button variant="outline" onClick={() => setOpen(false)}>Annuler</Button>
       <Button onClick={handleSave}>Enregistrer</Button>
     </DialogFooter>
   </DialogContent>
 </Dialog>
 ```
+
+**Internal spacing — `mt-4` between header, body, and footer**. `<DialogContent>` has `p-6` outer padding but **no vertical spacing between its direct children**. Without explicit margins, the title rams flush against the first input and the footer rams against the last input, and the whole dialog reads as cramped. Apply:
+
+- `mt-4` on the body wrapper (the first element after `<DialogHeader>`) — 16px breathing room under the title
+- `mt-4` on `<DialogFooter>` — 16px breathing room above the action buttons
+- Inline error / success banners that sit between body and footer get `mt-3` from the body, and the footer keeps `mt-4`
+
+This applies to every Dialog variant in this section (Basic Form, Side-by-Side, custom layouts). The only exception is the full-bleed viewer variant (§18.B), which has no body wrapper because the iframe IS the body.
+
+When the body is a `<form>` element or a single flex column, put the `mt-4` on the body wrapper itself, not on each child — otherwise the spacing compounds and the dialog grows taller than intended.
 
 ### A-bis. "En developpement" Placeholder Dialog (canonical)
 
