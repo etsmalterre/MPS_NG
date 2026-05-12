@@ -2704,7 +2704,7 @@ This means the drawer's `drawerOpen` guard (`stockDrawerLineId !== null && !isEd
 Because the drawer sits **inside** the panel and the selected row is already highlighted right above it, **do NOT repeat the row's info at the top of the drawer**. The user can see it without scrolling. Keep the drawer header minimal — a thin strip with just an `X` close button on the right is plenty:
 
 ```tsx
-<div className="flex flex-col h-full min-h-0 overflow-hidden">
+<div className="flex flex-col h-full min-h-0 overflow-hidden bg-zinc-100/80">
   {/* Minimal top bar: close button only — row info is already visible in the list above */}
   <div className="flex-shrink-0 px-2 py-1 border-b bg-zinc-200/50 flex items-center justify-end">
     <Button variant="ghost" size="icon" onClick={onClose} className="h-7 w-7" title="Fermer">
@@ -2717,7 +2717,60 @@ Because the drawer sits **inside** the panel and the selected row is already hig
 </div>
 ```
 
-If the drawer's content has multiple sections, use the same `text-[10px] uppercase tracking-wide text-muted-foreground font-semibold` section heading convention (§5, §7).
+#### Chrome conventions — copy these classes
+
+The drawer reuses the **same three-tone background scheme as the right DetailSidebar** (§8) so the in-screen drawer reads as "another sidebar panel, just inside this row". Do not pick other zinc shades.
+
+| Layer | Class | Why |
+|---|---|---|
+| Outer container | `bg-zinc-100/80` | Matches the right DetailSidebar's tab panel — the drawer "belongs" to the same visual family. **Mandatory** — do not omit. |
+| Top strip (close X + optional tabs) | `bg-zinc-200/50` | The darker gray strip mirrors the DetailSidebar's tab header band. |
+| Cards inside the body | `rounded-lg border bg-card shadow-sm` | Same white card with light shadow as the InfoTab cards (§8.1). Do NOT use `bg-white` without a shadow — the card disappears into the zinc panel. |
+
+Section headings inside the body keep the `text-[10px] uppercase tracking-wide text-muted-foreground font-semibold` convention (§5, §7).
+
+#### Optional internal tab strip (multi-content drawers)
+
+When the drawer has **two or more distinct content modes** (e.g. *Réception* vs *Affectés* in the sous-traitant `PiecesDrawer`), the top strip becomes a tab bar instead of a bare close button. The tab buttons MUST use the **same gold-pill active state as the right DetailSidebar's tabs** (§8) so the styling is unified across every sidebar-like panel in the app:
+
+```tsx
+<div className="flex-shrink-0 flex items-center border-b bg-zinc-200/50 p-1 gap-1">
+  {tabs.map((t) => {
+    const Icon = t.icon
+    const active = activeTab === t.key
+    return (
+      <button
+        key={t.key}
+        type="button"
+        onClick={() => setActiveTab(t.key)}
+        className={cn(
+          'flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer',
+          active
+            ? 'bg-accent text-accent-foreground shadow-sm'
+            : 'text-muted-foreground hover:bg-accent/10',
+        )}
+      >
+        <Icon className="h-3.5 w-3.5" />
+        <span>{t.label}</span>
+      </button>
+    )
+  })}
+  <div className="ml-auto flex items-center pr-1">
+    <Button variant="ghost" size="icon" onClick={onClose} className="h-7 w-7" title="Fermer">
+      <X className="h-3.5 w-3.5" />
+    </Button>
+  </div>
+</div>
+```
+
+Rules — do not deviate:
+- **Active tab**: `bg-accent text-accent-foreground shadow-sm` (gold pill, dark text). NOT an underline, NOT a colored text-only active. This matches §8's right-sidebar tab bar exactly.
+- **Inactive tab**: `text-muted-foreground hover:bg-accent/10`.
+- **Close X** stays in the same top strip, pushed right with `ml-auto`. It's a sibling of the tabs, not a separate band.
+- **Tabs don't `flex-1`** here (unlike the DetailSidebar's full-width tabs) because we need to reserve space for the close X on the right. They size to content.
+- Tab icons: `h-3.5 w-3.5`. Tab labels: `text-xs font-medium`.
+
+Reference implementation: `PiecesDrawer` in `apps/web/src/pages/SousTraitantsCommandes.tsx` — every convention above is set there.
 
 ### 31.5 Gotcha: `overflow-auto` clips ring-based highlights
 

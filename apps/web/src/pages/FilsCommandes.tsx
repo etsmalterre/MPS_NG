@@ -1204,8 +1204,9 @@ function StockLinkDrawer({
   const available = data?.available ?? []
 
   return (
-    <div className="flex flex-col h-full min-h-0 overflow-hidden">
-      {/* Minimal top bar: close button only — line info is already visible in the list above */}
+    <div className="flex flex-col h-full min-h-0 overflow-hidden bg-zinc-100/80">
+      {/* Minimal top bar — close X on a darker zinc strip, matching the
+          §31.4 chrome convention (right DetailSidebar's tab header band). */}
       <div className="flex-shrink-0 px-2 py-1 border-b bg-zinc-200/50 flex items-center justify-end">
         <Button
           variant="ghost"
@@ -1298,7 +1299,7 @@ function StockLotRow({
   const stockKg = Number(lot.stock) || 0
   const initialKg = Number(lot.stock_initial) || 0
   return (
-    <div className="rounded-lg border border-border/60 bg-white p-3 flex items-center gap-3">
+    <div className="rounded-lg border border-border/60 bg-card shadow-sm p-3 flex items-center gap-3">
       <div className="h-8 w-8 rounded-md bg-zinc-100 flex items-center justify-center flex-shrink-0">
         <BobineIcon className="h-4 w-4 text-muted-foreground" />
       </div>

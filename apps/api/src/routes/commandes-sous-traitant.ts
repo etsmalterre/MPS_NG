@@ -36,8 +36,14 @@ import { sendMail } from '../lib/gmail.js'
 import { getUserEmail } from '../lib/user-emails.js'
 import { stripRtf, wrapRtf } from '../lib/rtf-utils.js'
 import { recalcLignePrix, hasTariffData, calcTarifSSTBreakdown, type PrixBreakdown } from '../lib/pricing-sst.js'
+import { resolveSearch, type SearchHits } from '../lib/sst-search-cache.js'
 
 const upload = multer({ storage: multer.memoryStorage() })
+
+// HFSQL ODBC bridge rejects accented identifiers on Linux but accepts
+// them on Windows. The suivilot helper (and any other write touching
+// columns like `stabL_demandée` / `freinte_demandée`) branches on this.
+const IS_WINDOWS = process.platform === 'win32'
 
 export const commandesSousTraitantRouter: RouterType = Router()
 
@@ -359,50 +365,82 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
     // by ID rather than date_commande is required for keyset to be stable —
     // and IDs are sequential so the visible order barely changes.
     //
-    // When `q` is non-empty, pagination is bypassed entirely — the search
-    // needs to scan EVERY commande matching the status filter, not just
-    // the loaded page. The JS-side filter at the end of this handler does
-    // the actual matching against ID / sous-traitant nom / commentaire.
-    // We accept the slower payload here because the user is actively
-    // narrowing the result set, and they expect search to be exhaustive.
+    // Search (`q` non-empty) is pushed down to SQL via `resolveSearch()`,
+    // which matches the query tokens against in-process caches of the
+    // sous_traitant + ref/coloris catalog tables and returns the matching
+    // IDs. Those IDs become IN-list predicates on the main commande query
+    // (sst match) and on a `ligne_commande_sous_traitant` sub-SELECT (ref +
+    // coloris match per polymorphic `type`). We keep `TOP limit` even on
+    // search — a typeahead doesn't need 4000 hits. `commentaire` is no
+    // longer fetched/stripped because the list card doesn't render it.
     const isSearching = q.length > 0
     const limitRaw = parseInt(String(req.query.limit ?? ''), 10)
     const limit = isNaN(limitRaw) ? 100 : Math.min(Math.max(limitRaw, 1), 500)
     const beforeIdRaw = parseInt(String(req.query.before_id ?? ''), 10)
     const beforeId = isNaN(beforeIdRaw) || beforeIdRaw <= 0 ? null : beforeIdRaw
 
+    let hits: SearchHits | null = null
+    if (isSearching) {
+      try {
+        hits = await resolveSearch(q)
+      } catch (err) {
+        console.error('Search cache resolve failed:', err)
+        hits = null
+      }
+    }
+
     const whereParts: string[] = []
     if (!isNaN(stFilter)) whereParts.push(`cst.IDsous_traitant = ${stFilter}`)
     if (statusFilter === 'en_cours') whereParts.push(`cst.est_soldee = 0`)
     else if (statusFilter === 'terminee') whereParts.push(`cst.est_soldee = 1`)
     if (!isSearching && beforeId !== null) whereParts.push(`cst.IDcommande_sous_traitant < ${beforeId}`)
+
+    if (isSearching && hits) {
+      const orParts: string[] = []
+      // Digit-only query → exact commande-id match. Users type the full
+      // numero de commande, and HFSQL `CAST(... AS VARCHAR) LIKE` is flaky
+      // on some driver versions — exact equality is the safer primitive.
+      const qDigits = /^\d+$/.test(q) ? parseInt(q, 10) : NaN
+      if (!isNaN(qDigits) && qDigits > 0) orParts.push(`cst.IDcommande_sous_traitant = ${qDigits}`)
+      if (hits.sstIds.length > 0) orParts.push(`cst.IDsous_traitant IN (${hits.sstIds.join(',')})`)
+
+      // Ref + coloris match on the lines. Type discriminates the catalog:
+      // 0=ecru, 1=fil, 2=fini for refs; 0=colori_ecru, 2=ref_fini_colori
+      // for coloris.
+      const lineConds: string[] = []
+      if (hits.refEcruIds.length) lineConds.push(`(lcs.type = 0 AND lcs.IDreference IN (${hits.refEcruIds.join(',')}))`)
+      if (hits.refFiniIds.length) lineConds.push(`(lcs.type = 2 AND lcs.IDreference IN (${hits.refFiniIds.join(',')}))`)
+      if (hits.refFilIds.length) lineConds.push(`(lcs.type = 1 AND lcs.IDreference IN (${hits.refFilIds.join(',')}))`)
+      if (hits.coloriEcruIds.length) lineConds.push(`(lcs.type = 0 AND lcs.IDColoris IN (${hits.coloriEcruIds.join(',')}))`)
+      if (hits.refFiniColoriIds.length) lineConds.push(`(lcs.type = 2 AND lcs.IDColoris IN (${hits.refFiniColoriIds.join(',')}))`)
+      if (lineConds.length > 0) {
+        orParts.push(
+          `cst.IDcommande_sous_traitant IN (SELECT lcs.IDcommande_sous_traitant FROM ligne_commande_sous_traitant lcs WHERE ${lineConds.join(' OR ')})`,
+        )
+      }
+
+      if (orParts.length === 0) {
+        // q didn't match any catalog and isn't a numeric ID. Short-circuit
+        // so we don't return the unfiltered list.
+        res.json([])
+        return
+      }
+      whereParts.push(`(${orParts.join(' OR ')})`)
+    }
+
     const whereSql = whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : ''
 
-    // When searching we drop the TOP cap so the JS filter can scan every
-    // matching commande. Otherwise we keep TOP for the keyset page.
-    const topClause = isSearching ? '' : `TOP ${limit}`
     const commandes = await query<any>(
-      `SELECT ${topClause} cst.IDcommande_sous_traitant, cst.IDsous_traitant, cst.date_commande, cst.est_soldee, cst.commentaire
+      `SELECT TOP ${limit} cst.IDcommande_sous_traitant, cst.IDsous_traitant, cst.date_commande, cst.est_soldee
        FROM commande_sous_traitant cst
        ${whereSql}
        ORDER BY cst.IDcommande_sous_traitant DESC`,
     )
-    const fixedCommandes = await fixEncoding(
-      commandes,
-      'commande_sous_traitant',
-      'IDcommande_sous_traitant',
-      ['commentaire'],
-    )
-    // Strip RTF for list-card snippets too (it's used as a search-haystack
-    // and for the truncated display).
-    for (const c of fixedCommandes as any[]) {
-      if (c.commentaire) c.commentaire = stripRtf(c.commentaire) || null
-    }
 
     // Bulk-resolve sous-traitant nom + type label. The JOIN with type_sst
     // truncates results in HFSQL ODBC, so we run two flat queries and merge.
     const stIds = Array.from(
-      new Set(fixedCommandes.map((c: any) => Number(c.IDsous_traitant)).filter((x) => !isNaN(x) && x > 0)),
+      new Set(commandes.map((c: any) => Number(c.IDsous_traitant)).filter((x) => !isNaN(x) && x > 0)),
     )
     const stInfo = new Map<number, { nom: string; type: string | null }>()
     if (stIds.length > 0) {
@@ -435,29 +473,12 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
       }
     }
 
-    // Apply the search-q filter BEFORE computing line aggregates. The
-    // aggregate fetches (lignes + stock_ecru) scale with the IN-list size,
-    // and on `terminee` the IN list can be thousands of ids — that's the
-    // path that made "click 'terminé' → search 'foo'" take 20+ seconds.
-    // After this filter the survivor list is typically a handful for
-    // searches, so the aggregate joins stay cheap.
-    const qLower = q.toLowerCase()
-    const filteredCommandes = isSearching
-      ? fixedCommandes.filter((c: any) => {
-          const sst = stInfo.get(Number(c.IDsous_traitant))
-          const nom = sst?.nom ?? ''
-          const com = c.commentaire ?? ''
-          const hay = `${c.IDcommande_sous_traitant} ${nom} ${com}`.toLowerCase()
-          return hay.includes(qLower)
-        })
-      : fixedCommandes
-
-    // Bulk fetch line aggregates only for the survivors. `total_eur` is
-    // the **actual** total (sum of attached écru kg × prix), not the
-    // nominal qty × prix — for ennoblisseur lines, the user enters qty
-    // (Ml) and prix (€/Kg) as *projections*, and the bill comes from the
-    // weights of the écru rolls they attach via the pieces drawer.
-    const ids = filteredCommandes.map((c: any) => c.IDcommande_sous_traitant).filter(Boolean)
+    // Bulk fetch line aggregates only for the rows we're returning.
+    // `total_eur` is the **actual** total (sum of attached écru kg × prix),
+    // not the nominal qty × prix — for ennoblisseur lines, the user enters
+    // qty (Ml) and prix (€/Kg) as *projections*, and the bill comes from
+    // the weights of the écru rolls they attach via the pieces drawer.
+    const ids = commandes.map((c: any) => c.IDcommande_sous_traitant).filter(Boolean)
     const totalsMap = new Map<number, {
       total_eur: number
       total_qte: number
@@ -508,7 +529,7 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
       }
     }
 
-    const result = filteredCommandes.map((c: any) => {
+    const result = commandes.map((c: any) => {
       const totals = totalsMap.get(Number(c.IDcommande_sous_traitant)) ?? {
         total_eur: 0,
         total_qte: 0,
@@ -1519,6 +1540,121 @@ async function loadEnnoblisseurLineContext(
   return { commandeId, IDref_fini, IDref_ecru }
 }
 
+/** Create a `suivilot` row for a (ligne, lot) pair.
+ *
+ *  Legacy behaviour: ONE `suivilot` row per (IDligne_commande_sous_traitant,
+ *  lot). The row identifies the lot + carries the demande fields copied
+ *  from `ref_fini` at creation. `quantite_receptionnee` and
+ *  `metrage_receptionne` start at 0 and are filled by a downstream
+ *  workflow (verified against the user's MA108050-Actual sample). We
+ *  match that exactly — no auto-aggregation on reception.
+ *
+ *  - Empty/whitespace lot → no-op (matches legacy: stock_fini rows with
+ *    empty lot have no suivilot).
+ *  - If a suivilot already exists for the same (ligne, lot) → no-op
+ *    (the lot is already tracked).
+ *  - First call → INSERT with totals=0, IDetatLot=1 (initial state, set
+ *    by the legacy app on creation; later workflow steps advance it).
+ *  - `IDColoris` / `IDref_fini_colori` come from the LINE, not the
+ *    écru's `IDcolori_ecru` — fini lines reference `ref_fini_colori`.
+ *  - Accented columns (`stabL_demandée`, `stabH_demandée`,
+ *    `freinte_demandée`, `approuvé_qualité`) are omitted on Linux
+ *    because the bridge rejects them in INSERT clauses. HFSQL fills
+ *    its own defaults there.
+ *  - Failures are logged but never bubble up: the stock_fini reception
+ *    is the user's primary action, and a missing suivilot row is a
+ *    secondary annoyance, not data loss.
+ */
+async function upsertSuivilot(opts: {
+  commandeId: number
+  ligneId: number
+  lot: string
+}): Promise<void> {
+  const lot = (opts.lot ?? '').trim()
+  if (lot.length === 0) return
+  try {
+    const existing = await query<{ IDsuivilot: number }>(
+      `SELECT IDsuivilot FROM suivilot
+       WHERE IDligne_commande_sous_traitant = ${opts.ligneId} AND lot = '${esc(lot)}'`,
+    )
+    if (existing.length > 0) return  // Lot already tracked.
+
+    // Resolve everything else from the line + parent commande + ref_fini.
+    const lineRows = await query<{ IDreference: number | null; IDColoris: number | null }>(
+      `SELECT IDreference, IDColoris FROM ligne_commande_sous_traitant
+       WHERE IDligne_commande_sous_traitant = ${opts.ligneId}`,
+    )
+    const IDref_fini = Number(lineRows[0]?.IDreference) || 0
+    const IDColoris = Number(lineRows[0]?.IDColoris) || 0
+    const cmdRows = await query<{ IDsous_traitant: number | null }>(
+      `SELECT IDsous_traitant FROM commande_sous_traitant WHERE IDcommande_sous_traitant = ${opts.commandeId}`,
+    )
+    const IDsous_traitant = Number(cmdRows[0]?.IDsous_traitant) || 0
+    const refRows = IDref_fini > 0
+      ? await query<{
+          laizeHT_Moy: number | null
+          poids_Moy: number | null
+          rendement: number | null
+          freinte: number | null
+          stab_hauteur: number | null
+          stab_largeur: number | null
+        }>(
+          `SELECT laizeHT_Moy, poids_Moy, rendement, freinte, stab_hauteur, stab_largeur
+           FROM ref_fini WHERE IDref_fini = ${IDref_fini}`,
+        )
+      : []
+    const ref = refRows[0] ?? {
+      laizeHT_Moy: null, poids_Moy: null, rendement: null,
+      freinte: null, stab_hauteur: null, stab_largeur: null,
+    }
+
+    const today = new Date()
+    const dateStr = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`
+
+    // For fini lines, ligne.IDColoris IS the ref_fini_colori id —
+    // legacy verified: every sample row has IDColoris == IDref_fini_colori.
+    const baseCols = [
+      'IDref_fini_colori', 'IDcommande_sous_traitant', 'IDsous_traitant', 'DATE', 'lot',
+      'laize_demandee', 'poids_demande', 'rendement_demande',
+      'quantite_receptionnee', 'metrage_receptionne',
+      'IDref_fini', 'IDColoris', 'IDligne_commande_sous_traitant', 'IDetatLot',
+    ]
+    const baseVals = [
+      String(IDColoris),
+      String(opts.commandeId),
+      String(IDsous_traitant),
+      `'${dateStr}'`,
+      `'${esc(lot)}'`,
+      String(n(ref.laizeHT_Moy)),
+      String(n(ref.poids_Moy)),
+      String(n(ref.rendement)),
+      '0',
+      '0',
+      String(IDref_fini),
+      String(IDColoris),
+      String(opts.ligneId),
+      '1',
+    ]
+    // Accented columns — only on Windows. Linux will get HFSQL's column
+    // defaults (typically 0 / NULL) and the user can backfill via the
+    // legacy app if those values are needed.
+    if (IS_WINDOWS) {
+      baseCols.push('stabL_demandée', 'stabH_demandée', 'freinte_demandée', 'approuvé_qualité')
+      baseVals.push(
+        String(n(ref.stab_hauteur)),
+        String(n(ref.stab_largeur)),
+        String(n(ref.freinte)),
+        '0',
+      )
+    }
+    await query(
+      `INSERT INTO suivilot (${baseCols.join(', ')}) VALUES (${baseVals.join(', ')})`,
+    )
+  } catch (err) {
+    console.error(`upsertSuivilot failed for ligne=${opts.ligneId} lot=${lot}:`, err)
+  }
+}
+
 /** Quality defect recorded against an écru roll. Stored in the legacy
  *  `defaut_qualite` table with a polymorphic link: when
  *  `Type_Reference = 2`, `reference` is a stringified `IDstock_ecru`.
@@ -1584,6 +1720,16 @@ interface StockFiniLite {
   second_choix: number | null
   observations: string | null
   observation_sst: string | null
+  /** Workflow state from `etat_stock_fini`:
+   *    1=En Contrôle, 2=En Reprise, 3=Validé, 4=Expédié, 5=Attente de décision.
+   *  New receptions enter at 1; the legacy app advances it as the roll
+   *  moves through inspection / shipping. */
+  IDetat_stock_fini: number | null
+  /** Resolved client name when this fini is reserved for a client order —
+   *  derived from `stock_fini.IDligne_commande_client` walked through
+   *  ligne_commande_client → commande_client → client. Inherited from
+   *  the source écru's reservation at reception time. */
+  client_nom?: string | null
 }
 
 async function fetchPiecesPayload(ctx: LineContext, ligneId: number): Promise<{
@@ -1607,15 +1753,32 @@ async function fetchPiecesPayload(ctx: LineContext, ligneId: number): Promise<{
   )
   const linkedFixed = await fixEncoding(linkedRows, 'stock_ecru', 'IDstock_ecru', ['numero', 'lot', 'observations'])
 
+  // Pull fini rows up front so their IDligne_commande_client values
+  // join the same client-name lookup pass used for écru (one chain walk
+  // instead of two). Fini rolls inherit the écru's client reservation
+  // on creation — that lcc id propagates into stock_fini and we surface
+  // it as `client_nom` on the response so the Réception card can render
+  // the same client badge.
+  const finiRowsRaw = await query<StockFiniLite & { IDligne_commande_client?: number | null }>(
+    `SELECT IDstock_fini, numero, lot, poids, metrage, IDref_fini, IDColoris,
+            IDstock_ecru, IDmagasin, date_saisie, observations, observation_sst, second_choix,
+            IDetat_stock_fini, IDligne_commande_client
+     FROM stock_fini
+     WHERE IDref_commande_source = ${ligneId}
+     ORDER BY date_saisie DESC, IDstock_fini DESC`,
+  )
+  const finiFixed = await fixEncoding(finiRowsRaw, 'stock_fini', 'IDstock_fini', ['numero', 'lot', 'observations', 'observation_sst'])
+
   // Resolve each roll's client reservation in two batched JOIN hops.
   // We can't do a 3-way JOIN here because the legacy bridge has issues
   // with CONVERT() across joins (see CLAUDE.md), so we walk the chain
   // ligne_commande_client → commande_client → client manually and
   // assemble the name map.
   const clientByLcc = new Map<number, string>()
-  const lccIds = Array.from(new Set(
-    linkedFixed.map((r) => Number(r.IDligne_commande_client) || 0).filter((x) => x > 0)
-  ))
+  const lccIds = Array.from(new Set([
+    ...linkedFixed.map((r) => Number(r.IDligne_commande_client) || 0),
+    ...finiFixed.map((r) => Number((r as any).IDligne_commande_client) || 0),
+  ].filter((x) => x > 0)))
   if (lccIds.length > 0) {
     const lccRows = await query<{ IDligne_commande_client: number; IDcommande_client: number }>(
       `SELECT IDligne_commande_client, IDcommande_client
@@ -1717,15 +1880,17 @@ async function fetchPiecesPayload(ctx: LineContext, ligneId: number): Promise<{
     defects: defectsByEcruId.get(Number(r.IDstock_ecru) || 0) ?? [],
   }))
 
-  // Finis rolls already received against this line.
-  const finiRows = await query<StockFiniLite>(
-    `SELECT IDstock_fini, numero, lot, poids, metrage, IDref_fini, IDColoris,
-            IDstock_ecru, IDmagasin, date_saisie, observations, observation_sst, second_choix
-     FROM stock_fini
-     WHERE IDref_commande_source = ${ligneId}
-     ORDER BY date_saisie DESC, IDstock_fini DESC`,
-  )
-  const fini = await fixEncoding(finiRows, 'stock_fini', 'IDstock_fini', ['numero', 'lot', 'observations', 'observation_sst'])
+  // Attach client_nom to each fini using the shared clientByLcc map
+  // built above. The raw IDligne_commande_client comes from the stock_fini
+  // SELECT (already fetched into finiFixed); it isn't part of the public
+  // StockFiniLite shape so we read it as any.
+  const fini = finiFixed.map((r) => {
+    const lcc = Number((r as any).IDligne_commande_client) || 0
+    return {
+      ...r,
+      client_nom: lcc > 0 ? (clientByLcc.get(lcc) ?? null) : null,
+    }
+  })
 
   // Read the line's current prix so the caller can patch the frontend
   // detail cache without a full refetch. We re-read here (rather than
@@ -1941,6 +2106,7 @@ const finiBody = z.object({
   IDColoris: z.number().int().nonnegative().optional(),
   IDmagasin: z.number().int().nonnegative().optional(),
   observations: z.string().optional(),
+  observation_sst: z.string().optional(),
 })
 
 commandesSousTraitantRouter.post(
@@ -1968,9 +2134,19 @@ commandesSousTraitantRouter.post(
       // simpler and avoids the stock_fini.IDColoris-vs-colori_fini
       // mismatch in the legacy schema).
       let inheritedIDColoris = d.IDColoris ?? 0
+      // Inherit the source écru's client reservation. When the écru was
+      // affected with `IDligne_commande_client > 0` (e.g. reserved for
+      // "BONNE NOUVELLE"), the dyed roll keeps the same reservation so
+      // the client tag flows downstream into the Réception tab.
+      let inheritedLcc = 0
       if (d.IDstock_ecru && d.IDstock_ecru > 0) {
-        const verify = await query<{ IDref_commande_affectation: number | null; IDcolori_ecru: number | null }>(
-          `SELECT IDref_commande_affectation, IDcolori_ecru FROM stock_ecru WHERE IDstock_ecru = ${d.IDstock_ecru}`,
+        const verify = await query<{
+          IDref_commande_affectation: number | null
+          IDcolori_ecru: number | null
+          IDligne_commande_client: number | null
+        }>(
+          `SELECT IDref_commande_affectation, IDcolori_ecru, IDligne_commande_client
+           FROM stock_ecru WHERE IDstock_ecru = ${d.IDstock_ecru}`,
         )
         if (verify.length === 0) {
           res.status(400).json({ error: 'Source ecru not found' }); return
@@ -1982,6 +2158,7 @@ commandesSousTraitantRouter.post(
         if (!inheritedIDColoris) {
           inheritedIDColoris = Number((verify[0] as any).IDcolori_ecru) || 0
         }
+        inheritedLcc = Number((verify[0] as any).IDligne_commande_client) || 0
       }
 
       const today = new Date()
@@ -1990,17 +2167,39 @@ commandesSousTraitantRouter.post(
       const dd = String(today.getDate()).padStart(2, '0')
       const dateSaisie = `${yyyy}${mm}${dd}`
 
+      // Resolve the parent commande's sous-traitant. New receptions are
+      // stored in the magasin keyed on that sst id (matches legacy: 86%
+      // of legacy stock_fini rows have IDmagasin = IDsous_traitant; the
+      // mismatched ones are mostly the IDmagasin=0 rows previously
+      // inserted by MPS_NG before this fix). Body-supplied IDmagasin
+      // (non-zero) still wins so a user can override later.
+      const cmdInfo = await query<{ IDsous_traitant: number | null }>(
+        `SELECT IDsous_traitant FROM commande_sous_traitant WHERE IDcommande_sous_traitant = ${commandeId}`,
+      )
+      const sstId = Number(cmdInfo[0]?.IDsous_traitant) || 0
+      const idMagasin = (d.IDmagasin && d.IDmagasin > 0) ? d.IDmagasin : sstId
+
+      // IDetat_stock_fini = 1 → "En Contrôle" (per etat_stock_fini
+      // label table). New receptions need inspection before being
+      // validated/shipped, so they enter at state 1.
       await query(
         `INSERT INTO stock_fini
          (numero, lot, poids, metrage, IDref_fini, IDColoris, IDstock_ecru,
-          IDmagasin, IDref_commande_source, observations, date_saisie,
+          IDmagasin, IDref_commande_source, observations, observation_sst, date_saisie,
           second_choix, destockage, don, IDProprietaire, IDcommande_donation, IDligne_commande_client, IDligne_expedition,
           IDetat_stock_fini)
          VALUES ('${esc(d.numero)}', '${esc(d.lot ?? '')}', ${n(d.poids)}, ${n(d.metrage)},
                  ${d.IDref_fini}, ${inheritedIDColoris}, ${d.IDstock_ecru ?? 0},
-                 ${d.IDmagasin ?? 0}, ${ligneId}, '${esc(d.observations ?? '')}', '${dateSaisie}',
-                 0, 0, 0, 0, 0, 0, 0, 0)`,
+                 ${idMagasin}, ${ligneId}, '${esc(d.observations ?? '')}', '${esc(d.observation_sst ?? '')}', '${dateSaisie}',
+                 0, 0, 0, 0, 0, ${inheritedLcc}, 0, 1)`,
       )
+
+      // Track the lot in suivilot if it isn't already. Idempotent per
+      // (ligne, lot) — only the first reception of a given lot creates
+      // the row. Totals stay at 0 (a downstream workflow populates
+      // quantite_receptionnee / metrage_receptionne), matching legacy.
+      await upsertSuivilot({ commandeId, ligneId, lot: d.lot ?? '' })
+
       res.status(201).json(await fetchPiecesPayload(ctx, ligneId))
     } catch (err) {
       console.error('Error creating stock_fini reception:', err)
@@ -2059,13 +2258,123 @@ commandesSousTraitantRouter.delete(
   },
 )
 
+// ── Edit a stock_fini reception's notes ──────────────────
+//
+// PATCH only edits the two free-text columns:
+//   - `observations`     : the visiteur's note shared with the customer
+//                          (blue banner in the UI)
+//   - `observation_sst`  : the ennoblisseur's defect report
+//                          (red banner in the UI)
+// Other stock_fini fields (poids, lot, magasin, …) are intentionally NOT
+// editable from this surface — the UI doesn't expose them and they'd
+// require revisiting the link/destockage invariants.
+
+const finiNotesPatchBody = z.object({
+  observations: z.string().optional(),
+  observation_sst: z.string().optional(),
+})
+
+commandesSousTraitantRouter.patch(
+  '/:commandeId/lignes/:ligneId/pieces/fini/:stockFiniId',
+  async (req: Request, res: Response) => {
+    try {
+      const commandeId = parseInt(req.params.commandeId, 10)
+      const ligneId = parseInt(req.params.ligneId, 10)
+      const stockFiniId = parseInt(req.params.stockFiniId, 10)
+      if (isNaN(commandeId) || isNaN(ligneId) || isNaN(stockFiniId)) {
+        res.status(400).json({ error: 'Invalid ID' }); return
+      }
+      const ctx = await loadEnnoblisseurLineContext(commandeId, ligneId)
+      if (!ctx) { res.status(404).json({ error: 'Line not found or does not belong to commande' }); return }
+      if (refuseIfTerminee(res, await loadCommandeSoldee(commandeId))) return
+
+      const parsed = finiNotesPatchBody.safeParse(req.body)
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Validation failed', details: parsed.error.issues })
+        return
+      }
+      const d = parsed.data
+
+      // Verify the row belongs to this line — symmetric with the DELETE
+      // handler. We don't need the downstream-usage guard here because
+      // editing notes never breaks an expedition / commande client / etc.
+      const verify = await query<{ IDref_commande_source: number | null }>(
+        `SELECT IDref_commande_source FROM stock_fini WHERE IDstock_fini = ${stockFiniId}`,
+      )
+      if (verify.length === 0) { res.status(404).json({ error: 'Stock fini not found' }); return }
+      if (Number(verify[0].IDref_commande_source) !== ligneId) {
+        res.status(400).json({ error: 'Stock fini is not linked to this line' }); return
+      }
+
+      const setParts: string[] = []
+      if (d.observations !== undefined) setParts.push(`observations = '${esc(d.observations)}'`)
+      if (d.observation_sst !== undefined) setParts.push(`observation_sst = '${esc(d.observation_sst)}'`)
+      if (setParts.length > 0) {
+        await query(`UPDATE stock_fini SET ${setParts.join(', ')} WHERE IDstock_fini = ${stockFiniId}`)
+      }
+      res.json(await fetchPiecesPayload(ctx, ligneId))
+    } catch (err) {
+      console.error('Error updating stock_fini notes:', err)
+      res.status(500).json({ error: 'Internal server error' })
+    }
+  },
+)
+
+// ── Tricobot — autofill from BL PDFs ─────────────────────
+//
+// Tricobot is an AI agent that monitors the company inbox, parses BLs
+// received from sous-traitants, and writes per-piece rows into
+// `data_bl_tricotbot`. This endpoint returns those rows for a given
+// ligne so the frontend batch-reception dialog can pre-populate Lot /
+// Poids / Métrage / Défaut by matching `num_piece` to each écru's
+// numero.
+commandesSousTraitantRouter.get(
+  '/:commandeId/lignes/:ligneId/tricobot',
+  async (req: Request, res: Response) => {
+    try {
+      const commandeId = parseInt(req.params.commandeId, 10)
+      const ligneId = parseInt(req.params.ligneId, 10)
+      if (isNaN(commandeId) || isNaN(ligneId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+      const ctx = await loadEnnoblisseurLineContext(commandeId, ligneId)
+      if (!ctx) { res.status(404).json({ error: 'Line not found or does not belong to commande' }); return }
+
+      const rows = await query<{
+        IDdata_bl_tricotbot: number
+        IDligne_commande_sous_traitant: number
+        lot: string | null
+        poids: number | null
+        metrage: number | null
+        observation: string | null
+        num_piece: string | null
+        DATE: string | null
+      }>(
+        `SELECT IDdata_bl_tricotbot, IDligne_commande_sous_traitant, lot, poids, metrage,
+                observation, num_piece, DATE
+         FROM data_bl_tricotbot
+         WHERE IDligne_commande_sous_traitant = ${ligneId}`,
+      )
+      const fixed = await fixEncoding(rows, 'data_bl_tricotbot', 'IDdata_bl_tricotbot', ['observation', 'num_piece', 'lot'])
+      res.json(fixed)
+    } catch (err) {
+      console.error('Error fetching tricobot data:', err)
+      res.status(500).json({ error: 'Internal server error' })
+    }
+  },
+)
+
 // ── Documents (polymorphic GED) ──────────────────────────
 //
-// Discriminator: rows where IDcommande_sous_traitant = id AND
-// IDcommande_client = 0. The whitelist below was empirically derived from
-// production data — see inspect-pieces-flow.ts output:
+// Discriminator: rows where IDcommande_sous_traitant = id AND IDtype_doc
+// is in the sst-relevant whitelist below. The whitelist was empirically
+// derived from production data — see inspect-pieces-flow.ts output:
 //   1=facture fil, 2=autre, 3=bl retour ennoblisseur (most common),
 //   4=bl retour tricoteur, 5=cert GOTS, 6=bl fournisseur, 15=soumission
+//
+// CRITICAL: we do NOT filter `IDcommande_client = 0`. A single ged row
+// can legitimately point at BOTH a sous-traitant commande and the parent
+// client commande in the chain (e.g. ged#9292 for sst-cmd 7925 also has
+// IDcommande_client = 6351). Adding the zero filter silently hides
+// those shared docs — see the CLAUDE.md polymorphic-ged rule.
 
 const COMMANDE_SST_DOC_TYPES = '1, 2, 3, 4, 5, 6, 15'
 
@@ -2083,7 +2392,6 @@ commandesSousTraitantRouter.get('/:id/documents', async (req: Request, res: Resp
       `SELECT g.IDged, g.nom, g.commentaire, g.IDtype_doc
        FROM ged g
        WHERE g.IDcommande_sous_traitant = ${id}
-         AND g.IDcommande_client = 0
          AND g.IDtype_doc IN (${COMMANDE_SST_DOC_TYPES})
        ORDER BY g.IDged DESC`,
     )
@@ -2123,7 +2431,6 @@ commandesSousTraitantRouter.get('/:id/documents/:idged/fichier', async (req: Req
       `SELECT fichier FROM ged
        WHERE IDged = ${idged}
          AND IDcommande_sous_traitant = ${id}
-         AND IDcommande_client = 0
          AND IDtype_doc IN (${COMMANDE_SST_DOC_TYPES})`,
     )
     if (rows.length === 0) { res.status(404).json({ error: 'Document not found' }); return }
@@ -2216,7 +2523,6 @@ commandesSousTraitantRouter.put(
         `SELECT IDged FROM ged
          WHERE IDged = ${idged}
            AND IDcommande_sous_traitant = ${id}
-           AND IDcommande_client = 0
            AND IDtype_doc IN (${COMMANDE_SST_DOC_TYPES})`,
       )
       if (scope.length === 0) { res.status(404).json({ error: 'Document not found' }); return }
@@ -2251,7 +2557,6 @@ commandesSousTraitantRouter.delete('/:id/documents/:idged', async (req: Request,
       `SELECT IDged FROM ged
        WHERE IDged = ${idged}
          AND IDcommande_sous_traitant = ${id}
-         AND IDcommande_client = 0
          AND IDtype_doc IN (${COMMANDE_SST_DOC_TYPES})`,
     )
     if (scope.length === 0) { res.status(404).json({ error: 'Document not found' }); return }
