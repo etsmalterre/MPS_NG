@@ -258,7 +258,16 @@ const styles = StyleSheet.create({
   // ── Content area ────────────────────────────────────
   content: {
     paddingHorizontal: 36,
-    paddingTop: 32,
+    paddingTop: 20,
+    flexGrow: 1,
+    flexDirection: 'column',
+  },
+  // Variant used by the optional secondPage: same horizontal gutters but
+  // no top padding — the Page-level paddingTop already provides the top
+  // margin (and applies on every physical overflow page).
+  contentLean: {
+    paddingHorizontal: 36,
+    paddingTop: 0,
     flexGrow: 1,
     flexDirection: 'column',
   },
@@ -456,6 +465,16 @@ export interface MalterreDocumentProps {
   title?: string
   /** Body sections — table, totals, etc. */
   children: React.ReactNode
+  /** Optional second logical <Page> appended after the primary one. Has no
+   *  yellow header band (the body uses its own section title), but inherits
+   *  the same fixed footer chrome. Its `paddingTop` is applied at the Page
+   *  level so every physical overflow page that the second-page content
+   *  spans gets the same top margin — gives wrapped tables breathing room
+   *  on continuation pages. */
+  secondPage?: {
+    paddingTop?: number
+    children: React.ReactNode
+  }
 }
 
 // ── Reusable card components (exported) ────────────────
@@ -493,6 +512,34 @@ export function MetadataCard({ data, stretch }: { data: MetadataCardData; stretc
   )
 }
 
+// Footer: gray band with thin tricolore strip at the very top. Wrapped
+// as its own component so each <Page> in the Document can render its own
+// copy (each Page needs its own `fixed` footer node to appear on every
+// physical page within that logical page).
+function PageFooter() {
+  return (
+    <View style={styles.footer} fixed>
+      <View style={styles.footerStripe}>
+        <View style={styles.footerStripeBlue} />
+        <View style={styles.footerStripeMiddle} />
+        <View style={styles.footerStripeRed} />
+      </View>
+      <View style={styles.footerInner}>
+        <Text style={styles.footerLine}>
+          {company.address1} - {company.zip} {company.city}
+        </Text>
+        <Text style={styles.footerContact}>
+          Tél: {company.phone}   ·   Mail: {company.email}
+        </Text>
+        <Text style={styles.footerLegal}>
+          SIRET: {company.siret} - Code NAF: {company.naf} - N° TVA: {company.vat} - Capital: {company.capital}
+        </Text>
+        <Text style={styles.footerJurisdiction}>{company.legalJurisdiction}</Text>
+      </View>
+    </View>
+  )
+}
+
 // ── Component ────────────────────────────────────────────
 
 export function MalterreDocument({
@@ -503,6 +550,7 @@ export function MalterreDocument({
   topRightInfo,
   title,
   children,
+  secondPage,
 }: MalterreDocumentProps) {
   return (
     <Document
@@ -554,28 +602,26 @@ export function MalterreDocument({
           {children}
         </View>
 
-        {/* Footer: gray band with thin tricolore strip at the very top.
-            Hairline borders above and below the strip frame it cleanly. */}
-        <View style={styles.footer} fixed>
-          <View style={styles.footerStripe}>
-            <View style={styles.footerStripeBlue} />
-            <View style={styles.footerStripeMiddle} />
-            <View style={styles.footerStripeRed} />
-          </View>
-          <View style={styles.footerInner}>
-            <Text style={styles.footerLine}>
-              {company.address1} - {company.zip} {company.city}
-            </Text>
-            <Text style={styles.footerContact}>
-              Tél: {company.phone}   ·   Mail: {company.email}
-            </Text>
-            <Text style={styles.footerLegal}>
-              SIRET: {company.siret} - Code NAF: {company.naf} - N° TVA: {company.vat} - Capital: {company.capital}
-            </Text>
-            <Text style={styles.footerJurisdiction}>{company.legalJurisdiction}</Text>
-          </View>
-        </View>
+        <PageFooter />
       </Page>
+
+      {/* Optional second logical Page — no yellow header band, paddingTop
+          is set per-Page so every physical overflow page that this content
+          spans inherits a clean white top margin. */}
+      {secondPage && (
+        <Page
+          size="A4"
+          style={[
+            styles.page,
+            { paddingTop: secondPage.paddingTop ?? 36 },
+          ]}
+        >
+          <View style={styles.contentLean}>
+            {secondPage.children}
+          </View>
+          <PageFooter />
+        </Page>
+      )}
     </Document>
   )
 }

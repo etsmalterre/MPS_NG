@@ -75,9 +75,10 @@ async function fileToBase64(file: File): Promise<string> {
 export async function postEmail(
   url: string,
   payload: SendPayload,
-  opts?: { includeAttachPdf?: boolean },
+  opts?: { includeAttachPdf?: boolean; extraBody?: Record<string, unknown> },
 ): Promise<void> {
   const body: Record<string, unknown> = {
+    ...(opts?.extraBody ?? {}),
     to: payload.to,
     subject: payload.subject,
     body: payload.body,

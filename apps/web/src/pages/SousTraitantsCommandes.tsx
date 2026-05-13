@@ -43,6 +43,7 @@ import {
   Unlink,
   Printer,
   AtSign,
+  Send,
   FileText,
   Upload,
   Check,
@@ -105,6 +106,8 @@ interface CommandeListRow {
   IDsous_traitant: number
   date_commande: string | null
   est_soldee: number | null
+  /** Computed phase (server-derived). See PhasePill / SST_PHASE_META. */
+  phase: SstPhase
   sous_traitant_nom: string
   sous_traitant_type: string | null
   total_eur: number
@@ -176,6 +179,8 @@ interface CommandeDetail {
    *  prix input — suppliers without a catalog (e.g. FRANCE TEINTURE)
    *  keep manual prix entry instead. */
   auto_pricing_enabled?: boolean
+  /** Computed phase (server-derived). See PhasePill / SST_PHASE_META. */
+  phase: SstPhase
 }
 
 interface SousTraitantLite {
@@ -279,6 +284,24 @@ interface PiecesPayload {
   prix: number
 }
 
+// Returned by GET /:id/soumission/lots-eligibles. One entry per
+// (ref_fini, coloris, lot, commande_client) group; only includes groups
+// whose (client, ref_fini) pair has designation_client.soumettre = 1.
+interface EligibleLot {
+  IDref_fini: number
+  IDColoris: number
+  lot: string
+  IDcommande_client: number
+  IDclient: number
+  client_nom: string
+  ref_malterre: string
+  client_designation: string
+  coloris_reference: string
+  nb_rolls: number
+  total_metrage: number
+  key: string
+}
+
 // ── Shared styling ─────────────────────────────────────
 
 const inputClass = 'w-full h-8 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring'
@@ -303,16 +326,36 @@ function adresseOption(a: AdresseLookup) {
 
 // ── Status helpers ─────────────────────────────────────
 
-function CommandeEtatBadge({ est_soldee, className }: { est_soldee: number | null; className?: string }) {
-  if (est_soldee === 1) return <Badge variant="success" className={cn('text-[10px] py-0 gap-1', className)}><CheckCircle2 className="h-2.5 w-2.5" />Terminée</Badge>
-  return <Badge variant="default" className={cn('text-[10px] py-0 gap-1', className)}><Clock className="h-2.5 w-2.5" />En cours</Badge>
+/** Computed phase, served by the API in the list + detail responses.
+ *  Replaces the old binary "en cours / terminée" pill — derived from
+ *  est_soldee + stock_fini.IDetat_stock_fini + envoi_email history. See
+ *  `commandes-sous-traitant.ts` `computePhase` for the server logic. */
+export type SstPhase = 'en_cours' | 'en_controle' | 'soumis' | 'en_reprise' | 'terminee'
+
+const SST_PHASE_META: Record<SstPhase, {
+  label: string
+  icon: typeof Clock
+  /** Pill / badge classes — light tinted background for inline use. */
+  classes: string
+  /** Solid background + border for the StatusFooter band (white text). */
+  solid: string
+}> = {
+  en_cours:    { label: 'En cours',          icon: Clock,        classes: 'bg-blue-500/10 text-blue-700 border-blue-500/30',     solid: 'bg-primary border-primary' },
+  en_controle: { label: 'En contrôle',       icon: Eye,          classes: 'bg-amber-500/10 text-amber-700 border-amber-500/30',  solid: 'bg-amber-500 border-amber-500' },
+  soumis:      { label: 'Soumis au client',  icon: Send,         classes: 'bg-violet-500/10 text-violet-700 border-violet-500/30', solid: 'bg-violet-500 border-violet-500' },
+  en_reprise:  { label: 'En reprise',        icon: RotateCcw,    classes: 'bg-orange-500/10 text-orange-700 border-orange-500/30', solid: 'bg-orange-500 border-orange-500' },
+  terminee:    { label: 'Terminée',          icon: CheckCircle2, classes: 'bg-green-500/10 text-green-700 border-green-500/30',  solid: 'bg-success border-success' },
 }
 
-function LineSstatutBadge({ sstatut, className }: { sstatut: string | null; className?: string }) {
-  if (isLineDone(sstatut)) {
-    return <Badge variant="success" className={cn('text-[10px] py-0 gap-1', className)}><CheckCircle2 className="h-2.5 w-2.5" />Terminée</Badge>
-  }
-  return <Badge variant="default" className={cn('text-[10px] py-0 gap-1', className)}><Clock className="h-2.5 w-2.5" />En cours</Badge>
+function PhasePill({ phase, className }: { phase: SstPhase | null | undefined; className?: string }) {
+  const meta = SST_PHASE_META[phase ?? 'en_cours']
+  const Icon = meta.icon
+  return (
+    <Badge variant="outline" className={cn('text-[10px] py-0 gap-1 border', meta.classes, className)}>
+      <Icon className="h-2.5 w-2.5" />
+      {meta.label}
+    </Badge>
+  )
 }
 
 function deliveryUrgency(earliestHfsql: string | null, est_soldee: number | null): 'late' | 'soon' | null {
@@ -369,14 +412,18 @@ export function SousTraitantsCommandes() {
   const queryClient = useQueryClient()
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
-  const [statusFilter, setStatusFilter] = useState<'all' | 'en_cours' | 'terminee'>('en_cours')
+  const [statusFilter, setStatusFilter] = useState<SstPhase | 'all'>('en_cours')
   const [isEditing, setIsEditing] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [piecesDrawerLineId, setPiecesDrawerLineId] = useState<number | null>(null)
   const [emailModalOpen, setEmailModalOpen] = useState(false)
-  const [printModalOpen, setPrintModalOpen] = useState(false)
   const [autoEditForId, setAutoEditForId] = useState<number | null>(null)
   const [deleteCommandeConfirmOpen, setDeleteCommandeConfirmOpen] = useState(false)
+  // Soumission Lot — eligibility-gated workflow that opens the email modal
+  // with a freshly-built soumission PDF attached. See plan file.
+  const [soumissionPickerOpen, setSoumissionPickerOpen] = useState(false)
+  const [soumissionEmailOpen, setSoumissionEmailOpen] = useState(false)
+  const [selectedSoumissionLot, setSelectedSoumissionLot] = useState<EligibleLot | null>(null)
 
   // Edit-mode draft state
   const [editDateCommande, setEditDateCommande] = useState('')
@@ -455,12 +502,44 @@ export function SousTraitantsCommandes() {
     enabled: selectedId !== null,
   })
 
-  // Auto-select first on load
-  useEffect(() => {
-    if (commandes && commandes.length > 0 && selectedId === null) {
-      setSelectedId(commandes[0].IDcommande_sous_traitant)
+  // Soumission Lot eligibility — only fires in view mode for the selected
+  // commande. Empty array means the "Soumettre au client" button is hidden.
+  const { data: soumissionEligibility } = useQuery<{ lots: EligibleLot[] }>({
+    queryKey: ['commande-sst-lots-eligibles', selectedId],
+    queryFn: () => apiFetch(`/commandes-sous-traitant/${selectedId}/soumission/lots-eligibles`),
+    enabled: selectedId !== null && !isEditing,
+  })
+  const eligibleLots = soumissionEligibility?.lots ?? []
+
+  // Click handler: zero → no-op (button is hidden anyway), one → skip the
+  // picker and open the email modal directly with that lot, many → open
+  // the picker first.
+  const onSoumettreClick = useCallback(() => {
+    if (eligibleLots.length === 0) return
+    if (eligibleLots.length === 1) {
+      setSelectedSoumissionLot(eligibleLots[0])
+      setSoumissionEmailOpen(true)
+    } else {
+      setSoumissionPickerOpen(true)
     }
-  }, [commandes, selectedId])
+  }, [eligibleLots])
+
+  // Auto-select the first row whenever the list filter changes (initial
+  // load, status filter switch, or search query update). When the new
+  // filter yields zero rows, clear the selection so the detail panel
+  // shows its "aucune commande sélectionnée" placeholder.
+  //
+  // The ref guards against re-triggering on unrelated re-renders — once
+  // we've snapped to the first row for a given (statusFilter, search)
+  // pair, the user can click any other row without us yanking them back.
+  const lastAppliedListKey = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    if (commandes === undefined) return
+    const key = `${statusFilter}|${debouncedSearch}`
+    if (lastAppliedListKey.current === key) return
+    lastAppliedListKey.current = key
+    setSelectedId(commandes.length > 0 ? commandes[0].IDcommande_sous_traitant : null)
+  }, [commandes, statusFilter, debouncedSearch])
 
   // Reset the pieces drawer when the active commande changes — avoids stale
   // drawer state leaking into the next commande's lines.
@@ -567,7 +646,7 @@ export function SousTraitantsCommandes() {
     })
   }, [guard])
 
-  const handleStatusFilterChange = useCallback((s: 'all' | 'en_cours' | 'terminee') => {
+  const handleStatusFilterChange = useCallback((s: SstPhase | 'all') => {
     guard.guardAction(() => {
       setIsEditing(false)
       setStatusFilter(s)
@@ -613,8 +692,14 @@ export function SousTraitantsCommandes() {
             onSave={() => saveHeaderMut.mutate()}
             isSaving={saveHeaderMut.isPending}
             onDelete={() => setDeleteCommandeConfirmOpen(true)}
-            onPrintClick={() => setPrintModalOpen(true)}
+            onPrintClick={() => {
+              if (selectedId !== null) {
+                window.open(`${API_URL}/commandes-sous-traitant/${selectedId}/pdf`, '_blank')
+              }
+            }}
             onEmailClick={() => setEmailModalOpen(true)}
+            onSoumettreClick={onSoumettreClick}
+            soumettreEligibleCount={eligibleLots.length}
           />
         }
         detail={
@@ -680,36 +765,6 @@ export function SousTraitantsCommandes() {
         onConfirm={() => { if (selectedId !== null) deleteMut.mutate(selectedId) }}
       />
 
-      {/* "En developpement" placeholder for the print button per §18.A-bis */}
-      <Dialog open={printModalOpen} onOpenChange={setPrintModalOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Printer className="h-5 w-5 text-accent" />
-              Imprimer
-            </DialogTitle>
-          </DialogHeader>
-          <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-            <Printer className="h-12 w-12 mb-3 opacity-40" />
-            <p className="text-sm font-medium">PDF disponible</p>
-            <p className="text-xs mt-1">Le PDF s'ouvre via le bouton « Envoyer un email » ci-contre.</p>
-            {selectedId !== null && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="mt-3"
-                onClick={() => {
-                  window.open(`${API_URL}/commandes-sous-traitant/${selectedId}/pdf`, '_blank')
-                  setPrintModalOpen(false)
-                }}
-              >
-                <FileText className="h-3.5 w-3.5 mr-1.5" />Ouvrir le PDF
-              </Button>
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
-
       {selectedId !== null && (
         <SendEmailDialog
           open={emailModalOpen}
@@ -722,8 +777,64 @@ export function SousTraitantsCommandes() {
           onSend={(p) => postEmail(`${API_URL}/commandes-sous-traitant/${selectedId}/email`, p, { includeAttachPdf: true })}
         />
       )}
+
+      {/* Soumission Lot picker — shown when multiple lots are eligible. */}
+      <SoumissionLotPicker
+        open={soumissionPickerOpen}
+        lots={eligibleLots}
+        onClose={() => setSoumissionPickerOpen(false)}
+        onSelect={(lot) => {
+          setSelectedSoumissionLot(lot)
+          setSoumissionPickerOpen(false)
+          setSoumissionEmailOpen(true)
+        }}
+      />
+
+      {/* Soumission Lot email modal — reuses SendEmailDialog with the
+          soumission-specific endpoints. PDF + recipients regenerate
+          server-side per lot when the user sends. */}
+      {selectedId !== null && selectedSoumissionLot && (
+        <SendEmailDialog
+          open={soumissionEmailOpen}
+          onClose={() => {
+            setSoumissionEmailOpen(false)
+            setSelectedSoumissionLot(null)
+          }}
+          contextLabel={`Lot ${selectedSoumissionLot.lot} · ${selectedSoumissionLot.client_nom}`}
+          queryKey={['commande-sst-soumission-email-defaults', selectedId, selectedSoumissionLot.key]}
+          loadDefaults={() => apiFetch(
+            `/commandes-sous-traitant/${selectedId}/soumission/email-defaults?${buildSoumissionLotQuery(selectedSoumissionLot)}`,
+          )}
+          pdfUrl={`${API_URL}/commandes-sous-traitant/${selectedId}/soumission/pdf?${buildSoumissionLotQuery(selectedSoumissionLot)}`}
+          pdfAttachmentLabel={`soumission-lot-${selectedSoumissionLot.lot}.pdf`}
+          onSend={(p) =>
+            postEmail(
+              `${API_URL}/commandes-sous-traitant/${selectedId}/soumission/email`,
+              p,
+              {
+                includeAttachPdf: true,
+                extraBody: {
+                  ref_fini: selectedSoumissionLot.IDref_fini,
+                  coloris: selectedSoumissionLot.IDColoris,
+                  lot: selectedSoumissionLot.lot,
+                  commande_client: selectedSoumissionLot.IDcommande_client,
+                },
+              },
+            )
+          }
+        />
+      )}
     </>
   )
+}
+
+function buildSoumissionLotQuery(lot: EligibleLot): string {
+  return new URLSearchParams({
+    ref_fini: String(lot.IDref_fini),
+    coloris: String(lot.IDColoris),
+    lot: lot.lot,
+    commande_client: String(lot.IDcommande_client),
+  }).toString()
 }
 
 // ── Left Panel: List ───────────────────────────────────
@@ -744,8 +855,8 @@ function CommandeList({
   onSelect: (id: number) => void
   searchQuery: string
   onSearchChange: (q: string) => void
-  statusFilter: 'all' | 'en_cours' | 'terminee'
-  onStatusFilterChange: (s: 'all' | 'en_cours' | 'terminee') => void
+  statusFilter: SstPhase | 'all'
+  onStatusFilterChange: (s: SstPhase | 'all') => void
   onNew: () => void
   isEditing: boolean
   /** True while the backend has more rows behind the current cursor. */
@@ -789,17 +900,20 @@ function CommandeList({
             className="w-full h-9 pl-9 pr-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
           />
         </div>
-        <div className="flex gap-1">
+        <div className="flex flex-wrap gap-1">
           {([
-            { key: 'en_cours', label: 'En cours' },
-            { key: 'terminee', label: 'Terminées' },
-            { key: 'all', label: 'Toutes' },
+            { key: 'en_cours',    label: 'En cours' },
+            { key: 'en_controle', label: 'En contrôle' },
+            { key: 'soumis',      label: 'Soumis' },
+            { key: 'en_reprise',  label: 'En reprise' },
+            { key: 'terminee',    label: 'Terminées' },
+            { key: 'all',         label: 'Toutes' },
           ] as const).map((opt) => (
             <button
               key={opt.key}
               onClick={() => onStatusFilterChange(opt.key)}
               className={cn(
-                'flex-1 px-2 py-1 text-xs rounded-md transition-colors',
+                'px-2 py-1 text-xs rounded-md transition-colors flex-grow basis-[calc(33.333%-0.25rem)]',
                 statusFilter === opt.key
                   ? 'bg-accent text-accent-foreground shadow-sm font-medium'
                   : 'text-muted-foreground hover:bg-accent/10'
@@ -849,7 +963,7 @@ function CommandeList({
               <div className="flex items-center gap-2">
                 <Building2 className="h-4 w-4 text-muted-foreground flex-shrink-0" />
                 <span className="font-medium text-sm">N° {row.IDcommande_sous_traitant}</span>
-                <CommandeEtatBadge est_soldee={row.est_soldee} className="ml-auto" />
+                <PhasePill phase={row.phase} className="ml-auto" />
               </div>
               <p className="text-xs text-muted-foreground mt-1 truncate">{row.sous_traitant_nom || '—'}</p>
               <div className="flex items-center gap-2 mt-1 text-[11px] text-muted-foreground">
@@ -905,6 +1019,7 @@ function DetailHeader({
   commande, isLoading, isEditing,
   onStartEdit, onCancelEdit, onSave, isSaving,
   onDelete, onPrintClick, onEmailClick,
+  onSoumettreClick, soumettreEligibleCount,
 }: {
   commande: CommandeDetail | null
   isLoading: boolean
@@ -916,6 +1031,10 @@ function DetailHeader({
   onDelete: () => void
   onPrintClick: () => void
   onEmailClick: () => void
+  /** Opens the soumission flow — picker if multiple lots, email modal directly if 1. */
+  onSoumettreClick: () => void
+  /** Eligibility count from /lots-eligibles. Button is hidden when 0. */
+  soumettreEligibleCount: number
 }) {
   if (!commande && !isLoading) return null
 
@@ -973,6 +1092,17 @@ function DetailHeader({
                 <Button variant="outline" size="icon" className="h-9 w-9" title="Envoyer un email" onClick={onEmailClick}>
                   <AtSign className="h-4 w-4" />
                 </Button>
+                {soumettreEligibleCount > 0 && (
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-9 w-9"
+                    title="Soumettre au client"
+                    onClick={onSoumettreClick}
+                  >
+                    <Send className="h-4 w-4" />
+                  </Button>
+                )}
                 <Button variant="gold" size="sm" onClick={onStartEdit}>
                   <Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier
                 </Button>
@@ -985,6 +1115,66 @@ function DetailHeader({
     </div>
   )
 }
+
+// ── Soumission Lot picker ─────────────────────────────────
+// Modelled on AdressePickerDialog (line ~3494). Shown only when 2+ lots
+// are eligible — single-lot flows skip straight to the email modal.
+function SoumissionLotPicker({
+  open, lots, onClose, onSelect,
+}: {
+  open: boolean
+  lots: EligibleLot[]
+  onClose: () => void
+  onSelect: (lot: EligibleLot) => void
+}) {
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent className="max-w-lg space-y-4" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Send className="h-5 w-5 text-accent" />
+            Choisir un lot à soumettre
+          </DialogTitle>
+        </DialogHeader>
+        <div className="max-h-[60vh] overflow-y-auto space-y-2 px-1">
+          {lots.map((lot) => (
+            <button
+              key={lot.key}
+              type="button"
+              onClick={() => onSelect(lot)}
+              className="w-full text-left p-3 rounded-md border border-zinc-200 hover:border-accent hover:bg-accent/5 transition-colors"
+            >
+              <div className="flex items-baseline justify-between gap-3">
+                <div className="text-sm font-semibold text-primary truncate">
+                  Lot {lot.lot}
+                </div>
+                <div className="text-xs text-muted-foreground flex-shrink-0">
+                  {lot.client_nom}
+                </div>
+              </div>
+              <div className="text-xs text-muted-foreground mt-1">
+                {lot.ref_malterre}
+                {lot.coloris_reference ? ` · ${lot.coloris_reference}` : ''}
+              </div>
+              <div className="text-xs text-muted-foreground mt-1">
+                {lot.nb_rolls} rouleau{lot.nb_rolls > 1 ? 'x' : ''} · {fmtNum(lot.total_metrage, 1)} Ml
+              </div>
+            </button>
+          ))}
+          {lots.length === 0 && (
+            <p className="text-sm text-muted-foreground italic px-2 py-4 text-center">
+              Aucun lot éligible
+            </p>
+          )}
+        </div>
+        <div className="flex justify-end">
+          <Button variant="outline" size="sm" onClick={onClose}>Annuler</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 
 // ── Center: Detail Main ────────────────────────────────
 
@@ -1004,7 +1194,7 @@ function DetailMain({
     <div className="flex-1 flex items-center justify-center">
       <div className="text-center space-y-3">
         <div className="icon-box-gold h-16 w-16 mx-auto"><Building2 className="h-8 w-8" /></div>
-        <p className="text-muted-foreground text-sm">Sélectionnez une commande dans la liste</p>
+        <p className="text-muted-foreground text-sm">Aucune commande sélectionnée</p>
       </div>
     </div>
   )
@@ -1130,15 +1320,6 @@ function LignesSection({
     onSuccess: onMutationSuccess,
   })
 
-  const toggleLineSstatutMut = useMutation({
-    mutationFn: ({ lineId, sstatut }: { lineId: number; sstatut: string }) =>
-      apiFetch(`/commandes-sous-traitant/lignes/${lineId}`, {
-        method: 'PUT',
-        body: JSON.stringify({ sstatut }),
-      }),
-    onSuccess: onMutationSuccess,
-  })
-
   const resetLineForm = () => {
     setLineForm({ IDreference: 0, IDColoris: 0, quantite: '', prix: '', date_livraison: '' })
     setShowLineForm(false)
@@ -1233,10 +1414,6 @@ function LignesSection({
                   isDrawerOpen={piecesDrawerLineId === l.IDligne_commande_sous_traitant}
                   onEdit={() => startEditLine(l)}
                   onDelete={() => setDeleteLineConfirmId(l.IDligne_commande_sous_traitant)}
-                  onToggleSstatut={() => toggleLineSstatutMut.mutate({
-                    lineId: l.IDligne_commande_sous_traitant,
-                    sstatut: isLineDone(l.sstatut) ? SSTATUT_OPEN : SSTATUT_DONE,
-                  })}
                   onOpenDrawer={onOpenPiecesDrawer}
                 />
               )
@@ -1327,7 +1504,7 @@ function LignesSection({
 }
 
 function LineCard({
-  line, isEditing, linesLocked, isEnnoblisseur, isDrawerOpen, onEdit, onDelete, onToggleSstatut, onOpenDrawer,
+  line, isEditing, linesLocked, isEnnoblisseur, isDrawerOpen, onEdit, onDelete, onOpenDrawer,
 }: {
   line: LigneCommande
   isEditing: boolean
@@ -1336,7 +1513,6 @@ function LineCard({
   isDrawerOpen: boolean
   onEdit: () => void
   onDelete: () => void
-  onToggleSstatut: () => void
   onOpenDrawer: (lineId: number | null) => void
 }) {
   const { border, iconBg, iconColor } = lineEtatColors(line.sstatut)
@@ -1401,16 +1577,12 @@ function LineCard({
           </div>
         </div>
         <div className="flex items-center gap-1.5 flex-shrink-0">
-          <LineSstatutBadge sstatut={line.sstatut} />
+          {/* Per-line "En cours / Terminée" pill and toggle dropped — line
+              state now derives from the per-roll EtatFiniBadge surfaced
+              inside the pieces drawer. The commande header pill at the
+              top of the sidebar carries the overall phase. */}
           {isEditing && !linesLocked && (
             <div className="flex gap-0.5">
-              <Button
-                variant="ghost" size="icon" className="h-6 w-6"
-                onClick={(e) => { e.stopPropagation(); onToggleSstatut() }}
-                title={isLineDone(line.sstatut) ? 'Marquer en cours' : 'Marquer terminée'}
-              >
-                {isLineDone(line.sstatut) ? <Clock className="h-3 w-3" /> : <CheckCircle2 className="h-3 w-3" />}
-              </Button>
               {isEnnoblisseur && (
                 <Button variant="ghost" size="icon" className="h-6 w-6" onClick={(e) => { e.stopPropagation(); onEdit() }}>
                   <Pencil className="h-3 w-3" />
@@ -1805,6 +1977,12 @@ function PiecesDrawer({
   const [selectedEcruIds, setSelectedEcruIds] = useState<Set<number>>(new Set())
   const [showBatchReception, setShowBatchReception] = useState(false)
   const lastSelectedEcruIdRef = useRef<number | null>(null)
+  // Mirror of the affectés multi-select for the reception tab: lets the
+  // visiteur pick rolls currently "en reprise" (IDetat_stock_fini = 2)
+  // and re-edit them in batch via the reprise mode of BatchReceptionDialog.
+  const [selectedFiniIds, setSelectedFiniIds] = useState<Set<number>>(new Set())
+  const [showBatchReprise, setShowBatchReprise] = useState(false)
+  const lastSelectedFiniIdRef = useRef<number | null>(null)
 
   const ecruLinked = data?.ecruLinked ?? []
 
@@ -1835,6 +2013,37 @@ function PiecesDrawer({
   }, [ecruLinked])
   const ecruAvailable = data?.ecruAvailable ?? []
   const finiReceived = data?.finiReceived ?? []
+
+  // Only "En reprise" rolls are selectable for the reprendre batch.
+  const finiReprisableIds = useMemo<number[]>(
+    () => finiReceived.filter((r) => Number(r.IDetat_stock_fini) === 2).map((r) => r.IDstock_fini),
+    [finiReceived],
+  )
+
+  const handleFiniClick = useCallback((id: number, shiftKey: boolean) => {
+    const ids = finiReprisableIds
+    const anchor = lastSelectedFiniIdRef.current
+    if (shiftKey && anchor !== null && anchor !== id) {
+      const a = ids.indexOf(anchor)
+      const b = ids.indexOf(id)
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a]
+        setSelectedFiniIds((prev) => {
+          const next = new Set(prev)
+          for (let i = lo; i <= hi; i++) next.add(ids[i])
+          return next
+        })
+        return
+      }
+    }
+    setSelectedFiniIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+    lastSelectedFiniIdRef.current = id
+  }, [finiReprisableIds])
 
   // Roll-up still used by the "Affectés" section header below the tab bar.
   const totalKgAffectes = ecruLinked.reduce((s, r) => s + (Number(r.poids) || 0), 0)
@@ -1870,7 +2079,7 @@ function PiecesDrawer({
           )
         })}
         <div className="ml-auto flex items-center gap-1 pr-1">
-          {!commandeSoldee && selectedEcruIds.size > 0 && (
+          {!commandeSoldee && activeTab === 'affectes' && selectedEcruIds.size > 0 && (
             <Button
               variant="gold"
               size="sm"
@@ -1878,6 +2087,16 @@ function PiecesDrawer({
               onClick={() => setShowBatchReception(true)}
             >
               Réceptionner ({selectedEcruIds.size})
+            </Button>
+          )}
+          {!commandeSoldee && activeTab === 'reception' && selectedFiniIds.size > 0 && (
+            <Button
+              variant="gold"
+              size="sm"
+              className="h-7 px-2.5 text-[11px]"
+              onClick={() => setShowBatchReprise(true)}
+            >
+              Reprendre ({selectedFiniIds.size})
             </Button>
           )}
           <Button variant="ghost" size="icon" onClick={onClose} className="h-7 w-7" title="Fermer">
@@ -2015,14 +2234,20 @@ function PiecesDrawer({
                 <p className="text-xs text-muted-foreground italic">Aucun rouleau reçu pour le moment.</p>
               ) : (
                 <div className="space-y-1.5">
-                  {finiReceived.map((roll) => (
-                    <FiniRollRow
-                      key={roll.IDstock_fini}
-                      roll={roll}
-                      onEdit={() => setEditFiniTarget(roll)}
-                      disabled={commandeSoldee}
-                    />
-                  ))}
+                  {finiReceived.map((roll) => {
+                    const enReprise = Number(roll.IDetat_stock_fini) === 2
+                    return (
+                      <FiniRollRow
+                        key={roll.IDstock_fini}
+                        roll={roll}
+                        onEdit={() => setEditFiniTarget(roll)}
+                        disabled={commandeSoldee}
+                        selectable={!commandeSoldee && enReprise}
+                        selected={selectedFiniIds.has(roll.IDstock_fini)}
+                        onSelectToggle={(shiftKey) => handleFiniClick(roll.IDstock_fini, shiftKey ?? false)}
+                      />
+                    )
+                  })}
                 </div>
               )}
             </section>
@@ -2055,6 +2280,21 @@ function PiecesDrawer({
             setShowBatchReception(false)
             setSelectedEcruIds(new Set())
             setActiveTab('reception')
+          }}
+        />
+      )}
+      {showBatchReprise && (
+        <BatchReceptionDialog
+          mode="reprise"
+          commandeId={commandeId}
+          ligne={ligne}
+          finiRolls={finiReceived.filter((r) => selectedFiniIds.has(r.IDstock_fini))}
+          onClose={() => setShowBatchReprise(false)}
+          onSuccess={(payload) => {
+            queryClient.setQueryData(queryKey, payload)
+            onSuccess()
+            setShowBatchReprise(false)
+            setSelectedFiniIds(new Set())
           }}
         />
       )}
@@ -2319,20 +2559,42 @@ function EtatFiniBadge({ etat }: { etat: number | null | undefined }) {
 
 function FiniRollRow({
   roll, onEdit, disabled = false,
+  selectable = false, selected = false, onSelectToggle,
 }: {
   roll: StockFiniLite
   onEdit: () => void
   /** Hide the edit action when the commande is soldée — same rule as
    *  the rest of the pieces drawer: closed commandes are read-only. */
   disabled?: boolean
+  /** When true, the row gets a leading checkbox and the whole card body
+   *  toggles selection on click. Mirrors EcruRollRow — used in the
+   *  Réception tab to drive the "Reprendre X" batch flow. Currently only
+   *  set on rolls whose `IDetat_stock_fini === 2` (En reprise). */
+  selectable?: boolean
+  selected?: boolean
+  onSelectToggle?: (shiftKey?: boolean) => void
 }) {
   return (
-    <div className="group rounded-lg border border-border/60 bg-card shadow-sm p-3">
+    <div
+      onClick={selectable ? (e) => onSelectToggle?.(e.shiftKey) : undefined}
+      className={cn(
+        'group rounded-lg border bg-card shadow-sm p-3 transition-colors select-none',
+        selectable && 'cursor-pointer hover:border-accent/40',
+        selected ? 'border-accent ring-1 ring-accent/40 bg-accent/[0.03]' : 'border-border/60',
+      )}
+    >
       {/* Header row — fixed nominal height, vertically-centered badges
           and edit button. Mirrors the écru card layout so the right-side
           chrome lines up with the title + metrics block, not the centre
           of an inflated card (when notes appear below). */}
       <div className="flex items-center gap-3">
+        {selectable && (
+          <Checkbox
+            checked={selected}
+            onClick={(e) => { e.stopPropagation(); onSelectToggle?.(e.shiftKey) }}
+            className="flex-shrink-0"
+          />
+        )}
         <div className="h-10 w-10 rounded-md bg-green-500/10 flex items-center justify-center flex-shrink-0">
           <FiniRollIcon className="h-7 w-7 text-green-600" />
         </div>
@@ -2373,7 +2635,7 @@ function FiniRollRow({
             variant="ghost"
             size="icon"
             className="h-7 w-7 text-muted-foreground hover:text-accent flex-shrink-0"
-            onClick={onEdit}
+            onClick={(e) => { e.stopPropagation(); onEdit() }}
             title="Modifier les observations"
           >
             <Pencil className="h-3.5 w-3.5" />
@@ -2493,15 +2755,40 @@ interface BatchReceptionRow {
   observation_sst: string
 }
 
-function BatchReceptionDialog({
-  commandeId, ligne, ecruRolls, onClose, onSuccess,
-}: {
+type BatchReceptionProps = {
   commandeId: number
   ligne: LigneCommande
-  ecruRolls: StockEcruLite[]
   onClose: () => void
   onSuccess: (payload: PiecesPayload) => void
-}) {
+} & (
+  | { mode?: 'create'; ecruRolls: StockEcruLite[]; finiRolls?: undefined }
+  | { mode: 'reprise'; finiRolls: StockFiniLite[]; ecruRolls?: undefined }
+)
+
+function BatchReceptionDialog(props: BatchReceptionProps) {
+  const { commandeId, ligne, onClose, onSuccess } = props
+  const isReprise = props.mode === 'reprise'
+
+  // Type-narrowed locals: TS can't follow `isReprise` back to the
+  // discriminated union, so we resolve the arrays once via the mode
+  // discriminator and pass the narrowed values through the rest of the
+  // component. The "off" array is `[]` and never read.
+  const ecruRolls: StockEcruLite[] = props.mode === 'reprise' ? [] : props.ecruRolls
+  const finiRolls: StockFiniLite[] = props.mode === 'reprise' ? props.finiRolls : []
+
+  // In create mode we iterate over écru rolls (one fini row per écru); in
+  // reprise mode we iterate over the existing fini rolls and PATCH them.
+  // The wizard, sticky-lot carryover, and submit progress all key on the
+  // same "row id" (écru id for create, fini id for reprise).
+  const rolls: Array<{ id: number; numero: string | null; lot: string | null; poidsRef: number | null }> =
+    isReprise
+      ? finiRolls.map((r) => ({
+          id: r.IDstock_fini, numero: r.numero, lot: r.lot, poidsRef: Number(r.poids) || null,
+        }))
+      : ecruRolls.map((r) => ({
+          id: r.IDstock_ecru, numero: r.numero, lot: r.lot, poidsRef: Number(r.poids) || null,
+        }))
+
   // Référence fini and Magasin are no longer user-editable here; both
   // default once and apply to the whole batch. IDref_fini is taken from
   // the ennoblisseur line's target ref; IDmagasin stays 0 (server-side
@@ -2511,18 +2798,35 @@ function BatchReceptionDialog({
 
   const [rows, setRows] = useState<Record<number, BatchReceptionRow>>(() => {
     const initial: Record<number, BatchReceptionRow> = {}
-    for (const r of ecruRolls) {
-      const ecruPoids = Number(r.poids)
-      initial[r.IDstock_ecru] = {
-        lot: '',
-        // Format to 1 decimal — HFSQL stores poids as float and the
-        // ODBC bridge surfaces values like 4.800000190734863. Match the
-        // Tricobot autofill formatting so the field never shows the
-        // floating-point tail.
-        poids: ecruPoids > 0 ? ecruPoids.toFixed(1) : '',
-        metrage: '',
-        observations: '',
-        observation_sst: '',
+    if (isReprise) {
+      // Pre-fill from the existing stock_fini values — the visiteur edits
+      // them and submits, which PATCHes each row and resets the etat back
+      // to 1 (En contrôle) server-side.
+      for (const r of finiRolls) {
+        const poids = Number(r.poids)
+        const metrage = Number(r.metrage)
+        initial[r.IDstock_fini] = {
+          lot: (r.lot ?? '').trim(),
+          poids: poids > 0 ? poids.toFixed(1) : '',
+          metrage: metrage > 0 ? metrage.toFixed(1) : '',
+          observations: r.observations ?? '',
+          observation_sst: r.observation_sst ?? '',
+        }
+      }
+    } else {
+      for (const r of ecruRolls) {
+        const ecruPoids = Number(r.poids)
+        initial[r.IDstock_ecru] = {
+          lot: '',
+          // Format to 1 decimal — HFSQL stores poids as float and the
+          // ODBC bridge surfaces values like 4.800000190734863. Match the
+          // Tricobot autofill formatting so the field never shows the
+          // floating-point tail.
+          poids: ecruPoids > 0 ? ecruPoids.toFixed(1) : '',
+          metrage: '',
+          observations: '',
+          observation_sst: '',
+        }
       }
     }
     return initial
@@ -2533,7 +2837,7 @@ function BatchReceptionDialog({
   // on a fresh roll, never on one the user already touched).
   const [currentIndex, setCurrentIndex] = useState(0)
   const [visited, setVisited] = useState<Set<number>>(() => {
-    const first = ecruRolls[0]?.IDstock_ecru
+    const first = rolls[0]?.id
     return first !== undefined ? new Set([first]) : new Set()
   })
 
@@ -2548,15 +2852,15 @@ function BatchReceptionDialog({
   const [tricobotState, setTricobotState] = useState<'idle' | 'loading' | 'done'>('idle')
   const [tricobotMessage, setTricobotMessage] = useState<string | null>(null)
 
-  const current = ecruRolls[currentIndex]
-  const currentRow = current ? rows[current.IDstock_ecru] : null
+  const current = rolls[currentIndex]
+  const currentRow = current ? rows[current.id] : null
   const canPrev = currentIndex > 0
-  const canNext = currentIndex < ecruRolls.length - 1
-  const canSubmit = idRefFini > 0 && ecruRolls.length > 0 && !submitting
+  const canNext = currentIndex < rolls.length - 1
+  const canSubmit = idRefFini > 0 && rolls.length > 0 && !submitting
 
   const updateCurrent = (patch: Partial<BatchReceptionRow>) => {
     if (!current) return
-    setRows((prev) => ({ ...prev, [current.IDstock_ecru]: { ...prev[current.IDstock_ecru], ...patch } }))
+    setRows((prev) => ({ ...prev, [current.id]: { ...prev[current.id], ...patch } }))
   }
 
   // Move to a different roll index. Sticky lot carryover: if the
@@ -2564,23 +2868,23 @@ function BatchReceptionDialog({
   // value as a default. A roll that's been edited (its lot is non-empty)
   // never gets overridden — the user's typed value always wins.
   const goTo = (next: number) => {
-    if (next < 0 || next >= ecruRolls.length) return
-    const target = ecruRolls[next]
-    if (current && target.IDstock_ecru !== current.IDstock_ecru) {
+    if (next < 0 || next >= rolls.length) return
+    const target = rolls[next]
+    if (current && target.id !== current.id) {
       setRows((prev) => {
-        const carry = (prev[current.IDstock_ecru]?.lot ?? '').trim()
-        const targetLot = (prev[target.IDstock_ecru]?.lot ?? '').trim()
+        const carry = (prev[current.id]?.lot ?? '').trim()
+        const targetLot = (prev[target.id]?.lot ?? '').trim()
         if (carry.length === 0 || targetLot.length > 0) return prev
         return {
           ...prev,
-          [target.IDstock_ecru]: { ...prev[target.IDstock_ecru], lot: carry },
+          [target.id]: { ...prev[target.id], lot: carry },
         }
       })
     }
     setVisited((prev) => {
-      if (prev.has(target.IDstock_ecru)) return prev
+      if (prev.has(target.id)) return prev
       const nextSet = new Set(prev)
-      nextSet.add(target.IDstock_ecru)
+      nextSet.add(target.id)
       return nextSet
     })
     setCurrentIndex(next)
@@ -2591,7 +2895,12 @@ function BatchReceptionDialog({
   // ecru.numero`, and overwrites that écru's lot/poids/metrage/defaut.
   // The user's blue Commentaire is left untouched (it's a manual note
   // to the customer, not on the BL).
+  //
+  // Tricobot is create-only: it pulls from the ennoblisseur's incoming
+  // BL, which doesn't apply when the visiteur is just correcting values
+  // on rolls that are already in the warehouse ("reprise" flow).
   const handleTricobotClick = async () => {
+    if (isReprise) return
     if (tricobotState !== 'idle') return
     setTricobotState('loading')
     setTricobotMessage(null)
@@ -2659,31 +2968,60 @@ function BatchReceptionDialog({
     setDoneCount(0)
     let lastPayload: PiecesPayload | null = null
     try {
-      for (const r of ecruRolls) {
-        const row = rows[r.IDstock_ecru]
-        const numeroBase = (r.numero || `#${r.IDstock_ecru}`).slice(0, 20)
-        const poidsNum = Number(row.poids)
-        const metrageNum = Number(row.metrage)
-        const payload = await apiFetch<PiecesPayload>(
-          `/commandes-sous-traitant/${commandeId}/lignes/${ligne.IDligne_commande_sous_traitant}/pieces/fini`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              numero: numeroBase,
-              lot: row.lot,
-              poids: isNaN(poidsNum) ? 0 : poidsNum,
-              metrage: isNaN(metrageNum) ? 0 : metrageNum,
-              IDstock_ecru: r.IDstock_ecru,
-              IDref_fini: idRefFini,
-              IDmagasin: idMagasin || 0,
-              observations: row.observations,
-              observation_sst: row.observation_sst,
-            }),
-          },
-        )
-        lastPayload = payload
-        setDoneCount((n) => n + 1)
+      if (isReprise) {
+        // Reprise: PATCH each fini roll with the edited values. The
+        // server resets IDetat_stock_fini back to 1 (En contrôle) so the
+        // visiteur can re-validate after the correction.
+        for (const r of finiRolls) {
+          const row = rows[r.IDstock_fini]
+          const poidsNum = Number(row.poids)
+          const metrageNum = Number(row.metrage)
+          const payload = await apiFetch<PiecesPayload>(
+            `/commandes-sous-traitant/${commandeId}/lignes/${ligne.IDligne_commande_sous_traitant}/pieces/fini/${r.IDstock_fini}`,
+            {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                lot: row.lot,
+                poids: isNaN(poidsNum) ? 0 : poidsNum,
+                metrage: isNaN(metrageNum) ? 0 : metrageNum,
+                observations: row.observations,
+                observation_sst: row.observation_sst,
+                // Reset to En contrôle for re-validation.
+                IDetat_stock_fini: 1,
+              }),
+            },
+          )
+          lastPayload = payload
+          setDoneCount((n) => n + 1)
+        }
+      } else {
+        for (const r of ecruRolls) {
+          const row = rows[r.IDstock_ecru]
+          const numeroBase = (r.numero || `#${r.IDstock_ecru}`).slice(0, 20)
+          const poidsNum = Number(row.poids)
+          const metrageNum = Number(row.metrage)
+          const payload = await apiFetch<PiecesPayload>(
+            `/commandes-sous-traitant/${commandeId}/lignes/${ligne.IDligne_commande_sous_traitant}/pieces/fini`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                numero: numeroBase,
+                lot: row.lot,
+                poids: isNaN(poidsNum) ? 0 : poidsNum,
+                metrage: isNaN(metrageNum) ? 0 : metrageNum,
+                IDstock_ecru: r.IDstock_ecru,
+                IDref_fini: idRefFini,
+                IDmagasin: idMagasin || 0,
+                observations: row.observations,
+                observation_sst: row.observation_sst,
+              }),
+            },
+          )
+          lastPayload = payload
+          setDoneCount((n) => n + 1)
+        }
       }
       if (lastPayload) onSuccess(lastPayload)
     } catch (err) {
@@ -2707,10 +3045,12 @@ function BatchReceptionDialog({
           </div>
           <div className="flex-1 min-w-0">
             <h2 className="text-base font-heading font-bold tracking-tight truncate">
-              Réceptionner {ecruRolls.length} rouleau{ecruRolls.length > 1 ? 'x' : ''}
+              {isReprise
+                ? `Reprendre ${rolls.length} rouleau${rolls.length > 1 ? 'x' : ''}`
+                : `Réceptionner ${rolls.length} rouleau${rolls.length > 1 ? 'x' : ''}`}
             </h2>
             <p className="text-xs text-muted-foreground mt-0.5 tabular-nums">
-              Rouleau {currentIndex + 1} sur {ecruRolls.length}
+              Rouleau {currentIndex + 1} sur {rolls.length}
             </p>
             {!!tricobotMessage && (
               <p
@@ -2723,7 +3063,7 @@ function BatchReceptionDialog({
               </p>
             )}
           </div>
-          <button
+          {!isReprise && <button
             type="button"
             onClick={handleTricobotClick}
             disabled={tricobotState !== 'idle'}
@@ -2757,7 +3097,7 @@ function BatchReceptionDialog({
                 Tricobot
               </span>
             )}
-          </button>
+          </button>}
         </div>
 
         {/* Batch fields */}
@@ -2774,15 +3114,17 @@ function BatchReceptionDialog({
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-semibold truncate">
-                    {current.numero || `#${current.IDstock_ecru}`}
+                    {current.numero || `#${current.id}`}
                   </span>
                   {current.lot && (
-                    <span className="text-[11px] text-muted-foreground truncate">· lot écru {current.lot}</span>
+                    <span className="text-[11px] text-muted-foreground truncate">
+                      · lot {isReprise ? 'actuel' : 'écru'} {current.lot}
+                    </span>
                   )}
                 </div>
-                {Number(current.poids) > 0 && (
+                {current.poidsRef != null && current.poidsRef > 0 && (
                   <p className="text-[10px] text-muted-foreground mt-0.5 tabular-nums">
-                    Poids écru: {fmtNum(Number(current.poids), 1)} kg
+                    {isReprise ? 'Poids actuel' : 'Poids écru'}: {fmtNum(current.poidsRef, 1)} kg
                   </p>
                 )}
               </div>
@@ -2851,14 +3193,14 @@ function BatchReceptionDialog({
         <div className="flex-1 min-h-0 flex flex-col border-t mt-4 bg-zinc-100/80">
           <div className="flex-shrink-0 px-6 pt-3 pb-1.5">
             <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
-              Aperçu des {ecruRolls.length} rouleaux
+              Aperçu des {rolls.length} rouleaux
             </p>
           </div>
           <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-3 space-y-1 scrollbar-transparent">
-            {ecruRolls.map((r, i) => {
-              const row = rows[r.IDstock_ecru]
+            {rolls.map((r, i) => {
+              const row = rows[r.id]
               const isCurrent = i === currentIndex
-              const isVisited = visited.has(r.IDstock_ecru)
+              const isVisited = visited.has(r.id)
               const hasObs = (row.observations ?? '').trim().length > 0
               const hasDef = (row.observation_sst ?? '').trim().length > 0
               const hasData =
@@ -2868,7 +3210,7 @@ function BatchReceptionDialog({
                 || hasDef
               return (
                 <button
-                  key={r.IDstock_ecru}
+                  key={r.id}
                   type="button"
                   onClick={() => goTo(i)}
                   className={cn(
@@ -2888,7 +3230,7 @@ function BatchReceptionDialog({
                     {hasData && !isCurrent ? <Check className="h-3 w-3" /> : i + 1}
                   </div>
                   <span className="font-semibold truncate flex-shrink-0 max-w-[120px]">
-                    {r.numero || `#${r.IDstock_ecru}`}
+                    {r.numero || `#${r.id}`}
                   </span>
                   <div className="flex items-center gap-2 tabular-nums text-muted-foreground min-w-0 flex-1 truncate">
                     {row.lot && <span className="truncate">lot {row.lot}</span>}
@@ -2918,8 +3260,10 @@ function BatchReceptionDialog({
             <Button variant="outline" onClick={onClose} disabled={submitting}>Annuler</Button>
             <Button onClick={handleSubmit} disabled={!canSubmit}>
               {submitting
-                ? `Enregistrement... (${doneCount}/${ecruRolls.length})`
-                : `Réceptionner ${ecruRolls.length} rouleau${ecruRolls.length > 1 ? 'x' : ''}`}
+                ? `Enregistrement... (${doneCount}/${rolls.length})`
+                : isReprise
+                  ? `Reprendre ${rolls.length} rouleau${rolls.length > 1 ? 'x' : ''}`
+                  : `Réceptionner ${rolls.length} rouleau${rolls.length > 1 ? 'x' : ''}`}
             </Button>
           </div>
         </div>
@@ -3067,7 +3411,7 @@ function LineFormFields({
 
 // ── Right Panel: Sidebar with Tabs ─────────────────────
 
-type SidebarTab = 'info' | 'adresses' | 'docs'
+type SidebarTab = 'info' | 'adresses' | 'docs' | 'historique'
 
 function DetailSidebar({
   commande, isLoading, isEditing,
@@ -3121,6 +3465,7 @@ function DetailSidebar({
     { key: 'info', label: 'Info', icon: Info },
     { key: 'adresses', label: 'Adresses', icon: MapPin },
     { key: 'docs', label: 'Docs', icon: FileText },
+    { key: 'historique', label: 'Historique', icon: Clock },
   ]
 
   return (
@@ -3172,9 +3517,13 @@ function DetailSidebar({
           {activeTab === 'docs' && (
             <DocsTab commande={commande} isEditing={isEditing} />
           )}
+          {activeTab === 'historique' && (
+            <HistoriqueTab commandeId={commande.IDcommande_sous_traitant} />
+          )}
         </div>
       </div>
       <StatusFooter
+        phase={commande.phase}
         est_soldee={commande.est_soldee}
         onToggle={onToggleEtat}
         isToggling={isTogglingEtat}
@@ -3187,29 +3536,36 @@ function DetailSidebar({
 // ── Sidebar Status Footer ──────────────────────────────
 
 function StatusFooter({
-  est_soldee, onToggle, isToggling, disabled,
+  phase, est_soldee, onToggle, isToggling, disabled,
 }: {
+  /** Computed phase from the detail response. Drives the colored pill. */
+  phase: SstPhase | null | undefined
+  /** Still required: the Clôturer / Rouvrir button toggles est_soldee
+   *  directly — it remains the only write gate. */
   est_soldee: number | null
   onToggle: () => void
   isToggling: boolean
   disabled: boolean
 }) {
   const isTerminee = est_soldee === 1
-  const Icon = isTerminee ? CheckCircle2 : Clock
-  const label = isTerminee ? 'Terminée' : 'En cours'
+  const meta = SST_PHASE_META[phase ?? 'en_cours']
+  const Icon = meta.icon
   const actionLabel = isTerminee ? 'Rouvrir' : 'Clôturer'
   const ActionIcon = isTerminee ? Clock : CheckCircle2
 
+  // Footer chrome: solid band coloured by the computed phase. Phase →
+  // colour: en_cours=primary blue, en_controle=amber, soumis=violet,
+  // en_reprise=orange, terminée=success green. White text on top.
   return (
     <div
       className={cn(
         'flex-shrink-0 rounded-xl border shadow-sm overflow-hidden flex items-stretch h-11',
-        isTerminee ? 'bg-success border-success' : 'bg-primary border-primary'
+        meta.solid,
       )}
     >
       <div className="flex items-center gap-2 px-3 flex-1 text-white min-w-0">
         <Icon className="h-4 w-4 flex-shrink-0" />
-        <span className="text-sm font-bold uppercase tracking-wide truncate">{label}</span>
+        <span className="text-sm font-bold uppercase tracking-wide truncate">{meta.label}</span>
       </div>
       <button
         type="button"
@@ -3485,6 +3841,168 @@ interface GedDocument {
 interface TypeDoc {
   IDtype_doc: number
   nom: string
+}
+
+// ── Historique tab ─────────────────────────────────────
+// Activity timeline for the commande. Sourced from the legacy
+// `envoi_email` audit table — every email the company sends about a
+// commande gets a row there (one per recipient). The API groups rows
+// from the same send into one event so the timeline shows one entry
+// per real action (bon de commande sent, soumission lot sent, etc.).
+
+type HistoriqueEvent =
+  | {
+      kind: 'email'
+      id: string
+      date: string                   // "YYYY-MM-DD HH:MM:SS"
+      type_doc_id: number
+      type_doc_label: string
+      recipients: Array<{ email: string; societe: string | null }>
+      notes: string | null
+    }
+  | {
+      kind: 'reponse'
+      id: string
+      date: string                   // "YYYY-MM-DD"
+      reponse: number                // 1 = approuvé, 0 = refusé
+      lot: string
+      IDclient: number
+    }
+
+interface HistoriqueResponse {
+  events: HistoriqueEvent[]
+}
+
+// Icon + label per type_doc for email events. Type 14 (avis expédition)
+// is NOT in the server scope today (its IDreference points to
+// `expedition`, not `commande_sous_traitant`) — kept here for a future
+// wiring that walks sst lines → stock_fini → expedition.
+const HISTORIQUE_EMAIL_META: Record<number, {
+  label: string
+  icon: typeof Clock
+  accent: string
+}> = {
+  13: { label: 'Bon de commande envoyé',    icon: AtSign, accent: 'text-blue-700 bg-blue-500/10 border-blue-500/30' },
+  14: { label: 'Avis d’expédition envoyé',  icon: Truck,  accent: 'text-cyan-700 bg-cyan-500/10 border-cyan-500/30' },
+  15: { label: 'Soumission au client',      icon: Send,   accent: 'text-violet-700 bg-violet-500/10 border-violet-500/30' },
+}
+
+function HistoriqueTab({ commandeId }: { commandeId: number }) {
+  const { data, isLoading, error } = useQuery<HistoriqueResponse>({
+    queryKey: ['commande-sst-historique', commandeId],
+    queryFn: () => apiFetch(`/commandes-sous-traitant/${commandeId}/historique`),
+  })
+
+  if (isLoading) {
+    return (
+      <div className="space-y-2">
+        {[1, 2, 3].map((i) => <div key={i} className="h-16 bg-muted animate-pulse rounded-lg" />)}
+      </div>
+    )
+  }
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center py-6 text-destructive">
+        <AlertCircle className="h-6 w-6 mb-2" />
+        <p className="text-sm">Erreur de chargement de l’historique</p>
+      </div>
+    )
+  }
+  const events = data?.events ?? []
+  if (events.length === 0) {
+    return (
+      <p className="text-xs text-muted-foreground italic px-2 py-6 text-center">
+        Aucune activité pour le moment.
+      </p>
+    )
+  }
+
+  return (
+    <div className="space-y-2">
+      {events.map((evt) => evt.kind === 'email'
+        ? <EmailEventCard key={evt.id} evt={evt} />
+        : <ReponseEventCard key={evt.id} evt={evt} />
+      )}
+    </div>
+  )
+}
+
+function EmailEventCard({ evt }: { evt: Extract<HistoriqueEvent, { kind: 'email' }> }) {
+  const meta = HISTORIQUE_EMAIL_META[evt.type_doc_id]
+    ?? { label: evt.type_doc_label || `type_doc ${evt.type_doc_id}`, icon: Clock, accent: 'text-muted-foreground bg-muted border-border' }
+  const Icon = meta.icon
+  return (
+    <div className="rounded-lg border border-border/60 bg-card shadow-sm p-3">
+      <div className="flex items-start gap-2">
+        <div className={cn('h-8 w-8 rounded-md flex items-center justify-center flex-shrink-0 border', meta.accent)}>
+          <Icon className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-sm font-semibold truncate">
+              {meta.label}
+              {evt.notes && (
+                <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                  · lot {evt.notes}
+                </span>
+              )}
+            </p>
+            <span className="text-[10px] text-muted-foreground tabular-nums flex-shrink-0">
+              {formatHistoriqueDate(evt.date)}
+            </span>
+          </div>
+          {evt.recipients.length > 0 && (
+            <p className="text-xs text-muted-foreground mt-0.5 break-all">
+              {evt.recipients.map((r) => r.email).join(', ')}
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ReponseEventCard({ evt }: { evt: Extract<HistoriqueEvent, { kind: 'reponse' }> }) {
+  // reponse: 1 = approuvé (green check), 0 = refusé (red X).
+  const approved = evt.reponse === 1
+  const meta = approved
+    ? { label: 'Lot approuvé par le client',  Icon: CheckCircle2, accent: 'text-green-700 bg-green-500/10 border-green-500/30' }
+    : { label: 'Lot refusé par le client',    Icon: X,            accent: 'text-red-700 bg-red-500/10 border-red-500/30' }
+  return (
+    <div className="rounded-lg border border-border/60 bg-card shadow-sm p-3">
+      <div className="flex items-start gap-2">
+        <div className={cn('h-8 w-8 rounded-md flex items-center justify-center flex-shrink-0 border', meta.accent)}>
+          <meta.Icon className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-sm font-semibold truncate">
+              {meta.label}
+              {evt.lot && (
+                <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                  · lot {evt.lot}
+                </span>
+              )}
+            </p>
+            <span className="text-[10px] text-muted-foreground tabular-nums flex-shrink-0">
+              {formatHistoriqueDate(evt.date)}
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** "2026-03-09 14:17:36" → "09/03/2026 · 14:17"
+ *  "2025-04-16"          → "16/04/2025"          (date-only — used by reponse_soumission). */
+function formatHistoriqueDate(raw: string): string {
+  if (!raw) return '—'
+  const withTime = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/)
+  if (withTime) return `${withTime[3]}/${withTime[2]}/${withTime[1]} · ${withTime[4]}:${withTime[5]}`
+  const dateOnly = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (dateOnly) return `${dateOnly[3]}/${dateOnly[2]}/${dateOnly[1]}`
+  return raw
 }
 
 function DocsTab({ commande, isEditing }: { commande: CommandeDetail; isEditing: boolean }) {

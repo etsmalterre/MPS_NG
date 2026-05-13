@@ -58,8 +58,8 @@ MPS_NG/
 │   │       │   ├── permission-keys.ts    # PERMISSION_KEYS catalog
 │   │       │   ├── user-emails.ts        # JSON-backed per-user emails (TODO: DB)
 │   │       │   ├── gmail.ts              # Gmail API send helper (JWT + DWD)
-│   │       │   ├── pricing-sst.ts        # Ennoblisseur auto-pricing: multiplicateurMatel, calcTarifSST, recalcLignePrix (see HFSQL rules + memory project_pricing_calcultarifsst.md)
-│   │       │   └── pdf/                  # theme.ts, MalterreDocument.tsx, CommandeFournisseurPdf, DemandeEtudeColorisPdf, SoumissionPdf, FeuilleColorisPdf
+│   │       │   ├── pricing-sst.ts        # Ennoblisseur auto-pricing (see HFSQL rules)
+│   │       │   └── pdf/                  # theme.ts, MalterreDocument.tsx, CommandeFournisseurPdf, CommandeSoustraitantPdf, SoumissionLotPdf, DemandeEtudeColorisPdf, SoumissionPdf, FeuilleColorisPdf
 │   │       ├── routes/                   # entreprises, fournisseurs, references-fil, stock, commandes-fil, commandes-sous-traitant, etudes-coloris, auth, permissions, user-emails
 │   │       └── index.ts
 │   └── web/           # React frontend
@@ -67,7 +67,7 @@ MPS_NG/
 │           ├── components/
 │           │   ├── auth/         # UserPickerGate, UserPicker
 │           │   ├── email/        # SendEmailDialog (shared two-pane send dialog)
-│           │   ├── icons/        # BobineIcon, KnitIcon (Tombé Métier), FabricRollIcon (generic), FiniRollIcon + TmRollIcon (CSS-mask of public/icons/fini.png + tm.png)
+│           │   ├── icons/        # BobineIcon, KnitIcon, FabricRollIcon, FiniRollIcon, TmRollIcon
 │           │   ├── layout/       # AppShell, Sidebar, Header, MobileNav, MasterDetailLayout
 │           │   └── ui/           # Radix-based (Button has 'gold' variant)
 │           ├── config/navigation.ts      # SubMenuItem.adminOnly flag
@@ -97,7 +97,7 @@ Mirrors the legacy WinDev main menu (top → bottom):
 1. **Tableau de bord** (`/`)
 2. **Marketing** — placeholder
 3. **Clients** — Commandes, Devis, Facturation, Gestion
-4. **Sous-traitants** — **Commandes** (implemented, ennoblisseur Phase 1), Gestion
+4. **Sous-traitants** — **Commandes** (ennoblisseur; see `sous_traitants_status_model.md`), Gestion
 5. **Transferts** — placeholder
 6. **Fils** (route `/fils/*`, renamed from `/fournisseurs/*`) — Références, Stock (table-centric), Commandes, Gestion, Prévisions
 7. **Tombé Métier** — placeholder, custom `KnitIcon`
@@ -122,6 +122,7 @@ Load these on demand when working on the matching topic:
 | `claude_doc/legacy_windows.md` | All 319 windows + 49 reports |
 | `claude_doc/navigation_mapping.md` | Legacy windows → MPS_NG routes |
 | `claude_doc/business_glossary.md` | Domain vocabulary, production flow |
+| `claude_doc/sous_traitants_status_model.md` | Sst commandes computed-phase model, Soumission Lot Client flow, Historique tab, Reprise flow, type_doc codes |
 
 ## HFSQL rules (footguns — always apply)
 
@@ -140,17 +141,18 @@ Full details in `claude_doc/hfsql_odbc.md`. These are the non-negotiable rules f
 - **Reserved-word column `type` returns uppercased**: `SELECT lcs.type FROM ligne_commande_sous_traitant lcs` returns the column key as `TYPE` in the result row, not `type`. Always alias: `lcs.type AS type_kind`. Affected anywhere a `type` column exists (e.g. `ligne_commande_sous_traitant`, `ligne_commande_client`).
 - **Polymorphic `IDreference` on `ligne_commande_sous_traitant`**: same numeric ID can exist in `ref_ecru`, `ref_fini`, AND `ref_fil` — a triple-fallback lookup picks the wrong catalog. ALWAYS route by the `type` SMALLINT (aliased `type_kind`): `2 → ref_fini`, `1 → ref_fil`, `0 → ref_ecru`. Same rule for `IDColoris`: `type=2 → ref_fini_colori`, `type=0 → colori_ecru`. Reference: `commandes-sous-traitant.ts` `resolveRef` / `resolveColoris`.
 - **`IDColoris` on fini stock is `ref_fini_colori`, NOT `colori_fini`**: `colori_fini` is a junction (`IDcolori_fini`, `IDgamme_coloris`, `IDcolori_ecru`, `IDref_fini_colori`) with NO `IDColoris` column and NO `reference` column. The actual fini-coloris catalog is `ref_fini_colori` (PK `IDref_fini_colori`, label `reference`, FK `IDref_fini`) — that's what `stock_fini.IDColoris` and `ligne_commande_sous_traitant.IDColoris` reference for fini lines.
-- **Sous-traitant `commentaire` / `journal` are RTF**: stored by the legacy WinDev app as full RTF documents (`{\rtf1\ansi… ATTENTION… \par}`). Read via `stripRtf()`, write via `wrapRtf()` from `apps/api/src/lib/rtf-utils.ts` so the legacy app keeps reading. Plain-text round-trip — bold/colour formatting is lost on first edit through MPS_NG (Phase 2 will add a WYSIWYG editor).
-- **Ennoblisseur lines (sst commandes, `type=2`)**: `quantite` is **Ml**, `prix` is **€/Kg of finished fabric** — they don't multiply. € total = `Σ(stock_ecru.poids of attached rolls) × prix` (used by `SousTraitantsCommandes.tsx` `LineCard`, the list-endpoint aggregates, and the bon-de-commande PDF). `prix` is auto-computed by `apps/api/src/lib/pricing-sst.ts` (`recalcLignePrix` fires on every écru link/unlink — ports legacy `CalculTarifSST`: base from `tranche_tarif_ennoblissement` + MATEL (sst=9) / ESAT (sst=89) multipliers on Lavage (285) / BNO-PAT (302); full algo in memory `project_pricing_calcultarifsst.md`). SSTs without catalog rows keep manual entry — `auto_pricing_enabled` gates the frontend lock. Breakdown: `GET /:cId/lignes/:lId/prix-breakdown`.
+- **Sous-traitant `commentaire` / `journal` are RTF**: read via `stripRtf()`, write via `wrapRtf()` (`rtf-utils.ts`) so the legacy WinDev app keeps reading. Plain-text round-trip — formatting lost on first MPS_NG edit.
+- **Ennoblisseur lines (sst, `type=2`)**: `quantite=Ml`, `prix=€/Kg` — never multiply. € total = `Σ(stock_ecru.poids) × prix`. `prix` auto-computed by `pricing-sst.ts` (`recalcLignePrix` on every écru link/unlink; ports legacy `CalculTarifSST`). MATEL (sst=9) / ESAT (sst=89) have rendement multipliers on Lavage (285) / BNO-PAT (302). Out-of-catalog ssts keep manual entry — `auto_pricing_enabled` gates the lock. Breakdown: `GET /:cId/lignes/:lId/prix-breakdown`. Algo: memory `project_pricing_calcultarifsst.md`.
 - **`defaut_qualite` polymorphic via `Type_Reference` + `reference`**: integer discriminator (1=piece_production, 2=stock_ecru) with the parent id stringified in `reference` (varchar-typed FK). Écru defects: `WHERE Type_Reference = 2 AND reference IN ('id1','id2',...)`. Coexists with `stock_ecru.second_choix` + `observations` — rendered together in the red `RollNotes` banner. Pattern in `commandes-sous-traitant.ts` `fetchPiecesPayload`.
+- **`envoi_email.IDreference` is polymorphic by `IDtype_doc`**: `13/15` → `commande_sous_traitant`, `14` → `expedition`, `27` → étude soumission. **Never** query without an `IDtype_doc IN (...)` whitelist — sst and expedition IDs collide. Sst-soumission convention: `IDtype_doc=15`, `notes=lot id`. Detail in `claude_doc/sous_traitants_status_model.md`.
 
 **Connection**: `DRIVER={HFSQL};Server Name=localhost;Server Port=4900;Database=MPS;UID=Admin;PWD=;`
 
 ## React / frontend rules
 
-- **Hooks before early returns**: all `useState`/`useMutation`/`useMemo`/`useQuery` must come before any conditional `return`. Violating this crashes production builds (minified error #310).
+- **Hooks before early returns**: all `use*` hooks must come before any conditional `return` — violating this crashes production builds (minified React error #310).
 - **Shared `apiFetch`**: all fetch calls go through `apps/web/src/lib/api.ts` (sets `credentials: 'include'` for cookie auth). **Never duplicate per page** — the cookie won't be sent without `credentials: 'include'`.
-- **Service Worker denylist**: the PWA service worker has a `navigateFallbackDenylist` for `/api/`. Never remove — without it, the SW intercepts iframe/fetch navigations to `/api/` and serves `index.html`, breaking React Router.
+- **SW denylist for `/api/`**: the PWA SW has `navigateFallbackDenylist` for `/api/`. Never remove — without it, the SW intercepts `/api/` navigations and serves `index.html`, breaking React Router.
 - **Modifier button = `variant="gold"`**: the view-mode "Modifier" CTA on every detail screen MUST use `<Button variant="gold">`. Never `outline` or `default`. Canonical "enter edit mode" affordance.
 - **Stale `.js` build artifacts**: `apps/web/src/**/*.js` is gitignored. If an accidental `tsc -b` creates `.js` alongside `.tsx`, Vite resolves the `.js` first and serves stale code — delete the files AND restart the Vite dev process (deleting `node_modules/.vite` is not enough). Symptom: `404` on a `*.js` file under `/src/pages/`.
 - **Boolean rendering**: because HFSQL returns `0`/`1`, always `!!value && <JSX/>` — bare `value && …` renders `0` as text.

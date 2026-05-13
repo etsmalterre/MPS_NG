@@ -32,6 +32,10 @@ import {
   CommandeSoustraitantPdf,
   type CommandeSoustraitantPdfData,
 } from '../lib/pdf/CommandeSoustraitantPdf.js'
+import {
+  SoumissionLotPdf,
+  type SoumissionLotPdfData,
+} from '../lib/pdf/SoumissionLotPdf.js'
 import { sendMail } from '../lib/gmail.js'
 import { getUserEmail } from '../lib/user-emails.js'
 import { stripRtf, wrapRtf } from '../lib/rtf-utils.js'
@@ -391,8 +395,85 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
 
     const whereParts: string[] = []
     if (!isNaN(stFilter)) whereParts.push(`cst.IDsous_traitant = ${stFilter}`)
-    if (statusFilter === 'en_cours') whereParts.push(`cst.est_soldee = 0`)
-    else if (statusFilter === 'terminee') whereParts.push(`cst.est_soldee = 1`)
+
+    // Status filter — accepts both the legacy binary filter
+    // ('en_cours' / 'terminee') and the new richer phase filters
+    // ('en_controle' / 'soumis' / 'en_reprise'). Terminée is a pure
+    // est_soldee=1 query; the other four are sub-divisions of
+    // est_soldee=0 that we pre-resolve via signal sets so the SQL can
+    // narrow to IN (...) and infinite-scroll pagination still works.
+    const SUB_PHASES: SstPhase[] = ['en_cours', 'en_controle', 'soumis', 'en_reprise']
+    if (statusFilter === 'terminee') {
+      whereParts.push(`cst.est_soldee = 1`)
+    } else if (SUB_PHASES.includes(statusFilter as SstPhase)) {
+      whereParts.push(`cst.est_soldee = 0`)
+      // Resolve the three signal ID sets — scoped to open commandes for
+      // efficiency. We compute the phase priority (reprise > soumis >
+      // en_controle > en_cours) by set subtraction.
+      const [repriseRows, soumisRows, receptionRows] = await Promise.all([
+        query<{ IDcommande_sous_traitant: number }>(
+          `SELECT DISTINCT lcs.IDcommande_sous_traitant
+           FROM stock_fini sf
+           JOIN ligne_commande_sous_traitant lcs
+             ON lcs.IDligne_commande_sous_traitant = sf.IDref_commande_source
+           JOIN commande_sous_traitant cst
+             ON cst.IDcommande_sous_traitant = lcs.IDcommande_sous_traitant
+           WHERE sf.IDetat_stock_fini = 2 AND cst.est_soldee = 0`,
+        ),
+        query<{ IDreference: number }>(
+          `SELECT DISTINCT ee.IDreference
+           FROM envoi_email ee
+           JOIN commande_sous_traitant cst
+             ON cst.IDcommande_sous_traitant = ee.IDreference
+           WHERE ee.IDtype_doc = ${TYPE_DOC_SOUMISSION_LOT_CLIENT}
+             AND (ee.invalidé = 0 OR ee.invalidé IS NULL)
+             AND cst.est_soldee = 0`,
+        ),
+        query<{ IDcommande_sous_traitant: number }>(
+          `SELECT DISTINCT lcs.IDcommande_sous_traitant
+           FROM stock_fini sf
+           JOIN ligne_commande_sous_traitant lcs
+             ON lcs.IDligne_commande_sous_traitant = sf.IDref_commande_source
+           JOIN commande_sous_traitant cst
+             ON cst.IDcommande_sous_traitant = lcs.IDcommande_sous_traitant
+           WHERE cst.est_soldee = 0`,
+        ),
+      ])
+      const repriseSet = new Set(repriseRows.map((r) => Number(r.IDcommande_sous_traitant)))
+      const soumisSetRaw = new Set(soumisRows.map((r) => Number(r.IDreference)))
+      const receptionSetRaw = new Set(receptionRows.map((r) => Number(r.IDcommande_sous_traitant)))
+      // Priority-gated sets (each phase excludes higher-priority ones).
+      const soumisSet = new Set(Array.from(soumisSetRaw).filter((id) => !repriseSet.has(id)))
+      const controleSet = new Set(
+        Array.from(receptionSetRaw).filter((id) => !repriseSet.has(id) && !soumisSet.has(id)),
+      )
+      const excludeFromEnCours = new Set<number>([
+        ...repriseSet, ...soumisSet, ...controleSet,
+      ])
+
+      const pickSet = (s: Set<number>): string | null => {
+        if (s.size === 0) return null
+        return Array.from(s).join(',')
+      }
+      if (statusFilter === 'en_reprise') {
+        const list = pickSet(repriseSet)
+        if (!list) { res.json([]); return }
+        whereParts.push(`cst.IDcommande_sous_traitant IN (${list})`)
+      } else if (statusFilter === 'soumis') {
+        const list = pickSet(soumisSet)
+        if (!list) { res.json([]); return }
+        whereParts.push(`cst.IDcommande_sous_traitant IN (${list})`)
+      } else if (statusFilter === 'en_controle') {
+        const list = pickSet(controleSet)
+        if (!list) { res.json([]); return }
+        whereParts.push(`cst.IDcommande_sous_traitant IN (${list})`)
+      } else if (statusFilter === 'en_cours') {
+        // En cours = open AND has no signal yet (no rolls, no soumission, no reprise).
+        if (excludeFromEnCours.size > 0) {
+          whereParts.push(`cst.IDcommande_sous_traitant NOT IN (${Array.from(excludeFromEnCours).join(',')})`)
+        }
+      }
+    }
     if (!isSearching && beforeId !== null) whereParts.push(`cst.IDcommande_sous_traitant < ${beforeId}`)
 
     if (isSearching && hits) {
@@ -529,6 +610,17 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
       }
     }
 
+    // Compute the derived phase per returned row in one batched pass so
+    // the frontend can render the new colored pill without an extra
+    // round-trip. Phase order: terminée > en_reprise > soumis >
+    // en_controle > en_cours (see computePhasesBatch).
+    const phaseMap = await computePhasesBatch(
+      commandes.map((c: any) => ({
+        id: Number(c.IDcommande_sous_traitant),
+        est_soldee: Number(c.est_soldee) || 0,
+      })),
+    )
+
     const result = commandes.map((c: any) => {
       const totals = totalsMap.get(Number(c.IDcommande_sous_traitant)) ?? {
         total_eur: 0,
@@ -537,10 +629,12 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
         earliest_delivery: null,
       }
       const sst = stInfo.get(Number(c.IDsous_traitant))
+      const cid = Number(c.IDcommande_sous_traitant)
       return {
         ...c,
         sous_traitant_nom: sst?.nom ?? '',
         sous_traitant_type: sst?.type ?? null,
+        phase: phaseMap.get(cid) ?? 'en_cours',
         ...totals,
       }
     })
@@ -804,6 +898,7 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
     // keep manual prix entry. The flag is per-commande, not per-line,
     // because IDsous_traitant is set once at commande creation.
     const autoPricingEnabled = await hasTariffData(Number(header.IDsous_traitant) || 0)
+    const phase = await computePhase(id, Number(header.est_soldee) || 0)
 
     res.json({
       ...header,
@@ -815,6 +910,7 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
       adresse_livraison: fixedAdresseLiv[0] ?? null,
       lignes: lignesEnriched,
       auto_pricing_enabled: autoPricingEnabled,
+      phase,
     })
   } catch (err) {
     console.error('Error fetching commande-sous-traitant detail:', err)
@@ -868,7 +964,7 @@ function cleanAddress(a: any | null) {
   }
 }
 
-async function buildCommandePdfData(id: number): Promise<CommandeSoustraitantPdfData | null> {
+export async function buildCommandePdfData(id: number): Promise<CommandeSoustraitantPdfData | null> {
   const rows = await query<CommandeSousTraitantHeader>(
     `SELECT * FROM commande_sous_traitant WHERE IDcommande_sous_traitant = ${id}`,
   )
@@ -943,13 +1039,36 @@ async function buildCommandePdfData(id: number): Promise<CommandeSoustraitantPdf
   const filMap = new Map<number, string>()
   const colorisFiniMap = new Map<number, string>()
   const colorisEcruMap = new Map<number, string>()
+  // Per-fini extras for the PDF: cosmetic + technical specs + IDref_ecru
+  // pointer so we can pull the "article initial" block (designation +
+  // composition) once we know which ref_ecru each line maps to.
+  interface FiniExtra {
+    designation: string | null
+    conditionnement: string | null
+    poids_Moy: number | null
+    laizeHT_Moy: number | null
+    rendement: number | null
+    IDref_ecru: number
+  }
+  const finiExtrasMap = new Map<number, FiniExtra>()
   if (refIds.length > 0) {
     const [ecru, fini, fil] = await Promise.all([
       query<{ IDref_ecru: number; reference: string | null }>(
         `SELECT IDref_ecru, reference FROM ref_ecru WHERE IDref_ecru IN (${refIds.join(',')})`,
       ),
-      query<{ IDref_fini: number; reference: string | null }>(
-        `SELECT IDref_fini, reference FROM ref_fini WHERE IDref_fini IN (${refIds.join(',')})`,
+      query<{
+        IDref_fini: number
+        reference: string | null
+        designation: string | null
+        conditionnement: string | null
+        poids_Moy: number | null
+        laizeHT_Moy: number | null
+        rendement: number | null
+        IDref_ecru: number | null
+      }>(
+        `SELECT IDref_fini, reference, designation, conditionnement,
+                poids_Moy, laizeHT_Moy, rendement, IDref_ecru
+         FROM ref_fini WHERE IDref_fini IN (${refIds.join(',')})`,
       ),
       query<{ IDref_fil: number; reference: string | null }>(
         `SELECT IDref_fil, reference FROM ref_fil WHERE IDref_fil IN (${refIds.join(',')})`,
@@ -957,10 +1076,115 @@ async function buildCommandePdfData(id: number): Promise<CommandeSoustraitantPdf
     ])
     for (const r of await fixEncoding(ecru, 'ref_ecru', 'IDref_ecru', ['reference']))
       ecruMap.set(r.IDref_ecru, r.reference ?? '')
-    for (const r of await fixEncoding(fini, 'ref_fini', 'IDref_fini', ['reference']))
+    for (const r of await fixEncoding(fini, 'ref_fini', 'IDref_fini', ['reference', 'designation', 'conditionnement'])) {
       finiMap.set(r.IDref_fini, r.reference ?? '')
+      finiExtrasMap.set(r.IDref_fini, {
+        designation: (r.designation ?? null) || null,
+        conditionnement: (r.conditionnement ?? null) || null,
+        poids_Moy: r.poids_Moy == null ? null : Number(r.poids_Moy),
+        laizeHT_Moy: r.laizeHT_Moy == null ? null : Number(r.laizeHT_Moy),
+        rendement: r.rendement == null ? null : Number(r.rendement),
+        IDref_ecru: Number(r.IDref_ecru) || 0,
+      })
+    }
     for (const r of await fixEncoding(fil, 'ref_fil', 'IDref_fil', ['reference']))
       filMap.set(r.IDref_fil, r.reference ?? '')
+  }
+
+  // Per-fini treatment list. Single batch query; we group by IDref_fini and
+  // preserve traitement.ordre. Drives the "Préfixation - Adoucissage - Rame"
+  // subscript line in the PDF.
+  const treatmentsByFini = new Map<number, string[]>()
+  if (refIds.length > 0) {
+    const trtRows = await query<{ IDref_fini: number; IDtraitement: number; designation: string | null; ordre: number | null }>(
+      `SELECT trf.IDref_fini, t.IDtraitement, t.designation, t.ordre
+       FROM traitement_ref_fini trf
+       JOIN traitement t ON t.IDtraitement = trf.IDtraitement
+       WHERE trf.IDref_fini IN (${refIds.join(',')})
+         AND (t.is_deleted = 0 OR t.is_deleted IS NULL)`,
+    )
+    const trtFixed = await fixEncoding(trtRows, 'traitement', 'IDtraitement', ['designation'])
+    interface TrtEntry { ordre: number; designation: string }
+    const buckets = new Map<number, TrtEntry[]>()
+    for (const r of trtFixed as any[]) {
+      const fid = Number(r.IDref_fini) || 0
+      const designation = (r.designation ?? '').trim()
+      if (fid === 0 || !designation) continue
+      const arr = buckets.get(fid) ?? []
+      arr.push({ ordre: Number(r.ordre) || 0, designation })
+      buckets.set(fid, arr)
+    }
+    for (const [fid, arr] of buckets) {
+      arr.sort((a, b) => a.ordre - b.ordre)
+      treatmentsByFini.set(fid, arr.map((e) => e.designation))
+    }
+  }
+
+  // ref_ecru extras (designation + composition) keyed by IDref_ecru. We
+  // gather IDs from both directly-referenced écru lines (type=0) and the
+  // IDref_ecru pointer on each fini we just fetched.
+  interface EcruExtra {
+    reference: string | null
+    designation: string | null
+    composition: string | null
+  }
+  const ecruExtrasMap = new Map<number, EcruExtra>()
+  const ecruExtraIds = new Set<number>()
+  for (const extra of finiExtrasMap.values()) {
+    if (extra.IDref_ecru > 0) ecruExtraIds.add(extra.IDref_ecru)
+  }
+  for (const l of fixedLignes) {
+    const tk = Number((l as any).type_kind) || 0
+    const rid = Number(l.IDreference) || 0
+    if (tk === 0 && rid > 0) ecruExtraIds.add(rid)
+  }
+  if (ecruExtraIds.size > 0) {
+    const ecruExtraRows = await query<{ IDref_ecru: number; reference: string | null; designation: string | null; composition: string | null }>(
+      `SELECT IDref_ecru, reference, designation, composition FROM ref_ecru
+       WHERE IDref_ecru IN (${Array.from(ecruExtraIds).join(',')})`,
+    )
+    const fixedEcru = await fixEncoding(ecruExtraRows, 'ref_ecru', 'IDref_ecru', ['reference', 'designation', 'composition'])
+    for (const r of fixedEcru as any[]) {
+      ecruExtrasMap.set(Number(r.IDref_ecru), {
+        reference: (r.reference ?? null) || null,
+        designation: (r.designation ?? null) || null,
+        composition: (r.composition ?? null) || null,
+      })
+    }
+  }
+
+  // Attached écru rolls per line — Stock à mettre en oeuvre. Single batch
+  // SELECT scoped to the lines on this commande; group by line id.
+  const piecesByLine = new Map<number, Array<{ numero: string | null; poids_kg: number | null; metrage_m: number | null; observations: string | null }>>()
+  if (lineIdsForKg.length > 0) {
+    const pieceRows = await query<{
+      IDref_commande_affectation: number
+      numero: string | null
+      lot: string | null
+      poids: number | null
+      metrage: number | null
+      observations: string | null
+    }>(
+      `SELECT IDref_commande_affectation, numero, lot, poids, metrage, observations
+       FROM stock_ecru
+       WHERE IDref_commande_affectation IN (${lineIdsForKg.join(',')})
+       ORDER BY numero, lot`,
+    )
+    const piecesFixed = await fixEncoding(pieceRows, 'stock_ecru', 'IDstock_ecru', ['numero', 'lot', 'observations'])
+    for (const p of piecesFixed as any[]) {
+      const lid = Number(p.IDref_commande_affectation) || 0
+      if (lid === 0) continue
+      const arr = piecesByLine.get(lid) ?? []
+      const numero = (p.numero ?? '').toString().trim() || null
+      const obs = (p.observations ?? null) ? String(p.observations).trim() || null : null
+      arr.push({
+        numero,
+        poids_kg: p.poids == null ? null : Number(p.poids),
+        metrage_m: p.metrage == null ? null : Number(p.metrage),
+        observations: obs,
+      })
+      piecesByLine.set(lid, arr)
+    }
   }
   function resolveRef(IDref: number, typeKind: number): string {
     if (IDref <= 0) return ''
@@ -1018,17 +1242,60 @@ async function buildCommandePdfData(id: number): Promise<CommandeSoustraitantPdf
       const dl = formatHfsqlDateFr(l.date_livraison) || null
       const ddRaw = typeof l.date_delai === 'string' ? l.date_delai : ''
       const dd = formatHfsqlDateFr(ddRaw) || null
+
+      // Pull the fini extras (only meaningful for type=2 ennoblisseur
+      // lines, but we attempt for all and the maps just miss for non-fini).
+      const finiExtra = typeKind === 2 ? finiExtrasMap.get(refId) : null
+
+      // Resolve the écru pointed to by the fini (article initial). For
+      // ecru lines (type=0), the line's own IDreference IS the écru.
+      const ecruId = finiExtra?.IDref_ecru || (typeKind === 0 ? refId : 0)
+      const ecruExtra = ecruId > 0 ? ecruExtrasMap.get(ecruId) : null
+
       return {
         ref_label: resolveRef(refId, typeKind) || null,
         colori_reference: resolveColoris(colId, typeKind) || null,
+        ref_designation: finiExtra?.designation ?? null,
+        ref_presentation: derivePresentation(finiExtra?.conditionnement ?? null),
+        traitements: treatmentsByFini.get(refId) ?? [],
+        poids_gm2: finiExtra?.poids_Moy ?? null,
+        laize_cm: finiExtra?.laizeHT_Moy ?? null,
+        rendement_ml_kg: finiExtra?.rendement ?? null,
+        ecru_label: buildEcruLabel(ecruExtra),
         quantite: l.quantite == null ? null : Number(l.quantite),
         prix: l.prix == null ? null : Number(l.prix),
         total_kg_ecru_lie: kgByLine.get(lid) ?? 0,
         date_livraison: dl,
         date_delai: dd && dl && dd !== dl ? dd : null,
+        pieces: piecesByLine.get(lid) ?? [],
       }
     }),
   }
+}
+
+// "OUVERT AU LARGE" / "TUBULAIRE" / "PLIÉ" distilled from the long
+// ref_fini.conditionnement free-text (multi-line description). Returns
+// null when no recognized keyword is present so the PDF skips the row
+// entirely.
+function derivePresentation(conditionnement: string | null): string | null {
+  if (!conditionnement) return null
+  const s = conditionnement.toLowerCase()
+  if (s.includes('au large')) return 'OUVERT AU LARGE'
+  if (s.includes('tubulaire')) return 'TUBULAIRE'
+  if (s.includes('plié') || s.includes('plie ')) return 'PLIÉ'
+  return null
+}
+
+function buildEcruLabel(e: { reference: string | null; designation: string | null; composition: string | null } | null | undefined): string | null {
+  if (!e) return null
+  const parts: string[] = []
+  if (e.reference) parts.push(e.reference)
+  // The legacy report renders "ARTICLE INITIAL : DF85/55 - ecru : <desc>" —
+  // we keep the "ecru" hint inline so the bilingual row reads cleanly.
+  if (e.designation) parts.push(`écru : ${e.designation}`)
+  else parts.push('écru')
+  if (e.composition) parts.push(e.composition)
+  return parts.join(' — ')
 }
 
 async function renderCommandePdfBuffer(data: CommandeSoustraitantPdfData): Promise<Buffer> {
@@ -1245,6 +1512,924 @@ commandesSousTraitantRouter.post('/:id/email', async (req: Request, res: Respons
   }
 })
 
+// ── Computed phase — replaces the binary "en cours / terminée" pill ───
+//
+// The legacy header status (`est_soldee` 0/1) only tells us whether the
+// commande is open or closed. The actual workflow phase is much richer —
+// the operator wants to see "Soumis au client" / "En reprise" / "En
+// contrôle" / "En cours" at a glance. We derive that phase on read from:
+//
+//   - `est_soldee`                   → "terminée" (overrides everything)
+//   - `stock_fini.IDetat_stock_fini` → "en reprise" / "en contrôle"
+//   - `envoi_email.IDtype_doc=28`    → "soumis au client"
+//
+// Priority (top-down, first match wins): terminée > en_reprise > soumis
+// > en_controle > en_cours. The phase is informational only — `est_soldee`
+// remains the sole write gate (`refuseIfTerminee` is unchanged).
+
+export type SstPhase = 'en_cours' | 'en_controle' | 'soumis' | 'en_reprise' | 'terminee'
+
+/** Compute the phase for a single commande. Used by the detail endpoint. */
+async function computePhase(commandeId: number, est_soldee: number): Promise<SstPhase> {
+  if (est_soldee === 1) return 'terminee'
+
+  // Reprise — any received roll currently flagged for redo.
+  const reprise = await query<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM stock_fini sf
+     JOIN ligne_commande_sous_traitant lcs
+       ON lcs.IDligne_commande_sous_traitant = sf.IDref_commande_source
+     WHERE lcs.IDcommande_sous_traitant = ${commandeId}
+       AND sf.IDetat_stock_fini = 2`,
+  )
+  if (Number(reprise[0]?.n) > 0) return 'en_reprise'
+
+  // Soumis au client — at least one envoi_email row was logged for this
+  // commande (TYPE_DOC_SOUMISSION_LOT_CLIENT = 15).
+  const soumis = await query<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM envoi_email
+     WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION_LOT_CLIENT}
+       AND IDreference = ${commandeId}
+       AND (invalidé = 0 OR invalidé IS NULL)`,
+  )
+  if (Number(soumis[0]?.n) > 0) return 'soumis'
+
+  // En contrôle — at least one roll has been received.
+  const reception = await query<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM stock_fini sf
+     JOIN ligne_commande_sous_traitant lcs
+       ON lcs.IDligne_commande_sous_traitant = sf.IDref_commande_source
+     WHERE lcs.IDcommande_sous_traitant = ${commandeId}`,
+  )
+  if (Number(reception[0]?.n) > 0) return 'en_controle'
+
+  return 'en_cours'
+}
+
+/** Batched variant for the list endpoint — runs three flat IN-queries
+ *  and merges signals in JS. Returns a Map<commandeId, phase>. */
+async function computePhasesBatch(
+  rows: Array<{ id: number; est_soldee: number }>,
+): Promise<Map<number, SstPhase>> {
+  const out = new Map<number, SstPhase>()
+  if (rows.length === 0) return out
+
+  const openIds: number[] = []
+  for (const r of rows) {
+    if (r.est_soldee === 1) {
+      out.set(r.id, 'terminee')
+    } else {
+      openIds.push(r.id)
+    }
+  }
+  if (openIds.length === 0) return out
+
+  const idList = openIds.join(',')
+
+  // 1) Reprise — group reprise rolls by commande.
+  const repriseRows = await query<{ IDcommande_sous_traitant: number }>(
+    `SELECT DISTINCT lcs.IDcommande_sous_traitant
+     FROM stock_fini sf
+     JOIN ligne_commande_sous_traitant lcs
+       ON lcs.IDligne_commande_sous_traitant = sf.IDref_commande_source
+     WHERE lcs.IDcommande_sous_traitant IN (${idList})
+       AND sf.IDetat_stock_fini = 2`,
+  )
+  const repriseSet = new Set(repriseRows.map((r) => Number(r.IDcommande_sous_traitant)))
+
+  // 2) Soumis au client.
+  const soumisRows = await query<{ IDreference: number }>(
+    `SELECT DISTINCT IDreference FROM envoi_email
+     WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION_LOT_CLIENT}
+       AND IDreference IN (${idList})
+       AND (invalidé = 0 OR invalidé IS NULL)`,
+  )
+  const soumisSet = new Set(soumisRows.map((r) => Number(r.IDreference)))
+
+  // 3) Any reception at all.
+  const receptionRows = await query<{ IDcommande_sous_traitant: number }>(
+    `SELECT DISTINCT lcs.IDcommande_sous_traitant
+     FROM stock_fini sf
+     JOIN ligne_commande_sous_traitant lcs
+       ON lcs.IDligne_commande_sous_traitant = sf.IDref_commande_source
+     WHERE lcs.IDcommande_sous_traitant IN (${idList})`,
+  )
+  const receptionSet = new Set(receptionRows.map((r) => Number(r.IDcommande_sous_traitant)))
+
+  for (const id of openIds) {
+    if (repriseSet.has(id)) out.set(id, 'en_reprise')
+    else if (soumisSet.has(id)) out.set(id, 'soumis')
+    else if (receptionSet.has(id)) out.set(id, 'en_controle')
+    else out.set(id, 'en_cours')
+  }
+  return out
+}
+
+// ── envoi_email logging — shared with the étude-coloris path ─────
+//
+// `envoi_email` is the legacy WinDev audit log of every recipient an email
+// has been sent to. We use it server-side as the canonical "this commande
+// has been soumis to the client" signal — the new computed phase reads
+// from this table.
+//
+// The `IDtype_doc` values are a small global enum keyed off the legacy
+// `type_doc` lookup. The sst Soumission-Lot-Client flow uses `15`
+// (`type_doc.nom = 'soumission'`) to stay legacy-compatible — the
+// WinDev app has been logging sst soumissions with this code since
+// 2021 (3 279 rows of type=15 all reference a real commande_sous_-
+// traitant, with `notes` carrying the lot identifier like "MA105741").
+// We mirror the same convention on send so the legacy app can read our
+// outgoing soumissions out of envoi_email alongside its own.
+const TYPE_DOC_SOUMISSION_LOT_CLIENT = 15
+
+function nowHfsqlDatetime(): string {
+  const d = new Date()
+  const pad = (n: number, w = 2) => String(n).padStart(w, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
+    + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.`
+    + `${pad(d.getMilliseconds(), 3)}`
+}
+
+/** Insert one envoi_email row per recipient. Mirrors the helper in
+ *  `etudes-coloris.ts` plus an optional `notes` field — the legacy
+ *  sst-soumission convention stores the lot identifier there
+ *  ("MA105741", "MA107896 (reprise)", …) so the WinDev app surfaces
+ *  it in its UI. Failures are swallowed (logged) so the send response
+ *  path isn't affected. */
+async function logEnvoiEmails(
+  idTypeDoc: number,
+  idReference: number,
+  recipients: string[],
+  societe: string,
+  notes: string = '',
+): Promise<void> {
+  if (recipients.length === 0) return
+  const ts = nowHfsqlDatetime()
+  const soc = esc(societe || '')
+  const notesEsc = esc(notes || '')
+  for (const raw of recipients) {
+    const addr = esc(String(raw).trim())
+    if (!addr) continue
+    try {
+      await query(
+        `INSERT INTO envoi_email
+           (DATE, adresse, société, IDreference, invalidé, notes, IDtype_doc)
+         VALUES
+           ('${ts}', '${addr}', '${soc}', ${idReference}, 0, '${notesEsc}', ${idTypeDoc})`,
+      )
+    } catch (e) {
+      console.error(`envoi_email log failed (${idTypeDoc}/${idReference}/${addr}):`, (e as Error).message)
+    }
+  }
+}
+
+// ── Soumission Lot — feature ─────────────────────────────
+//
+// Eligibility: a sous-traitant commande can be "soumis au client" when at
+// least one received fini roll (stock_fini back-linked via
+// IDref_commande_source) is reserved to a client (stock_fini.IDligne_-
+// commande_client → ligne_commande_client → commande_client.IDclient)
+// AND that (IDclient, IDref_fini) tuple has a designation_client row with
+// soumettre = 1 AND archivé = 0.
+//
+// Lot key: a single "lot" for the picker is the tuple
+//   (IDref_fini, IDColoris, lot string, IDcommande_client)
+// — we include IDcommande_client because the same physical batch can be
+// split across distinct client orders and the soumission PDF has a single
+// "N° Commande" cell.
+
+interface EligibleLot {
+  // Composite key parts (drive the PDF/email URL)
+  IDref_fini: number
+  IDColoris: number
+  lot: string
+  IDcommande_client: number
+  // Resolved display fields
+  IDclient: number
+  client_nom: string
+  ref_malterre: string         // ref_fini.reference
+  client_designation: string   // designation_client.designation (= ref client)
+  coloris_reference: string
+  nb_rolls: number
+  total_metrage: number
+  // React-friendly key
+  key: string
+}
+
+export async function findEligibleLots(commandeId: number): Promise<EligibleLot[]> {
+  // 1) Lines belonging to this commande_sous_traitant.
+  const lineRows = await query<{ IDligne_commande_sous_traitant: number }>(
+    `SELECT IDligne_commande_sous_traitant FROM ligne_commande_sous_traitant
+     WHERE IDcommande_sous_traitant = ${commandeId}`,
+  )
+  const lineIds = lineRows.map((r) => Number(r.IDligne_commande_sous_traitant)).filter((x) => x > 0)
+  if (lineIds.length === 0) return []
+
+  // 2) Fini rolls produced from those lines, with the client-order link.
+  const finiRows = await query<{
+    IDref_fini: number
+    IDColoris: number
+    lot: string | null
+    IDligne_commande_client: number
+    metrage: number | null
+  }>(
+    `SELECT IDref_fini, IDColoris, lot, IDligne_commande_client, metrage
+     FROM stock_fini
+     WHERE IDref_commande_source IN (${lineIds.join(',')})
+       AND IDligne_commande_client > 0`,
+  )
+  const fixedFini = await fixEncoding(finiRows as any[], 'stock_fini', 'IDstock_fini', ['lot'])
+  if (fixedFini.length === 0) return []
+
+  // 3) Resolve IDligne_commande_client → IDcommande_client.
+  const lccIds = Array.from(new Set(fixedFini.map((r: any) => n(r.IDligne_commande_client))))
+    .filter((x) => x > 0)
+  const lccToCc = new Map<number, number>()
+  if (lccIds.length > 0) {
+    const lccRows = await query<{ IDligne_commande_client: number; IDcommande_client: number }>(
+      `SELECT IDligne_commande_client, IDcommande_client FROM ligne_commande_client
+       WHERE IDligne_commande_client IN (${lccIds.join(',')})`,
+    )
+    for (const r of lccRows) lccToCc.set(n(r.IDligne_commande_client), n(r.IDcommande_client))
+  }
+
+  // 4) Resolve IDcommande_client → IDclient.
+  const ccIds = Array.from(new Set(Array.from(lccToCc.values()))).filter((x) => x > 0)
+  const ccToClient = new Map<number, number>()
+  if (ccIds.length > 0) {
+    const ccRows = await query<{ IDcommande_client: number; IDclient: number }>(
+      `SELECT IDcommande_client, IDclient FROM commande_client
+       WHERE IDcommande_client IN (${ccIds.join(',')})`,
+    )
+    for (const r of ccRows) ccToClient.set(n(r.IDcommande_client), n(r.IDclient))
+  }
+
+  // 5) Group rolls by (IDref_fini, IDColoris, lot, IDcommande_client) and
+  //    aggregate nb_rolls + total_metrage. Skip rolls whose lot string is
+  //    empty (defensive — those would group together meaninglessly).
+  interface GroupAcc {
+    IDref_fini: number
+    IDColoris: number
+    lot: string
+    IDcommande_client: number
+    IDclient: number
+    nb_rolls: number
+    total_metrage: number
+  }
+  const groups = new Map<string, GroupAcc>()
+  for (const r of fixedFini as any[]) {
+    const lot = (r.lot ?? '').toString().trim()
+    if (!lot) continue
+    const lccId = n(r.IDligne_commande_client)
+    const ccId = lccToCc.get(lccId) ?? 0
+    const clientId = ccToClient.get(ccId) ?? 0
+    if (ccId === 0 || clientId === 0) continue
+    const idRefFini = n(r.IDref_fini)
+    const idColoris = n(r.IDColoris)
+    const k = `${idRefFini}|${idColoris}|${lot}|${ccId}`
+    const acc = groups.get(k) ?? {
+      IDref_fini: idRefFini,
+      IDColoris: idColoris,
+      lot,
+      IDcommande_client: ccId,
+      IDclient: clientId,
+      nb_rolls: 0,
+      total_metrage: 0,
+    }
+    acc.nb_rolls += 1
+    acc.total_metrage += Number(r.metrage) || 0
+    groups.set(k, acc)
+  }
+  if (groups.size === 0) return []
+
+  // 6) Filter by designation_client soumettre = 1 AND get the client's
+  //    preferred reference label. Key the catalog map by `clientId|refFiniId`.
+  const dcPairs = Array.from(groups.values()).map((g) => ({ c: g.IDclient, r: g.IDref_fini }))
+  const uniqueClients = Array.from(new Set(dcPairs.map((p) => p.c)))
+  const uniqueRefFini = Array.from(new Set(dcPairs.map((p) => p.r)))
+  const dcMap = new Map<string, string>() // `${IDclient}|${IDref_fini}` → designation
+  if (uniqueClients.length > 0 && uniqueRefFini.length > 0) {
+    const dcRows = await query<{ IDclient: number; IDref_fini: number; designation: string | null }>(
+      `SELECT IDclient, IDref_fini, designation FROM designation_client
+       WHERE IDclient IN (${uniqueClients.join(',')})
+         AND IDref_fini IN (${uniqueRefFini.join(',')})
+         AND soumettre = 1
+         AND archivé = 0`,
+    )
+    const dcFixed = await fixEncoding(dcRows as any[], 'designation_client', 'IDdesignation_client', ['designation'])
+    for (const r of dcFixed as any[]) {
+      dcMap.set(`${n(r.IDclient)}|${n(r.IDref_fini)}`, (r.designation ?? '').toString())
+    }
+  }
+
+  // 7) Display lookups: ref_fini.reference, ref_fini_colori.reference,
+  //    client.nom — all flat queries to avoid CONVERT-in-JOIN collapse.
+  const refFiniMap = new Map<number, string>()
+  if (uniqueRefFini.length > 0) {
+    const rf = await query<{ IDref_fini: number; reference: string | null }>(
+      `SELECT IDref_fini, reference FROM ref_fini WHERE IDref_fini IN (${uniqueRefFini.join(',')})`,
+    )
+    for (const r of await fixEncoding(rf as any[], 'ref_fini', 'IDref_fini', ['reference'])) {
+      refFiniMap.set(n((r as any).IDref_fini), ((r as any).reference ?? '').toString())
+    }
+  }
+  const uniqueColoris = Array.from(new Set(Array.from(groups.values()).map((g) => g.IDColoris).filter((x) => x > 0)))
+  const colorisMap = new Map<number, string>()
+  if (uniqueColoris.length > 0) {
+    const rc = await query<{ IDref_fini_colori: number; reference: string | null }>(
+      `SELECT IDref_fini_colori, reference FROM ref_fini_colori
+       WHERE IDref_fini_colori IN (${uniqueColoris.join(',')})`,
+    )
+    for (const r of await fixEncoding(rc as any[], 'ref_fini_colori', 'IDref_fini_colori', ['reference'])) {
+      colorisMap.set(n((r as any).IDref_fini_colori), ((r as any).reference ?? '').toString())
+    }
+  }
+  const clientMap = new Map<number, string>()
+  if (uniqueClients.length > 0) {
+    const cl = await query<{ IDclient: number; nom: string | null }>(
+      `SELECT IDclient, nom FROM client WHERE IDclient IN (${uniqueClients.join(',')})`,
+    )
+    for (const r of await fixEncoding(cl as any[], 'client', 'IDclient', ['nom'])) {
+      clientMap.set(n((r as any).IDclient), ((r as any).nom ?? '').toString().trim())
+    }
+  }
+
+  // 8) Assemble surviving groups (those with a designation_client.soumettre=1 row).
+  const out: EligibleLot[] = []
+  for (const g of groups.values()) {
+    const dcKey = `${g.IDclient}|${g.IDref_fini}`
+    const clientDesignation = dcMap.get(dcKey)
+    if (clientDesignation === undefined) continue
+    out.push({
+      IDref_fini: g.IDref_fini,
+      IDColoris: g.IDColoris,
+      lot: g.lot,
+      IDcommande_client: g.IDcommande_client,
+      IDclient: g.IDclient,
+      client_nom: clientMap.get(g.IDclient) || '',
+      ref_malterre: refFiniMap.get(g.IDref_fini) || '',
+      client_designation: clientDesignation,
+      coloris_reference: colorisMap.get(g.IDColoris) || '',
+      nb_rolls: g.nb_rolls,
+      total_metrage: g.total_metrage,
+      key: `${g.IDref_fini}|${g.IDColoris}|${g.lot}|${g.IDcommande_client}`,
+    })
+  }
+  // Stable order: by client_nom then by lot
+  out.sort((a, b) => a.client_nom.localeCompare(b.client_nom) || a.lot.localeCompare(b.lot))
+  return out
+}
+
+// Long-form FR date formatter — reuses the existing FRENCH_MONTHS const
+// declared above for the bon-de-commande PDF helpers.
+function todayLongFr(): string {
+  const d = new Date()
+  return `${d.getDate()} ${FRENCH_MONTHS[d.getMonth()]} ${d.getFullYear()}`
+}
+
+interface SoumissionLotParams {
+  IDref_fini: number
+  IDColoris: number
+  lot: string
+  IDcommande_client: number
+}
+
+function parseSoumissionLotParams(q: any): SoumissionLotParams | null {
+  const idRefFini = parseInt(String(q.ref_fini ?? ''), 10)
+  const idColoris = parseInt(String(q.coloris ?? ''), 10)
+  const idCommandeClient = parseInt(String(q.commande_client ?? ''), 10)
+  const lot = String(q.lot ?? '').trim()
+  if (!Number.isFinite(idRefFini) || idRefFini <= 0) return null
+  if (!Number.isFinite(idColoris) || idColoris < 0) return null
+  if (!Number.isFinite(idCommandeClient) || idCommandeClient <= 0) return null
+  if (!lot) return null
+  return { IDref_fini: idRefFini, IDColoris: idColoris, lot, IDcommande_client: idCommandeClient }
+}
+
+export async function buildSoumissionLotPdfData(
+  commandeId: number,
+  params: SoumissionLotParams,
+  userId: number,
+): Promise<SoumissionLotPdfData | null> {
+  // 1) Verify the lot is eligible for THIS commande (defensive — also
+  //    drops requests for lots not belonging to this commande).
+  const eligible = await findEligibleLots(commandeId)
+  const lot = eligible.find((l) =>
+    l.IDref_fini === params.IDref_fini &&
+    l.IDColoris === params.IDColoris &&
+    l.lot === params.lot &&
+    l.IDcommande_client === params.IDcommande_client,
+  )
+  if (!lot) return null
+
+  // 2) commande_client row → date_commande, numero, ref_client, IDadresse_livraison.
+  const ccRows = await query<{
+    IDcommande_client: number
+    numero: number | null
+    date_commande: string | null
+    ref_client: string | null
+    IDadresse_livraison: number | null
+  }>(
+    `SELECT IDcommande_client, numero, date_commande, ref_client, IDadresse_livraison
+     FROM commande_client WHERE IDcommande_client = ${lot.IDcommande_client}`,
+  )
+  const ccFixed = await fixEncoding(ccRows as any[], 'commande_client', 'IDcommande_client', ['ref_client'])
+  const cc = (ccFixed[0] as any) ?? null
+
+  // 3) Earliest ligne_commande_client.date_livraison for the lot's parent
+  //    order (the legacy uses the line date, not the order date). Pick any
+  //    ligne_commande_client of this commande_client (often there's only
+  //    one); if multiple, take the earliest valid date.
+  const lccRows = await query<{ date_livraison: string | null }>(
+    `SELECT date_livraison FROM ligne_commande_client
+     WHERE IDcommande_client = ${lot.IDcommande_client}`,
+  )
+  const dlValid = (lccRows
+    .map((r) => (typeof r.date_livraison === 'string' ? r.date_livraison : ''))
+    .filter((s: string) => /^\d{8}$/.test(s)) as string[]).sort()[0] ?? null
+
+  // 4) Adresse de livraison.
+  const idAdresse = n(cc?.IDadresse_livraison)
+  let adresseLivraison: SoumissionLotPdfData['adresseLivraison'] = null
+  if (idAdresse > 0) {
+    const aRows = await query(
+      `SELECT * FROM adresse WHERE IDadresse = ${idAdresse}`,
+    )
+    const aFixed = await fixEncoding(aRows as any[], 'adresse', 'IDadresse', [
+      'nom', 'adresse1', 'adresse2', 'adresse3', 'ville', 'pays',
+    ])
+    adresseLivraison = cleanAddress(aFixed[0] as any)
+  }
+
+  // 5) Expéditeur — current user's prénom.
+  const uRows = await query<{ prenom: string | null; nom: string | null }>(
+    `SELECT prenom, nom FROM utilisateur WHERE IDutilisateur = ${userId}`,
+  )
+  const uFixed = await fixEncoding(uRows as any[], 'utilisateur', 'IDutilisateur', ['prenom', 'nom'])
+  const expediteur = ((uFixed[0] as any)?.prenom ?? '').toString().trim() || 'ETS Malterre'
+
+  // 6) Destinataire — client's contact with envoi_soumission = 1.
+  const contactRows = await query<{
+    IDcontact: number; nom: string | null; prenom: string | null; mail: string | null
+  }>(
+    `SELECT IDcontact, nom, prenom, mail FROM contact
+     WHERE IDclient = ${lot.IDclient}
+       AND envoi_soumission = 1
+       AND est_visible = 1`,
+  )
+  const cFixed = await fixEncoding(contactRows as any[], 'contact', 'IDcontact', ['nom', 'prenom', 'mail'])
+  const firstContact = (cFixed[0] as any) ?? null
+  const destinataire = firstContact
+    ? [firstContact.prenom, firstContact.nom]
+        .map((s: string | null) => (s ?? '').toString().trim())
+        .filter((s: string) => s.length > 0)
+        .join(' ')
+    : ''
+
+  return {
+    numeroCommande: cc?.numero != null ? String(cc.numero) : '',
+    dateSoumission: todayLongFr(),
+    dateCommande: cc?.date_commande ? formatHfsqlDateFr(cc.date_commande) : '',
+    dateLivraison: dlValid ? formatHfsqlDateFr(dlValid) : '',
+    refCommandeClient: (cc?.ref_client ?? '').toString().trim(),
+    quantiteMl: lot.total_metrage,
+    clientNom: lot.client_nom,
+    refClient: lot.client_designation,
+    refMalterre: lot.ref_malterre,
+    coloris: lot.coloris_reference,
+    adresseLivraison,
+    expediteur,
+    destinataire,
+    lot: lot.lot,
+  }
+}
+
+async function renderSoumissionLotPdfBuffer(data: SoumissionLotPdfData): Promise<Buffer> {
+  return renderToBuffer(
+    React.createElement(SoumissionLotPdf, { data }) as unknown as React.ReactElement<
+      import('@react-pdf/renderer').DocumentProps
+    >,
+  )
+}
+
+// ── Soumission: eligibility list ─────────────────────────
+
+commandesSousTraitantRouter.get('/:id/soumission/lots-eligibles', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const lots = await findEligibleLots(id)
+    res.json({ lots })
+  } catch (err) {
+    console.error('Error fetching eligible soumission lots:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Soumission: PDF preview / download ───────────────────
+
+commandesSousTraitantRouter.get('/:id/soumission/pdf', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
+
+    const params = parseSoumissionLotParams(req.query)
+    if (!params) { res.status(400).json({ error: 'Missing or invalid lot params' }); return }
+
+    const data = await buildSoumissionLotPdfData(id, params, req.userId)
+    if (!data) { res.status(404).json({ error: 'Lot not eligible for this commande' }); return }
+
+    const buffer = await renderSoumissionLotPdfBuffer(data)
+
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="soumission-lot-${data.lot.replace(/[^a-zA-Z0-9_-]/g, '_')}.pdf"`,
+    )
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.send(buffer)
+  } catch (err) {
+    console.error('Error rendering soumission lot PDF:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Soumission: email defaults ───────────────────────────
+
+async function buildSoumissionEmailDefaults(
+  commandeId: number,
+  params: SoumissionLotParams,
+): Promise<EmailDefaultsPayload | null> {
+  const eligible = await findEligibleLots(commandeId)
+  const lot = eligible.find((l) =>
+    l.IDref_fini === params.IDref_fini &&
+    l.IDColoris === params.IDColoris &&
+    l.lot === params.lot &&
+    l.IDcommande_client === params.IDcommande_client,
+  )
+  if (!lot) return null
+
+  // Client contacts. Pre-select envoi_soumission=1 contacts; everything
+  // else with a valid email goes into suggestions.
+  const contactRows = await query<{
+    IDcontact: number; nom: string | null; prenom: string | null; mail: string | null;
+    envoi_soumission: number | null; est_visible: number | null
+  }>(
+    `SELECT IDcontact, nom, prenom, mail, envoi_soumission, est_visible
+     FROM contact WHERE IDclient = ${lot.IDclient}`,
+  )
+  const fixedContacts = await fixEncoding(contactRows as any[], 'contact', 'IDcontact', ['nom', 'prenom', 'mail'])
+
+  const selected: EmailRecipientPayload[] = []
+  const suggestions: EmailRecipientPayload[] = []
+  const seen = new Set<string>()
+  for (const c of fixedContacts as any[]) {
+    if (c.est_visible === 0) continue
+    const raw = (c.mail ?? '').toString().trim()
+    if (!raw) continue
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) continue
+    const key = raw.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    const displayName = [c.prenom, c.nom]
+      .map((s: string | null) => (s ?? '').toString().trim())
+      .filter((s: string) => s.length > 0)
+      .join(' ')
+    const recipient: EmailRecipientPayload = {
+      email: raw,
+      source: 'contact',
+      contactId: n(c.IDcontact),
+    }
+    if (displayName) recipient.name = displayName
+    if (c.envoi_soumission === 1) selected.push(recipient)
+    else suggestions.push(recipient)
+  }
+
+  const subject = `Soumission Lot ${lot.lot} — ${lot.ref_malterre}${lot.coloris_reference ? ` · ${lot.coloris_reference}` : ''}`
+  const body =
+    `Bonjour,\n\n` +
+    `Veuillez trouver ci-joint la soumission du lot ${lot.lot} pour la référence ${lot.client_designation || lot.ref_malterre}${lot.coloris_reference ? ` (coloris ${lot.coloris_reference})` : ''}.\n\n` +
+    `Un échantillon est joint au document imprimé.\n\n` +
+    `Cordialement,\n` +
+    `ETS Malterre`
+
+  return {
+    recipients: { selected, suggestions },
+    subject,
+    body,
+    sousTraitantNom: lot.client_nom, // reuse the field — the email dialog displays it as contextLabel
+    numero: lot.lot,
+  }
+}
+
+commandesSousTraitantRouter.get('/:id/soumission/email-defaults', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const params = parseSoumissionLotParams(req.query)
+    if (!params) { res.status(400).json({ error: 'Missing or invalid lot params' }); return }
+    const defaults = await buildSoumissionEmailDefaults(id, params)
+    if (!defaults) { res.status(404).json({ error: 'Lot not eligible for this commande' }); return }
+    res.json(defaults)
+  } catch (err) {
+    console.error('Error building soumission email defaults:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Soumission: send email + attach PDF ──────────────────
+
+const soumissionEmailBody = z.object({
+  to: z.array(z.string().email()).min(1, 'At least one recipient is required'),
+  cc: z.array(z.string().email()).optional(),
+  subject: z.string().min(1).max(500),
+  body: z.string().min(1).max(20000),
+  attach_pdf: z.boolean().optional(),
+  extra_attachments: z.array(extraAttachmentSchema).optional(),
+  // Lot params travel in the body so the server can rebuild the right PDF.
+  ref_fini: z.number().int().positive(),
+  coloris: z.number().int().nonnegative(),
+  lot: z.string().min(1).max(200),
+  commande_client: z.number().int().positive(),
+})
+
+commandesSousTraitantRouter.post('/:id/soumission/email', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
+
+    const parsed = soumissionEmailBody.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return
+    }
+    const lotParams: SoumissionLotParams = {
+      IDref_fini: parsed.data.ref_fini,
+      IDColoris: parsed.data.coloris,
+      lot: parsed.data.lot,
+      IDcommande_client: parsed.data.commande_client,
+    }
+
+    const senderEmail = await getUserEmail(req.userId)
+    if (!senderEmail) {
+      res.status(400).json({
+        error: 'no_sender_email',
+        message:
+          "Aucune adresse email n'est associée à votre compte. Un administrateur doit en définir une dans Paramètres › Utilisateurs.",
+      })
+      return
+    }
+
+    const userRows = await query<{ prenom: string | null; nom: string | null }>(
+      `SELECT prenom, nom FROM utilisateur WHERE IDutilisateur = ${req.userId}`,
+    )
+    const fixedUser = await fixEncoding(userRows, 'utilisateur', 'IDutilisateur', ['prenom', 'nom'])
+    const u = (fixedUser[0] as any) ?? null
+    const displayName = u
+      ? [u.prenom, u.nom].filter((s: string | null) => s && s.trim()).map((s: string) => s.trim()).join(' ')
+      : ''
+    const fromName = displayName ? `${displayName} — ETS Malterre` : 'ETS Malterre'
+
+    const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
+    if (parsed.data.attach_pdf !== false) {
+      const data = await buildSoumissionLotPdfData(id, lotParams, req.userId)
+      if (!data) { res.status(404).json({ error: 'Lot not eligible for this commande' }); return }
+      const buffer = await renderSoumissionLotPdfBuffer(data)
+      attachments.push({
+        filename: `soumission-lot-${data.lot.replace(/[^a-zA-Z0-9_-]/g, '_')}.pdf`,
+        content: buffer,
+        contentType: 'application/pdf',
+      })
+    }
+    for (const a of parsed.data.extra_attachments ?? []) {
+      attachments.push({
+        filename: a.filename,
+        content: Buffer.from(a.content_base64, 'base64'),
+        contentType: a.content_type,
+      })
+    }
+
+    const messageId = await sendMail({
+      from: senderEmail,
+      fromName,
+      to: parsed.data.to,
+      cc: parsed.data.cc,
+      subject: parsed.data.subject,
+      body: parsed.data.body,
+      attachments: attachments.length > 0 ? attachments : undefined,
+    })
+
+    // Audit: log one envoi_email row per recipient (to+cc). The legacy
+    // WinDev app reads from this same table — by using IDtype_doc=15
+    // and storing the lot identifier in `notes` we stay compatible
+    // with what the legacy UI surfaces. The computed phase also reads
+    // type=15 rows for this commande to derive "Soumis au client".
+    const allRecipients = [...parsed.data.to, ...(parsed.data.cc ?? [])]
+    let societe = ''
+    try {
+      const eligible = await findEligibleLots(id)
+      const lot = eligible.find((l) =>
+        l.IDref_fini === lotParams.IDref_fini &&
+        l.IDColoris === lotParams.IDColoris &&
+        l.lot === lotParams.lot &&
+        l.IDcommande_client === lotParams.IDcommande_client,
+      )
+      societe = lot?.client_nom ?? ''
+    } catch {
+      // Audit field is informational; fall back to empty.
+    }
+    await logEnvoiEmails(
+      TYPE_DOC_SOUMISSION_LOT_CLIENT,
+      id,
+      allRecipients,
+      societe,
+      lotParams.lot, // notes — lot identifier (legacy convention)
+    )
+
+    res.json({ ok: true, messageId })
+  } catch (err) {
+    console.error('Error sending soumission lot email:', err)
+    const message = err instanceof Error ? err.message : 'Internal server error'
+    res.status(500).json({ error: 'send_failed', message })
+  }
+})
+
+// ── Historique — activity timeline for the right sidebar ─────
+//
+// Surfaces every envoi_email row whose IDreference points to this
+// commande_sous_traitant and whose IDtype_doc is in the set we care
+// about. IMPORTANT: envoi_email.IDreference is polymorphic — its
+// target table depends on IDtype_doc:
+//   13 = commande sst             → commande_sous_traitant.IDcommande_sous_traitant ✓
+//   14 = avis expedition          → expedition.IDexpedition (NOT this commande!)
+//   15 = soumission (sst → client)→ commande_sous_traitant.IDcommande_sous_traitant ✓
+//                                    `notes` carries the lot identifier
+//                                    ("MA105741", "MA107896 (reprise)", …)
+//
+// Type 14 is intentionally excluded: it lives in the expedition
+// polymorphic context. A sst commande #8586 and expedition #8586 are
+// unrelated rows with colliding IDs; if we naively join on IDreference
+// we surface 2024-era avis-expedition emails on the 2026 sst commande
+// (real bug observed on commande 8586). To show expeditions on a sst
+// commande's timeline we'd need to walk sst lines → stock_fini →
+// ligne_expedition → expedition — out of scope here.
+//
+// In addition to email events, we also surface client-response
+// events from `reponse_soumission` (per-lot approve/reject log).
+//
+// Rows from a single send burst share the same DATE down to the
+// millisecond (4 recipients → 4 rows). We group by IDtype_doc +
+// timestamp-truncated-to-second so the UI renders one event per send
+// with a recipient list, not one event per recipient.
+
+type HistoriqueEvent =
+  | {
+      kind: 'email'
+      /** Stable group key. */
+      id: string
+      /** HFSQL DATETIME string (e.g. "2026-03-09 14:17:36"). */
+      date: string
+      type_doc_id: number
+      type_doc_label: string
+      recipients: Array<{ email: string; societe: string | null }>
+      /** First non-empty `notes` cell in the group — for sst soumissions
+       *  this carries the lot identifier (e.g. "MA105741"). */
+      notes: string | null
+    }
+  | {
+      kind: 'reponse'
+      id: string
+      /** HFSQL date "YYYY-MM-DD" (reponse_soumission has no time). */
+      date: string
+      /** 1 = approuvé, 0 = refusé. */
+      reponse: number
+      lot: string
+      IDclient: number
+    }
+
+// Only the type_doc codes whose IDreference points to a commande_sous_traitant.
+const HISTORIQUE_TYPE_DOC_IDS = [13, 15] as const
+
+commandesSousTraitantRouter.get('/:id/historique', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const rows = await query<{
+      IDenvoi_email: number
+      DATE: string | null
+      adresse: string | null
+      société: string | null
+      IDreference: number
+      IDtype_doc: number
+      notes: string | null
+    }>(
+      `SELECT IDenvoi_email, DATE, adresse, société, IDreference, IDtype_doc, notes
+       FROM envoi_email
+       WHERE IDreference = ${id}
+         AND IDtype_doc IN (${HISTORIQUE_TYPE_DOC_IDS.join(',')})
+       ORDER BY DATE DESC`,
+    )
+    const fixed = await fixEncoding(rows as any[], 'envoi_email', 'IDenvoi_email', ['adresse', 'société', 'notes'])
+
+    // Resolve type_doc labels (small lookup — 29 rows). Fetch once,
+    // share across all events.
+    const tdRows = await query<{ IDtype_doc: number; nom: string | null }>(
+      `SELECT IDtype_doc, nom FROM type_doc
+       WHERE IDtype_doc IN (${HISTORIQUE_TYPE_DOC_IDS.join(',')})`,
+    )
+    const tdFixed = await fixEncoding(tdRows as any[], 'type_doc', 'IDtype_doc', ['nom'])
+    const labelMap = new Map<number, string>()
+    for (const r of tdFixed as any[]) labelMap.set(Number(r.IDtype_doc), (r.nom ?? '').toString())
+
+    // Group email rows by (IDtype_doc, DATE-to-minute). Truncating to
+    // the second isn't enough — a single send burst with many
+    // recipients can straddle the second boundary (e.g. 4 emails
+    // spanning 17:00:31.855 → 17:00:32.026 would otherwise become two
+    // separate "events"). Minute precision keeps real sends together
+    // while still distinguishing distinct user actions (no two sends
+    // for the same commande + type ever happen within the same minute).
+    type EmailEvent = Extract<HistoriqueEvent, { kind: 'email' }>
+    const groups = new Map<string, EmailEvent>()
+    for (const r of fixed as any[]) {
+      const rawDate = (r.DATE ?? '').toString()
+      // "2026-03-09 14:17:36.744" → "2026-03-09 14:17" (drop seconds + subseconds).
+      const dateMin = rawDate.split('.')[0].replace(/:\d{2}$/, '')
+      const dateSec = rawDate.split('.')[0]
+      const tdid = Number(r.IDtype_doc) || 0
+      const key = `email|${tdid}|${dateMin}`
+      const event = groups.get(key) ?? {
+        kind: 'email' as const,
+        id: key,
+        date: dateSec,
+        type_doc_id: tdid,
+        type_doc_label: labelMap.get(tdid) ?? `type_doc ${tdid}`,
+        recipients: [],
+        notes: null,
+      }
+      const email = (r.adresse ?? '').toString().trim()
+      const societe = (r['société'] ?? '').toString().trim() || null
+      if (email) event.recipients.push({ email, societe })
+      if (!event.notes) {
+        const n = (r.notes ?? '').toString().trim()
+        if (n) event.notes = n
+      }
+      groups.set(key, event)
+    }
+
+    // Fetch client-response events from reponse_soumission. Keyed
+    // directly on IDcommande_sous_traitant, no polymorphism concerns.
+    const reponseRows = await query<{
+      IDreponse_soumission: number
+      DATE: string | null
+      reponse: number | null
+      lot: string | null
+      IDclient: number | null
+    }>(
+      `SELECT IDreponse_soumission, DATE, reponse, lot, IDclient
+       FROM reponse_soumission
+       WHERE IDcommande_sous_traitant = ${id}`,
+    )
+    const reponseFixed = await fixEncoding(reponseRows as any[], 'reponse_soumission', 'IDreponse_soumission', ['lot'])
+    const reponseEvents: HistoriqueEvent[] = (reponseFixed as any[]).map((r) => {
+      // reponse_soumission.DATE is HFSQL "YYYYMMDD" — convert to "YYYY-MM-DD"
+      // so the timeline can sort it alongside the timestamped email events.
+      const raw = (r.DATE ?? '').toString()
+      const iso = /^\d{8}$/.test(raw) ? `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}` : raw
+      return {
+        kind: 'reponse' as const,
+        id: `reponse|${Number(r.IDreponse_soumission)}`,
+        date: iso,
+        reponse: Number(r.reponse) || 0,
+        lot: (r.lot ?? '').toString().trim(),
+        IDclient: Number(r.IDclient) || 0,
+      }
+    })
+
+    // Merge + sort by date DESC. For events with the same date, emails
+    // (with timestamps) outrank responses (date-only); within emails,
+    // SQL already returned them DESC; within responses, order by id
+    // DESC as a tie-breaker.
+    const merged: HistoriqueEvent[] = [
+      ...Array.from(groups.values()),
+      ...reponseEvents,
+    ].sort((a, b) => {
+      // String compare on date works for both "2026-03-09 14:17:36" and "2026-03-09" formats.
+      if (a.date !== b.date) return a.date < b.date ? 1 : -1
+      // Emails first (richer info), then responses.
+      if (a.kind !== b.kind) return a.kind === 'email' ? -1 : 1
+      return a.id < b.id ? 1 : -1
+    })
+
+    res.json({ events: merged })
+  } catch (err) {
+    console.error('Error fetching historique:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // ── Create commande ──────────────────────────────────────
 
 commandesSousTraitantRouter.post('/', async (req: Request, res: Response) => {
@@ -1457,9 +2642,11 @@ commandesSousTraitantRouter.put('/lignes/:lineId', async (req: Request, res: Res
       `UPDATE ligne_commande_sous_traitant SET ${sets.join(', ')} WHERE IDligne_commande_sous_traitant = ${lineId}`,
     )
 
-    if (d.sstatut !== undefined && isLineDone(d.sstatut)) {
-      await maybeAutoCloseCommande(commandeId)
-    }
+    // Auto-close on "all lines done" was removed when we moved to the
+    // computed-phase model — the operator now uses the Clôturer button in
+    // the sidebar footer to flip est_soldee manually. `maybeAutoCloseCommande`
+    // and `isLineDone` remain in the module (cheap to revert) but are no
+    // longer called from the line-update path.
 
     res.json({ ok: true })
   } catch (err) {
@@ -2265,13 +3452,25 @@ commandesSousTraitantRouter.delete(
 //                          (blue banner in the UI)
 //   - `observation_sst`  : the ennoblisseur's defect report
 //                          (red banner in the UI)
-// Other stock_fini fields (poids, lot, magasin, …) are intentionally NOT
-// editable from this surface — the UI doesn't expose them and they'd
-// require revisiting the link/destockage invariants.
+//
+// Reprise flow (multi-select in the Réception tab → "Reprendre X" → batch
+// dialog): the same PATCH endpoint is also used to update lot / poids /
+// metrage / numero on a roll currently in `IDetat_stock_fini = 2` ("En
+// reprise"). The frontend defaults the etat back to `1` (En contrôle)
+// after the reprise edit so the visiteur can re-validate the values.
+// Other stock_fini fields (magasin, …) remain non-editable from this
+// surface — they'd require revisiting the link/destockage invariants.
 
 const finiNotesPatchBody = z.object({
   observations: z.string().optional(),
   observation_sst: z.string().optional(),
+  // Reprise-only fields. All optional — only set when the caller wants to
+  // overwrite the corresponding stock_fini column.
+  numero: z.string().max(40).optional(),
+  lot: z.string().max(40).optional(),
+  poids: z.number().nonnegative().optional(),
+  metrage: z.number().nonnegative().optional(),
+  IDetat_stock_fini: z.number().int().min(1).max(5).optional(),
 })
 
 commandesSousTraitantRouter.patch(
@@ -2309,6 +3508,11 @@ commandesSousTraitantRouter.patch(
       const setParts: string[] = []
       if (d.observations !== undefined) setParts.push(`observations = '${esc(d.observations)}'`)
       if (d.observation_sst !== undefined) setParts.push(`observation_sst = '${esc(d.observation_sst)}'`)
+      if (d.numero !== undefined) setParts.push(`numero = '${esc(d.numero)}'`)
+      if (d.lot !== undefined) setParts.push(`lot = '${esc(d.lot)}'`)
+      if (d.poids !== undefined) setParts.push(`poids = ${d.poids}`)
+      if (d.metrage !== undefined) setParts.push(`metrage = ${d.metrage}`)
+      if (d.IDetat_stock_fini !== undefined) setParts.push(`IDetat_stock_fini = ${d.IDetat_stock_fini}`)
       if (setParts.length > 0) {
         await query(`UPDATE stock_fini SET ${setParts.join(', ')} WHERE IDstock_fini = ${stockFiniId}`)
       }
