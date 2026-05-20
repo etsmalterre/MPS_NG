@@ -1546,6 +1546,7 @@ async function buildSoumissionEmailDefaults(soumId: number): Promise<{
 
   const numero = String(soumId)
   const sousTraitantNom = ctx.sousTraitantNom ?? ''
+  const clientNom = ctx.clientNom ?? ''
   const refFini = ctx.refFiniReference ?? ''
   const codeClient = ctx.desigClient ?? ''
   const subjectContext = [refFini, codeClient].filter(Boolean).join(' · ')
@@ -1556,7 +1557,7 @@ async function buildSoumissionEmailDefaults(soumId: number): Promise<{
   const bodyLines = [
     'Bonjour,',
     '',
-    `Veuillez trouver ci-joint notre soumission N°${numero}${sousTraitantNom ? ` à destination de ${sousTraitantNom}` : ''}.`,
+    `Veuillez trouver ci-joint notre soumission N°${numero}${clientNom ? ` à destination de ${clientNom}` : ''}.`,
     '',
   ]
   if (refFini || codeClient || ctx.refFiniColoriReference) {
