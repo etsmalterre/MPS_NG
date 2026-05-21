@@ -38,6 +38,12 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
+        // Skip the heavy Tricobot reception-modal mascot from the precache:
+        // it's loaded only inside the ennoblisseur reception dialog and
+        // doesn't belong in the offline shell. Without this exclusion the
+        // workbox step fails the build because the wave PNG (~5 MB)
+        // exceeds the default 2 MiB precache cap.
+        globIgnores: ['tricobot/**'],
         navigateFallbackDenylist: [/^\/api\//],
         runtimeCaching: [
           {
