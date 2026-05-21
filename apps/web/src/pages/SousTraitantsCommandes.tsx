@@ -4164,6 +4164,107 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
   )
 }
 
+// Picker dialog for the "+ Affecter" affordance on the Affectés section of
+// the ennoblisseur PiecesDrawer. Lets the user multi-select compatible
+// écru rolls from `ecruAvailable` and link them in one batch via
+// `onBulkLink`. The parent's `linkEcruMut` is invoked once per id (small
+// N — operators typically pick 1-5 rolls at a time).
+function LinkEcruDialog({
+  available, onBulkLink, onClose,
+}: {
+  available: StockEcruLite[]
+  onBulkLink: (ids: number[]) => Promise<void>
+  onClose: () => void
+}) {
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const totalKg = available
+    .filter((r) => selected.has(r.IDstock_ecru))
+    .reduce((s, r) => s + (Number(r.poids) || 0), 0)
+
+  const toggle = (id: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  const handleSubmit = async () => {
+    setError(null)
+    setBusy(true)
+    try {
+      await onBulkLink(Array.from(selected))
+      onClose()
+    } catch (e: any) {
+      setError(e instanceof Error ? e.message : 'Erreur')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o && !busy) onClose() }}>
+      <DialogContent className="max-w-2xl w-[92vw] h-[80vh] flex flex-col p-0 overflow-hidden" onClose={busy ? undefined : onClose}>
+        <div className="flex-shrink-0 px-6 pt-4 pb-3 border-b bg-gradient-to-r from-gold/25 via-gold/10 to-transparent flex items-start gap-3">
+          <div className="h-10 w-10 rounded-lg icon-box-gold flex items-center justify-center flex-shrink-0">
+            <Link2 className="h-5 w-5" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h2 className="text-base font-heading font-bold tracking-tight truncate">
+              Affecter des rouleaux écru
+            </h2>
+            <p className="text-xs text-muted-foreground mt-0.5 tabular-nums">
+              {available.length} rouleau{available.length > 1 ? 'x' : ''} disponible{available.length > 1 ? 's' : ''}
+              {selected.size > 0 && ` · ${selected.size} sélectionné${selected.size > 1 ? 's' : ''} (${fmtNum(totalKg, 1)} kg)`}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1.5 bg-zinc-100/80 scrollbar-transparent">
+          {available.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+              <TmRollIcon className="h-12 w-12 mb-2 opacity-40" />
+              <p className="text-sm">Aucun rouleau écru disponible pour cette référence</p>
+            </div>
+          ) : (
+            available.map((roll) => (
+              <SelectableEcruRow
+                key={roll.IDstock_ecru}
+                roll={roll}
+                selected={selected.has(roll.IDstock_ecru)}
+                onToggle={() => toggle(roll.IDstock_ecru)}
+                disabled={busy}
+              />
+            ))
+          )}
+        </div>
+
+        <div className="flex-shrink-0 px-6 py-3 border-t bg-zinc-200/50">
+          {!!error && (
+            <div className="mb-2 flex items-start gap-1.5 text-xs text-destructive">
+              <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+              <span className="break-all">{error}</span>
+            </div>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={onClose} disabled={busy}>Annuler</Button>
+            <Button onClick={handleSubmit} disabled={busy || selected.size === 0}>
+              {busy ? (
+                <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Affectation…</>
+              ) : (
+                <><Link2 className="h-3.5 w-3.5 mr-1.5" />Affecter {selected.size > 0 ? `${selected.size} rouleau${selected.size > 1 ? 'x' : ''}` : ''}</>
+              )}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function SelectableEcruRow({
   roll, selected, onToggle, disabled,
 }: {
