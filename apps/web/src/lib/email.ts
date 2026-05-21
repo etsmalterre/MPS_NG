@@ -36,6 +36,12 @@ export interface SendPayload {
   /** User-uploaded files from the attachment picker. Sent to the server
    *  as base64-encoded `extra_attachments` alongside the server-rendered PDF. */
   userAttachments: File[]
+  /** Dev-only: skip the actual Gmail send, but still run every server-side
+   *  side effect (envoi_email log, sstatut transitions). Used by the "Faux
+   *  envoi" button in the dialog to test status transitions without spamming
+   *  real recipients. The server ignores this flag unless NODE_ENV is not
+   *  'production'. */
+  devSkipSend?: boolean
 }
 
 /** Split a comma/semicolon/newline-separated recipient string into trimmed,
@@ -85,6 +91,7 @@ export async function postEmail(
   }
   if (payload.cc.length > 0) body.cc = payload.cc
   if (opts?.includeAttachPdf) body.attach_pdf = payload.attachPdf
+  if (payload.devSkipSend) body.dev_skip_send = true
 
   if (payload.userAttachments.length > 0) {
     body.extra_attachments = await Promise.all(

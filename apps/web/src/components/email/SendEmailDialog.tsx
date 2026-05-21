@@ -295,6 +295,34 @@ export function SendEmailDialog({
     }
   }, [selectedRecipients, subject, cc, body, attachPdf, userAttachments, pdfUrl, onSend, onClose])
 
+  // Dev-only "Faux envoi" — short-circuits to vincent@etsmalterre.com with
+  // dev_skip_send=true so the backend logs envoi_email + flips sstatut
+  // without actually calling Gmail. Lets the operator exercise status
+  // transitions in dev without spamming real ennoblisseurs.
+  const handleDevFakeSend = useCallback(async () => {
+    setErrorMessage(null)
+    setSuccessMessage(null)
+    const trimmedSubject = subject.trim() || '[Faux envoi dev]'
+    setIsSending(true)
+    try {
+      await onSend({
+        to: ['vincent@etsmalterre.com'],
+        cc: [],
+        subject: trimmedSubject,
+        body: body || '[Faux envoi dev — pas de corps]',
+        attachPdf: false,
+        userAttachments: [],
+        devSkipSend: true,
+      })
+      setSuccessMessage('Faux envoi enregistré (statut mis à jour, aucun email réel envoyé)')
+      setTimeout(() => onClose(), 1200)
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Échec du faux envoi')
+    } finally {
+      setIsSending(false)
+    }
+  }, [subject, body, onSend, onClose])
+
   // ── Preview resolution ───────────────────────────────
   // Resolve what the right-pane viewer should render based on previewedId.
   // Kept as a tagged union so the render branch below is a flat switch.
@@ -485,7 +513,18 @@ export function SendEmailDialog({
                       <p className="flex-1">{successMessage}</p>
                     </div>
                   )}
-                  <div className="flex justify-end gap-2">
+                  <div className="flex justify-end gap-2 items-center">
+                    {import.meta.env.DEV && (
+                      <Button
+                        variant="outline"
+                        onClick={handleDevFakeSend}
+                        disabled={isSending || loadingDefaults || !!successMessage}
+                        title="Dev only — n'envoie pas réellement, mais déclenche les transitions de statut côté serveur"
+                        className="mr-auto border-dashed border-amber-500/60 text-amber-700 hover:bg-amber-500/10"
+                      >
+                        Faux envoi (dev)
+                      </Button>
+                    )}
                     <Button variant="outline" onClick={onClose} disabled={isSending}>
                       Annuler
                     </Button>

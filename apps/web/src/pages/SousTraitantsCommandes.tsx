@@ -53,6 +53,8 @@ import {
   RotateCcw,
   Truck,
   HelpCircle,
+  Mail,
+  Hourglass,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -399,9 +401,23 @@ function adresseOption(a: AdresseLookup) {
 
 /** Computed phase, served by the API in the list + detail responses.
  *  Replaces the old binary "en cours / terminée" pill — derived from
- *  est_soldee + stock_fini.IDetat_stock_fini + envoi_email history. See
+ *  est_soldee + stock_fini.IDetat_stock_fini + envoi_email history + line
+ *  sstatut state machine (Non_Envoye → Attente_Delai → En_Cours). See
  *  `commandes-sous-traitant.ts` `computePhase` for the server logic. */
-export type SstPhase = 'en_cours' | 'en_controle' | 'soumis' | 'en_reprise' | 'terminee'
+export type SstPhase =
+  | 'non_envoye'
+  | 'attente_delai'
+  | 'en_cours'
+  | 'en_controle'
+  | 'soumis'
+  | 'en_reprise'
+  | 'terminee'
+
+/** Filter keys accepted by the list endpoint. The toggle bar exposes only
+ *  the macro buckets ('open' / 'terminee' / 'all'); sub-phase narrowing
+ *  happens via the search bar (server matches phase keywords). The full
+ *  SstPhase set is still accepted so a phase keyword can fall through. */
+export type StatusFilter = SstPhase | 'all' | 'open'
 
 const SST_PHASE_META: Record<SstPhase, {
   label: string
@@ -411,11 +427,13 @@ const SST_PHASE_META: Record<SstPhase, {
   /** Solid background + border for the StatusFooter band (white text). */
   solid: string
 }> = {
-  en_cours:    { label: 'En cours',          icon: Clock,        classes: 'bg-blue-500/10 text-blue-700 border-blue-500/30',     solid: 'bg-primary border-primary' },
-  en_controle: { label: 'En contrôle',       icon: Eye,          classes: 'bg-amber-500/10 text-amber-700 border-amber-500/30',  solid: 'bg-amber-500 border-amber-500' },
-  soumis:      { label: 'Soumis au client',  icon: Send,         classes: 'bg-violet-500/10 text-violet-700 border-violet-500/30', solid: 'bg-violet-500 border-violet-500' },
-  en_reprise:  { label: 'En reprise',        icon: RotateCcw,    classes: 'bg-orange-500/10 text-orange-700 border-orange-500/30', solid: 'bg-orange-500 border-orange-500' },
-  terminee:    { label: 'Terminée',          icon: CheckCircle2, classes: 'bg-green-500/10 text-green-700 border-green-500/30',  solid: 'bg-success border-success' },
+  non_envoye:    { label: 'Non envoyé',        icon: Mail,         classes: 'bg-slate-500/10 text-slate-700 border-slate-500/30',  solid: 'bg-slate-500 border-slate-500' },
+  attente_delai: { label: 'Attente délai',     icon: Hourglass,    classes: 'bg-yellow-500/10 text-yellow-800 border-yellow-500/30', solid: 'bg-yellow-500 border-yellow-500' },
+  en_cours:      { label: 'En cours',          icon: Clock,        classes: 'bg-blue-500/10 text-blue-700 border-blue-500/30',     solid: 'bg-primary border-primary' },
+  en_controle:   { label: 'En contrôle',       icon: Eye,          classes: 'bg-amber-500/10 text-amber-700 border-amber-500/30',  solid: 'bg-amber-500 border-amber-500' },
+  soumis:        { label: 'Soumis au client',  icon: Send,         classes: 'bg-violet-500/10 text-violet-700 border-violet-500/30', solid: 'bg-violet-500 border-violet-500' },
+  en_reprise:    { label: 'En reprise',        icon: RotateCcw,    classes: 'bg-orange-500/10 text-orange-700 border-orange-500/30', solid: 'bg-orange-500 border-orange-500' },
+  terminee:      { label: 'Terminée',          icon: CheckCircle2, classes: 'bg-green-500/10 text-green-700 border-green-500/30',  solid: 'bg-success border-success' },
 }
 
 function PhasePill({ phase, className }: { phase: SstPhase | null | undefined; className?: string }) {
@@ -453,10 +471,31 @@ function lineEtatColors(sstatut: string | null) {
       iconColor: 'text-green-600',
     }
   }
+  const s = (sstatut ?? '').trim()
+  // Non envoyé — slate (neutral, "nothing has happened yet"). Mirrors
+  // SST_PHASE_META.non_envoye so the header pill and the line card share
+  // the same hue.
+  if (s === 'Non_Envoye') {
+    return {
+      border: 'border-l-slate-400/60',
+      iconBg: 'bg-slate-400/10',
+      iconColor: 'text-slate-600',
+    }
+  }
+  // Attente délai — yellow (distinct from the en_controle amber).
+  if (s === 'Attente_Delai') {
+    return {
+      border: 'border-l-yellow-500/60',
+      iconBg: 'bg-yellow-500/10',
+      iconColor: 'text-yellow-700',
+    }
+  }
+  // En_Cours and any other legacy "open" value — blue, matches the
+  // primary phase pill.
   return {
-    border: 'border-l-amber-400/60',
-    iconBg: 'bg-amber-400/10',
-    iconColor: 'text-amber-600',
+    border: 'border-l-blue-500/60',
+    iconBg: 'bg-blue-500/10',
+    iconColor: 'text-blue-600',
   }
 }
 
@@ -500,7 +539,7 @@ export function SousTraitantsCommandes() {
   const queryClient = useQueryClient()
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
-  const [statusFilter, setStatusFilter] = useState<SstPhase | 'all'>('en_cours')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('open')
   const [isEditing, setIsEditing] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [piecesDrawerLineId, setPiecesDrawerLineId] = useState<number | null>(null)
@@ -734,7 +773,7 @@ export function SousTraitantsCommandes() {
     })
   }, [guard])
 
-  const handleStatusFilterChange = useCallback((s: SstPhase | 'all') => {
+  const handleStatusFilterChange = useCallback((s: StatusFilter) => {
     guard.guardAction(() => {
       setIsEditing(false)
       setStatusFilter(s)
@@ -838,6 +877,11 @@ export function SousTraitantsCommandes() {
         onCreated={(newId) => {
           setCreateOpen(false)
           queryClient.invalidateQueries({ queryKey: ['commandes-sst'] })
+          // New commandes start at phase=non_envoye → the 'open' macro
+          // filter already covers it, but make the switch explicit so a
+          // user who had picked 'Terminées' before creating doesn't lose
+          // sight of the freshly-created row.
+          setStatusFilter('open')
           setSelectedId(newId)
           setAutoEditForId(newId)
         }}
@@ -862,7 +906,17 @@ export function SousTraitantsCommandes() {
           loadDefaults={() => apiFetch(`/commandes-sous-traitant/${selectedId}/email-defaults`)}
           pdfUrl={`${API_URL}/commandes-sous-traitant/${selectedId}/pdf`}
           pdfAttachmentLabel={`commande-sous-traitant-${selectedId}.pdf`}
-          onSend={(p) => postEmail(`${API_URL}/commandes-sous-traitant/${selectedId}/email`, p, { includeAttachPdf: true })}
+          onSend={async (p) => {
+            await postEmail(`${API_URL}/commandes-sous-traitant/${selectedId}/email`, p, { includeAttachPdf: true })
+            // Server-side, sending the bon de commande flips every
+            // Non_Envoye line to Attente_Delai AND logs an envoi_email
+            // row (IDtype_doc=13). Invalidate the queries the UI reads
+            // those signals from so the phase pill, the left-list card,
+            // and the historique tab all refresh without a manual reload.
+            queryClient.invalidateQueries({ queryKey: ['commande-sst', selectedId] })
+            queryClient.invalidateQueries({ queryKey: ['commandes-sst'] })
+            queryClient.invalidateQueries({ queryKey: ['commande-sst-historique', selectedId] })
+          }}
         />
       )}
 
@@ -895,8 +949,8 @@ export function SousTraitantsCommandes() {
           )}
           pdfUrl={`${API_URL}/commandes-sous-traitant/${selectedId}/soumission/pdf?${buildSoumissionLotQuery(selectedSoumissionLot)}`}
           pdfAttachmentLabel={`soumission-lot-${selectedSoumissionLot.lot}.pdf`}
-          onSend={(p) =>
-            postEmail(
+          onSend={async (p) => {
+            await postEmail(
               `${API_URL}/commandes-sous-traitant/${selectedId}/soumission/email`,
               p,
               {
@@ -909,7 +963,14 @@ export function SousTraitantsCommandes() {
                 },
               },
             )
-          }
+            // Soumission send logs an envoi_email row (IDtype_doc=15)
+            // which the phase computation reads to flip the commande to
+            // 'soumis'. Refresh the same set of queries as the bon-de-
+            // commande send above.
+            queryClient.invalidateQueries({ queryKey: ['commande-sst', selectedId] })
+            queryClient.invalidateQueries({ queryKey: ['commandes-sst'] })
+            queryClient.invalidateQueries({ queryKey: ['commande-sst-historique', selectedId] })
+          }}
         />
       )}
     </>
@@ -943,8 +1004,8 @@ function CommandeList({
   onSelect: (id: number) => void
   searchQuery: string
   onSearchChange: (q: string) => void
-  statusFilter: SstPhase | 'all'
-  onStatusFilterChange: (s: SstPhase | 'all') => void
+  statusFilter: StatusFilter
+  onStatusFilterChange: (s: StatusFilter) => void
   onNew: () => void
   isEditing: boolean
   /** True while the backend has more rows behind the current cursor. */
@@ -990,12 +1051,9 @@ function CommandeList({
         </div>
         <div className="flex flex-wrap gap-1">
           {([
-            { key: 'en_cours',    label: 'En cours' },
-            { key: 'en_controle', label: 'En contrôle' },
-            { key: 'soumis',      label: 'Soumis' },
-            { key: 'en_reprise',  label: 'En reprise' },
-            { key: 'terminee',    label: 'Terminées' },
-            { key: 'all',         label: 'Toutes' },
+            { key: 'open',     label: 'En cours' },
+            { key: 'terminee', label: 'Terminées' },
+            { key: 'all',      label: 'Toutes' },
           ] as const).map((opt) => (
             <button
               key={opt.key}
@@ -1593,6 +1651,7 @@ function LignesSection({
             {drawerKind === 'ennoblisseur' && (
               <PiecesDrawer
                 commandeId={commande.IDcommande_sous_traitant}
+                sousTraitantNom={commande.sous_traitant_nom}
                 ligne={drawerLigne}
                 commandeSoldee={commande.est_soldee === 1}
                 onClose={() => onOpenPiecesDrawer(null)}
@@ -2052,9 +2111,12 @@ function PrixBreakdownContent({ data, isLoading }: { data: PrixBreakdownResponse
 // ── Pieces drawer (ennoblisseur-only) ──────────────────
 
 function PiecesDrawer({
-  commandeId, ligne, commandeSoldee, onClose, onSuccess,
+  commandeId, sousTraitantNom, ligne, commandeSoldee, onClose, onSuccess,
 }: {
   commandeId: number
+  /** Used in the LinkEcruDialog subtitle so the operator sees which sst's
+   *  magasin the listed rolls belong to ("disponibles chez MATEL"). */
+  sousTraitantNom: string | null | undefined
   ligne: LigneCommande
   /** True when the parent commande is `est_soldee = 1` (terminée). In
    *  that state the drawer is read-only: we hide the "+ Affecter" and
@@ -2365,6 +2427,7 @@ function PiecesDrawer({
             {showLinkEcruDialog && (
               <LinkEcruDialog
                 available={ecruAvailable}
+                sousTraitantNom={sousTraitantNom}
                 onBulkLink={async (ids) => {
                   for (const id of ids) {
                     await linkEcruMut.mutateAsync(id)
@@ -3765,6 +3828,23 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
   const [submitting, setSubmitting] = useState(false)
   const [doneCount, setDoneCount] = useState(0)
 
+  // Direct ref into the métrage input so the "Suivant" button can punt focus
+  // straight there — the operator's hands then stay on the keyboard for the
+  // dominant case (type lot → tab → type metrage → click Suivant → type
+  // next metrage → …).
+  const metrageInputRef = useRef<HTMLInputElement | null>(null)
+  const focusMetrageNextTick = () => {
+    // queueMicrotask runs after React commits the rerender from setCurrentIndex
+    // but before paint, so the new row's value is in the DOM by the time
+    // .focus() + .select() fires.
+    queueMicrotask(() => {
+      const el = metrageInputRef.current
+      if (!el) return
+      el.focus()
+      el.select()
+    })
+  }
+
   // Tricobot autofill state. `idle` → wave image, clickable.
   // `loading` → wave image, spinner overlay, disabled. `done` → thumb-up
   // image, locked. `tricobotMessage` is a short status line shown below
@@ -3776,7 +3856,22 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
   const currentRow = current ? rows[current.id] : null
   const canPrev = currentIndex > 0
   const canNext = currentIndex < rolls.length - 1
-  const canSubmit = idRefFini > 0 && rolls.length > 0 && !submitting
+
+  // Every roll must have a non-empty lot AND a positive metrage before the
+  // operator can submit. Without this guard the server happily accepts
+  // stock_fini rows with metrage=0 / empty lot, which is invisible at the
+  // create call but breaks downstream Soumission-Lot eligibility (the lot
+  // key is the join column) and the suivilot insert.
+  const completeCount = rolls.reduce((n, r) => {
+    const row = rows[r.id]
+    if (!row) return n
+    const lotOk = (row.lot ?? '').trim().length > 0
+    const metrageOk = Number(row.metrage) > 0
+    return n + (lotOk && metrageOk ? 1 : 0)
+  }, 0)
+  const allRowsComplete = completeCount === rolls.length
+  const totalMetrage = rolls.reduce((s, r) => s + (Number(rows[r.id]?.metrage) || 0), 0)
+  const canSubmit = idRefFini > 0 && rolls.length > 0 && !submitting && allRowsComplete
 
   const updateCurrent = (patch: Partial<BatchReceptionRow>) => {
     if (!current) return
@@ -4064,10 +4159,11 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
                 onChange={(v) => updateCurrent({ poids: v })}
               />
               <LabeledInput
-                label="Métrage (m)"
+                label="Métrage (Ml)"
                 type="number"
                 value={currentRow.metrage}
                 onChange={(v) => updateCurrent({ metrage: v })}
+                inputRef={metrageInputRef}
               />
             </div>
 
@@ -4099,10 +4195,20 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
             </div>
 
             <div className="flex items-center justify-between pt-1">
-              <Button variant="outline" size="sm" onClick={() => goTo(currentIndex - 1)} disabled={!canPrev}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => { goTo(currentIndex - 1); focusMetrageNextTick() }}
+                disabled={!canPrev}
+              >
                 <ChevronLeft className="h-4 w-4 mr-1" /> Précédent
               </Button>
-              <Button variant="outline" size="sm" onClick={() => goTo(currentIndex + 1)} disabled={!canNext}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => { goTo(currentIndex + 1); focusMetrageNextTick() }}
+                disabled={!canNext}
+              >
                 Suivant <ChevronRight className="h-4 w-4 ml-1" />
               </Button>
             </div>
@@ -4155,7 +4261,7 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
                   <div className="flex items-center gap-2 tabular-nums text-muted-foreground min-w-0 flex-1 truncate">
                     {row.lot && <span className="truncate">lot {row.lot}</span>}
                     {Number(row.poids) > 0 && <span>· {fmtNum(Number(row.poids), 1)} kg</span>}
-                    {Number(row.metrage) > 0 && <span>· {fmtNum(Number(row.metrage), 1)} m</span>}
+                    {Number(row.metrage) > 0 && <span>· {fmtNum(Number(row.metrage), 1)} Ml</span>}
                     {!hasData && <span className="italic">— en attente</span>}
                   </div>
                   <div className="flex items-center gap-1 flex-shrink-0">
@@ -4176,15 +4282,32 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
               <span className="break-all">{error}</span>
             </div>
           )}
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={onClose} disabled={submitting}>Annuler</Button>
-            <Button onClick={handleSubmit} disabled={!canSubmit}>
-              {submitting
-                ? `Enregistrement... (${doneCount}/${rolls.length})`
-                : isReprise
-                  ? `Reprendre ${rolls.length} rouleau${rolls.length > 1 ? 'x' : ''}`
-                  : `Réceptionner ${rolls.length} rouleau${rolls.length > 1 ? 'x' : ''}`}
-            </Button>
+          <div className="flex items-center gap-3">
+            <div className="flex flex-col items-start text-xs tabular-nums leading-tight">
+              <span className="font-semibold">
+                Total : {fmtNum(totalMetrage, 1)} Ml
+              </span>
+              <span className={cn(
+                'text-[11px]',
+                allRowsComplete ? 'text-muted-foreground' : 'text-amber-700',
+              )}>
+                {completeCount} / {rolls.length} rouleau{rolls.length > 1 ? 'x' : ''} complet{completeCount > 1 ? 's' : ''}
+              </span>
+            </div>
+            <div className="ml-auto flex gap-2">
+              <Button variant="outline" onClick={onClose} disabled={submitting}>Annuler</Button>
+              <Button
+                onClick={handleSubmit}
+                disabled={!canSubmit}
+                title={!allRowsComplete ? 'Chaque rouleau doit avoir un lot et un métrage' : undefined}
+              >
+                {submitting
+                  ? `Enregistrement... (${doneCount}/${rolls.length})`
+                  : isReprise
+                    ? `Reprendre ${rolls.length} rouleau${rolls.length > 1 ? 'x' : ''}`
+                    : `Réceptionner ${rolls.length} rouleau${rolls.length > 1 ? 'x' : ''}`}
+              </Button>
+            </div>
           </div>
         </div>
       </DialogContent>
@@ -4198,9 +4321,13 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
 // `onBulkLink`. The parent's `linkEcruMut` is invoked once per id (small
 // N — operators typically pick 1-5 rolls at a time).
 function LinkEcruDialog({
-  available, onBulkLink, onClose,
+  available, sousTraitantNom, onBulkLink, onClose,
 }: {
   available: StockEcruLite[]
+  /** Sst name appended to the subtitle ("disponibles chez MATEL"). The
+   *  picker is scoped to rolls whose IDmagasin equals this sst's id, so
+   *  surfacing the name avoids ambiguity ("64 disponibles … where?"). */
+  sousTraitantNom: string | null | undefined
   onBulkLink: (ids: number[]) => Promise<void>
   onClose: () => void
 }) {
@@ -4281,6 +4408,7 @@ function LinkEcruDialog({
             </h2>
             <p className="text-xs text-muted-foreground mt-0.5 tabular-nums">
               {available.length} rouleau{available.length > 1 ? 'x' : ''} disponible{available.length > 1 ? 's' : ''}
+              {sousTraitantNom && ` chez ${sousTraitantNom}`}
               {selected.size > 0 && ` · ${selected.size} sélectionné${selected.size > 1 ? 's' : ''} (${fmtNum(totalKg, 1)} kg)`}
             </p>
             <p className="text-[10px] text-muted-foreground/80 italic mt-0.5">
@@ -5671,7 +5799,7 @@ function KV({ label, value }: { label: string; value: React.ReactNode }) {
 }
 
 function LabeledInput({
-  label, value, onChange, type = 'text', autoFocus, disabled, helper,
+  label, value, onChange, type = 'text', autoFocus, disabled, helper, inputRef,
 }: {
   label: string
   value: string
@@ -5685,11 +5813,16 @@ function LabeledInput({
   /** Optional secondary text rendered under a disabled input to explain
    *  why the field is locked. */
   helper?: string
+  /** Optional ref to the underlying input element. Used by callers that
+   *  need programmatic focus (e.g. BatchReceptionDialog's Suivant button
+   *  jumps focus straight into the metrage field). */
+  inputRef?: React.Ref<HTMLInputElement>
 }) {
   return (
     <div className="space-y-1">
       <label className="text-xs font-medium text-muted-foreground">{label}</label>
       <input
+        ref={inputRef}
         type={type}
         value={value}
         onChange={(e) => onChange(e.target.value)}

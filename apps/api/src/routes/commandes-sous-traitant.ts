@@ -81,12 +81,20 @@ export const commandesSousTraitantRouter: RouterType = Router()
 //   259, "Non_Affecté" 186, "Attente_Delai" 128, "Delai_Expiré" 46,
 //   "Non_Envoye" 18, "En_Contrôle" 15, "En_Création" 11, "A_Soumettre" 6,
 //   "En_Reprise" 2.
-// The binary toggle in the UI maps to "En_Cours" / "Terminé" only. Any
-// other legacy value reads as "in progress" for the toggle (the line is
-// not done) but is preserved on save.
+// MPS_NG wires three of them into a state machine:
+//   - Non_Envoye      → line just created, bon de commande not sent yet
+//   - Attente_Delai   → bon de commande sent (envoi_email IDtype_doc=13),
+//                       waiting on the sst to confirm a delivery date
+//   - En_Cours        → user edited date_livraison after the bon de
+//                       commande was sent (sst has confirmed)
+// Other legacy values (Notification, Non_Affecté, …) are preserved on read
+// but never written from MPS_NG; phase computation treats them as the
+// generic "open / progressed" bucket alongside En_Cours.
 
 const STATUT_DONE = 'Terminé'
 const STATUT_OPEN = 'En_Cours'
+const STATUT_NON_ENVOYE = 'Non_Envoye'
+const STATUT_ATTENTE_DELAI = 'Attente_Delai'
 function isLineDone(sstatut: string | null | undefined): boolean {
   return (sstatut ?? '').trim() === STATUT_DONE
 }
@@ -154,6 +162,65 @@ function refuseIfTerminee(res: Response, est_soldee: number | null): boolean {
     return true
   }
   return false
+}
+
+/** Phase keyword → SstPhase override for the search bar smart filter.
+ *  Matches are accent-stripped and lowercased. The simplified toggle bar
+ *  only exposes open / terminee / all, so this is how the operator drills
+ *  into a specific sub-phase ("rep", "soum", "dela", "term", …).
+ *
+ *  Order matters: when an input is ambiguous (e.g. "en c" matches both
+ *  "en cours" and "en controle"), the FIRST entry wins. Listed roughly
+ *  by frequency so the common case is one keystroke away. */
+const PHASE_KEYWORD_ALIASES: Array<[string, SstPhase]> = [
+  ['en cours', 'en_cours'],
+  ['en controle', 'en_controle'],
+  ['controle', 'en_controle'],
+  ['en reprise', 'en_reprise'],
+  ['reprise', 'en_reprise'],
+  ['attente delai', 'attente_delai'],
+  ['attente', 'attente_delai'],
+  ['delai', 'attente_delai'],
+  ['non envoye', 'non_envoye'],
+  ['envoye', 'non_envoye'],
+  ['soumis', 'soumis'],
+  ['terminee', 'terminee'],
+  ['termine', 'terminee'],
+]
+
+function normalizePhaseQuery(s: string): string {
+  return s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim()
+}
+
+/** Returns the matching phase if the user's query (a) is at least 3
+ *  characters (avoids false positives on 1-2 char typeahead), AND (b)
+ *  either prefixes one of the alias strings ("rep" → "reprise") or
+ *  appears as a substring inside one ("dela" → "attente delai", "trole"
+ *  → "en controle"). Prefix is tried first since it produces more
+ *  intuitive results when both could apply. */
+function matchPhaseKeyword(q: string): SstPhase | null {
+  if (!q) return null
+  const norm = normalizePhaseQuery(q)
+  if (norm.length < 3) return null
+  for (const [kw, phase] of PHASE_KEYWORD_ALIASES) {
+    if (kw.startsWith(norm)) return phase
+  }
+  for (const [kw, phase] of PHASE_KEYWORD_ALIASES) {
+    if (kw.includes(norm)) return phase
+  }
+  return null
+}
+
+/** Whether a bon de commande email (envoi_email IDtype_doc=13) has been
+ *  logged for this commande. Drives the initial sstatut on line creation:
+ *  fresh commande → Non_Envoye; lines added after the bon de commande was
+ *  already sent → Attente_Delai. */
+async function hasBonDeCommandeBeenSent(commandeId: number): Promise<boolean> {
+  const rows = await query<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM envoi_email
+     WHERE IDtype_doc = 13 AND IDreference = ${commandeId}`,
+  )
+  return Number(rows[0]?.n) > 0
 }
 
 /** Flip est_soldee to 1 when every line is in the done state. */
@@ -578,7 +645,7 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
   try {
     const q = String(req.query.q ?? '').trim()
     const stFilter = parseInt(String(req.query.sous_traitant ?? ''), 10)
-    const statusFilter = String(req.query.status ?? 'all')
+    const statusFilterRaw = String(req.query.status ?? 'all')
 
     // Keyset pagination: the frontend can pass `limit` (default 100, max 500)
     // and `before_id` (the last IDcommande_sous_traitant it has). We sort by
@@ -594,7 +661,16 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
     // coloris match per polymorphic `type`). We keep `TOP limit` even on
     // search — a typeahead doesn't need 4000 hits. `commentaire` is no
     // longer fetched/stripped because the list card doesn't render it.
-    const isSearching = q.length > 0
+    //
+    // Smart phase-keyword override: the simplified toggle bar only offers
+    // open / terminee / all, so sub-phase narrowing has moved to the search
+    // bar. When `q` (accent-stripped, lowercased) exactly matches one of
+    // the known phase keywords, we override statusFilter to that phase and
+    // skip the catalog search. Compound queries like "MATEL reprise" are
+    // intentionally NOT supported in v1 — a future iteration can tokenise.
+    const phaseFromKeyword = matchPhaseKeyword(q)
+    const statusFilter = phaseFromKeyword ?? statusFilterRaw
+    const isSearching = q.length > 0 && phaseFromKeyword === null
     const limitRaw = parseInt(String(req.query.limit ?? ''), 10)
     const limit = isNaN(limitRaw) ? 100 : Math.min(Math.max(limitRaw, 1), 500)
     const beforeIdRaw = parseInt(String(req.query.before_id ?? ''), 10)
@@ -613,15 +689,20 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
     const whereParts: string[] = []
     if (!isNaN(stFilter)) whereParts.push(`cst.IDsous_traitant = ${stFilter}`)
 
-    // Status filter — accepts both the legacy binary filter
-    // ('en_cours' / 'terminee') and the new richer phase filters
-    // ('en_controle' / 'soumis' / 'en_reprise'). Terminée is a pure
-    // est_soldee=1 query; the other four are sub-divisions of
-    // est_soldee=0 that we pre-resolve via signal sets so the SQL can
-    // narrow to IN (...) and infinite-scroll pagination still works.
-    const SUB_PHASES: SstPhase[] = ['en_cours', 'en_controle', 'soumis', 'en_reprise']
+    // Status filter — accepts:
+    //   - 'all'        → no predicate (everything)
+    //   - 'open'       → est_soldee = 0 (macro filter for the simplified
+    //                    toggle bar — covers non_envoye / attente_delai /
+    //                    en_cours / en_controle / soumis / en_reprise)
+    //   - 'terminee'   → est_soldee = 1
+    //   - any SstPhase → sub-phase classification within est_soldee = 0
+    //                    (pre-resolved via signal sets so the SQL can
+    //                    narrow to IN (...) and pagination stays stable)
+    const SUB_PHASES: SstPhase[] = ['non_envoye', 'attente_delai', 'en_cours', 'en_controle', 'soumis', 'en_reprise']
     if (statusFilter === 'terminee') {
       whereParts.push(`cst.est_soldee = 1`)
+    } else if (statusFilter === 'open') {
+      whereParts.push(`cst.est_soldee = 0`)
     } else if (SUB_PHASES.includes(statusFilter as SstPhase)) {
       whereParts.push(`cst.est_soldee = 0`)
       // Resolve the three signal ID sets — scoped to open commandes for
@@ -713,10 +794,61 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
         const list = pickSet(controleSet)
         if (!list) { res.json([]); return }
         whereParts.push(`cst.IDcommande_sous_traitant IN (${list})`)
-      } else if (statusFilter === 'en_cours') {
-        // En cours = open AND has no signal yet (no rolls, no soumission, no reprise).
-        if (excludeFromEnCours.size > 0) {
-          whereParts.push(`cst.IDcommande_sous_traitant NOT IN (${Array.from(excludeFromEnCours).join(',')})`)
+      } else if (
+        statusFilter === 'en_cours'
+        || statusFilter === 'attente_delai'
+        || statusFilter === 'non_envoye'
+      ) {
+        // Sub-classify the open-bucket commandes (those not already in a
+        // higher-priority signal set) by MAX(line sstatut rank):
+        //   rank 0 → Non_Envoye, 1 → Attente_Delai, 2 → En_Cours (or any
+        //   other legacy "progressed" value). The commande's rank is the
+        //   max across its lines — one confirmed line lifts the whole
+        //   commande to en_cours.
+        const lineRows = await query<{ IDcommande_sous_traitant: number; sstatut: string | null }>(
+          `SELECT lcs.IDcommande_sous_traitant, lcs.sstatut
+           FROM ligne_commande_sous_traitant lcs
+           JOIN commande_sous_traitant cst
+             ON cst.IDcommande_sous_traitant = lcs.IDcommande_sous_traitant
+           WHERE cst.est_soldee = 0`,
+        )
+        const maxRankByCmd = new Map<number, 0 | 1 | 2>()
+        for (const r of lineRows) {
+          const cmdId = Number(r.IDcommande_sous_traitant)
+          if (excludeFromEnCours.has(cmdId)) continue
+          const rank = lineStatutRank(r.sstatut)
+          const prev = maxRankByCmd.get(cmdId) ?? 0
+          if (rank > prev) maxRankByCmd.set(cmdId, rank)
+        }
+        const nonEnvoyeSet = new Set<number>()
+        const attenteDelaiSet = new Set<number>()
+        const enCoursSet = new Set<number>()
+        for (const [cmdId, rank] of maxRankByCmd) {
+          if (rank === 2) enCoursSet.add(cmdId)
+          else if (rank === 1) attenteDelaiSet.add(cmdId)
+          else nonEnvoyeSet.add(cmdId)
+        }
+        // Commandes with no lines at all aren't in maxRankByCmd; classify
+        // them as non_envoye (fresh commande, no work yet).
+        if (statusFilter === 'non_envoye') {
+          // Open AND not in any higher-priority set AND (no lines OR all lines Non_Envoye).
+          const exclude = new Set<number>([
+            ...excludeFromEnCours,
+            ...attenteDelaiSet,
+            ...enCoursSet,
+          ])
+          if (exclude.size > 0) {
+            whereParts.push(`cst.IDcommande_sous_traitant NOT IN (${Array.from(exclude).join(',')})`)
+          }
+        } else if (statusFilter === 'attente_delai') {
+          const list = pickSet(attenteDelaiSet)
+          if (!list) { res.json([]); return }
+          whereParts.push(`cst.IDcommande_sous_traitant IN (${list})`)
+        } else {
+          // en_cours
+          const list = pickSet(enCoursSet)
+          if (!list) { res.json([]); return }
+          whereParts.push(`cst.IDcommande_sous_traitant IN (${list})`)
         }
       }
     }
@@ -1719,7 +1851,17 @@ const emailBody = z.object({
   body: z.string().min(1).max(20000),
   attach_pdf: z.boolean().optional(),
   extra_attachments: z.array(extraAttachmentSchema).optional(),
+  // Dev-only "Faux envoi" support — when true on a non-production server,
+  // we skip the Gmail send but still run every side effect (envoi_email
+  // row, sstatut Non_Envoye → Attente_Delai). Lets the operator exercise
+  // status transitions in dev without spamming real ennoblisseurs.
+  dev_skip_send: z.boolean().optional(),
 })
+
+/** True when the server is allowed to honour the `dev_skip_send` flag.
+ *  Tied to NODE_ENV so a production build silently ignores it even if a
+ *  client (e.g. a curl test) tries to set it. */
+const ALLOW_DEV_SKIP_SEND = process.env.NODE_ENV !== 'production'
 
 commandesSousTraitantRouter.post('/:id/email', async (req: Request, res: Response) => {
   try {
@@ -1732,54 +1874,104 @@ commandesSousTraitantRouter.post('/:id/email', async (req: Request, res: Respons
       res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return
     }
 
-    const senderEmail = await getUserEmail(req.userId)
-    if (!senderEmail) {
-      res.status(400).json({
-        error: 'no_sender_email',
-        message:
-          "Aucune adresse email n'est associée à votre compte. Un administrateur doit en définir une dans Paramètres › Utilisateurs.",
+    // Dev-only fake send — skip everything that talks to Gmail (sender
+    // email lookup, PDF rendering, sendMail) but still log envoi_email +
+    // flip sstatut below. Bypassing the sender-email check is intentional
+    // so a developer without an email mapping can still exercise the
+    // status transitions.
+    const devSkip = parsed.data.dev_skip_send === true && ALLOW_DEV_SKIP_SEND
+
+    let messageId: string
+    if (devSkip) {
+      messageId = `dev-skip-${Date.now()}`
+      console.log(`[dev-skip-send] commande_sst #${id} — fake send to ${parsed.data.to.join(', ')}`)
+    } else {
+      const senderEmail = await getUserEmail(req.userId)
+      if (!senderEmail) {
+        res.status(400).json({
+          error: 'no_sender_email',
+          message:
+            "Aucune adresse email n'est associée à votre compte. Un administrateur doit en définir une dans Paramètres › Utilisateurs.",
+        })
+        return
+      }
+
+      const userRows = await query<{ prenom: string | null; nom: string | null }>(
+        `SELECT prenom, nom FROM utilisateur WHERE IDutilisateur = ${req.userId}`,
+      )
+      const fixedUser = await fixEncoding(userRows, 'utilisateur', 'IDutilisateur', ['prenom', 'nom'])
+      const u = (fixedUser[0] as any) ?? null
+      const displayName = u
+        ? [u.prenom, u.nom].filter((s: string | null) => s && s.trim()).map((s: string) => s.trim()).join(' ')
+        : ''
+      const fromName = displayName ? `${displayName} — ETS Malterre` : 'ETS Malterre'
+
+      const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
+      if (parsed.data.attach_pdf !== false) {
+        const data = await buildCommandePdfData(id)
+        if (!data) { res.status(404).json({ error: 'Commande not found' }); return }
+        const buffer = await renderCommandePdfBuffer(data)
+        attachments.push({
+          filename: `commande-sous-traitant-${data.numero}.pdf`,
+          content: buffer,
+          contentType: 'application/pdf',
+        })
+      }
+      for (const a of parsed.data.extra_attachments ?? []) {
+        attachments.push({
+          filename: a.filename,
+          content: Buffer.from(a.content_base64, 'base64'),
+          contentType: a.content_type,
+        })
+      }
+
+      messageId = await sendMail({
+        from: senderEmail,
+        fromName,
+        to: parsed.data.to,
+        cc: parsed.data.cc,
+        subject: parsed.data.subject,
+        body: parsed.data.body,
+        attachments: attachments.length > 0 ? attachments : undefined,
       })
-      return
     }
 
-    const userRows = await query<{ prenom: string | null; nom: string | null }>(
-      `SELECT prenom, nom FROM utilisateur WHERE IDutilisateur = ${req.userId}`,
-    )
-    const fixedUser = await fixEncoding(userRows, 'utilisateur', 'IDutilisateur', ['prenom', 'nom'])
-    const u = (fixedUser[0] as any) ?? null
-    const displayName = u
-      ? [u.prenom, u.nom].filter((s: string | null) => s && s.trim()).map((s: string) => s.trim()).join(' ')
-      : ''
-    const fromName = displayName ? `${displayName} — ETS Malterre` : 'ETS Malterre'
-
-    const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
-    if (parsed.data.attach_pdf !== false) {
-      const data = await buildCommandePdfData(id)
-      if (!data) { res.status(404).json({ error: 'Commande not found' }); return }
-      const buffer = await renderCommandePdfBuffer(data)
-      attachments.push({
-        filename: `commande-sous-traitant-${data.numero}.pdf`,
-        content: buffer,
-        contentType: 'application/pdf',
-      })
+    // Audit: log one envoi_email row per recipient with IDtype_doc=13
+    // ("commande sst"). The historique tab and the Non_Envoye →
+    // Attente_Delai phase transition both key off this row's presence,
+    // and the legacy WinDev app surfaces it in its own UI.
+    const allRecipients = [...parsed.data.to, ...(parsed.data.cc ?? [])]
+    let societe = ''
+    try {
+      const stRows = await query<{ IDsous_traitant: number; nom: unknown }>(
+        `SELECT cst.IDsous_traitant, CONVERT(st.nom USING 'UTF-8') AS nom
+         FROM commande_sous_traitant cst
+         JOIN sous_traitant st ON st.IDsous_traitant = cst.IDsous_traitant
+         WHERE cst.IDcommande_sous_traitant = ${id}`,
+      )
+      const raw = stRows[0]?.nom
+      if (raw instanceof ArrayBuffer) societe = Buffer.from(raw).toString('utf8')
+      else if (typeof raw === 'string') societe = raw
+    } catch {
+      // Audit field is informational; fall back to empty.
     }
-    for (const a of parsed.data.extra_attachments ?? []) {
-      attachments.push({
-        filename: a.filename,
-        content: Buffer.from(a.content_base64, 'base64'),
-        contentType: a.content_type,
-      })
+    await logEnvoiEmails(13, id, allRecipients, societe)
+
+    // State machine: bon de commande has now been sent → flip every
+    // still-Non_Envoye line to Attente_Delai. We intentionally do NOT
+    // touch lines already in En_Cours / Terminé / other legacy values —
+    // the flip is one-way and idempotent.
+    try {
+      await query(
+        `UPDATE ligne_commande_sous_traitant
+         SET sstatut = '${STATUT_ATTENTE_DELAI}'
+         WHERE IDcommande_sous_traitant = ${id}
+           AND sstatut = '${STATUT_NON_ENVOYE}'`,
+      )
+    } catch (e) {
+      console.error('sstatut Non_Envoye → Attente_Delai failed for commande', id, e)
     }
 
-    const messageId = await sendMail({
-      from: senderEmail,
-      fromName,
-      to: parsed.data.to,
-      cc: parsed.data.cc,
-      subject: parsed.data.subject,
-      body: parsed.data.body,
-      attachments: attachments.length > 0 ? attachments : undefined,
-    })
     res.json({ ok: true, messageId })
   } catch (err) {
     console.error('Error sending commande-sous-traitant email:', err)
@@ -1803,7 +1995,45 @@ commandesSousTraitantRouter.post('/:id/email', async (req: Request, res: Respons
 // > en_controle > en_cours. The phase is informational only — `est_soldee`
 // remains the sole write gate (`refuseIfTerminee` is unchanged).
 
-export type SstPhase = 'en_cours' | 'en_controle' | 'soumis' | 'en_reprise' | 'terminee'
+export type SstPhase =
+  | 'non_envoye'
+  | 'attente_delai'
+  | 'en_cours'
+  | 'en_controle'
+  | 'soumis'
+  | 'en_reprise'
+  | 'terminee'
+
+/** Map a stored line.sstatut value to a coarse progression rank used by
+ *  the en_cours-bucket sub-classification.
+ *    0 = Non_Envoye        (waiting for bon de commande to go out)
+ *    1 = Attente_Delai     (sent, waiting on sst to confirm date)
+ *    2 = En_Cours / any other legacy value (date confirmed / line moving)
+ *  The commande-level phase within the en_cours bucket is MAX(rank) over
+ *  its lines — a single confirmed line lifts the commande to en_cours. */
+function lineStatutRank(sstatut: string | null | undefined): 0 | 1 | 2 {
+  const s = (sstatut ?? '').trim()
+  if (s === STATUT_NON_ENVOYE) return 0
+  if (s === STATUT_ATTENTE_DELAI) return 1
+  return 2
+}
+
+/** Sub-classify the open commande (est_soldee=0, no reprise/soumis/en_controle
+ *  signal) into non_envoye / attente_delai / en_cours by reading its lines. */
+async function classifyEnCoursBucket(commandeId: number): Promise<'non_envoye' | 'attente_delai' | 'en_cours'> {
+  const rows = await query<{ sstatut: string | null }>(
+    `SELECT sstatut FROM ligne_commande_sous_traitant WHERE IDcommande_sous_traitant = ${commandeId}`,
+  )
+  if (rows.length === 0) return 'non_envoye'
+  let max: 0 | 1 | 2 = 0
+  for (const r of rows) {
+    const rank = lineStatutRank(r.sstatut)
+    if (rank > max) max = rank
+  }
+  if (max === 2) return 'en_cours'
+  if (max === 1) return 'attente_delai'
+  return 'non_envoye'
+}
 
 /** Compute the phase for a single commande. Used by the detail endpoint. */
 async function computePhase(commandeId: number, est_soldee: number): Promise<SstPhase> {
@@ -1851,7 +2081,8 @@ async function computePhase(commandeId: number, est_soldee: number): Promise<Sst
   )
   if (Number(reception[0]?.n) > 0) return 'en_controle'
 
-  return 'en_cours'
+  // Open bucket — sub-classify via line sstatut ranks.
+  return classifyEnCoursBucket(commandeId)
 }
 
 /** Batched variant for the list endpoint — runs three flat IN-queries
@@ -1922,11 +2153,37 @@ async function computePhasesBatch(
   )
   const receptionSet = new Set(receptionRows.map((r) => Number(r.IDcommande_sous_traitant)))
 
+  // Bucket the remaining "open" ids (no reprise / soumis / en_controle
+  // signal) by line sstatut: read all their lines in one IN-query and
+  // compute MAX(rank) per commande.
+  const enCoursBucketIds = openIds.filter(
+    (id) => !repriseSet.has(id) && !soumisSet.has(id) && !receptionSet.has(id),
+  )
+  const maxRankByCmd = new Map<number, 0 | 1 | 2>()
+  if (enCoursBucketIds.length > 0) {
+    const lineRows = await query<{ IDcommande_sous_traitant: number; sstatut: string | null }>(
+      `SELECT IDcommande_sous_traitant, sstatut
+       FROM ligne_commande_sous_traitant
+       WHERE IDcommande_sous_traitant IN (${enCoursBucketIds.join(',')})`,
+    )
+    for (const r of lineRows) {
+      const cmdId = Number(r.IDcommande_sous_traitant)
+      const rank = lineStatutRank(r.sstatut)
+      const prev = maxRankByCmd.get(cmdId) ?? 0
+      if (rank > prev) maxRankByCmd.set(cmdId, rank)
+    }
+  }
+
   for (const id of openIds) {
     if (repriseSet.has(id)) out.set(id, 'en_reprise')
     else if (soumisSet.has(id)) out.set(id, 'soumis')
     else if (receptionSet.has(id)) out.set(id, 'en_controle')
-    else out.set(id, 'en_cours')
+    else {
+      const rank = maxRankByCmd.get(id) ?? 0
+      if (rank === 2) out.set(id, 'en_cours')
+      else if (rank === 1) out.set(id, 'attente_delai')
+      else out.set(id, 'non_envoye')
+    }
   }
   return out
 }
@@ -2460,6 +2717,8 @@ const soumissionEmailBody = z.object({
   coloris: z.number().int().nonnegative(),
   lot: z.string().min(1).max(200),
   commande_client: z.number().int().positive(),
+  // Dev-only — see emailBody for semantics.
+  dev_skip_send: z.boolean().optional(),
 })
 
 commandesSousTraitantRouter.post('/:id/soumission/email', async (req: Request, res: Response) => {
@@ -2479,54 +2738,63 @@ commandesSousTraitantRouter.post('/:id/soumission/email', async (req: Request, r
       IDcommande_client: parsed.data.commande_client,
     }
 
-    const senderEmail = await getUserEmail(req.userId)
-    if (!senderEmail) {
-      res.status(400).json({
-        error: 'no_sender_email',
-        message:
-          "Aucune adresse email n'est associée à votre compte. Un administrateur doit en définir une dans Paramètres › Utilisateurs.",
-      })
-      return
-    }
+    // Dev-only fake send — see the bon-de-commande endpoint above.
+    const devSkip = parsed.data.dev_skip_send === true && ALLOW_DEV_SKIP_SEND
 
-    const userRows = await query<{ prenom: string | null; nom: string | null }>(
-      `SELECT prenom, nom FROM utilisateur WHERE IDutilisateur = ${req.userId}`,
-    )
-    const fixedUser = await fixEncoding(userRows, 'utilisateur', 'IDutilisateur', ['prenom', 'nom'])
-    const u = (fixedUser[0] as any) ?? null
-    const displayName = u
-      ? [u.prenom, u.nom].filter((s: string | null) => s && s.trim()).map((s: string) => s.trim()).join(' ')
-      : ''
-    const fromName = displayName ? `${displayName} — ETS Malterre` : 'ETS Malterre'
+    let messageId: string
+    if (devSkip) {
+      messageId = `dev-skip-${Date.now()}`
+      console.log(`[dev-skip-send] soumission #${id} lot=${parsed.data.lot} — fake send to ${parsed.data.to.join(', ')}`)
+    } else {
+      const senderEmail = await getUserEmail(req.userId)
+      if (!senderEmail) {
+        res.status(400).json({
+          error: 'no_sender_email',
+          message:
+            "Aucune adresse email n'est associée à votre compte. Un administrateur doit en définir une dans Paramètres › Utilisateurs.",
+        })
+        return
+      }
 
-    const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
-    if (parsed.data.attach_pdf !== false) {
-      const data = await buildSoumissionLotPdfData(id, lotParams, req.userId)
-      if (!data) { res.status(404).json({ error: 'Lot not eligible for this commande' }); return }
-      const buffer = await renderSoumissionLotPdfBuffer(data)
-      attachments.push({
-        filename: `soumission-lot-${data.lot.replace(/[^a-zA-Z0-9_-]/g, '_')}.pdf`,
-        content: buffer,
-        contentType: 'application/pdf',
+      const userRows = await query<{ prenom: string | null; nom: string | null }>(
+        `SELECT prenom, nom FROM utilisateur WHERE IDutilisateur = ${req.userId}`,
+      )
+      const fixedUser = await fixEncoding(userRows, 'utilisateur', 'IDutilisateur', ['prenom', 'nom'])
+      const u = (fixedUser[0] as any) ?? null
+      const displayName = u
+        ? [u.prenom, u.nom].filter((s: string | null) => s && s.trim()).map((s: string) => s.trim()).join(' ')
+        : ''
+      const fromName = displayName ? `${displayName} — ETS Malterre` : 'ETS Malterre'
+
+      const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
+      if (parsed.data.attach_pdf !== false) {
+        const data = await buildSoumissionLotPdfData(id, lotParams, req.userId)
+        if (!data) { res.status(404).json({ error: 'Lot not eligible for this commande' }); return }
+        const buffer = await renderSoumissionLotPdfBuffer(data)
+        attachments.push({
+          filename: `soumission-lot-${data.lot.replace(/[^a-zA-Z0-9_-]/g, '_')}.pdf`,
+          content: buffer,
+          contentType: 'application/pdf',
+        })
+      }
+      for (const a of parsed.data.extra_attachments ?? []) {
+        attachments.push({
+          filename: a.filename,
+          content: Buffer.from(a.content_base64, 'base64'),
+          contentType: a.content_type,
+        })
+      }
+
+      messageId = await sendMail({
+        from: senderEmail,
+        fromName,
+        to: parsed.data.to,
+        cc: parsed.data.cc,
+        subject: parsed.data.subject,
+        body: parsed.data.body,
+        attachments: attachments.length > 0 ? attachments : undefined,
       })
     }
-    for (const a of parsed.data.extra_attachments ?? []) {
-      attachments.push({
-        filename: a.filename,
-        content: Buffer.from(a.content_base64, 'base64'),
-        contentType: a.content_type,
-      })
-    }
-
-    const messageId = await sendMail({
-      from: senderEmail,
-      fromName,
-      to: parsed.data.to,
-      cc: parsed.data.cc,
-      subject: parsed.data.subject,
-      body: parsed.data.body,
-      attachments: attachments.length > 0 ? attachments : undefined,
-    })
 
     // Audit: log one envoi_email row per recipient (to+cc). The legacy
     // WinDev app reads from this same table — by using IDtype_doc=15
@@ -2624,21 +2892,25 @@ commandesSousTraitantRouter.get('/:id/historique', async (req: Request, res: Res
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
 
-    const rows = await query<{
-      IDenvoi_email: number
-      DATE: string | null
-      adresse: string | null
-      société: string | null
-      IDreference: number
-      IDtype_doc: number
-      notes: string | null
-    }>(
-      `SELECT IDenvoi_email, DATE, adresse, société, IDreference, IDtype_doc, notes
-       FROM envoi_email
-       WHERE IDreference = ${id}
-         AND IDtype_doc IN (${HISTORIQUE_TYPE_DOC_IDS.join(',')})
-       ORDER BY DATE DESC`,
-    )
+    // Read envoi_email rows for this commande. The Linux iODBC bridge
+    // can't tokenize the `société` identifier in a SELECT column list, so
+    // we fall back to `SELECT *` there and let fixEncoding decode the row
+    // dict. Windows keeps the explicit column list. Same pattern as the
+    // computePhase soumis-check.
+    const rows = IS_WINDOWS
+      ? await query<Record<string, unknown>>(
+          `SELECT IDenvoi_email, DATE, adresse, société, IDreference, IDtype_doc, notes
+           FROM envoi_email
+           WHERE IDreference = ${id}
+             AND IDtype_doc IN (${HISTORIQUE_TYPE_DOC_IDS.join(',')})
+           ORDER BY DATE DESC`,
+        )
+      : await query<Record<string, unknown>>(
+          `SELECT * FROM envoi_email
+           WHERE IDreference = ${id}
+             AND IDtype_doc IN (${HISTORIQUE_TYPE_DOC_IDS.join(',')})
+           ORDER BY DATE DESC`,
+        )
     const fixed = await fixEncoding(rows as any[], 'envoi_email', 'IDenvoi_email', ['adresse', 'société', 'notes'])
 
     // Resolve type_doc labels (small lookup — 29 rows). Fetch once,
@@ -2984,13 +3256,21 @@ commandesSousTraitantRouter.post('/:id/lignes', async (req: Request, res: Respon
     // rule has a baseline to compare against later. `type` defaults to 2,
     // the dominant legacy value for ennoblisseur lines (matches stock_ecru
     // references; 4668/7247 legacy lines have type=2).
+    //
+    // Initial sstatut: starts at Non_Envoye for a fresh commande; if the
+    // bon de commande has already been sent (e.g. user adds a line after
+    // the fact) the new line skips straight to Attente_Delai so the
+    // commande phase doesn't regress.
+    const defaultStatut = (await hasBonDeCommandeBeenSent(id))
+      ? STATUT_ATTENTE_DELAI
+      : STATUT_NON_ENVOYE
     await query(
       `INSERT INTO ligne_commande_sous_traitant
        (IDcommande_sous_traitant, type, IDreference, IDColoris, quantite, unite, prix,
         date_livraison, date_delai, sstatut, commentaire)
        VALUES (${id}, ${lineType}, ${d.IDreference ?? 0}, ${d.IDColoris ?? 0},
                ${n(d.quantite)}, ${d.unite ?? 0}, ${n(linePrix)},
-               '${dateLiv}', '${dateLiv}', '${esc(d.sstatut ?? STATUT_OPEN)}', '${esc(d.commentaire ?? '')}')`,
+               '${dateLiv}', '${dateLiv}', '${esc(d.sstatut ?? defaultStatut)}', '${esc(d.commentaire ?? '')}')`,
     )
 
     // Mirror to TRM only for Tricotage Malterre (sister-company knitter).
@@ -3069,19 +3349,22 @@ commandesSousTraitantRouter.put('/lignes/:lineId', async (req: Request, res: Res
     if (commandeId == null) { res.status(404).json({ error: 'Line not found' }); return }
     if (refuseIfTerminee(res, await loadCommandeSoldee(commandeId))) return
 
-    // Read current dates + type + IDreference + quantite — needed for the
-    // delai-initial preservation rule AND the tricoteur prix recompute.
+    // Read current dates + type + IDreference + quantite + sstatut — needed
+    // for the delai-initial preservation rule, the tricoteur prix recompute,
+    // AND the Attente_Delai → En_Cours auto-flip when the user edits
+    // date_livraison.
     const currentRows = await query<{
       date_livraison: string | null
       date_delai: string | null
       type_kind: number | null
       IDreference: number | null
       quantite: number | null
+      sstatut: string | null
     }>(
-      `SELECT date_livraison, date_delai, type AS type_kind, IDreference, quantite
+      `SELECT date_livraison, date_delai, type AS type_kind, IDreference, quantite, sstatut
        FROM ligne_commande_sous_traitant WHERE IDligne_commande_sous_traitant = ${lineId}`,
     )
-    const cur = currentRows[0] ?? { date_livraison: '', date_delai: '', type_kind: 0, IDreference: 0, quantite: 0 }
+    const cur = currentRows[0] ?? { date_livraison: '', date_delai: '', type_kind: 0, IDreference: 0, quantite: 0, sstatut: '' }
 
     const sets: string[] = []
     if (d.type !== undefined) sets.push(`type = ${d.type}`)
@@ -3103,6 +3386,14 @@ commandesSousTraitantRouter.put('/lignes/:lineId', async (req: Request, res: Res
         sets.push(`date_delai = '${prevLiv}'`)
       }
       sets.push(`date_livraison = '${nextLiv}'`)
+      // State machine: editing date_livraison on an Attente_Delai line
+      // means the sst has confirmed a délai → flip to En_Cours. Lines in
+      // Non_Envoye keep their status (the bon de commande hasn't been
+      // sent yet, the date is hypothetical). An explicit d.sstatut in the
+      // patch wins over this auto-flip.
+      if (d.sstatut === undefined && (cur.sstatut ?? '').trim() === STATUT_ATTENTE_DELAI) {
+        sets.push(`sstatut = '${STATUT_OPEN}'`)
+      }
     }
 
     // Tricoteur prix recompute: when IDreference or quantite changes on a
@@ -3252,6 +3543,11 @@ interface LineContext {
   /** The IDref_ecru that ref_fini maps to (via ref_fini.IDref_ecru). Used
    *  to filter compatible écru rolls for the drawer. */
   IDref_ecru: number
+  /** The commande's sous-traitant. Doubles as a magasin id (stock_*.IDmagasin
+   *  is the same id space as sous_traitant.IDsous_traitant) — used to narrow
+   *  the "Affecter des rouleaux écru" picker to rolls physically present at
+   *  the ennoblisseur's warehouse. */
+  IDsous_traitant: number
 }
 
 async function loadEnnoblisseurLineContext(
@@ -3281,7 +3577,15 @@ async function loadEnnoblisseurLineContext(
     )
     IDref_ecru = Number((r[0] as any)?.IDref_ecru) || 0
   }
-  return { commandeId, IDref_fini, IDref_ecru }
+
+  // Resolve the sous-traitant id for the magasin-based available-rolls filter.
+  const sst = await query<{ IDsous_traitant: number | null }>(
+    `SELECT IDsous_traitant FROM commande_sous_traitant
+     WHERE IDcommande_sous_traitant = ${commandeId}`,
+  )
+  const IDsous_traitant = Number((sst[0] as any)?.IDsous_traitant) || 0
+
+  return { commandeId, IDref_fini, IDref_ecru, IDsous_traitant }
 }
 
 /** Create a `suivilot` row for a (ligne, lot) pair.
@@ -3559,17 +3863,21 @@ async function fetchPiecesPayload(ctx: LineContext, ligneId: number): Promise<{
   }
 
   // Available écru rolls — every roll of the ref_ecru that maps to this
-  // fini line, currently unaffected. Coloris is intentionally not filtered:
-  // the ennoblisseur dyes the écru regardless of its source coloris, so we
-  // present all matching écru rolls.
+  // fini line, currently unaffected AND physically present at the sous-
+  // traitant's magasin (stock_ecru.IDmagasin = ctx.IDsous_traitant). The
+  // legacy MPS workflow only links rolls the ennoblisseur actually holds;
+  // showing Malterre-magasin rolls here would let an operator link rolls
+  // that still need to be transferred. Coloris is intentionally not
+  // filtered: the ennoblisseur dyes regardless of source coloris.
   let available: StockEcruLite[] = []
-  if (ctx.IDref_ecru > 0) {
+  if (ctx.IDref_ecru > 0 && ctx.IDsous_traitant > 0) {
     const availRows = await query<StockEcruLite>(
       `SELECT IDstock_ecru, numero, lot, poids, metrage, IDref_ecru, IDcolori_ecru,
               IDmagasin, IDordre_fabrication, date_saisie,
               second_choix, observations
        FROM stock_ecru
        WHERE IDref_ecru = ${ctx.IDref_ecru}
+         AND IDmagasin = ${ctx.IDsous_traitant}
          AND (IDref_commande_affectation IS NULL OR IDref_commande_affectation = 0)
        ORDER BY date_saisie DESC, IDstock_ecru DESC`,
     )

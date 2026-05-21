@@ -60,18 +60,41 @@ async function loadCatalog(
   return promise
 }
 
-/** Subcontractors — small table, exact catalog. */
+/** Subcontractors — small table, exact catalog. The searchable label
+ *  concatenates the sst name AND its type label (Ennoblisseur / Tricoteur
+ *  / Confectionneur / …) so typing a type fragment ("enn", "tric") matches
+ *  every sst of that category, not just the few whose name happens to
+ *  contain the type word. type_sst is loaded with a separate flat query
+ *  (no JOIN) and merged in JS — the Linux iODBC bridge collapses result
+ *  sets when CONVERT is combined with a JOIN. */
 async function loadSousTraitants(): Promise<CacheSnapshot> {
   return loadCatalog('sous_traitant', async () => {
-    const rows = await query<{ IDsous_traitant: number; nom: unknown }>(
-      `SELECT IDsous_traitant, CONVERT(nom USING 'UTF-8') AS nom FROM sous_traitant`,
-    )
     const decode = (v: unknown): string => {
       if (v instanceof ArrayBuffer) return Buffer.from(v).toString('utf8')
       if (typeof v === 'string') return v
       return ''
     }
-    return rows.map((r) => ({ id: Number(r.IDsous_traitant), label: decode(r.nom) }))
+    const sstRows = await query<{ IDsous_traitant: number; nom: unknown; IDtype_sst: number | null }>(
+      `SELECT IDsous_traitant, CONVERT(nom USING 'UTF-8') AS nom, IDtype_sst FROM sous_traitant`,
+    )
+    // `type` is an HFSQL reserved word — even when aliased back to `type`
+    // the column comes back as `TYPE` in the row dict (see CLAUDE.md HFSQL
+    // rules). Alias to a non-reserved name to avoid the casing flip.
+    const typeRows = await query<{ IDtype_sst: number; type_label: unknown }>(
+      `SELECT IDtype_sst, CONVERT(type USING 'UTF-8') AS type_label FROM type_sst`,
+    )
+    const typeMap = new Map<number, string>()
+    for (const t of typeRows) typeMap.set(Number(t.IDtype_sst), decode(t.type_label))
+    return sstRows.map((r) => {
+      const nom = decode(r.nom)
+      const typeLabel = typeMap.get(Number(r.IDtype_sst) || 0) ?? ''
+      return {
+        id: Number(r.IDsous_traitant),
+        // `nom + ' ' + type` — both contribute to the normalised
+        // substring index used by matchAll.
+        label: typeLabel ? `${nom} ${typeLabel}` : nom,
+      }
+    })
   })
 }
 
