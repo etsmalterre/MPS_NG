@@ -639,100 +639,68 @@ commandesSousTraitantRouter.get('/lookups/magasins', async (_req: Request, res: 
   }
 })
 
-// ── Attente Délai pill counts ────────────────────────────
+// ── Urgency bucket helper ────────────────────────────────
 //
-// Surfaces two scalars for the left-list header pills:
-//   - `late` (>= 3 days since bon de commande sent)
-//   - `soon` (== 2 days)
-// Day-of-send and day-after are tolerated → not counted.
-// Computed from the same signal sets the list endpoint uses to derive the
-// `attente_delai` phase, then joined to the latest envoi_email DATE
-// (IDtype_doc=13) per commande. Registered before `/:id` so the literal
-// path wins the Express match.
-commandesSousTraitantRouter.get('/attente-delai-counts', async (_req: Request, res: Response) => {
-  try {
-    // 1) All open commandes.
-    const openRows = await query<{ IDcommande_sous_traitant: number }>(
-      `SELECT IDcommande_sous_traitant FROM commande_sous_traitant WHERE est_soldee = 0`,
-    )
-    const openIds = openRows.map((r) => Number(r.IDcommande_sous_traitant)).filter((n) => n > 0)
-    if (openIds.length === 0) { res.json({ late: 0, soon: 0 }); return }
-    const idList = openIds.join(',')
+// Mirrors the frontend frame-colour logic so the header pills count
+// exactly the cards that render as red / amber:
+//   - attente_delai → days since the latest bon de commande was sent
+//     (>= 3 → late, === 2 → soon, otherwise no frame). Day 0 and day +1
+//     are tolerated.
+//   - any other open phase → earliest open-line `date_livraison` deadline
+//     (<= today → late, within 3 days → soon). Open commandes with no
+//     valid earliest delivery are treated as late, matching the frontend
+//     `deliveryUrgency` fallback.
+//   - terminée → never urgent.
+//
+// Returns the set of IDs for each bucket so callers can either count them
+// (pill endpoint) or use them as an IN-list filter (list endpoint).
+async function computeUrgencyBuckets(): Promise<{
+  late: Set<number>
+  soon: Set<number>
+}> {
+  const empty = { late: new Set<number>(), soon: new Set<number>() }
+  const openRows = await query<{ IDcommande_sous_traitant: number }>(
+    `SELECT IDcommande_sous_traitant FROM commande_sous_traitant WHERE est_soldee = 0`,
+  )
+  const openIds = openRows.map((r) => Number(r.IDcommande_sous_traitant)).filter((n) => n > 0)
+  if (openIds.length === 0) return empty
+  const idList = openIds.join(',')
 
-    // 2) Higher-priority signal sets — anything in these is NOT attente_delai.
-    const [repriseRows, receptionRows] = await Promise.all([
-      query<{ IDcommande_sous_traitant: number }>(
-        `SELECT DISTINCT lcs.IDcommande_sous_traitant
-         FROM stock_fini sf
-         JOIN ligne_commande_sous_traitant lcs
-           ON lcs.IDligne_commande_sous_traitant = sf.IDref_commande_source
-         WHERE lcs.IDcommande_sous_traitant IN (${idList})
-           AND sf.IDetat_stock_fini = 2`,
-      ),
-      query<{ IDcommande_sous_traitant: number }>(
-        `SELECT DISTINCT lcs.IDcommande_sous_traitant
-         FROM stock_fini sf
-         JOIN ligne_commande_sous_traitant lcs
-           ON lcs.IDligne_commande_sous_traitant = sf.IDref_commande_source
-         WHERE lcs.IDcommande_sous_traitant IN (${idList})`,
-      ),
-    ])
-    const repriseSet = new Set(repriseRows.map((r) => Number(r.IDcommande_sous_traitant)))
-    const receptionSet = new Set(receptionRows.map((r) => Number(r.IDcommande_sous_traitant)))
+  // Phase per open commande — reuses the same batched logic as the list
+  // endpoint so the bucket boundaries stay in sync.
+  const phaseMap = await computePhasesBatch(openIds.map((id) => ({ id, est_soldee: 0 })))
 
-    // Soumis — Linux path branches around the `invalidé` predicate.
-    let soumisIds: number[]
-    if (IS_WINDOWS) {
-      const rows = await query<{ IDreference: number }>(
-        `SELECT DISTINCT IDreference FROM envoi_email
-         WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION_LOT_CLIENT}
-           AND IDreference IN (${idList})
-           ${SOUMIS_INVALIDE_SQL_PREDICATE}`,
-      )
-      soumisIds = rows.map((r) => Number(r.IDreference)).filter((n) => n > 0)
-    } else {
-      const rows = await query<Record<string, unknown>>(
-        `SELECT * FROM envoi_email
-         WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION_LOT_CLIENT}
-           AND IDreference IN (${idList})`,
-      )
-      soumisIds = filterActiveSoumisRows(rows)
-        .map((r) => Number((r as any).IDreference))
-        .filter((n) => n > 0)
-    }
-    const soumisSet = new Set(soumisIds)
+  // Earliest open-line delivery deadline per commande (min over lines
+  // whose sstatut != Terminé). Open lines with no valid date_livraison
+  // contribute nothing; the commande's earliest stays null in that case.
+  const lineRows = await query<{
+    IDcommande_sous_traitant: number
+    sstatut: string | null
+    date_livraison: string | null
+  }>(
+    `SELECT IDcommande_sous_traitant, sstatut, date_livraison
+     FROM ligne_commande_sous_traitant
+     WHERE IDcommande_sous_traitant IN (${idList})`,
+  )
+  const earliestByCmd = new Map<number, string | null>()
+  for (const l of lineRows) {
+    const cid = Number(l.IDcommande_sous_traitant)
+    if (!earliestByCmd.has(cid)) earliestByCmd.set(cid, null)
+    if (isLineDone(l.sstatut)) continue
+    const dl = typeof l.date_livraison === 'string' ? l.date_livraison : ''
+    if (!/^\d{8}$/.test(dl)) continue
+    const prev = earliestByCmd.get(cid) ?? null
+    if (prev === null || dl < prev) earliestByCmd.set(cid, dl)
+  }
 
-    const excludeFromOpenBucket = new Set<number>([
-      ...repriseSet, ...soumisSet, ...receptionSet,
-    ])
-
-    // 3) Among the remaining open ids, classify by MAX(line sstatut rank).
-    // Rank 1 (Attente_Delai) is what we want.
-    const lineRows = await query<{ IDcommande_sous_traitant: number; sstatut: string | null }>(
-      `SELECT IDcommande_sous_traitant, sstatut
-       FROM ligne_commande_sous_traitant
-       WHERE IDcommande_sous_traitant IN (${idList})`,
-    )
-    const maxRankByCmd = new Map<number, 0 | 1 | 2>()
-    for (const r of lineRows) {
-      const cmdId = Number(r.IDcommande_sous_traitant)
-      if (excludeFromOpenBucket.has(cmdId)) continue
-      const rank = lineStatutRank(r.sstatut)
-      const prev = maxRankByCmd.get(cmdId) ?? 0
-      if (rank > prev) maxRankByCmd.set(cmdId, rank)
-    }
-    const attenteDelaiIds: number[] = []
-    for (const [cmdId, rank] of maxRankByCmd) {
-      if (rank === 1) attenteDelaiIds.push(cmdId)
-    }
-    if (attenteDelaiIds.length === 0) { res.json({ late: 0, soon: 0 }); return }
-
-    // 4) Latest bon de commande send date per attente_delai commande.
+  // Latest bon de commande send date per attente_delai commande.
+  const attenteDelaiIds = openIds.filter((id) => phaseMap.get(id) === 'attente_delai')
+  const lastSent = new Map<number, string>()
+  if (attenteDelaiIds.length > 0) {
     const sendRows = await query<{ IDreference: number; DATE: string | null }>(
       `SELECT IDreference, DATE FROM envoi_email
        WHERE IDtype_doc = 13 AND IDreference IN (${attenteDelaiIds.join(',')})`,
     )
-    const lastSent = new Map<number, string>()
     for (const r of sendRows) {
       const cid = Number(r.IDreference)
       const raw = (r.DATE ?? '').toString()
@@ -742,26 +710,52 @@ commandesSousTraitantRouter.get('/attente-delai-counts', async (_req: Request, r
       const prev = lastSent.get(cid)
       if (!prev || day > prev) lastSent.set(cid, day)
     }
+  }
 
-    // 5) Bucket. Day 0 (sent today) and +1 are tolerated.
-    const today = new Date(); today.setHours(0, 0, 0, 0)
-    let late = 0
-    let soon = 0
-    for (const cid of attenteDelaiIds) {
-      const iso = lastSent.get(cid)
+  const today = new Date(); today.setHours(0, 0, 0, 0)
+  const late = new Set<number>()
+  const soon = new Set<number>()
+  for (const id of openIds) {
+    const phase = phaseMap.get(id) ?? 'en_cours'
+    if (phase === 'attente_delai') {
+      const iso = lastSent.get(id)
       if (!iso) continue
       const y = Number(iso.slice(0, 4))
       const m = Number(iso.slice(5, 7)) - 1
       const d = Number(iso.slice(8, 10))
       const sent = new Date(y, m, d); sent.setHours(0, 0, 0, 0)
       const diff = Math.round((today.getTime() - sent.getTime()) / 86_400_000)
-      if (diff >= 3) late += 1
-      else if (diff === 2) soon += 1
+      if (diff >= 3) late.add(id)
+      else if (diff === 2) soon.add(id)
+      continue
     }
+    // All other open phases — deadline-based, matching `deliveryUrgency`.
+    const earliest = earliestByCmd.get(id) ?? null
+    if (!earliest) { late.add(id); continue }
+    const y = Number(earliest.slice(0, 4))
+    const m = Number(earliest.slice(4, 6)) - 1
+    const d = Number(earliest.slice(6, 8))
+    const target = new Date(y, m, d); target.setHours(0, 0, 0, 0)
+    const diff = Math.round((target.getTime() - today.getTime()) / 86_400_000)
+    if (diff <= 0) late.add(id)
+    else if (diff <= 3) soon.add(id)
+  }
+  return { late, soon }
+}
 
-    res.json({ late, soon })
+// ── Urgency pill counts ──────────────────────────────────
+//
+// Surfaces the two scalars driving the header pills:
+//   - `late`: every open commande currently rendering as a red frame
+//   - `soon`: every open commande currently rendering as an amber frame
+// See `computeUrgencyBuckets` for the per-phase rules. Registered before
+// `/:id` so the literal path wins the Express match.
+commandesSousTraitantRouter.get('/urgency-counts', async (_req: Request, res: Response) => {
+  try {
+    const { late, soon } = await computeUrgencyBuckets()
+    res.json({ late: late.size, soon: soon.size })
   } catch (err) {
-    console.error('Error fetching attente-delai counts:', err)
+    console.error('Error fetching urgency counts:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -978,6 +972,23 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
           whereParts.push(`cst.IDcommande_sous_traitant IN (${list})`)
         }
       }
+    }
+    // Urgency filter — `urgency_in=late`, `=soon`, or `=late,soon`. Narrows
+    // to the cards the frontend would paint red / amber. Composes with the
+    // existing statusFilter and search predicates; pagination keeps working
+    // because we resolve the matching IDs up-front and add an IN-list
+    // predicate. Skipped when no urgency tokens are passed.
+    const urgencyTokens = String(req.query.urgency_in ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s === 'late' || s === 'soon')
+    if (urgencyTokens.length > 0) {
+      const buckets = await computeUrgencyBuckets()
+      const merged = new Set<number>()
+      if (urgencyTokens.includes('late')) for (const id of buckets.late) merged.add(id)
+      if (urgencyTokens.includes('soon')) for (const id of buckets.soon) merged.add(id)
+      if (merged.size === 0) { res.json([]); return }
+      whereParts.push(`cst.IDcommande_sous_traitant IN (${Array.from(merged).join(',')})`)
     }
     if (!isSearching && beforeId !== null) whereParts.push(`cst.IDcommande_sous_traitant < ${beforeId}`)
 

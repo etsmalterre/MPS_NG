@@ -620,12 +620,14 @@ export function SousTraitantsCommandes() {
   const COMMANDES_PAGE_SIZE = 100
   const debouncedSearch = useDebouncedValue(searchQuery.trim(), 200)
   const isSearching = debouncedSearch.length > 0
-  // When either urgency pill is on, the underlying query targets
-  // `attente_delai` regardless of the toggle bar selection; the visible
-  // rows are pruned further down via `urgencyLateOn`/`urgencySoonOn`.
-  const effectiveStatusFilter: StatusFilter = urgencyFilterActive
-    ? 'attente_delai'
-    : statusFilter
+  // When a pill is on, send `urgency_in=...` to the API so it narrows the
+  // result set to matching open commandes across every phase (the rule
+  // matches the per-row frame color). The statusFilter stays as the user
+  // selected — `terminee` + urgency yields nothing, which the
+  // pill/toggle-bar cross-clear UX prevents.
+  const urgencyQuery = urgencyFilterActive
+    ? `&urgency_in=${[urgencyLateOn ? 'late' : '', urgencySoonOn ? 'soon' : ''].filter(Boolean).join(',')}`
+    : ''
   const {
     data: commandesPages,
     isLoading,
@@ -635,17 +637,17 @@ export function SousTraitantsCommandes() {
     fetchNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery<CommandeListRow[], Error>({
-    queryKey: ['commandes-sst', effectiveStatusFilter, debouncedSearch],
+    queryKey: ['commandes-sst', statusFilter, debouncedSearch, urgencyQuery],
     queryFn: async ({ pageParam }) => {
       if (isSearching) {
         return apiFetch(
-          `/commandes-sous-traitant?status=${effectiveStatusFilter}&q=${encodeURIComponent(debouncedSearch)}`,
+          `/commandes-sous-traitant?status=${statusFilter}&q=${encodeURIComponent(debouncedSearch)}${urgencyQuery}`,
         )
       }
       const cursor = typeof pageParam === 'number' && pageParam > 0
         ? `&before_id=${pageParam}` : ''
       return apiFetch(
-        `/commandes-sous-traitant?status=${effectiveStatusFilter}&limit=${COMMANDES_PAGE_SIZE}${cursor}`,
+        `/commandes-sous-traitant?status=${statusFilter}&limit=${COMMANDES_PAGE_SIZE}${cursor}${urgencyQuery}`,
       )
     },
     initialPageParam: 0,
@@ -665,33 +667,30 @@ export function SousTraitantsCommandes() {
       if (!flat) return undefined
       // No urgency pill on → leave the server's ID-DESC order alone.
       if (!urgencyFilterActive) return flat
-      // Pills on → narrow to the selected urgency bucket(s) and resort by
-      // send date ASC so the oldest unanswered commande sits at the top.
-      const pruned = flat.filter((row) => {
-        if (row.phase !== 'attente_delai') return false
-        const u = attenteDelaiUrgency(row.bon_envoye_at)
-        if (urgencyLateOn && u === 'late') return true
-        if (urgencySoonOn && u === 'soon') return true
-        return false
-      })
-      return pruned.sort((a, b) => {
-        const ad = a.bon_envoye_at ?? ''
-        const bd = b.bon_envoye_at ?? ''
-        if (ad === bd) return b.IDcommande_sous_traitant - a.IDcommande_sous_traitant
-        if (!ad) return 1
-        if (!bd) return -1
-        return ad < bd ? -1 : 1
+      // Pills on → server already returned only urgent rows; resort so red
+      // (`late`) sits above amber (`soon`), then by ID DESC inside a band.
+      const urgencyOf = (row: CommandeListRow) =>
+        row.phase === 'attente_delai'
+          ? attenteDelaiUrgency(row.bon_envoye_at)
+          : deliveryUrgency(row.earliest_delivery, row.est_soldee)
+      const rank = (u: 'late' | 'soon' | null) => (u === 'late' ? 0 : u === 'soon' ? 1 : 2)
+      return [...flat].sort((a, b) => {
+        const ra = rank(urgencyOf(a))
+        const rb = rank(urgencyOf(b))
+        if (ra !== rb) return ra - rb
+        return b.IDcommande_sous_traitant - a.IDcommande_sous_traitant
       })
     },
-    [commandesPages, urgencyFilterActive, urgencyLateOn, urgencySoonOn],
+    [commandesPages, urgencyFilterActive],
   )
 
-  // Attente Délai counts — drives the two pills on the left-list header.
-  // Polled separately from the list so flipping filters doesn't refetch.
-  // The 30s stale window keeps the counts live without hammering the API.
-  const { data: attenteDelaiCounts } = useQuery<{ late: number; soon: number }>({
-    queryKey: ['commandes-sst-attente-delai-counts'],
-    queryFn: () => apiFetch('/commandes-sous-traitant/attente-delai-counts'),
+  // Urgency counts — drives the two header pills (number of open commandes
+  // currently rendering red / amber across every phase). Polled separately
+  // from the list so flipping filters doesn't refetch the counters; the
+  // 30 s stale window keeps them live without hammering the API.
+  const { data: urgencyCounts } = useQuery<{ late: number; soon: number }>({
+    queryKey: ['commandes-sst-urgency-counts'],
+    queryFn: () => apiFetch('/commandes-sous-traitant/urgency-counts'),
     staleTime: 30_000,
     refetchOnWindowFocus: true,
   })
@@ -893,8 +892,8 @@ export function SousTraitantsCommandes() {
             onSearchChange={setSearchQuery}
             statusFilter={statusFilter}
             onStatusFilterChange={handleStatusFilterChange}
-            attenteDelaiLate={attenteDelaiCounts?.late ?? 0}
-            attenteDelaiSoon={attenteDelaiCounts?.soon ?? 0}
+            attenteDelaiLate={urgencyCounts?.late ?? 0}
+            attenteDelaiSoon={urgencyCounts?.soon ?? 0}
             urgencyLateOn={urgencyLateOn}
             urgencySoonOn={urgencySoonOn}
             onToggleUrgencyLate={handleToggleUrgencyLate}
