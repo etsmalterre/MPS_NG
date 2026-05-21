@@ -24,6 +24,11 @@ export interface CommandeSoustraitantPdfData {
   numero: string
   /** "14 avril 2026" - long-form French */
   dateCommande: string
+  /** Unit for the QTÉ column header + totals. Derived from line types:
+   *  all tricoteur (type=1) lines → 'Kg' (yarn input weight to produce écru),
+   *  otherwise 'Ml' (ennoblisseur convention). Mixed-type commandes are
+   *  not expected today; the helper falls back to 'Ml' for them. */
+  qty_unit: 'Ml' | 'Kg'
   sousTraitantNom: string
   sousTraitantAdresse: {
     nom: string | null
@@ -557,10 +562,15 @@ export function CommandeSoustraitantPdf({
   const livraisonAddress = buildLivraisonAddress(data)
   const hasAnyPieces = data.lignes.some((l) => (l.pieces?.length ?? 0) > 0)
 
-  // Bon de commande totals: nominal Ml the ennoblisseur should produce,
-  // and the actual € total computed from attached écru rolls' weight (if
-  // any). The line-by-line "Total HT" column is omitted because Ml × €/Kg
-  // is unitless garbage — the bill comes from the real shipped kg.
+  // Bon de commande totals.
+  // - Quantité: sum of `quantite` (Ml for ennoblisseur, kg for tricoteur —
+  //   driven by data.qty_unit; mixed not expected).
+  // - Poids affecté (ennoblisseur only): sum of attached écru weight.
+  // - TOTAL HT:
+  //     tricoteur (qty_unit='Kg') → Σ(quantite × prix), known up front
+  //     because quantite is already kg.
+  //     ennoblisseur (qty_unit='Ml') → Σ(total_kg_ecru_lie × prix); blank
+  //     until écru rolls are attached (Ml × €/Kg is unitless garbage).
   const totalQte = data.lignes.reduce(
     (s, l) => s + (l.quantite != null ? Number(l.quantite) : 0),
     0,
@@ -569,10 +579,15 @@ export function CommandeSoustraitantPdf({
     (s, l) => s + (Number(l.total_kg_ecru_lie) || 0),
     0,
   )
-  const totalEur = data.lignes.reduce(
-    (s, l) => s + ((Number(l.total_kg_ecru_lie) || 0) * (Number(l.prix) || 0)),
-    0,
-  )
+  const totalEur = data.qty_unit === 'Kg'
+    ? data.lignes.reduce(
+        (s, l) => s + ((Number(l.quantite) || 0) * (Number(l.prix) || 0)),
+        0,
+      )
+    : data.lignes.reduce(
+        (s, l) => s + ((Number(l.total_kg_ecru_lie) || 0) * (Number(l.prix) || 0)),
+        0,
+      )
 
   return (
     <MalterreDocument
@@ -619,9 +634,15 @@ export function CommandeSoustraitantPdf({
       <View style={styles.table}>
         <View style={styles.tableHeader} fixed>
           <Text style={[styles.tableHeaderCell, styles.colDesc]}>DÉSIGNATION (RÉFÉRENCE FINI / COLORIS)</Text>
-          <Text style={[styles.tableHeaderCell, styles.colQty]}>QTÉ (Ml)</Text>
+          <Text style={[styles.tableHeaderCell, styles.colQty]}>QTÉ ({data.qty_unit})</Text>
           <Text style={[styles.tableHeaderCell, styles.colPU]}>PRIX (€/Kg)</Text>
-          <Text style={[styles.tableHeaderCell, styles.colTotal]}>POIDS AFFECTE</Text>
+          {/* "POIDS AFFECTE" tracks `total_kg_ecru_lie` — only meaningful
+              for ennoblisseur lines (écru rolls linked for dyeing). Tricoteur
+              commandes consume yarn (asso_fil_lignecmdsst) and produce
+              écru; that flow has no "affected weight" to show on the BC. */}
+          {data.qty_unit !== 'Kg' && (
+            <Text style={[styles.tableHeaderCell, styles.colTotal]}>POIDS AFFECTE</Text>
+          )}
         </View>
         {data.lignes.map((l, i) => {
           const kg = Number(l.total_kg_ecru_lie) || 0
@@ -685,9 +706,11 @@ export function CommandeSoustraitantPdf({
               <Text style={[styles.cellBase, styles.colPU]}>
                 {l.prix != null ? `${fmtNum(Number(l.prix), 2)} €` : '—'}
               </Text>
-              <Text style={[styles.cellBase, styles.colTotal]}>
-                {kg > 0 ? `${fmtNum(kg, 1)} kg` : '—'}
-              </Text>
+              {data.qty_unit !== 'Kg' && (
+                <Text style={[styles.cellBase, styles.colTotal]}>
+                  {kg > 0 ? `${fmtNum(kg, 1)} kg` : '—'}
+                </Text>
+              )}
             </View>
           )
         })}
@@ -697,14 +720,16 @@ export function CommandeSoustraitantPdf({
         <View style={styles.totals}>
           <View style={styles.totalRow}>
             <Text style={styles.totalLabel}>Quantité prévue</Text>
-            <Text style={styles.totalValue}>{fmtNum(totalQte, 1)} Ml</Text>
+            <Text style={styles.totalValue}>{fmtNum(totalQte, 1)} {data.qty_unit}</Text>
           </View>
-          <View style={styles.totalRow}>
-            <Text style={styles.totalLabel}>Poids affecté</Text>
-            <Text style={styles.totalValue}>
-              {totalKgAffecte > 0 ? `${fmtNum(totalKgAffecte, 1)} kg` : '— (à expédier)'}
-            </Text>
-          </View>
+          {data.qty_unit !== 'Kg' && (
+            <View style={styles.totalRow}>
+              <Text style={styles.totalLabel}>Poids affecté</Text>
+              <Text style={styles.totalValue}>
+                {totalKgAffecte > 0 ? `${fmtNum(totalKgAffecte, 1)} kg` : '— (à expédier)'}
+              </Text>
+            </View>
+          )}
           <View style={styles.grandRow}>
             <Text style={styles.grandLabel}>TOTAL HT</Text>
             <Text style={styles.grandValue}>

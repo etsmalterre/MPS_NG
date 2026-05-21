@@ -39,6 +39,7 @@ import {
 import { sendMail } from '../lib/gmail.js'
 import { getUserEmail } from '../lib/user-emails.js'
 import { stripRtf, wrapRtf } from '../lib/rtf-utils.js'
+import { trmLinePrix } from '../lib/pricing-trm.js'
 import { recalcLignePrix, hasTariffData, calcTarifSSTBreakdown, type PrixBreakdown } from '../lib/pricing-sst.js'
 import { resolveSearch, type SearchHits } from '../lib/sst-search-cache.js'
 
@@ -159,6 +160,148 @@ async function loadSousTraitantType(IDsous_traitant: number): Promise<{ IDtype_s
   if (r.type instanceof ArrayBuffer) typeStr = Buffer.from(r.type).toString('utf8')
   else if (typeof r.type === 'string') typeStr = r.type
   return { IDtype_sst: Number(r.IDtype_sst) || 0, type: typeStr }
+}
+
+// ── ETM ↔ TRM bridge helpers ─────────────────────────────
+//
+// Two-company shared DB: ETM (this app, IDsociete=1, sst ledger) and TRM
+// (Tricotage Malterre, IDsociete=2, client ledger; ETM is its IDclient=1,
+// the sister knitter on IDsous_traitant=1). The auto-mirror logic
+// (commande_client + line back-pointers via IDcommande_ETM / IDligne_commande_ETM)
+// is SPECIFIC to the sister-company relationship. Other tricoteur
+// sous-traitants (JERSEY DE LA BUCHE, MAILL'TUB, AET — IDtype_sst=1 but
+// IDsous_traitant != 1) are external suppliers; they get the standard
+// sous-traitant workflow without any cross-ledger mirror. Reception of
+// their rolls happens via the regular legacy paths, not via the
+// IDref_commande_source stamp TRM's app applies.
+//
+// Full spec in memory [[project-etm-trm-bridge]].
+
+/** Identity of the sister-company knitter. Hardcoded as IDsous_traitant=1
+ *  in the legacy DB. If TRM is ever rekeyed, this is the single point of
+ *  update; do not scatter "= 1" comparisons through the file. */
+const TRICOTAGE_MALTERRE_ID = 1
+
+/** True if the commande_sst's sous-traitant has IDtype_sst=1 (Tricoteur).
+ *  Used to default line.type / unite / prix for ANY tricoteur — including
+ *  external ones — because those defaults aren't TRM-specific. */
+async function isTricoteurSst(sstId: number): Promise<boolean> {
+  const r = await query<{ IDtype_sst: number | null }>(
+    `SELECT st.IDtype_sst FROM commande_sous_traitant cst
+     JOIN sous_traitant st ON st.IDsous_traitant = cst.IDsous_traitant
+     WHERE cst.IDcommande_sous_traitant = ${sstId}`,
+  )
+  return Number(r[0]?.IDtype_sst) === 1
+}
+
+/** True iff the commande_sst targets Tricotage Malterre (the sister
+ *  company). This is the gate that activates the TRM mirror — NOT
+ *  `isTricoteurSst`, which would catch external tricoteurs too. */
+async function isTricotageMalterreSst(sstId: number): Promise<boolean> {
+  const r = await query<{ IDsous_traitant: number | null }>(
+    `SELECT IDsous_traitant FROM commande_sous_traitant
+     WHERE IDcommande_sous_traitant = ${sstId}`,
+  )
+  return Number(r[0]?.IDsous_traitant) === TRICOTAGE_MALTERRE_ID
+}
+
+/** Return the TRM-side IDcommande_client mirroring this ETM sst, or null. */
+async function getTrmMirror(sstId: number): Promise<number | null> {
+  const r = await query<{ IDcommande_client: number }>(
+    `SELECT IDcommande_client FROM commande_client WHERE IDcommande_ETM = ${sstId}`,
+  )
+  return r.length === 0 ? null : Number(r[0].IDcommande_client) || null
+}
+
+/** Return the TRM-side IDligne_commande_client mirroring this ETM sst line. */
+async function getTrmMirrorLine(sstLineId: number): Promise<number | null> {
+  const r = await query<{ IDligne_commande_client: number }>(
+    `SELECT IDligne_commande_client FROM ligne_commande_client WHERE IDligne_commande_ETM = ${sstLineId}`,
+  )
+  return r.length === 0 ? null : Number(r[0].IDligne_commande_client) || null
+}
+
+/** Next numero sequence for the TRM ledger (IDsociete=2). Legacy data has
+ *  gaps (one observed between 2792 and 2794), so MAX+1 matches the legacy
+ *  allocator. Concurrent POSTs in the same tick can collide — the caller
+ *  retries up to 3 times. */
+async function nextTrmNumero(): Promise<number> {
+  const r = await query<{ m: number | null }>(
+    `SELECT MAX(numero) AS m FROM commande_client WHERE IDsociete = 2`,
+  )
+  return (Number(r[0]?.m) || 0) + 1
+}
+
+/** ref_ecru.prix for a given IDref_ecru — used to default tricoteur line
+ *  prix on the ETM side AND mirror it on the TRM cc side. Returns 0 if
+ *  the ref is unknown or has no price set. */
+async function loadRefEcruPrix(IDref_ecru: number): Promise<number> {
+  if (!(IDref_ecru > 0)) return 0
+  const r = await query<{ prix: number | null }>(
+    `SELECT prix FROM ref_ecru WHERE IDref_ecru = ${IDref_ecru}`,
+  )
+  return Number(r[0]?.prix) || 0
+}
+
+/** ref_ecru.reference for a given IDref_ecru, for the ref_client display
+ *  string on the TRM cc. Returns '' on miss. */
+async function loadRefEcruReference(IDref_ecru: number): Promise<string> {
+  if (!(IDref_ecru > 0)) return ''
+  const r = await query<{ reference: string | null }>(
+    `SELECT reference FROM ref_ecru WHERE IDref_ecru = ${IDref_ecru}`,
+  )
+  return (r[0]?.reference ?? '').toString().trim()
+}
+
+/** Rebuild `commande_client.ref_client = "commande <sstId>, <ref1>, <ref2>, …"`
+ *  by reading all cc lines' IDreference values and resolving to ref_ecru.reference.
+ *  Matches legacy convention from sample cc 6885 ("commande 8582, 029"). */
+async function refreshTrmRefClient(sstId: number, mirrorId: number): Promise<void> {
+  const lines = await query<{ IDreference: number | null }>(
+    `SELECT IDreference FROM ligne_commande_client WHERE IDcommande_client = ${mirrorId}`,
+  )
+  const ids = Array.from(new Set(
+    lines.map((l) => Number(l.IDreference) || 0).filter((x) => x > 0),
+  ))
+  let refsStr = ''
+  if (ids.length > 0) {
+    const r = await query<{ IDref_ecru: number; reference: string | null }>(
+      `SELECT IDref_ecru, reference FROM ref_ecru WHERE IDref_ecru IN (${ids.join(',')})`,
+    )
+    const fixed = await fixEncoding(r, 'ref_ecru', 'IDref_ecru', ['reference'])
+    // Preserve the line insertion order from the previous query.
+    const refByLine = new Map<number, string>()
+    for (const row of fixed as any[]) refByLine.set(Number(row.IDref_ecru), (row.reference ?? '').toString().trim())
+    const labels: string[] = []
+    for (const l of lines) {
+      const id = Number(l.IDreference) || 0
+      const lbl = refByLine.get(id)
+      if (lbl) labels.push(lbl)
+    }
+    refsStr = labels.length > 0 ? `, ${labels.join(', ')}` : ''
+  }
+  const refClient = `commande ${sstId}${refsStr}`
+  await query(
+    `UPDATE commande_client SET ref_client = '${esc(refClient)}' WHERE IDcommande_client = ${mirrorId}`,
+  )
+}
+
+/** Returns true (and sets a 409 JSON response) if any ordre_fabrication
+ *  is linked to this cc line — meaning TRM has started production and the
+ *  line cannot be safely removed from MPS_NG. */
+async function refuseIfTrmHasOFs(res: Response, ccLineId: number): Promise<boolean> {
+  const r = await query<{ n: number | null }>(
+    `SELECT COUNT(*) AS n FROM ordre_fabrication WHERE IDligne_commande_client = ${ccLineId}`,
+  )
+  const n = Number(r[0]?.n) || 0
+  if (n > 0) {
+    res.status(409).json({
+      error: 'trm_production_started',
+      message: 'Cette ligne ne peut pas être supprimée : Tricotage Malterre a déjà démarré la production.',
+    })
+    return true
+  }
+  return false
 }
 
 // ── Validation schemas ───────────────────────────────────
@@ -288,6 +431,58 @@ commandesSousTraitantRouter.get('/lookups/refs-ecru', async (_req: Request, res:
     )
   } catch (err) {
     console.error('Error fetching refs-ecru lookup:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Flat ref_ecru list for the tricoteur line picker. Distinct from
+// `/lookups/refs-ecru` (which produces (ref_ecru, colori_ecru) pairs for
+// the ennoblisseur affectation drawer). Tricoteur lines pick a ref_ecru,
+// then a colori_ecru via /lookups/colori-ecru.
+commandesSousTraitantRouter.get('/lookups/refs-ecru-list', async (_req: Request, res: Response) => {
+  try {
+    const rows = await query<{ IDref_ecru: number; reference: string | null; designation: string | null; prix: number | null }>(
+      `SELECT IDref_ecru, reference, designation, prix FROM ref_ecru ORDER BY reference`,
+    )
+    const fixed = await fixEncoding(rows, 'ref_ecru', 'IDref_ecru', ['reference', 'designation'])
+    res.json(
+      fixed.map((r) => ({
+        IDref_ecru: Number(r.IDref_ecru),
+        ref_ecru: r.reference ?? '',
+        designation: r.designation ?? '',
+        prix: Number(r.prix) || 0,
+      })),
+    )
+  } catch (err) {
+    console.error('Error fetching refs-ecru-list lookup:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// colori_ecru variants for a given ref_ecru — used by the tricoteur line
+// editor's coloris picker. The legacy schema keys colori_ecru on
+// IDref_ecru directly (each variant belongs to one ref_ecru).
+commandesSousTraitantRouter.get('/lookups/colori-ecru', async (req: Request, res: Response) => {
+  try {
+    const refEcruId = parseInt(String(req.query.ref_ecru ?? ''), 10)
+    if (isNaN(refEcruId) || refEcruId <= 0) {
+      res.status(400).json({ error: 'ref_ecru query parameter required' })
+      return
+    }
+    const rows = await query<{ IDcolori_ecru: number; reference: string | null }>(
+      `SELECT IDcolori_ecru, reference FROM colori_ecru
+       WHERE IDref_ecru = ${refEcruId}
+       ORDER BY reference`,
+    )
+    const fixed = await fixEncoding(rows, 'colori_ecru', 'IDcolori_ecru', ['reference'])
+    res.json(
+      fixed.map((r) => ({
+        IDcolori_ecru: Number(r.IDcolori_ecru),
+        reference: r.reference ?? '',
+      })),
+    )
+  } catch (err) {
+    console.error('Error fetching colori-ecru lookup:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -793,8 +988,18 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
       const tryEcru = () => ecruMap.has(IDref) ? { label: ecruMap.get(IDref)!, kind: 'ecru' as const } : null
       const tryFil = () => filMap.has(IDref) ? { label: filMap.get(IDref)!, kind: 'fil' as const } : null
       let order: Array<() => { label: string; kind: 'ecru' | 'fini' | 'fil' } | null>
+      // type=2 (ennoblisseur) — line spec is the OUTPUT fini being dyed.
+      // type=1 (tricoteur)    — line spec is the OUTPUT écru being knit
+      //                         (NOT the input yarn — that's derived via
+      //                         composition_ecru). Legacy commande 8582
+      //                         confirmed: IDreference=146 exists in both
+      //                         ref_ecru (ref "029") and ref_fil (ref
+      //                         "1/50 VISCOSE/LAINE 75/25"); the WinDev
+      //                         app displays the ecru ref, so do we.
+      // type=0 (legacy)       — direct ref_ecru pointer (same shape as 1
+      //                         but without the implicit tricoteur flow).
       if (typeKind === 2) order = [tryFini, tryEcru, tryFil]
-      else if (typeKind === 1) order = [tryFil, tryEcru, tryFini]
+      else if (typeKind === 1) order = [tryEcru, tryFini, tryFil]
       else order = [tryEcru, tryFini, tryFil]
       for (const fn of order) {
         const hit = fn()
@@ -883,6 +1088,10 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
       const refRendement = resolved.kind === 'fini' ? (finiRendementMap.get(refId) ?? 0) : 0
       return {
         ...l,
+        // Canonical `type` field for the frontend (mirrors type_kind, which
+        // is the SQL-safe alias for the HFSQL reserved-word column).
+        // 2=fini/ennoblisseur, 1=fil/tricoteur, 0=écru.
+        type: typeKind,
         ref_label: resolved.label || null,
         ref_kind: resolved.kind,
         ref_rendement: refRendement,
@@ -1192,8 +1401,11 @@ export async function buildCommandePdfData(id: number): Promise<CommandeSoustrai
     const tryEcru = () => ecruMap.get(IDref)
     const tryFil = () => filMap.get(IDref)
     let order: Array<() => string | undefined>
+    // Same ordering as the detail endpoint: type=1 (tricoteur) line ref
+    // is the OUTPUT écru, not the input yarn. See the comment block in
+    // the detail endpoint's resolveRef for the legacy 8582 evidence.
     if (typeKind === 2) order = [tryFini, tryEcru, tryFil]
-    else if (typeKind === 1) order = [tryFil, tryEcru, tryFini]
+    else if (typeKind === 1) order = [tryEcru, tryFini, tryFil]
     else order = [tryEcru, tryFini, tryFil]
     for (const fn of order) {
       const hit = fn()
@@ -1226,9 +1438,18 @@ export async function buildCommandePdfData(id: number): Promise<CommandeSoustrai
     .filter((s: string) => /^\d{8}$/.test(s)) as string[])
     .sort()[0] ?? null
 
+  // Quantity unit for the PDF table header + totals row. Tricoteur lines
+  // (type=1) order kg of écru output; ennoblisseur (type=2) orders Ml of
+  // fini. Use 'Kg' iff every line is tricoteur — fall back to 'Ml' (the
+  // historical default) for ennoblisseur and mixed commandes.
+  const allTricoteur = fixedLignes.length > 0
+    && fixedLignes.every((l) => Number((l as any).type_kind) === 1)
+  const qtyUnit: 'Ml' | 'Kg' = allTricoteur ? 'Kg' : 'Ml'
+
   return {
     numero: String(header.IDcommande_sous_traitant),
     dateCommande: formatHfsqlDateLongFr(header.date_commande),
+    qty_unit: qtyUnit,
     sousTraitantNom: sousTraitantNom || '—',
     sousTraitantAdresse: cleanAddress(fixedAdresseSt[0] as any),
     adresseLivraison: cleanAddress(fixedAdresseLiv[0] as any),
@@ -2461,7 +2682,56 @@ commandesSousTraitantRouter.post('/', async (req: Request, res: Response) => {
     )
     const newId = rows[0]?.IDcommande_sous_traitant ?? null
     if (newId == null) { res.status(500).json({ error: 'Insert lookup failed' }); return }
-    res.status(201).json({ IDcommande_sous_traitant: Number(newId) })
+
+    // ── TRM mirror (Tricotage Malterre only — sister company) ──
+    // The auto-mirror to TRM's commande_client ledger is SPECIFIC to the
+    // sister-company knitter (IDsous_traitant=1). External tricoteurs
+    // (JERSEY DE LA BUCHE, MAILL'TUB, AET, …) get the standard sous-
+    // traitant workflow with no cross-ledger writes. Best-effort: on
+    // failure we log + report mirror_status, but the ETM-side row stays.
+    let mirrorStatus: 'created' | 'skipped' | 'failed' | undefined
+    let mirrorError: string | undefined
+    if (await isTricotageMalterreSst(Number(newId))) {
+      try {
+        // numero allocator with a small retry loop to absorb concurrent
+        // POST collisions on MAX(numero)+1.
+        let inserted = false
+        let lastErr: unknown = null
+        for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
+          const numero = await nextTrmNumero()
+          try {
+            await query(
+              `INSERT INTO commande_client
+               (IDclient, IDsociete, IDcommande_ETM, numero, date_commande,
+                IDadresse_livraison, IDadresse_facturation, IDmode_paiement, IDecheance,
+                ref_client, est_soldee, archivé, expedié, remise, donation,
+                attente_paiement, frais_port, envoyé_client, IDdossier)
+               VALUES (1, 2, ${Number(newId)}, ${numero}, '${dateCmd}',
+                       1, 1, 3, 2,
+                       'commande ${Number(newId)}', 0, 0, 0, 0, 0,
+                       0, 0, 0, 0)`,
+            )
+            inserted = true
+          } catch (e) {
+            lastErr = e
+            // Retry on collision; rethrow on any other error after final try.
+          }
+        }
+        if (!inserted) throw lastErr ?? new Error('mirror insert failed after 3 attempts')
+        mirrorStatus = 'created'
+      } catch (e: any) {
+        console.error('[trm-bridge] mirror CREATE failed for sst', newId, e)
+        mirrorStatus = 'failed'
+        mirrorError = e?.message ? String(e.message) : 'unknown'
+      }
+    } else {
+      mirrorStatus = 'skipped'
+    }
+
+    const body: Record<string, unknown> = { IDcommande_sous_traitant: Number(newId) }
+    if (mirrorStatus && mirrorStatus !== 'skipped') body.mirror_status = mirrorStatus
+    if (mirrorError) body.mirror_error = mirrorError
+    res.status(201).json(body)
   } catch (err) {
     console.error('Error creating commande-sous-traitant:', err)
     res.status(500).json({ error: 'Internal server error' })
@@ -2495,7 +2765,35 @@ commandesSousTraitantRouter.put('/:id', async (req: Request, res: Response) => {
     await query(
       `UPDATE commande_sous_traitant SET ${sets.join(', ')} WHERE IDcommande_sous_traitant = ${id}`,
     )
-    res.json({ ok: true })
+
+    // TRM mirror: sync `date_commande` only (Tricotage Malterre commandes).
+    // est_soldee, addresses, and commentaire stay manual (no business case
+    // yet; bidirectional sync is deferred).
+    let mirrorStatus: 'updated' | 'skipped' | 'failed' | undefined
+    let mirrorError: string | undefined
+    if (d.date_commande !== undefined && (await isTricotageMalterreSst(id))) {
+      try {
+        const mirrorId = await getTrmMirror(id)
+        if (mirrorId == null) {
+          mirrorStatus = 'skipped'
+        } else {
+          await query(
+            `UPDATE commande_client SET date_commande = '${dateStr(d.date_commande)}'
+             WHERE IDcommande_client = ${mirrorId}`,
+          )
+          mirrorStatus = 'updated'
+        }
+      } catch (e: any) {
+        console.error('[trm-bridge] HEADER UPDATE mirror failed for sst', id, e)
+        mirrorStatus = 'failed'
+        mirrorError = e?.message ? String(e.message) : 'unknown'
+      }
+    }
+
+    const body: Record<string, unknown> = { ok: true }
+    if (mirrorStatus) body.mirror_status = mirrorStatus
+    if (mirrorError) body.mirror_error = mirrorError
+    res.json(body)
   } catch (err) {
     console.error('Error updating commande-sous-traitant:', err)
     res.status(500).json({ error: 'Internal server error' })
@@ -2529,6 +2827,19 @@ commandesSousTraitantRouter.delete('/:id', async (req: Request, res: Response) =
   try {
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    // Refuse the delete outright if a TRM mirror exists. Safe default per
+    // the bridge plan: avoid leaving the TRM ledger with dangling
+    // back-pointers, OFs, or invoiced/billed history. Operator must remove
+    // the mirror via the legacy app first (or via a future cascade-delete
+    // pass that checks ordre_fabrication / stock_ecru downstream).
+    if ((await getTrmMirror(id)) !== null) {
+      res.status(409).json({
+        error: 'trm_mirror_exists',
+        message: "Cette commande ne peut pas être supprimée depuis MPS_NG. Un miroir client existe côté Tricotage Malterre — utilisez l'application legacy pour la supprimer.",
+      })
+      return
+    }
 
     // Collect line ids to clear stock_ecru affectations.
     const lines = await query<{ IDligne_commande_sous_traitant: number }>(
@@ -2567,6 +2878,22 @@ commandesSousTraitantRouter.post('/:id/lignes', async (req: Request, res: Respon
 
     if (refuseIfTerminee(res, await loadCommandeSoldee(id))) return
 
+    // Defaults for ANY tricoteur sst (TRM or external):
+    // - line.type defaults to 1 for tricoteur sst (instead of the legacy 2).
+    // - prix defaults to the TRM cost model with 30% margin, floored by
+    //   ref_ecru.prix (see [[project-pricing-prixderevient-trm]] / pricing-trm.ts).
+    //   When ref_ecru_machine has no rows for the ref or tarif_TRM isn't
+    //   set up, the algo bails to 0 and the floor wins by default.
+    const isTricoteur = await isTricoteurSst(id)
+    // TRM-specific mirror gate — only the sister company gets the
+    // cross-ledger commande_client write.
+    const isTrm = await isTricotageMalterreSst(id)
+    const lineType = d.type ?? (isTricoteur ? 1 : 2)
+    let linePrix = d.prix
+    if (isTricoteur && (linePrix == null || linePrix === 0)) {
+      linePrix = await trmLinePrix(d.IDreference ?? 0, Number(d.quantite) || 0)
+    }
+
     // On creation, date_delai mirrors date_livraison so the "first reschedule"
     // rule has a baseline to compare against later. `type` defaults to 2,
     // the dominant legacy value for ennoblisseur lines (matches stock_ecru
@@ -2575,11 +2902,59 @@ commandesSousTraitantRouter.post('/:id/lignes', async (req: Request, res: Respon
       `INSERT INTO ligne_commande_sous_traitant
        (IDcommande_sous_traitant, type, IDreference, IDColoris, quantite, unite, prix,
         date_livraison, date_delai, sstatut, commentaire)
-       VALUES (${id}, ${d.type ?? 2}, ${d.IDreference ?? 0}, ${d.IDColoris ?? 0},
-               ${n(d.quantite)}, ${d.unite ?? 0}, ${n(d.prix)},
+       VALUES (${id}, ${lineType}, ${d.IDreference ?? 0}, ${d.IDColoris ?? 0},
+               ${n(d.quantite)}, ${d.unite ?? 0}, ${n(linePrix)},
                '${dateLiv}', '${dateLiv}', '${esc(d.sstatut ?? STATUT_OPEN)}', '${esc(d.commentaire ?? '')}')`,
     )
-    res.status(201).json({ ok: true })
+
+    // Mirror to TRM only for Tricotage Malterre (sister-company knitter).
+    let mirrorStatus: 'created' | 'skipped' | 'failed' | undefined
+    let mirrorError: string | undefined
+    let newSstLineId = 0
+    if (isTrm) {
+      try {
+        // Look up the brand-new sst line id (no RETURNING in HFSQL — we
+        // identify the row by (commande, no existing IDligne_commande_ETM
+        // back-pointer from cc, ORDER BY id DESC LIMIT 1)).
+        const rs = await query<{ IDligne_commande_sous_traitant: number }>(
+          `SELECT IDligne_commande_sous_traitant FROM ligne_commande_sous_traitant
+           WHERE IDcommande_sous_traitant = ${id}
+           ORDER BY IDligne_commande_sous_traitant DESC`,
+        )
+        newSstLineId = Number(rs[0]?.IDligne_commande_sous_traitant) || 0
+        if (newSstLineId === 0) throw new Error('cannot resolve new sst line id')
+
+        const mirrorId = await getTrmMirror(id)
+        if (mirrorId == null) {
+          // Orphan tricoteur sst (created before the bridge existed). Skip
+          // the line mirror; ensureMirror (deferred) will backfill later.
+          console.warn('[trm-bridge] LINE CREATE: no mirror cc for sst', id, '— skipping line mirror')
+          mirrorStatus = 'skipped'
+        } else {
+          // ligne_commande_client uses IDcolori (lowercase) — not IDColoris
+          // like the sst side. Quirk preserved from legacy schema.
+          await query(
+            `INSERT INTO ligne_commande_client
+             (IDcommande_client, IDligne_commande_ETM, TYPE, IDreference, IDcolori,
+              quantite, unite, prix, poids, date_livraison, commentaire)
+             VALUES (${mirrorId}, ${newSstLineId}, 1, ${d.IDreference ?? 0}, ${d.IDColoris ?? 0},
+                     ${n(d.quantite)}, 1, ${n(linePrix)}, 0,
+                     '${dateLiv}', '${esc(d.commentaire ?? '')}')`,
+          )
+          await refreshTrmRefClient(id, mirrorId)
+          mirrorStatus = 'created'
+        }
+      } catch (e: any) {
+        console.error('[trm-bridge] LINE CREATE mirror failed for sst', id, 'line', newSstLineId, e)
+        mirrorStatus = 'failed'
+        mirrorError = e?.message ? String(e.message) : 'unknown'
+      }
+    }
+
+    const body: Record<string, unknown> = { ok: true }
+    if (mirrorStatus) body.mirror_status = mirrorStatus
+    if (mirrorError) body.mirror_error = mirrorError
+    res.status(201).json(body)
   } catch (err) {
     console.error('Error creating ligne_commande_sous_traitant:', err)
     res.status(500).json({ error: 'Internal server error' })
@@ -2608,11 +2983,19 @@ commandesSousTraitantRouter.put('/lignes/:lineId', async (req: Request, res: Res
     if (commandeId == null) { res.status(404).json({ error: 'Line not found' }); return }
     if (refuseIfTerminee(res, await loadCommandeSoldee(commandeId))) return
 
-    // Read current dates for the delai-initial preservation rule.
-    const currentRows = await query<{ date_livraison: string | null; date_delai: string | null }>(
-      `SELECT date_livraison, date_delai FROM ligne_commande_sous_traitant WHERE IDligne_commande_sous_traitant = ${lineId}`,
+    // Read current dates + type + IDreference + quantite — needed for the
+    // delai-initial preservation rule AND the tricoteur prix recompute.
+    const currentRows = await query<{
+      date_livraison: string | null
+      date_delai: string | null
+      type_kind: number | null
+      IDreference: number | null
+      quantite: number | null
+    }>(
+      `SELECT date_livraison, date_delai, type AS type_kind, IDreference, quantite
+       FROM ligne_commande_sous_traitant WHERE IDligne_commande_sous_traitant = ${lineId}`,
     )
-    const cur = currentRows[0] ?? { date_livraison: '', date_delai: '' }
+    const cur = currentRows[0] ?? { date_livraison: '', date_delai: '', type_kind: 0, IDreference: 0, quantite: 0 }
 
     const sets: string[] = []
     if (d.type !== undefined) sets.push(`type = ${d.type}`)
@@ -2636,6 +3019,21 @@ commandesSousTraitantRouter.put('/lignes/:lineId', async (req: Request, res: Res
       sets.push(`date_livraison = '${nextLiv}'`)
     }
 
+    // Tricoteur prix recompute: when IDreference or quantite changes on a
+    // tricoteur line (type=1) AND the caller didn't pass an explicit prix,
+    // re-run PrixDeRevientTRM with the post-merge values. Applies to ANY
+    // tricoteur (legacy WLanguage gate is `ligne.type = 1`, not TRM-only).
+    const effectiveType = d.type !== undefined ? d.type : (Number(cur.type_kind) || 0)
+    const refChanged = d.IDreference !== undefined && d.IDreference !== (Number(cur.IDreference) || 0)
+    const qtyChanged = d.quantite !== undefined && d.quantite !== (Number(cur.quantite) || 0)
+    let recomputedTrmPrix: number | null = null
+    if (effectiveType === 1 && d.prix === undefined && (refChanged || qtyChanged)) {
+      const nextRef = d.IDreference !== undefined ? d.IDreference : (Number(cur.IDreference) || 0)
+      const nextQty = d.quantite !== undefined ? Number(d.quantite) : (Number(cur.quantite) || 0)
+      recomputedTrmPrix = await trmLinePrix(nextRef, nextQty)
+      sets.push(`prix = ${n(recomputedTrmPrix)}`)
+    }
+
     if (sets.length === 0) { res.status(400).json({ error: 'No fields to update' }); return }
 
     await query(
@@ -2648,7 +3046,57 @@ commandesSousTraitantRouter.put('/lignes/:lineId', async (req: Request, res: Res
     // and `isLineDone` remain in the module (cheap to revert) but are no
     // longer called from the line-update path.
 
-    res.json({ ok: true })
+    // TRM mirror sync (Tricotage Malterre only).
+    let mirrorStatus: 'updated' | 'skipped' | 'failed' | undefined
+    let mirrorError: string | undefined
+    if (await isTricotageMalterreSst(commandeId)) {
+      try {
+        const ccLineId = await getTrmMirrorLine(lineId)
+        if (ccLineId == null) {
+          console.warn('[trm-bridge] LINE UPDATE: no mirror cc line for sst line', lineId, '— skipping')
+          mirrorStatus = 'skipped'
+        } else {
+          // sst-side prix was already recomputed in the outer block via
+          // trmLinePrix when IDreference or quantite changed. Mirror that
+          // same value onto the cc line below for ledger parity.
+
+          // Build SET clauses for the cc line (IDColoris → IDcolori).
+          const ccSets: string[] = []
+          if (d.type !== undefined) ccSets.push(`TYPE = ${d.type}`)
+          if (d.IDreference !== undefined) ccSets.push(`IDreference = ${d.IDreference}`)
+          if (d.IDColoris !== undefined) ccSets.push(`IDcolori = ${d.IDColoris}`)
+          if (d.quantite !== undefined) ccSets.push(`quantite = ${n(d.quantite)}`)
+          if (d.unite !== undefined) ccSets.push(`unite = ${d.unite}`)
+          if (d.prix !== undefined) ccSets.push(`prix = ${n(d.prix)}`)
+          else if (recomputedTrmPrix !== null) ccSets.push(`prix = ${n(recomputedTrmPrix)}`)
+          if (d.commentaire !== undefined) ccSets.push(`commentaire = '${esc(d.commentaire)}'`)
+          if (d.date_livraison !== undefined) ccSets.push(`date_livraison = '${dateStr(d.date_livraison)}'`)
+
+          if (ccSets.length > 0) {
+            await query(
+              `UPDATE ligne_commande_client SET ${ccSets.join(', ')} WHERE IDligne_commande_client = ${ccLineId}`,
+            )
+          }
+
+          // If the ref changed, the cc.ref_client display string needs to
+          // pick up the new ref_ecru.reference.
+          if (d.IDreference !== undefined) {
+            const mirrorId = await getTrmMirror(commandeId)
+            if (mirrorId != null) await refreshTrmRefClient(commandeId, mirrorId)
+          }
+          mirrorStatus = 'updated'
+        }
+      } catch (e: any) {
+        console.error('[trm-bridge] LINE UPDATE mirror failed for sst line', lineId, e)
+        mirrorStatus = 'failed'
+        mirrorError = e?.message ? String(e.message) : 'unknown'
+      }
+    }
+
+    const body: Record<string, unknown> = { ok: true }
+    if (mirrorStatus) body.mirror_status = mirrorStatus
+    if (mirrorError) body.mirror_error = mirrorError
+    res.json(body)
   } catch (err) {
     console.error('Error updating ligne_commande_sous_traitant:', err)
     res.status(500).json({ error: 'Internal server error' })
@@ -2666,9 +3114,32 @@ commandesSousTraitantRouter.delete('/lignes/:lineId', async (req: Request, res: 
     if (commandeId == null) { res.status(404).json({ error: 'Line not found' }); return }
     if (refuseIfTerminee(res, await loadCommandeSoldee(commandeId))) return
 
+    // TRM mirror cleanup (Tricotage Malterre only) — must run BEFORE the
+    // sst DELETE so we can refuse cleanly if TRM has already started
+    // production (ordre_fabrication rows). On refuse, the sst row stays.
+    const isTrm = await isTricotageMalterreSst(commandeId)
+    let ccLineId: number | null = null
+    if (isTrm) {
+      ccLineId = await getTrmMirrorLine(lineId)
+      if (ccLineId != null) {
+        if (await refuseIfTrmHasOFs(res, ccLineId)) return
+        await query(`DELETE FROM ligne_commande_client WHERE IDligne_commande_client = ${ccLineId}`)
+      }
+    }
+
     // Clear ecru affectations pointing at this line (rolls go back to stock).
     await query(`UPDATE stock_ecru SET IDref_commande_affectation = 0 WHERE IDref_commande_affectation = ${lineId}`)
     await query(`DELETE FROM ligne_commande_sous_traitant WHERE IDligne_commande_sous_traitant = ${lineId}`)
+
+    // Refresh cc.ref_client now that one line is gone.
+    if (isTrm && ccLineId != null) {
+      const mirrorId = await getTrmMirror(commandeId)
+      if (mirrorId != null) {
+        try { await refreshTrmRefClient(commandeId, mirrorId) }
+        catch (e) { console.error('[trm-bridge] refreshTrmRefClient after LINE DELETE failed', e) }
+      }
+    }
+
     res.json({ ok: true })
   } catch (err) {
     console.error('Error deleting ligne_commande_sous_traitant:', err)
@@ -3109,6 +3580,797 @@ commandesSousTraitantRouter.get('/:commandeId/lignes/:ligneId/pieces', async (re
     res.status(500).json({ error: 'Internal server error' })
   }
 })
+
+// ── Tricoteur (type=1) drawer ──────────────────────────────────────────
+//
+// Read-only sibling to loadEnnoblisseurLineContext / fetchPiecesPayload.
+// A tricoteur line's IDreference is the OUTPUT IDref_ecru — what the
+// knitter is asked to produce (NOT the input yarn; the yarn composition
+// lives in `composition_ecru`, keyed by IDref_ecru + IDcolori_ecru).
+// Confirmed against legacy commande 8582 / ligne 8558: IDreference=146
+// resolves to ref_ecru "029" in the WinDev app, while IDref_fil=146 (yarn
+// "1/50 VISCOSE/LAINE 75/25") is a numeric-ID collision per CLAUDE.md.
+//
+// The drawer surfaces:
+//   • Réception — stock_ecru rolls produced by the knitter, linked to the
+//     line via IDref_commande_affectation (same projection as ennoblisseur's
+//     "linked écru", so the existing roll card can be reused).
+//   • Stock fil — every stock_fil roll of every IDref_fil that appears in
+//     composition_ecru WHERE IDref_ecru = line.IDreference. This shows
+//     the operator the on-hand yarn that could feed this écru's knitting
+//     run, regardless of coloris variant / fournisseur / magasin.
+//
+// No batch reception, no link/unlink, no auto-pricing — those are deferred.
+
+interface TricoteurLineContext {
+  commandeId: number
+  /** The line's IDreference column — it's an IDref_ecru (output écru). */
+  IDref_ecru: number
+  /** The line's IDColoris column — it's an IDcolori_ecru. Used to scope
+   *  composition_ecru to the exact yarn variant the knitter must use to
+   *  produce this écru in this specific colour (e.g. "ecru" vs a dyed
+   *  variant of the same ref_ecru). */
+  IDcolori_ecru: number
+}
+
+async function loadTricoteurLineContext(
+  commandeId: number,
+  ligneId: number,
+): Promise<TricoteurLineContext | null> {
+  const lineRows = await query<{
+    IDcommande_sous_traitant: number
+    IDreference: number | null
+    IDColoris: number | null
+    type_kind: number | null
+  }>(
+    `SELECT IDcommande_sous_traitant, IDreference, IDColoris, type AS type_kind
+     FROM ligne_commande_sous_traitant
+     WHERE IDligne_commande_sous_traitant = ${ligneId}`,
+  )
+  if (lineRows.length === 0) return null
+  const line = lineRows[0] as any
+  if (Number(line.IDcommande_sous_traitant) !== commandeId) return null
+  if (Number(line.type_kind) !== 1) return null
+  return {
+    commandeId,
+    IDref_ecru: Number(line.IDreference) || 0,
+    IDcolori_ecru: Number(line.IDColoris) || 0,
+  }
+}
+
+interface StockFilLite {
+  IDstock_fil: number
+  IDref_fil: number
+  IDcolori_fil: number | null
+  IDfournisseur: number | null
+  IDMagasin: number | null
+  IDref_fil_commande: number | null
+  stock: number | null
+  lot: string | null
+  lot_frs: string | null
+  emplacement: string | null
+  date_entree: string | null
+  /** Resolved display names (flat batch lookups, no JOIN+CONVERT — see
+   *  CLAUDE.md HFSQL rules: JOIN + CONVERT() collapses result sets). */
+  ref_fil_reference?: string | null
+  colori_reference?: string | null
+  fournisseur_nom?: string | null
+  magasin_nom?: string | null
+  /** Sum of asso_fil_lignecmdsst.quantite for (this lot, this line) — kg
+   *  of yarn currently affected from this lot to the line. 0 means not
+   *  affected. Used by the Stock fil tab to render the "affecté X kg"
+   *  chip and to gate the Affecter/Désaffecter button switch. */
+  affecte_kg?: number
+}
+
+// ── Yarn affectation helpers (asso_fil_lignecmdsst) ──────────
+//
+// Per-lot yarn → sst-line junction. Schema (730 rows in prod):
+//   IDasso_fil_ligneCmdSST (PK, camelCase per legacy)
+//   IDstock_fil            (the yarn lot consumed)
+//   IDligne_commande_sous_traitant
+//   quantite               (kg of this lot affected to this line)
+//
+// stock_fil.stock is NOT decremented by affectation (verified: legacy
+// affectations can sum >> physical stock; physical decrement happens
+// elsewhere, probably at reception time in the WinDev app). Treat asso
+// rows as PLAN/RESERVATION, not physical movement.
+
+interface CompositionPair {
+  IDref_fil: number
+  IDcolori_fil: number
+  pourcentage: number  // 0..100 (legacy stores as 94 for 94%)
+}
+
+/** Yarn composition pairs for a given (IDref_ecru, IDcolori_ecru). Used
+ *  both by the Stock fil tab filter AND by the affectation planner. */
+async function loadCompositionPairs(
+  IDref_ecru: number,
+  IDcolori_ecru: number,
+): Promise<CompositionPair[]> {
+  if (!(IDref_ecru > 0)) return []
+  const where = IDcolori_ecru > 0
+    ? `IDref_ecru = ${IDref_ecru} AND IDcolori_ecru = ${IDcolori_ecru}`
+    : `IDref_ecru = ${IDref_ecru}`
+  const rows = await query<{ IDref_fil: number; IDcolori_fil: number; pourcentage: number | null }>(
+    `SELECT DISTINCT IDref_fil, IDcolori_fil, pourcentage FROM composition_ecru
+     WHERE ${where} AND IDref_fil > 0`,
+  )
+  return rows
+    .map((r) => ({
+      IDref_fil: Number(r.IDref_fil) || 0,
+      IDcolori_fil: Number(r.IDcolori_fil) || 0,
+      pourcentage: Number(r.pourcentage) || 0,
+    }))
+    .filter((p) => p.IDref_fil > 0 && p.pourcentage > 0)
+}
+
+interface AffectationRow {
+  IDasso_fil_ligneCmdSST: number
+  IDstock_fil: number
+  IDligne_commande_sous_traitant: number
+  quantite: number
+}
+
+async function loadAffectationsForLine(ligneId: number): Promise<AffectationRow[]> {
+  const rows = await query<AffectationRow>(
+    `SELECT IDasso_fil_ligneCmdSST, IDstock_fil, IDligne_commande_sous_traitant, quantite
+     FROM asso_fil_lignecmdsst WHERE IDligne_commande_sous_traitant = ${ligneId}`,
+  )
+  return rows.map((r) => ({
+    IDasso_fil_ligneCmdSST: Number(r.IDasso_fil_ligneCmdSST) || 0,
+    IDstock_fil: Number(r.IDstock_fil) || 0,
+    IDligne_commande_sous_traitant: Number(r.IDligne_commande_sous_traitant) || 0,
+    quantite: Number(r.quantite) || 0,
+  }))
+}
+
+interface StockLotMini {
+  IDstock_fil: number
+  IDref_fil: number
+  IDcolori_fil: number
+  stock: number
+  lot: string
+  date_entree: string
+}
+
+async function loadStockLotsByIds(ids: number[]): Promise<StockLotMini[]> {
+  if (ids.length === 0) return []
+  const rows = await query<{
+    IDstock_fil: number
+    IDref_fil: number
+    IDcolori_fil: number
+    stock: number | null
+    lot: string | null
+    date_entree: string | null
+  }>(
+    `SELECT IDstock_fil, IDref_fil, IDcolori_fil, stock, lot, date_entree
+     FROM stock_fil WHERE IDstock_fil IN (${ids.join(',')})`,
+  )
+  const fixed = await fixEncoding(rows, 'stock_fil', 'IDstock_fil', ['lot'])
+  return (fixed as any[]).map((r) => ({
+    IDstock_fil: Number(r.IDstock_fil) || 0,
+    IDref_fil: Number(r.IDref_fil) || 0,
+    IDcolori_fil: Number(r.IDcolori_fil) || 0,
+    stock: Number(r.stock) || 0,
+    lot: (r.lot ?? '').toString(),
+    date_entree: (r.date_entree ?? '').toString(),
+  }))
+}
+
+interface AffectationPlanEntry {
+  IDstock_fil: number
+  quantite: number
+}
+
+interface AffectationPlanResult {
+  ok: boolean
+  errors: string[]
+  /** target line qty in kg — input as-is for `standard`, computed for `finir`. */
+  targetQtyKg: number
+  plan: AffectationPlanEntry[]
+  /** Only set for `finir` mode — the lot whose stock is consumed entirely. */
+  limitingLot?: { IDstock_fil: number; lot: string }
+}
+
+/** Distribute the target line quantity (in kg of écru) across the selected
+ *  yarn lots, respecting composition_ecru percentages. Pure function over
+ *  pre-fetched lot data; no DB access. FIFO by date_entree within a bucket. */
+function computeAffectationPlan(args: {
+  targetQtyKg: number
+  selectedLots: StockLotMini[]
+  pairs: CompositionPair[]
+}): AffectationPlanResult {
+  const errors: string[] = []
+  const { targetQtyKg, selectedLots, pairs } = args
+
+  if (!(targetQtyKg > 0)) errors.push("La quantité de la ligne doit être supérieure à 0.")
+  if (pairs.length === 0) errors.push("Aucune composition n'est définie pour cet écru. Vérifiez `composition_ecru`.")
+  if (selectedLots.length === 0) errors.push("Sélectionnez au moins un lot.")
+
+  // Group lots by (IDref_fil, IDcolori_fil) bucket.
+  const bucketKey = (rf: number, cf: number) => `${rf}:${cf}`
+  const lotsByBucket = new Map<string, StockLotMini[]>()
+  for (const lot of selectedLots) {
+    const k = bucketKey(lot.IDref_fil, lot.IDcolori_fil)
+    const arr = lotsByBucket.get(k) ?? []
+    arr.push(lot)
+    lotsByBucket.set(k, arr)
+  }
+  // Sort each bucket FIFO (oldest first).
+  for (const arr of lotsByBucket.values()) {
+    arr.sort((a, b) => (a.date_entree || '').localeCompare(b.date_entree || ''))
+  }
+
+  // Every required composition pair must have at least one selected lot.
+  const plan: AffectationPlanEntry[] = []
+  for (const pair of pairs) {
+    const k = bucketKey(pair.IDref_fil, pair.IDcolori_fil)
+    const bucket = lotsByBucket.get(k) ?? []
+    if (bucket.length === 0) {
+      errors.push(`Lot manquant pour la composition (ref_fil=${pair.IDref_fil}, coloris=${pair.IDcolori_fil}, ${pair.pourcentage}%).`)
+      continue
+    }
+    let needed = targetQtyKg * (pair.pourcentage / 100)
+    for (const lot of bucket) {
+      if (needed <= 0) break
+      const take = Math.min(needed, lot.stock)
+      if (take > 0) {
+        plan.push({ IDstock_fil: lot.IDstock_fil, quantite: take })
+        needed -= take
+      }
+    }
+    if (needed > 0.01) {
+      errors.push(`Stock insuffisant pour la composition (ref_fil=${pair.IDref_fil}, coloris=${pair.IDcolori_fil}) — manque ${needed.toFixed(2)} kg.`)
+    }
+  }
+
+  // Reject lots in user selection that don't match any pair (defensive
+  // — the UI should never let the user select these, but enforce here).
+  const validKeys = new Set(pairs.map((p) => bucketKey(p.IDref_fil, p.IDcolori_fil)))
+  for (const lot of selectedLots) {
+    if (!validKeys.has(bucketKey(lot.IDref_fil, lot.IDcolori_fil))) {
+      errors.push(`Le lot ${lot.lot || lot.IDstock_fil} ne correspond pas à la composition de l'écru.`)
+    }
+  }
+
+  return { ok: errors.length === 0, errors, targetQtyKg, plan }
+}
+
+/** "Finir le lot X" — compute the max producible écru qty using the most
+ *  limiting selected bucket entirely. */
+function computeFinirLotPlan(args: {
+  selectedLots: StockLotMini[]
+  pairs: CompositionPair[]
+}): AffectationPlanResult {
+  const errors: string[] = []
+  const { selectedLots, pairs } = args
+
+  if (pairs.length === 0) errors.push("Aucune composition n'est définie pour cet écru.")
+  if (selectedLots.length === 0) errors.push("Sélectionnez au moins un lot.")
+
+  const bucketKey = (rf: number, cf: number) => `${rf}:${cf}`
+  const lotsByBucket = new Map<string, StockLotMini[]>()
+  for (const lot of selectedLots) {
+    const k = bucketKey(lot.IDref_fil, lot.IDcolori_fil)
+    const arr = lotsByBucket.get(k) ?? []
+    arr.push(lot)
+    lotsByBucket.set(k, arr)
+  }
+  for (const arr of lotsByBucket.values()) {
+    arr.sort((a, b) => (a.date_entree || '').localeCompare(b.date_entree || ''))
+  }
+
+  // For each composition pair, the producible écru = bucket total / pourcentage.
+  let limitingBucketKey = ''
+  let limitingProducible = Infinity
+  for (const pair of pairs) {
+    const k = bucketKey(pair.IDref_fil, pair.IDcolori_fil)
+    const bucket = lotsByBucket.get(k) ?? []
+    if (bucket.length === 0) {
+      errors.push(`Lot manquant pour la composition (ref_fil=${pair.IDref_fil}, coloris=${pair.IDcolori_fil}, ${pair.pourcentage}%).`)
+      continue
+    }
+    const bucketStock = bucket.reduce((s, l) => s + l.stock, 0)
+    const producible = bucketStock / (pair.pourcentage / 100)
+    if (producible < limitingProducible) {
+      limitingProducible = producible
+      limitingBucketKey = k
+    }
+  }
+
+  if (!isFinite(limitingProducible) || limitingProducible <= 0) {
+    if (errors.length === 0) errors.push("Stock insuffisant dans les lots sélectionnés.")
+    return { ok: false, errors, targetQtyKg: 0, plan: [] }
+  }
+
+  if (errors.length > 0) {
+    return { ok: false, errors, targetQtyKg: 0, plan: [] }
+  }
+
+  const targetQtyKg = limitingProducible
+  // Pick the limiting lot label = first (oldest) lot in the limiting bucket.
+  const limitingBucket = lotsByBucket.get(limitingBucketKey) ?? []
+  const limitingLotPick = limitingBucket[0]
+  const limitingLot = limitingLotPick
+    ? { IDstock_fil: limitingLotPick.IDstock_fil, lot: limitingLotPick.lot }
+    : undefined
+
+  // Re-run the standard plan with the computed targetQtyKg.
+  const std = computeAffectationPlan({ targetQtyKg, selectedLots, pairs })
+  return { ...std, limitingLot }
+}
+
+interface CompositionPairLite {
+  IDref_fil: number
+  IDcolori_fil: number
+  pourcentage: number
+  /** Display labels — joined client-side as "<ref> · <coloris>" for the
+   *  coverage hint banner ("Sélectionnez un lot de <pair>"). */
+  ref_fil_reference: string | null
+  colori_reference: string | null
+}
+
+async function fetchPiecesFilPayload(ctx: TricoteurLineContext, ligneId: number): Promise<{
+  ecruProduced: StockEcruLite[]
+  stockFil: StockFilLite[]
+  /** Current line qty (kg) — surfaced so the Stock fil tab buttons can show
+   *  "Affecter (1234 kg)" without a separate detail fetch. */
+  targetQtyKg: number
+  /** Current asso_fil_lignecmdsst rows for this line. Frontend uses this
+   *  to compute per-row `affecte_kg` chips and to decide whether to show
+   *  Affecter/Finir vs Désaffecter. */
+  affectations: AffectationRow[]
+  /** Required composition pairs (IDref_fil + IDcolori_fil + pourcentage)
+   *  for this line's IDref_ecru + IDcolori_ecru. The frontend uses these
+   *  to enforce coverage on the Stock fil tab: Affecter / Finir le lot
+   *  only enable when the user has selected at least one lot per pair. */
+  compositionPairs: CompositionPairLite[]
+}> {
+  // Écru rolls produced by the knitter for this tricoteur line. Tricoteur
+  // production uses `IDref_commande_source` (the line that *caused* the
+  // production), NOT `IDref_commande_affectation` (which is the
+  // ennoblisseur-side affectation pointer set when an écru is later
+  // assigned to a dyer). Verified against legacy commande 8544 (24 rolls,
+  // all with IDref_commande_source = 8520, IDref_commande_affectation = 0).
+  // The TRM-side back-pointer `IDLigne_Commande_TRM` is also set on the
+  // same rows; we don't query through it because the source pointer is
+  // already keyed on the ETM sst line.
+  const ecruRows = await query<StockEcruLite>(
+    `SELECT IDstock_ecru, numero, lot, poids, metrage, IDref_ecru, IDcolori_ecru,
+            IDmagasin, IDordre_fabrication, date_saisie,
+            second_choix, observations
+     FROM stock_ecru
+     WHERE IDref_commande_source = ${ligneId}
+     ORDER BY date_saisie DESC, IDstock_ecru DESC`,
+  )
+  const ecruFixed = await fixEncoding(ecruRows, 'stock_ecru', 'IDstock_ecru', ['numero', 'lot', 'observations'])
+
+  // Defects (polymorphic): Type_Reference=2, reference (varchar) = IDstock_ecru.
+  const ecruIds = Array.from(new Set(ecruFixed.map((r) => Number(r.IDstock_ecru) || 0).filter((x) => x > 0)))
+  const defectsByEcruId = new Map<number, DefautQualite[]>()
+  if (ecruIds.length > 0) {
+    const inList = ecruIds.map((id) => `'${id}'`).join(',')
+    const defectRows = await query<{
+      IDdefaut_qualite: number
+      reference: string | null
+      description: string | null
+      type_defaut: string | null
+      taille_cm: number | null
+    }>(
+      `SELECT IDdefaut_qualite, reference, description, type_defaut, taille_cm
+       FROM defaut_qualite
+       WHERE Type_Reference = 2 AND reference IN (${inList})`,
+    )
+    const defectsFixed = await fixEncoding(defectRows, 'defaut_qualite', 'IDdefaut_qualite', ['description', 'type_defaut'])
+    for (const d of defectsFixed as any[]) {
+      const refId = parseInt(String(d.reference ?? ''), 10)
+      if (!(refId > 0)) continue
+      const arr = defectsByEcruId.get(refId) ?? []
+      arr.push({
+        IDdefaut_qualite: Number(d.IDdefaut_qualite),
+        description: d.description ?? null,
+        type_defaut: d.type_defaut ?? null,
+        taille_cm: Number(d.taille_cm) || 0,
+      })
+      defectsByEcruId.set(refId, arr)
+    }
+  }
+
+  const ecruProduced: StockEcruLite[] = (ecruFixed as StockEcruLite[]).map((r) => ({
+    ...r,
+    defects: defectsByEcruId.get(Number(r.IDstock_ecru) || 0) ?? [],
+  }))
+
+  // Stock fil — yarn rolls actually usable to produce this écru in its
+  // line-specific coloris. Legacy WinDev app filter (verified against
+  // commande 8582 line 8558):
+  //
+  //   1. composition_ecru WHERE IDref_ecru = line AND IDcolori_ecru =
+  //      line.IDColoris  →  set of (IDref_fil, IDcolori_fil) pairs.
+  //   2. stock_fil matching ANY of those pairs AND stock > 0 (depleted
+  //      lots are hidden — "active stock" view).
+  //
+  // Coloris pair filter matters: ref_ecru 146 (ref "029") has yarn variants
+  // for "ecru" (IDcolori_ecru=1094 → IDref_fil=5/IDcolori_fil=317) AND
+  // dyed variants (different IDcolori_fil values). Without the pair
+  // filter, dyeing a "marron" écru would surface "ecru" yarn rolls and
+  // vice-versa.
+  //
+  // Plain SELECT (no JOIN+CONVERT — bridge collapses results, see
+  // CLAUDE.md). Accented columns (terminé / controlé) omitted: read-only
+  // view, Linux bridge rejects them.
+  let stockFil: StockFilLite[] = []
+  // Composition pairs (with percentages) — used for the stock_fil filter
+  // AND surfaced in the response payload so the frontend can enforce
+  // coverage on the Stock fil tab. Hoisted out of the `if` block so the
+  // labeling step at the end of the function can see it.
+  let pairs: CompositionPair[] = []
+  if (ctx.IDref_ecru > 0) {
+    pairs = await loadCompositionPairs(ctx.IDref_ecru, ctx.IDcolori_ecru)
+    if (pairs.length === 0) {
+      const lineQtyRow = await query<{ quantite: number | null }>(
+        `SELECT quantite FROM ligne_commande_sous_traitant WHERE IDligne_commande_sous_traitant = ${ligneId}`,
+      )
+      return {
+        ecruProduced,
+        stockFil: [],
+        targetQtyKg: Number(lineQtyRow[0]?.quantite) || 0,
+        affectations: await loadAffectationsForLine(ligneId),
+        compositionPairs: [],
+      }
+    }
+
+    // Build a SQL OR clause for the pair list. Each (IDref_fil,
+    // IDcolori_fil) is a separate "ref AND colori" predicate joined by
+    // OR; we also AND stock > 0 to hide depleted lots (legacy default).
+    const pairClause = pairs
+      .map((p) => `(sf.IDref_fil = ${p.IDref_fil} AND sf.IDcolori_fil = ${p.IDcolori_fil})`)
+      .join(' OR ')
+
+    const stockRows = await query<StockFilLite>(
+      `SELECT sf.IDstock_fil, sf.IDref_fil, sf.IDcolori_fil, sf.IDfournisseur, sf.IDMagasin,
+              sf.IDref_fil_commande, sf.stock, sf.lot, sf.lot_frs, sf.emplacement, sf.date_entree
+       FROM stock_fil sf
+       WHERE (${pairClause}) AND sf.stock > 0
+       ORDER BY sf.date_entree DESC, sf.IDstock_fil DESC`,
+    )
+    const stockFixed = await fixEncoding(stockRows, 'stock_fil', 'IDstock_fil', ['lot', 'lot_frs', 'emplacement'])
+
+    // Flat batched lookups for the display name columns.
+    const refFilIds = Array.from(new Set(stockFixed.map((r) => Number((r as any).IDref_fil) || 0).filter((x) => x > 0)))
+    const coloriIds = Array.from(new Set(stockFixed.map((r) => Number((r as any).IDcolori_fil) || 0).filter((x) => x > 0)))
+    const fournisseurIds = Array.from(new Set(stockFixed.map((r) => Number((r as any).IDfournisseur) || 0).filter((x) => x > 0)))
+    const magasinIds = Array.from(new Set(stockFixed.map((r) => Number((r as any).IDMagasin) || 0).filter((x) => x > 0)))
+
+    const refFilNameById = new Map<number, string>()
+    if (refFilIds.length > 0) {
+      const r = await query<{ IDref_fil: number; reference: string | null }>(
+        `SELECT IDref_fil, reference FROM ref_fil WHERE IDref_fil IN (${refFilIds.join(',')})`,
+      )
+      for (const row of r) refFilNameById.set(Number(row.IDref_fil), (row.reference ?? '').toString().trim())
+    }
+
+    const coloriNameById = new Map<number, string>()
+    if (coloriIds.length > 0) {
+      const r = await query<{ IDcolori_fil: number; reference: string | null }>(
+        `SELECT IDcolori_fil, reference FROM colori_fil WHERE IDcolori_fil IN (${coloriIds.join(',')})`,
+      )
+      const fixedC = await fixEncoding(r, 'colori_fil', 'IDcolori_fil', ['reference'])
+      for (const row of fixedC as any[]) coloriNameById.set(Number(row.IDcolori_fil), (row.reference ?? '').toString().trim())
+    }
+
+    const fournisseurNameById = new Map<number, string>()
+    if (fournisseurIds.length > 0) {
+      const r = await query<{ IDfournisseur: number; nom: string | null }>(
+        `SELECT IDfournisseur, nom FROM fournisseur WHERE IDfournisseur IN (${fournisseurIds.join(',')})`,
+      )
+      const fixedF = await fixEncoding(r, 'fournisseur', 'IDfournisseur', ['nom'])
+      for (const row of fixedF as any[]) fournisseurNameById.set(Number(row.IDfournisseur), (row.nom ?? '').toString().trim())
+    }
+
+    const magasinNameById = new Map<number, string>()
+    if (magasinIds.length > 0) {
+      // stock_fil.IDMagasin → sous_traitant.IDsous_traitant (legacy convention).
+      const r = await query<{ IDsous_traitant: number; nom: string | null }>(
+        `SELECT IDsous_traitant, nom FROM sous_traitant WHERE IDsous_traitant IN (${magasinIds.join(',')})`,
+      )
+      const fixedM = await fixEncoding(r, 'sous_traitant', 'IDsous_traitant', ['nom'])
+      for (const row of fixedM as any[]) magasinNameById.set(Number(row.IDsous_traitant), (row.nom ?? '').toString().trim())
+    }
+
+    stockFil = (stockFixed as StockFilLite[]).map((r) => ({
+      ...r,
+      ref_fil_reference: refFilNameById.get(Number(r.IDref_fil) || 0) ?? null,
+      colori_reference: coloriNameById.get(Number(r.IDcolori_fil) || 0) ?? null,
+      fournisseur_nom: fournisseurNameById.get(Number(r.IDfournisseur) || 0) ?? null,
+      magasin_nom: magasinNameById.get(Number(r.IDMagasin) || 0) ?? null,
+    }))
+  }
+
+  // Affectations + target qty — surfaced so the Stock fil tab buttons can
+  // render labels and the lot rows can show their "affecté X kg" chip in
+  // a single round-trip.
+  const affectations = await loadAffectationsForLine(ligneId)
+  const lineRow = await query<{ quantite: number | null }>(
+    `SELECT quantite FROM ligne_commande_sous_traitant WHERE IDligne_commande_sous_traitant = ${ligneId}`,
+  )
+  const targetQtyKg = Number(lineRow[0]?.quantite) || 0
+
+  // Annotate each stockFil row with affecte_kg = sum of asso quantite for
+  // this (line, lot) pair. Tiny map lookup per row.
+  const affecteByLot = new Map<number, number>()
+  for (const a of affectations) {
+    affecteByLot.set(a.IDstock_fil, (affecteByLot.get(a.IDstock_fil) ?? 0) + a.quantite)
+  }
+  const stockFilWithAffecte = stockFil.map((r) => ({
+    ...r,
+    affecte_kg: affecteByLot.get(r.IDstock_fil) ?? 0,
+  }))
+
+  // Resolve composition-pair labels. Independent lookup (the pair's yarn
+  // might have no stock_fil rows, so we can't reuse the stock_fil-side
+  // name maps). Pairs are 1–3 entries → cheap.
+  let compositionPairs: CompositionPairLite[] = []
+  if (pairs.length > 0) {
+    const pairRefFilIds = Array.from(new Set(pairs.map((p) => p.IDref_fil).filter((x) => x > 0)))
+    const pairColoriIds = Array.from(new Set(pairs.map((p) => p.IDcolori_fil).filter((x) => x > 0)))
+    const refFilLabels = new Map<number, string>()
+    if (pairRefFilIds.length > 0) {
+      const r = await query<{ IDref_fil: number; reference: string | null }>(
+        `SELECT IDref_fil, reference FROM ref_fil WHERE IDref_fil IN (${pairRefFilIds.join(',')})`,
+      )
+      for (const row of r) refFilLabels.set(Number(row.IDref_fil), (row.reference ?? '').toString().trim())
+    }
+    const coloriLabels = new Map<number, string>()
+    if (pairColoriIds.length > 0) {
+      const r = await query<{ IDcolori_fil: number; reference: string | null }>(
+        `SELECT IDcolori_fil, reference FROM colori_fil WHERE IDcolori_fil IN (${pairColoriIds.join(',')})`,
+      )
+      const fixed = await fixEncoding(r, 'colori_fil', 'IDcolori_fil', ['reference'])
+      for (const row of fixed as any[]) coloriLabels.set(Number(row.IDcolori_fil), (row.reference ?? '').toString().trim())
+    }
+    compositionPairs = pairs.map((p) => ({
+      IDref_fil: p.IDref_fil,
+      IDcolori_fil: p.IDcolori_fil,
+      pourcentage: p.pourcentage,
+      ref_fil_reference: refFilLabels.get(p.IDref_fil) ?? null,
+      colori_reference: coloriLabels.get(p.IDcolori_fil) ?? null,
+    }))
+  }
+
+  return {
+    ecruProduced,
+    stockFil: stockFilWithAffecte,
+    targetQtyKg,
+    affectations,
+    compositionPairs,
+  }
+}
+
+commandesSousTraitantRouter.get(
+  '/:commandeId/lignes/:ligneId/pieces-fil',
+  async (req: Request, res: Response) => {
+    try {
+      const commandeId = parseInt(req.params.commandeId, 10)
+      const ligneId = parseInt(req.params.ligneId, 10)
+      if (isNaN(commandeId) || isNaN(ligneId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+      const ctx = await loadTricoteurLineContext(commandeId, ligneId)
+      if (!ctx) { res.status(404).json({ error: 'Line not found, not a tricoteur line, or does not belong to commande' }); return }
+      res.json(await fetchPiecesFilPayload(ctx, ligneId))
+    } catch (err) {
+      console.error('Error fetching tricoteur line pieces:', err)
+      res.status(500).json({ error: 'Internal server error' })
+    }
+  },
+)
+
+// ── Yarn affectation endpoints ───────────────────────────
+//
+// All-tricoteur (any IDtype_sst=1) — NOT TRM-only. The cross-company
+// mirror logic is the only TRM-specific bit; yarn-to-line affectation is
+// a generic tricoteur feature.
+
+const affecterBody = z.object({
+  stockFilIds: z.array(z.number().int().positive()).min(1),
+  mode: z.enum(['standard', 'finir']),
+})
+
+commandesSousTraitantRouter.post(
+  '/:commandeId/lignes/:ligneId/affecter',
+  async (req: Request, res: Response) => {
+    try {
+      const commandeId = parseInt(req.params.commandeId, 10)
+      const ligneId = parseInt(req.params.ligneId, 10)
+      if (isNaN(commandeId) || isNaN(ligneId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+      const ctx = await loadTricoteurLineContext(commandeId, ligneId)
+      if (!ctx) { res.status(404).json({ error: 'Line not found or not a tricoteur line' }); return }
+      if (refuseIfTerminee(res, await loadCommandeSoldee(commandeId))) return
+
+      const parsed = affecterBody.safeParse(req.body)
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Validation failed', details: parsed.error.issues })
+        return
+      }
+      const { stockFilIds, mode } = parsed.data
+
+      // Refuse if affectations already exist — caller must DELETE
+      // /affectations first to avoid silent overlap with old data.
+      const existing = await loadAffectationsForLine(ligneId)
+      if (existing.length > 0) {
+        res.status(409).json({
+          error: 'affectations_exist',
+          message: 'Des affectations existent déjà pour cette ligne. Cliquez sur Désaffecter avant de relancer le calcul.',
+        })
+        return
+      }
+
+      // Load composition + selected lots + current line qty.
+      const pairs = await loadCompositionPairs(ctx.IDref_ecru, ctx.IDcolori_ecru)
+      const selectedLots = await loadStockLotsByIds(stockFilIds)
+      const lineQtyRow = await query<{ quantite: number | null }>(
+        `SELECT quantite FROM ligne_commande_sous_traitant WHERE IDligne_commande_sous_traitant = ${ligneId}`,
+      )
+      const currentQty = Number(lineQtyRow[0]?.quantite) || 0
+
+      const planResult = mode === 'finir'
+        ? computeFinirLotPlan({ selectedLots, pairs })
+        : computeAffectationPlan({ targetQtyKg: currentQty, selectedLots, pairs })
+
+      if (!planResult.ok) {
+        res.status(400).json({ error: 'plan_invalid', messages: planResult.errors })
+        return
+      }
+
+      // For 'finir' mode, also update the line's quantite to the
+      // computed target. We go through the existing PUT path conceptually
+      // (a direct UPDATE here, then bridge sync to TRM cc if applicable).
+      if (mode === 'finir' && Math.abs(planResult.targetQtyKg - currentQty) > 0.001) {
+        // Re-run PrixDeRevientTRM with the new quantity — one-off costs
+        // amortize over more or fewer kg → different €/kg. Keep both
+        // ledgers (sst + TRM mirror) aligned.
+        const newPrix = await trmLinePrix(ctx.IDref_ecru, planResult.targetQtyKg)
+        await query(
+          `UPDATE ligne_commande_sous_traitant
+           SET quantite = ${n(planResult.targetQtyKg)}, prix = ${n(newPrix)}
+           WHERE IDligne_commande_sous_traitant = ${ligneId}`,
+        )
+        // TRM mirror line sync — only if this is a Tricotage Malterre sst.
+        if (await isTricotageMalterreSst(commandeId)) {
+          const ccLineId = await getTrmMirrorLine(ligneId)
+          if (ccLineId != null) {
+            await query(
+              `UPDATE ligne_commande_client
+               SET quantite = ${n(planResult.targetQtyKg)}, prix = ${n(newPrix)}
+               WHERE IDligne_commande_client = ${ccLineId}`,
+            )
+          }
+        }
+      }
+
+      // INSERT one asso row per plan entry.
+      for (const entry of planResult.plan) {
+        await query(
+          `INSERT INTO asso_fil_lignecmdsst (IDstock_fil, IDligne_commande_sous_traitant, quantite)
+           VALUES (${entry.IDstock_fil}, ${ligneId}, ${n(entry.quantite)})`,
+        )
+      }
+
+      res.json({
+        ok: true,
+        mode,
+        targetQtyKg: planResult.targetQtyKg,
+        limitingLot: planResult.limitingLot,
+        payload: await fetchPiecesFilPayload(ctx, ligneId),
+      })
+    } catch (err) {
+      console.error('Error affecting yarn lots:', err)
+      res.status(500).json({ error: 'Internal server error' })
+    }
+  },
+)
+
+commandesSousTraitantRouter.delete(
+  '/:commandeId/lignes/:ligneId/affectations',
+  async (req: Request, res: Response) => {
+    try {
+      const commandeId = parseInt(req.params.commandeId, 10)
+      const ligneId = parseInt(req.params.ligneId, 10)
+      if (isNaN(commandeId) || isNaN(ligneId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+      const ctx = await loadTricoteurLineContext(commandeId, ligneId)
+      if (!ctx) { res.status(404).json({ error: 'Line not found or not a tricoteur line' }); return }
+      if (refuseIfTerminee(res, await loadCommandeSoldee(commandeId))) return
+
+      // Refuse if production has started — `stock_ecru` rolls already
+      // reference this line. Désaffecter would leave orphan production.
+      const rolls = await query<{ n: number | null }>(
+        `SELECT COUNT(*) AS n FROM stock_ecru WHERE IDref_commande_source = ${ligneId}`,
+      )
+      if ((Number(rolls[0]?.n) || 0) > 0) {
+        res.status(409).json({
+          error: 'production_started',
+          message: 'Impossible de désaffecter : des rouleaux ont déjà été produits pour cette ligne.',
+        })
+        return
+      }
+
+      await query(
+        `DELETE FROM asso_fil_lignecmdsst WHERE IDligne_commande_sous_traitant = ${ligneId}`,
+      )
+
+      res.json({ ok: true, payload: await fetchPiecesFilPayload(ctx, ligneId) })
+    } catch (err) {
+      console.error('Error clearing affectations:', err)
+      res.status(500).json({ error: 'Internal server error' })
+    }
+  },
+)
+
+// ── Reception: create a stock_ecru roll ──────────────────
+
+const rollBody = z.object({
+  numero: z.string().min(1).max(40),
+  lot: z.string().max(40).optional(),
+  poids: z.number().positive(),
+  observations: z.string().optional(),
+  second_choix: z.number().int().min(0).max(1).optional(),
+})
+
+commandesSousTraitantRouter.post(
+  '/:commandeId/lignes/:ligneId/pieces-fil/rolls',
+  async (req: Request, res: Response) => {
+    try {
+      const commandeId = parseInt(req.params.commandeId, 10)
+      const ligneId = parseInt(req.params.ligneId, 10)
+      if (isNaN(commandeId) || isNaN(ligneId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+      const ctx = await loadTricoteurLineContext(commandeId, ligneId)
+      if (!ctx) { res.status(404).json({ error: 'Line not found or not a tricoteur line' }); return }
+      if (refuseIfTerminee(res, await loadCommandeSoldee(commandeId))) return
+
+      const parsed = rollBody.safeParse(req.body)
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Validation failed', details: parsed.error.issues })
+        return
+      }
+      const d = parsed.data
+
+      // For Tricotage Malterre commandes only, also stamp IDLigne_Commande_TRM
+      // with the mirror cc line so the TRM side sees this roll in its ledger.
+      let IDLigne_Commande_TRM = 0
+      if (await isTricotageMalterreSst(commandeId)) {
+        IDLigne_Commande_TRM = (await getTrmMirrorLine(ligneId)) ?? 0
+      }
+
+      const today = new Date()
+      const todayStr = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`
+
+      // Insert. IDsociete=1 because ownership transfers to ETM as the
+      // yarn-to-écru transformation completes (legacy convention,
+      // confirmed on sst 8544's 24 rolls). IDordre_fabrication=0 because
+      // MPS_NG doesn't model OFs yet — the legacy TRM workflow fills it
+      // when production starts; leaving 0 is harmless here.
+      await query(
+        `INSERT INTO stock_ecru
+         (numero, lot, poids, metrage, IDref_ecru, IDcolori_ecru,
+          IDmagasin, IDordre_fabrication, IDref_commande_source,
+          IDLigne_Commande_TRM, IDsociete, second_choix, observations, date_saisie)
+         VALUES ('${esc(d.numero)}', '${esc(d.lot ?? '')}', ${n(d.poids)}, 0,
+                 ${ctx.IDref_ecru}, ${ctx.IDcolori_ecru},
+                 0, 0, ${ligneId},
+                 ${IDLigne_Commande_TRM}, 1, ${d.second_choix ?? 0},
+                 '${esc(d.observations ?? '')}', '${todayStr}')`,
+      )
+
+      res.status(201).json({ ok: true, payload: await fetchPiecesFilPayload(ctx, ligneId) })
+    } catch (err) {
+      console.error('Error creating tricoteur roll:', err)
+      res.status(500).json({ error: 'Internal server error' })
+    }
+  },
+)
 
 // Breakdown of the current prix calculation for a line. Returns the
 // algorithm's full trace (base + treatments + multipliers) with

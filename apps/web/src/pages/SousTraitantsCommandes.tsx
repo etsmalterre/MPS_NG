@@ -62,6 +62,7 @@ import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-selec
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
 import { TmRollIcon } from '@/components/icons/TmRollIcon'
+import { BobineIcon } from '@/components/icons/BobineIcon'
 import { SendEmailDialog } from '@/components/email/SendEmailDialog'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
@@ -93,7 +94,12 @@ const TYPE_SST_LABEL_BY_ID: Record<number, string> = {
 }
 const TYPE_SST_OPTIONS_PHASE1: Array<{ id: number; primary: string }> = [
   { id: TYPE_SST_ID_BY_LABEL.Ennoblisseur, primary: 'Ennoblisseur' },
+  // Phase 2: Tricoteur is wired with a backend bridge that auto-mirrors
+  // the commande as a TRM-side commande_client (see [[project-etm-trm-bridge]]).
+  { id: TYPE_SST_ID_BY_LABEL.Tricoteur, primary: 'Tricoteur' },
 ]
+
+const TYPE_TRICOTEUR = 'Tricoteur'
 
 function isLineDone(sstatut: string | null | undefined): boolean {
   return (sstatut ?? '').trim() === SSTATUT_DONE
@@ -197,6 +203,16 @@ interface RefFiniLookup {
   designation: string
 }
 
+interface RefEcruLookup {
+  IDref_ecru: number
+  ref_ecru: string
+  designation: string
+  /** ref_ecru.prix (€/kg). Used to auto-fill the tricoteur line prix when
+   *  the user picks a ref — the backend would default it anyway, but
+   *  showing the value in the form makes the cost visible up front. */
+  prix: number
+}
+
 interface AdresseLookup extends AdresseLite {
   est_defaut: number
   est_defaut_facturation: number
@@ -282,6 +298,61 @@ interface PiecesPayload {
    *  commande detail React Query cache so the LineCard re-renders with
    *  the new value without a full refetch. */
   prix: number
+}
+
+// Read-only payload for the tricoteur (type=1) line drawer. Mirrors the
+// server's GET /:id/lignes/:lid/pieces-fil response. The drawer shows two
+// tabs: Réception (écru produced by the knitter, affected to this line)
+// and Stock fil (every yarn roll of this ref_fil — full availability
+// view, no filter on coloris/fournisseur/magasin).
+interface StockFilLite {
+  IDstock_fil: number
+  IDref_fil: number
+  IDcolori_fil: number | null
+  IDfournisseur: number | null
+  IDMagasin: number | null
+  IDref_fil_commande: number | null
+  stock: number | null
+  lot: string | null
+  lot_frs: string | null
+  emplacement: string | null
+  date_entree: string | null
+  ref_fil_reference?: string | null
+  colori_reference?: string | null
+  fournisseur_nom?: string | null
+  magasin_nom?: string | null
+  /** Kg of this lot currently affected to the line via asso_fil_lignecmdsst.
+   *  0 means not affected. > 0 puts an "affecté X kg" chip on the row. */
+  affecte_kg?: number
+}
+
+interface TricoteurAffectationRow {
+  IDasso_fil_ligneCmdSST: number
+  IDstock_fil: number
+  IDligne_commande_sous_traitant: number
+  quantite: number
+}
+
+interface TricoteurCompositionPair {
+  IDref_fil: number
+  IDcolori_fil: number
+  pourcentage: number
+  ref_fil_reference: string | null
+  colori_reference: string | null
+}
+
+interface TricoteurPiecesPayload {
+  ecruProduced: StockEcruLite[]
+  stockFil: StockFilLite[]
+  /** The line's quantite (kg of écru to produce). Surfaced so buttons can
+   *  show "Affecter (1234 kg)" without a separate detail fetch. */
+  targetQtyKg: number
+  /** Active asso_fil_lignecmdsst rows for this line. When non-empty, the
+   *  Stock fil tab shows "Désaffecter" instead of Affecter/Finir. */
+  affectations: TricoteurAffectationRow[]
+  /** Required composition pairs for this line's écru — every pair must
+   *  have at least one selected lot before Affecter/Finir enable. */
+  compositionPairs: TricoteurCompositionPair[]
 }
 
 // Returned by GET /:id/soumission/lots-eligibles. One entry per
@@ -1207,10 +1278,17 @@ function DetailMain({
   const totalQte = commande.lignes.reduce((s, l) => s + (l.quantite != null ? Number(l.quantite) : 0), 0)
   const totalKgEcru = commande.lignes.reduce((s, l) => s + (Number(l.total_kg_ecru_lie) || 0), 0)
   const totalMetrageFini = commande.lignes.reduce((s, l) => s + (Number(l.total_metrage_fini_recu) || 0), 0)
-  const totalEurReal = commande.lignes.reduce(
-    (s, l) => s + ((Number(l.total_kg_ecru_lie) || 0) * (Number(l.prix) || 0)),
-    0,
-  )
+  // Per-line € total branches by type:
+  //   - tricoteur (type=1): line.quantite is already in kg of écru ordered;
+  //     total = quantite × prix (€/kg). Knowable up front.
+  //   - ennoblisseur (type=2) / écru (type=0): total = attached_kg × prix
+  //     because quantite is in Ml, not kg — multiply by Ml × €/kg is unitless
+  //     garbage. The bill comes from the real shipped écru weight.
+  const totalEurReal = commande.lignes.reduce((s, l) => {
+    const prix = Number(l.prix) || 0
+    if (l.type === 1) return s + ((Number(l.quantite) || 0) * prix)
+    return s + ((Number(l.total_kg_ecru_lie) || 0) * prix)
+  }, 0)
 
   return (
     <LignesSection
@@ -1261,6 +1339,10 @@ function LignesSection({
 
   const linesLocked = commande.est_soldee === 1
   const isEnnoblisseur = isEnnoblisseurType(commande.sous_traitant_type)
+  const isTricoteur = (commande.sous_traitant_type ?? '').trim().toLowerCase() === TYPE_TRICOTEUR.toLowerCase()
+  // Phase 2: both ennoblisseur and tricoteur can edit lines from MPS_NG.
+  // Other sst types (confectionneur, autre) still defer to legacy.
+  const linesEditable = isEnnoblisseur || isTricoteur
 
   useEffect(() => {
     if (!isEditing || linesLocked) {
@@ -1273,28 +1355,33 @@ function LignesSection({
     onLinesDirtyChange(showLineForm || editingLineId !== null)
   }, [showLineForm, editingLineId, onLinesDirtyChange])
 
-  // Phase 1: ennoblisseur line picker is a flat list of ref_fini. Other
-  // line types can't add lines (the affordance is hidden) but existing
-  // lines render as-is via their resolved labels.
-  const { data: refLookup } = useQuery<RefFiniLookup[]>({
+  // Line picker source — ref_fini for ennoblisseur, ref_ecru for tricoteur.
+  // We keep two parallel React-Query hooks; only one fetches per commande.
+  const { data: refFiniLookup } = useQuery<RefFiniLookup[]>({
     queryKey: ['commande-sst-refs-fini'],
     queryFn: () => apiFetch('/commandes-sous-traitant/lookups/refs-fini'),
     enabled: isEditing && isEnnoblisseur,
+  })
+  const { data: refEcruLookup } = useQuery<RefEcruLookup[]>({
+    queryKey: ['commande-sst-refs-ecru-list'],
+    queryFn: () => apiFetch('/commandes-sous-traitant/lookups/refs-ecru-list'),
+    enabled: isEditing && isTricoteur,
   })
 
   const createLineMut = useMutation({
     mutationFn: () => apiFetch(`/commandes-sous-traitant/${commande.IDcommande_sous_traitant}/lignes`, {
       method: 'POST',
       body: JSON.stringify({
+        // Tricoteur lines store an IDref_ecru + IDcolori_ecru; ennoblisseur
+        // lines store an IDref_fini + IDref_fini_colori. The backend gates
+        // type/unite/prix-default on the parent sst's IDtype_sst, but we
+        // pass them explicitly here for symmetry / future-proofing.
+        type: isTricoteur ? 1 : 2,
         IDreference: lineForm.IDreference,
-        // IDColoris on a fini line points at ref_fini_colori (the legacy
-        // table — see commandes-sous-traitant.ts /lookups/colori-fini).
         IDColoris: lineForm.IDColoris,
         quantite: Number(lineForm.quantite) || 0,
         prix: Number(lineForm.prix) || 0,
-        // unite=0 → "Ml" (mètre linéaire), the only unit ennoblisseur
-        // commandes use in Phase 1.
-        unite: 0,
+        unite: isTricoteur ? 1 : 0,  // 1=kg (tricoteur), 0=Ml (ennoblisseur)
         date_livraison: inputDateToHfsql(lineForm.date_livraison),
       }),
     }),
@@ -1353,11 +1440,30 @@ function LignesSection({
     setShowLineForm(true)
   }
 
-  // Pieces drawer is only available for ennoblisseur sous-traitants in Phase 1.
-  const drawerOpen = piecesDrawerLineId !== null && !isEditing && isEnnoblisseur
+  // Line drawer is mounted when the user clicks a supported line:
+  //   • type=2 (ennoblisseur / fini) → PiecesDrawer (linkable écru +
+  //     fini reception, full Phase 1 flow).
+  //   • type=1 (tricoteur / fil) → TricoteurDrawer (read-only Phase 2
+  //     pass: Réception + Stock fil tabs).
+  // Other types are not yet wired up — clicking those lines is a no-op.
+  const drawerOpen = piecesDrawerLineId !== null && !isEditing
   const drawerLigne = drawerOpen
     ? commande.lignes.find((l) => l.IDligne_commande_sous_traitant === piecesDrawerLineId) ?? null
     : null
+  const drawerKind: 'ennoblisseur' | 'tricoteur' | null = (() => {
+    if (!drawerLigne) return null
+    if (drawerLigne.type === 2) return 'ennoblisseur'
+    if (drawerLigne.type === 1) return 'tricoteur'
+    return null
+  })()
+  const drawerMounted = drawerOpen && drawerLigne !== null && drawerKind !== null
+
+  // Order quantity unit for the totals footer — kg when every line is
+  // tricoteur (type=1, output écru weight), Ml when every line is
+  // ennoblisseur (type=2, output fabric meterage). Mixed commandes
+  // shouldn't happen today; fall back to Ml (the historical default).
+  const commandeTotalUnit: 'kg' | 'Ml' =
+    commande.lignes.length > 0 && commande.lignes.every((l) => l.type === 1) ? 'kg' : 'Ml'
 
   return (
     <>
@@ -1365,19 +1471,19 @@ function LignesSection({
         <div
           className={cn(
             'overflow-auto space-y-2 p-1 scrollbar-transparent',
-            drawerOpen ? 'flex-shrink-0 max-h-[40%]' : 'flex-1 min-h-0'
+            drawerMounted ? 'flex-shrink-0 max-h-[40%]' : 'flex-1 min-h-0'
           )}
         >
           {commande.lignes.length === 0 && !showLineForm ? (
             <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
               <FiniRollIcon className="h-12 w-12 mb-3 opacity-40" />
               <p className="text-sm">Aucune ligne</p>
-              {isEditing && !linesLocked && isEnnoblisseur && (
+              {isEditing && !linesLocked && linesEditable && (
                 <Button variant="outline" size="sm" className="mt-3" onClick={startAddLine}>
                   <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter une ligne
                 </Button>
               )}
-              {isEditing && !linesLocked && !isEnnoblisseur && (
+              {isEditing && !linesLocked && !linesEditable && (
                 <p className="text-[11px] text-muted-foreground italic mt-3 max-w-xs text-center">
                   L'ajout de ligne n'est disponible pour ce type de sous-traitant qu'à partir de la phase 2.
                 </p>
@@ -1397,9 +1503,11 @@ function LignesSection({
                     <LineFormFields
                       form={lineForm}
                       setForm={setLineForm}
-                      refsFini={refLookup ?? []}
-                      editable={isEnnoblisseur}
-                      autoPricing={commande.auto_pricing_enabled}
+                      kind={isTricoteur ? 'ecru' : 'fini'}
+                      refsFini={refFiniLookup ?? []}
+                      refsEcru={refEcruLookup ?? []}
+                      editable={linesEditable}
+                      autoPricing={isTricoteur ? false : commande.auto_pricing_enabled}
                     />
                   </InlineForm>
                 )
@@ -1411,6 +1519,7 @@ function LignesSection({
                   isEditing={isEditing}
                   linesLocked={linesLocked}
                   isEnnoblisseur={isEnnoblisseur}
+                  linesEditable={linesEditable}
                   isDrawerOpen={piecesDrawerLineId === l.IDligne_commande_sous_traitant}
                   onEdit={() => startEditLine(l)}
                   onDelete={() => setDeleteLineConfirmId(l.IDligne_commande_sous_traitant)}
@@ -1420,7 +1529,7 @@ function LignesSection({
             })
           )}
 
-          {isEditing && !linesLocked && isEnnoblisseur && showLineForm && (
+          {isEditing && !linesLocked && linesEditable && showLineForm && (
             <InlineForm
               title="Nouvelle ligne"
               onSave={() => createLineMut.mutate()}
@@ -1430,14 +1539,16 @@ function LignesSection({
               <LineFormFields
                 form={lineForm}
                 setForm={setLineForm}
-                refsFini={refLookup ?? []}
+                kind={isTricoteur ? 'ecru' : 'fini'}
+                refsFini={refFiniLookup ?? []}
+                refsEcru={refEcruLookup ?? []}
                 editable={true}
-                autoPricing={commande.auto_pricing_enabled}
+                autoPricing={isTricoteur ? false : commande.auto_pricing_enabled}
               />
             </InlineForm>
           )}
 
-          {isEditing && !linesLocked && isEnnoblisseur && commande.lignes.length > 0 && !showLineForm && editingLineId === null && (
+          {isEditing && !linesLocked && linesEditable && commande.lignes.length > 0 && !showLineForm && editingLineId === null && (
             <Button
               variant="ghost"
               size="sm"
@@ -1449,15 +1560,25 @@ function LignesSection({
           )}
         </div>
 
-        {drawerOpen && drawerLigne && (
+        {drawerMounted && drawerLigne && (
           <div className="flex-1 min-h-0 flex flex-col mt-3 rounded-lg border border-border/60 overflow-hidden bg-zinc-50/80 animate-in slide-in-from-bottom-4 fade-in-0 duration-200">
-            <PiecesDrawer
-              commandeId={commande.IDcommande_sous_traitant}
-              ligne={drawerLigne}
-              commandeSoldee={commande.est_soldee === 1}
-              onClose={() => onOpenPiecesDrawer(null)}
-              onSuccess={onMutationSuccess}
-            />
+            {drawerKind === 'ennoblisseur' && (
+              <PiecesDrawer
+                commandeId={commande.IDcommande_sous_traitant}
+                ligne={drawerLigne}
+                commandeSoldee={commande.est_soldee === 1}
+                onClose={() => onOpenPiecesDrawer(null)}
+                onSuccess={onMutationSuccess}
+              />
+            )}
+            {drawerKind === 'tricoteur' && (
+              <TricoteurDrawer
+                commandeId={commande.IDcommande_sous_traitant}
+                ligne={drawerLigne}
+                commandeSoldee={commande.est_soldee === 1}
+                onClose={() => onOpenPiecesDrawer(null)}
+              />
+            )}
           </div>
         )}
 
@@ -1467,7 +1588,7 @@ function LignesSection({
               Total · {commande.lignes.length} ligne{commande.lignes.length > 1 ? 's' : ''}
             </span>
             <div className="flex items-center gap-4 tabular-nums">
-              <span className="text-muted-foreground text-xs">Prévu {fmtNum(totalQte, 1)} Ml</span>
+              <span className="text-muted-foreground text-xs">Prévu {fmtNum(totalQte, 1)} {commandeTotalUnit}</span>
               {totalKgEcru > 0 && (
                 <span className="text-muted-foreground text-xs">
                   · {fmtNum(totalKgEcru, 1)} kg affectés
@@ -1504,12 +1625,16 @@ function LignesSection({
 }
 
 function LineCard({
-  line, isEditing, linesLocked, isEnnoblisseur, isDrawerOpen, onEdit, onDelete, onOpenDrawer,
+  line, isEditing, linesLocked, isEnnoblisseur, linesEditable, isDrawerOpen, onEdit, onDelete, onOpenDrawer,
 }: {
   line: LigneCommande
   isEditing: boolean
   linesLocked: boolean
   isEnnoblisseur: boolean
+  /** True when the parent commande's sst supports inline line editing in
+   *  MPS_NG (ennoblisseur OR tricoteur). Drives the per-card edit/delete
+   *  affordances regardless of which exact type. */
+  linesEditable: boolean
   isDrawerOpen: boolean
   onEdit: () => void
   onDelete: () => void
@@ -1520,9 +1645,14 @@ function LineCard({
   const qty = Number(line.quantite) || 0
   const totalKgEcru = Number(line.total_kg_ecru_lie) || 0
   const totalMetrageFini = Number(line.total_metrage_fini_recu) || 0
-  // Actual € total: sum of attached écru weight × prix/kg. Falls back to 0
-  // (and we hide the line) until the user attaches at least one roll.
-  const totalEur = totalKgEcru * prix
+  // Actual € total. Branches by line type:
+  //   - tricoteur (type=1): quantite IS the ordered kg of écru, so
+  //     total = qty × prix is the correct line € from the start.
+  //   - ennoblisseur (type=2) / écru (type=0): quantite is in Ml, can't
+  //     be multiplied directly with €/kg; total = attached_écru_kg × prix.
+  //     Falls back to 0 (and the line € row is hidden) until at least one
+  //     roll is linked.
+  const totalEur = line.type === 1 ? qty * prix : totalKgEcru * prix
   // Ml potentiel = kg écru affecté × rendement (Ml/kg from ref_fini).
   // A pre-réception estimate of how much fini the order should yield, used
   // to flag under/over-orders before the worker even starts dyeing.
@@ -1547,7 +1677,15 @@ function LineCard({
     if (pR > qR * 0.95 && pR < qR * 1.10) return 'amber'
     return 'red'
   })()
-  const clickable = !isEditing && isEnnoblisseur
+  // Drawer is mounted for both ennoblisseur (type=2, full flow) and
+  // tricoteur (type=1, read-only Réception + Stock fil tabs). Other line
+  // types aren't wired up — keep them non-clickable.
+  const drawerAvailable = line.type === 2 || line.type === 1
+  const clickable = !isEditing && drawerAvailable
+  // Order quantity unit is type-dependent: tricoteur lines are ordered in
+  // kg of écru to produce; ennoblisseur (and legacy écru) lines are in Ml
+  // of finished fabric. See [[project-sst-line-polymorphic]].
+  const qtyUnit = line.type === 1 ? 'kg' : 'Ml'
 
   // "Délai initial" indicator: HFSQL stores YYYYMMDD; show only when rescheduled.
   const dateDelaiRaw = line.date_delai && /^\d{8}$/.test(line.date_delai) ? line.date_delai : ''
@@ -1583,7 +1721,7 @@ function LineCard({
               top of the sidebar carries the overall phase. */}
           {isEditing && !linesLocked && (
             <div className="flex gap-0.5">
-              {isEnnoblisseur && (
+              {linesEditable && (
                 <Button variant="ghost" size="icon" className="h-6 w-6" onClick={(e) => { e.stopPropagation(); onEdit() }}>
                   <Pencil className="h-3 w-3" />
                 </Button>
@@ -1620,7 +1758,7 @@ function LineCard({
           <div className="flex items-center gap-3">
             <span className="text-xs uppercase tracking-wide text-muted-foreground/80 w-24 flex-shrink-0">Quantité</span>
             <span className="text-foreground">
-              {qty > 0 ? `${fmtNum(qty, 1)} Ml` : '—'}
+              {qty > 0 ? `${fmtNum(qty, 1)} ${qtyUnit}` : '—'}
             </span>
             {dateLivRaw && (() => {
               const lineUrgency = deliveryUrgency(dateLivRaw, isLineDone(line.sstatut) ? 1 : 0)
@@ -2299,6 +2437,760 @@ function PiecesDrawer({
         />
       )}
     </div>
+  )
+}
+
+// Tricoteur drawer (line.type === 1). Two tabs:
+//   • Réception — stock_ecru rolls produced for this line. "+ Créer rouleau"
+//     button opens the TricoteurReceptionDialog.
+//   • Stock fil — every stock_fil row whose (IDref_fil, IDcolori_fil)
+//     appears in composition_ecru for the line's IDref_ecru + IDcolori_ecru.
+//     Multi-select to drive Affecter / Finir le lot X / Désaffecter.
+function TricoteurDrawer({
+  commandeId, ligne, commandeSoldee, onClose,
+}: {
+  commandeId: number
+  ligne: LigneCommande
+  /** True when the parent commande is `est_soldee = 1` (terminée). In
+   *  that state the drawer is read-only: no lot selection, no Affecter /
+   *  Finir / Désaffecter buttons, no "+ Créer rouleau" affordance. Matches
+   *  the ennoblisseur PiecesDrawer's `commandeSoldee` semantics. */
+  commandeSoldee: boolean
+  onClose: () => void
+}) {
+  const queryKey = ['commande-sst-pieces-fil', commandeId, ligne.IDligne_commande_sous_traitant] as const
+  const queryClient = useQueryClient()
+
+  const { data, isLoading, isError } = useQuery<TricoteurPiecesPayload>({
+    queryKey,
+    queryFn: () => apiFetch(`/commandes-sous-traitant/${commandeId}/lignes/${ligne.IDligne_commande_sous_traitant}/pieces-fil`),
+  })
+
+  const [activeTab, setActiveTab] = useState<'reception' | 'stock-fil'>('reception')
+  const [selectedLotIds, setSelectedLotIds] = useState<Set<number>>(new Set())
+  const [planError, setPlanError] = useState<string | null>(null)
+  const [showDesaffecterConfirm, setShowDesaffecterConfirm] = useState(false)
+  const [showReceptionDialog, setShowReceptionDialog] = useState(false)
+
+  const ecruProduced = data?.ecruProduced ?? []
+  const stockFil = data?.stockFil ?? []
+  const affectations = data?.affectations ?? []
+  const targetQtyKg = data?.targetQtyKg ?? 0
+  const compositionPairs = data?.compositionPairs ?? []
+  const totalKgReception = ecruProduced.reduce((s, r) => s + (Number(r.poids) || 0), 0)
+  const totalKgStock = stockFil.reduce((s, r) => s + (Number(r.stock) || 0), 0)
+  const hasAffectations = affectations.length > 0
+
+  const toggleLot = useCallback((id: number) => {
+    setSelectedLotIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+    setPlanError(null)
+  }, [])
+
+  // Coverage — every required composition pair must have at least one
+  // selected lot in the same (IDref_fil, IDcolori_fil) bucket. Without
+  // full coverage we hide the Affecter / Finir buttons entirely (per
+  // legacy UX). `missingPairs` drives the hint banner.
+  const { coveredAll, missingPairs, limitingLotLabel } = useMemo(() => {
+    if (compositionPairs.length === 0) {
+      return { coveredAll: false, missingPairs: [] as TricoteurCompositionPair[], limitingLotLabel: null as string | null }
+    }
+    const selected = stockFil.filter((r) => selectedLotIds.has(r.IDstock_fil))
+    const bucketKey = (rf: number, cf: number) => `${rf}:${cf}`
+    const lotsByBucket = new Map<string, StockFilLite[]>()
+    for (const l of selected) {
+      const k = bucketKey(l.IDref_fil, l.IDcolori_fil ?? 0)
+      const arr = lotsByBucket.get(k) ?? []
+      arr.push(l)
+      lotsByBucket.set(k, arr)
+    }
+    const missing: TricoteurCompositionPair[] = []
+    for (const p of compositionPairs) {
+      const k = bucketKey(p.IDref_fil, p.IDcolori_fil)
+      if ((lotsByBucket.get(k) ?? []).length === 0) missing.push(p)
+    }
+    const covered = missing.length === 0
+
+    // Limiting lot — match the server algorithm exactly: producible =
+    // stock_sum_in_bucket / (pourcentage / 100); pick the smallest, then
+    // the oldest lot in that bucket by date_entree.
+    let label: string | null = null
+    if (covered) {
+      let smallestProducible = Infinity
+      let smallestBucketLots: StockFilLite[] = []
+      for (const p of compositionPairs) {
+        const k = bucketKey(p.IDref_fil, p.IDcolori_fil)
+        const bucket = lotsByBucket.get(k) ?? []
+        const sum = bucket.reduce((s, l) => s + (Number(l.stock) || 0), 0)
+        const pct = p.pourcentage / 100
+        if (pct <= 0) continue
+        const producible = sum / pct
+        if (producible < smallestProducible) {
+          smallestProducible = producible
+          smallestBucketLots = bucket
+        }
+      }
+      smallestBucketLots.sort((a, b) => (a.date_entree || '').localeCompare(b.date_entree || ''))
+      label = smallestBucketLots[0]?.lot ?? null
+    }
+    return { coveredAll: covered, missingPairs: missing, limitingLotLabel: label }
+  }, [selectedLotIds, stockFil, compositionPairs])
+
+  const affecterMut = useMutation({
+    mutationFn: (mode: 'standard' | 'finir') => apiFetch(
+      `/commandes-sous-traitant/${commandeId}/lignes/${ligne.IDligne_commande_sous_traitant}/affecter`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ stockFilIds: Array.from(selectedLotIds), mode }),
+      },
+    ),
+    onSuccess: (resp: any) => {
+      setSelectedLotIds(new Set())
+      setPlanError(null)
+      if (resp?.payload) queryClient.setQueryData(queryKey, resp.payload)
+      // Refresh the parent detail too (line qty may have changed in 'finir' mode).
+      queryClient.invalidateQueries({ queryKey: ['commande-sst', commandeId] })
+    },
+    onError: (err: any) => {
+      // Server responses: { error: 'plan_invalid', messages: [...] } or
+      // { error: 'affectations_exist', message: '...' }.
+      const body = (err && typeof err === 'object' && 'body' in err) ? (err as any).body : null
+      if (body?.messages?.length) setPlanError(body.messages.join(' '))
+      else if (body?.message) setPlanError(body.message)
+      else setPlanError('Erreur lors de l\'affectation.')
+    },
+  })
+
+  const desaffecterMut = useMutation({
+    mutationFn: () => apiFetch(
+      `/commandes-sous-traitant/${commandeId}/lignes/${ligne.IDligne_commande_sous_traitant}/affectations`,
+      { method: 'DELETE' },
+    ),
+    onSuccess: (resp: any) => {
+      setSelectedLotIds(new Set())
+      setPlanError(null)
+      setShowDesaffecterConfirm(false)
+      if (resp?.payload) queryClient.setQueryData(queryKey, resp.payload)
+    },
+    onError: (err: any) => {
+      const body = (err && typeof err === 'object' && 'body' in err) ? (err as any).body : null
+      setPlanError(body?.message ?? 'Erreur lors de la désaffectation.')
+      setShowDesaffecterConfirm(false)
+    },
+  })
+
+  const tabs = [
+    { key: 'reception' as const, label: 'Réception', icon: TmRollIcon },
+    { key: 'stock-fil' as const, label: 'Stock fil', icon: BobineIcon },
+  ]
+
+  // Every write affordance is gated on `!commandeSoldee` — a terminée
+  // commande is read-only (the backend also refuses writes via
+  // refuseIfTerminee, but hiding the buttons keeps the UI honest).
+  const canAffect = !commandeSoldee && !hasAffectations && coveredAll && targetQtyKg > 0
+  const canFinir = !commandeSoldee && !hasAffectations && coveredAll && limitingLotLabel != null
+
+  return (
+    <div className="flex flex-col h-full min-h-0 overflow-hidden bg-zinc-100/80">
+      {/* Tab strip — gold-pill active state matches PiecesDrawer. */}
+      <div className="flex-shrink-0 flex items-center border-b bg-zinc-200/50 p-1 gap-1">
+        {tabs.map((t) => {
+          const Icon = t.icon
+          const active = activeTab === t.key
+          return (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => setActiveTab(t.key)}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer',
+                active
+                  ? 'bg-accent text-accent-foreground shadow-sm'
+                  : 'text-muted-foreground hover:bg-accent/10',
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              <span>{t.label}</span>
+            </button>
+          )
+        })}
+        <div className="ml-auto flex items-center gap-1 pr-1">
+          {activeTab === 'reception' && hasAffectations && !commandeSoldee && (
+            <Button
+              variant="gold"
+              size="sm"
+              className="h-7 px-2.5 text-[11px]"
+              onClick={() => setShowReceptionDialog(true)}
+            >
+              <Plus className="h-3.5 w-3.5 mr-1" />
+              Créer rouleau
+            </Button>
+          )}
+          {activeTab === 'stock-fil' && canAffect && (
+            <Button
+              variant="gold"
+              size="sm"
+              className="h-7 px-2.5 text-[11px]"
+              disabled={affecterMut.isPending}
+              onClick={() => affecterMut.mutate('standard')}
+            >
+              Affecter ({fmtNum(targetQtyKg, 1)} kg)
+            </Button>
+          )}
+          {activeTab === 'stock-fil' && canFinir && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 px-2.5 text-[11px]"
+              disabled={affecterMut.isPending}
+              onClick={() => affecterMut.mutate('finir')}
+              title="Calcule la quantité maximum produisible en consommant entièrement le lot le plus limitant des lots sélectionnés."
+            >
+              Finir le lot {limitingLotLabel}
+            </Button>
+          )}
+          {activeTab === 'stock-fil' && hasAffectations && !commandeSoldee && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2.5 text-[11px] text-destructive hover:text-destructive hover:bg-destructive/10"
+              disabled={desaffecterMut.isPending}
+              onClick={() => setShowDesaffecterConfirm(true)}
+            >
+              <Unlink className="h-3.5 w-3.5 mr-1" />
+              Désaffecter
+            </Button>
+          )}
+          <Button variant="ghost" size="icon" onClick={onClose} className="h-7 w-7" title="Fermer">
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-transparent">
+        {isLoading && (
+          <div className="space-y-2">
+            {[1, 2, 3].map((i) => <div key={i} className="h-14 bg-muted animate-pulse rounded-lg" />)}
+          </div>
+        )}
+        {isError && (
+          <div className="flex flex-col items-center justify-center py-6 text-destructive">
+            <AlertCircle className="h-6 w-6 mb-2" />
+            <p className="text-sm">Erreur de chargement</p>
+          </div>
+        )}
+
+        {planError && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            {planError}
+          </div>
+        )}
+
+        {!isLoading && !isError && activeTab === 'reception' && (
+          <>
+            <div className="flex items-center justify-between mb-1.5">
+              <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
+                {ecruProduced.length === 0
+                  ? 'Aucune réception'
+                  : `${ecruProduced.length} rouleau${ecruProduced.length > 1 ? 'x' : ''} · ${fmtNum(totalKgReception, 1)} kg`}
+              </h3>
+            </div>
+            {ecruProduced.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+                <TmRollIcon className="h-12 w-12 mb-2 opacity-40" />
+                <p className="text-sm">Aucune réception pour cette ligne</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {ecruProduced.map((roll) => (
+                  <EcruRollRow
+                    key={roll.IDstock_ecru}
+                    roll={roll}
+                    action="unlink"
+                    onAction={() => {}}
+                    isBusy={false}
+                    hideAction
+                  />
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {!isLoading && !isError && activeTab === 'stock-fil' && (
+          <>
+            {!commandeSoldee && !hasAffectations && compositionPairs.length > 0 && missingPairs.length > 0 && (
+              <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-900">
+                <p className="font-medium mb-1">Composition à couvrir :</p>
+                <ul className="space-y-0.5">
+                  {compositionPairs.map((p) => {
+                    const stillMissing = missingPairs.some(
+                      (m) => m.IDref_fil === p.IDref_fil && m.IDcolori_fil === p.IDcolori_fil,
+                    )
+                    const label = `${p.ref_fil_reference ?? `#${p.IDref_fil}`}${p.colori_reference ? ` · ${p.colori_reference}` : ''} (${p.pourcentage}%)`
+                    return (
+                      <li key={`${p.IDref_fil}:${p.IDcolori_fil}`} className="flex items-center gap-1.5">
+                        {stillMissing ? (
+                          <AlertCircle className="h-3 w-3 text-amber-600 flex-shrink-0" />
+                        ) : (
+                          <Check className="h-3 w-3 text-green-600 flex-shrink-0" />
+                        )}
+                        <span className={cn(stillMissing ? 'text-amber-900' : 'text-green-700 line-through')}>{label}</span>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </div>
+            )}
+            <div className="flex items-center justify-between mb-1.5">
+              <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
+                {stockFil.length === 0
+                  ? 'Aucun stock pour cette référence'
+                  : `${stockFil.length} bobine${stockFil.length > 1 ? 's' : ''} · ${fmtNum(totalKgStock, 1)} kg`}
+              </h3>
+              {hasAffectations && (
+                <span className="text-[10px] uppercase tracking-wide text-green-700 font-semibold">
+                  Affectés · {fmtNum(affectations.reduce((s, a) => s + a.quantite, 0), 1)} kg
+                </span>
+              )}
+            </div>
+            {stockFil.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+                <BobineIcon className="h-12 w-12 mb-2 opacity-40" />
+                <p className="text-sm">Aucun stock disponible</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {stockFil.map((row) => (
+                  <StockFilRow
+                    key={row.IDstock_fil}
+                    row={row}
+                    selectable={!commandeSoldee && !hasAffectations}
+                    selected={selectedLotIds.has(row.IDstock_fil)}
+                    onToggle={() => toggleLot(row.IDstock_fil)}
+                  />
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      <ConfirmDialog
+        open={showDesaffecterConfirm}
+        title="Désaffecter les lots"
+        description="Cette action retire toutes les affectations de fil pour cette ligne. Elle est sans effet sur les rouleaux déjà produits."
+        confirmLabel="Désaffecter"
+        isPending={desaffecterMut.isPending}
+        onCancel={() => setShowDesaffecterConfirm(false)}
+        onConfirm={() => desaffecterMut.mutate()}
+      />
+
+      {showReceptionDialog && (
+        <TricoteurReceptionDialog
+          commandeId={commandeId}
+          ligneId={ligne.IDligne_commande_sous_traitant}
+          onClose={() => setShowReceptionDialog(false)}
+          onSuccess={(payload) => {
+            queryClient.setQueryData(queryKey, payload)
+            setShowReceptionDialog(false)
+            setActiveTab('reception')
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+function StockFilRow({
+  row, selectable = false, selected = false, onToggle,
+}: {
+  row: StockFilLite
+  /** When true, the whole card toggles selection on click and a checkbox
+   *  leads the row. Set to false when affectations already exist (the
+   *  buttons switch to Désaffecter; selection becomes irrelevant). */
+  selectable?: boolean
+  selected?: boolean
+  onToggle?: () => void
+}) {
+  const refLabel = row.ref_fil_reference || `Ref #${row.IDref_fil}`
+  const lotChips = [
+    row.lot ? `lot ${row.lot}` : '',
+    row.lot_frs ? `lot frs ${row.lot_frs}` : '',
+  ].filter((s) => s.length > 0)
+  const affecteKg = Number(row.affecte_kg) || 0
+
+  return (
+    <div
+      onClick={selectable ? onToggle : undefined}
+      className={cn(
+        'rounded-lg border bg-card shadow-sm p-3 transition-colors select-none',
+        selectable && 'cursor-pointer hover:border-accent/40',
+        selected ? 'border-accent ring-1 ring-accent/40 bg-accent/[0.03]' : 'border-border/60',
+        affecteKg > 0 && !selected && 'border-green-500/40 bg-green-500/[0.03]',
+      )}
+    >
+      <div className="flex items-center gap-3">
+        {selectable && (
+          <Checkbox
+            checked={selected}
+            onClick={(e) => { e.stopPropagation(); onToggle?.() }}
+            className="flex-shrink-0"
+          />
+        )}
+        <div className="h-10 w-10 rounded-md bg-zinc-100 flex items-center justify-center flex-shrink-0">
+          <BobineIcon className="h-6 w-6 text-muted-foreground" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-semibold truncate">
+              {refLabel}
+              {row.colori_reference && (
+                <span className="text-muted-foreground"> / {row.colori_reference}</span>
+              )}
+            </span>
+            {lotChips.map((c) => (
+              <span key={c} className="text-xs text-muted-foreground truncate">· {c}</span>
+            ))}
+            {affecteKg > 0 && (
+              <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-green-700 bg-green-500/10 border border-green-500/30 rounded px-1.5 py-0.5">
+                affecté {fmtNum(affecteKg, 1)} kg
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-3 mt-1 text-[11px] text-muted-foreground tabular-nums flex-wrap">
+            {Number(row.stock) > 0 && (
+              <span className="font-medium text-foreground">{fmtNum(Number(row.stock), 1)} kg</span>
+            )}
+            {row.fournisseur_nom && <span>· {row.fournisseur_nom}</span>}
+            {row.magasin_nom && <span>· {row.magasin_nom}</span>}
+            {row.emplacement && <span>· {row.emplacement}</span>}
+            {row.date_entree && <span>· entré {formatHfsqlDate(row.date_entree)}</span>}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Reception dialog for tricoteur lines — creates stock_ecru rolls one at
+// a time. Modeled on the ennoblisseur BatchReceptionDialog: gold-gradient
+// header + accent-edge editor card + zinc-tinted bottom list + zinc-tinted
+// footer (see mps_designer §18 + §32 for the shared shapes). Differences
+// vs the ennoblisseur dialog:
+//   - Rolls are CREATED from scratch (vs ennoblisseur transforming pre-
+//     selected écru rolls). Starts with 1 empty draft; user clicks
+//     "Ajouter un rouleau" to extend.
+//   - No metrage (tricoteur deliveries are weight-based).
+//   - No "défaut ennoblisseur" textarea — only one observations field
+//     plus a second_choix flag.
+//   - No Tricobot autofill, no "reprise" mode.
+function TricoteurReceptionDialog({
+  commandeId, ligneId, onClose, onSuccess,
+}: {
+  commandeId: number
+  ligneId: number
+  onClose: () => void
+  onSuccess: (payload: TricoteurPiecesPayload) => void
+}) {
+  interface RollDraft {
+    numero: string
+    lot: string
+    poids: string  // kept as string for the controlled input; parsed on save
+    observations: string
+    second_choix: boolean
+  }
+  const blank = (): RollDraft => ({ numero: '', lot: '', poids: '', observations: '', second_choix: false })
+  const [rolls, setRolls] = useState<RollDraft[]>(() => [blank()])
+  const [currentIdx, setCurrentIdx] = useState(0)
+  const [visitedKeys, setVisitedKeys] = useState<Set<number>>(() => new Set([0]))
+  const [error, setError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+  const [doneCount, setDoneCount] = useState(0)
+
+  const current = rolls[currentIdx] ?? blank()
+  const canPrev = currentIdx > 0
+  const canNext = currentIdx < rolls.length - 1
+  const canSubmit = rolls.length > 0 && !submitting
+
+  const updateCurrent = (patch: Partial<RollDraft>) => {
+    setRolls((prev) => prev.map((r, i) => (i === currentIdx ? { ...r, ...patch } : r)))
+  }
+
+  // Sticky-lot carryover on navigation: if destination has empty lot AND
+  // current has one, inherit. Matches the ennoblisseur dialog's behaviour.
+  const goTo = (next: number) => {
+    if (next < 0 || next >= rolls.length) return
+    setRolls((prev) => {
+      const dest = prev[next]
+      const src = prev[currentIdx]
+      if (dest && src && dest.lot.trim() === '' && src.lot.trim() !== '') {
+        return prev.map((r, i) => (i === next ? { ...r, lot: src.lot } : r))
+      }
+      return prev
+    })
+    setVisitedKeys((prev) => {
+      if (prev.has(next)) return prev
+      const nextSet = new Set(prev); nextSet.add(next); return nextSet
+    })
+    setCurrentIdx(next)
+  }
+
+  const addRoll = () => {
+    setRolls((prev) => {
+      const lastLot = prev[currentIdx]?.lot ?? ''
+      return [...prev, { ...blank(), lot: lastLot }]
+    })
+    setCurrentIdx(rolls.length)
+    setVisitedKeys((prev) => { const n = new Set(prev); n.add(rolls.length); return n })
+  }
+
+  const removeRoll = (idx: number) => {
+    if (rolls.length === 1) return
+    setRolls((prev) => prev.filter((_, i) => i !== idx))
+    setCurrentIdx((prev) => Math.max(0, Math.min(prev, rolls.length - 2)))
+  }
+
+  const validateRoll = (r: RollDraft): string | null => {
+    if (r.numero.trim().length === 0) return 'Le numéro est obligatoire.'
+    const poids = Number(r.poids.replace(',', '.'))
+    if (!isFinite(poids) || poids <= 0) return 'Le poids doit être supérieur à 0.'
+    return null
+  }
+
+  const handleSubmit = async () => {
+    setError(null)
+    setSubmitting(true)
+    setDoneCount(0)
+    // Validate first; jump to the first invalid roll on failure.
+    for (let i = 0; i < rolls.length; i++) {
+      const err = validateRoll(rolls[i])
+      if (err) {
+        setCurrentIdx(i)
+        setError(`Rouleau ${i + 1} : ${err}`)
+        setSubmitting(false)
+        return
+      }
+    }
+    let lastPayload: TricoteurPiecesPayload | null = null
+    for (let i = 0; i < rolls.length; i++) {
+      const r = rolls[i]
+      try {
+        const resp = await apiFetch<{ ok: boolean; payload: TricoteurPiecesPayload }>(
+          `/commandes-sous-traitant/${commandeId}/lignes/${ligneId}/pieces-fil/rolls`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              numero: r.numero.trim(),
+              lot: r.lot.trim() || undefined,
+              poids: Number(r.poids.replace(',', '.')),
+              observations: r.observations.trim() || undefined,
+              second_choix: r.second_choix ? 1 : 0,
+            }),
+          },
+        )
+        if (resp?.payload) lastPayload = resp.payload
+        setDoneCount((n) => n + 1)
+      } catch (err: any) {
+        const body = (err && typeof err === 'object' && 'body' in err) ? (err as any).body : null
+        setError(`Rouleau ${i + 1} : ${body?.message ?? body?.error ?? (err instanceof Error ? err.message : 'erreur serveur')}`)
+        setSubmitting(false)
+        return
+      }
+    }
+    setSubmitting(false)
+    if (lastPayload) onSuccess(lastPayload)
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o && !submitting) onClose() }}>
+      <DialogContent
+        className="max-w-3xl w-[92vw] h-[88vh] flex flex-col p-0 overflow-hidden"
+        onClose={submitting ? undefined : onClose}
+      >
+        {/* Header — gold gradient + icon box, mirrors BatchReceptionDialog. */}
+        <div className="flex-shrink-0 px-6 pt-4 pb-3 border-b bg-gradient-to-r from-gold/25 via-gold/10 to-transparent flex items-start gap-3">
+          <div className="h-10 w-10 rounded-lg icon-box-gold flex items-center justify-center flex-shrink-0">
+            <TmRollIcon className="h-6 w-6" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h2 className="text-base font-heading font-bold tracking-tight truncate">
+              Créer {rolls.length > 1 ? `${rolls.length} rouleaux` : 'un rouleau'} écru
+            </h2>
+            <p className="text-xs text-muted-foreground mt-0.5 tabular-nums">
+              Rouleau {currentIdx + 1} sur {rolls.length}
+            </p>
+          </div>
+        </div>
+
+        {/* Editor card — gold-edge accent, mirrors the ennoblisseur card. */}
+        <div className="flex-shrink-0 px-6 pt-4">
+          <div className="rounded-lg border-l-4 border-l-accent/70 border border-border/60 bg-accent/[0.03] p-3 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="h-7 w-7 rounded-md bg-zinc-100 flex items-center justify-center flex-shrink-0">
+                  <TmRollIcon className="h-4 w-4 text-muted-foreground" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold truncate">
+                    {current.numero.trim() || <span className="text-muted-foreground italic">Rouleau {currentIdx + 1}</span>}
+                  </p>
+                  {current.lot.trim().length > 0 && (
+                    <p className="text-[10px] text-muted-foreground mt-0.5">lot {current.lot}</p>
+                  )}
+                </div>
+              </div>
+              {rolls.length > 1 && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 text-destructive hover:text-destructive"
+                  onClick={() => removeRoll(currentIdx)}
+                  disabled={submitting}
+                  title="Retirer ce rouleau"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-3 gap-2">
+              <LabeledInput
+                label="N° rouleau"
+                value={current.numero}
+                onChange={(v) => updateCurrent({ numero: v })}
+                autoFocus
+              />
+              <LabeledInput
+                label="Lot"
+                value={current.lot}
+                onChange={(v) => updateCurrent({ lot: v })}
+                helper="Reporté aux rouleaux suivants."
+              />
+              <LabeledInput
+                label="Poids (kg)"
+                type="number"
+                value={current.poids}
+                onChange={(v) => updateCurrent({ poids: v })}
+              />
+            </div>
+
+            <div className="grid grid-cols-[1fr_auto] gap-2 items-start">
+              <div className="space-y-1">
+                <label className="text-[10px] font-medium text-blue-700 flex items-center gap-1">
+                  <MessageSquare className="h-3 w-3" />
+                  Observations
+                </label>
+                <textarea
+                  value={current.observations}
+                  onChange={(e) => updateCurrent({ observations: e.target.value })}
+                  rows={2}
+                  className="w-full rounded-md border border-blue-300 bg-white ring-1 ring-blue-100 px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none"
+                />
+              </div>
+              <label className="flex items-center gap-2 px-2 py-1.5 rounded-md border border-border/60 bg-white cursor-pointer select-none whitespace-nowrap mt-[18px]">
+                <Checkbox
+                  checked={current.second_choix}
+                  onCheckedChange={(c) => updateCurrent({ second_choix: !!c })}
+                />
+                <span className="text-xs font-medium">2<sup>e</sup> choix</span>
+              </label>
+            </div>
+
+            <div className="flex items-center justify-between pt-1">
+              <Button variant="outline" size="sm" onClick={() => goTo(currentIdx - 1)} disabled={!canPrev || submitting}>
+                <ChevronLeft className="h-4 w-4 mr-1" /> Précédent
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => goTo(currentIdx + 1)} disabled={!canNext || submitting}>
+                Suivant <ChevronRight className="h-4 w-4 ml-1" />
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        {/* Bottom roll list — compact summary, click-to-jump.
+            Includes "+ Ajouter un rouleau" trailing card. */}
+        <div className="flex-1 min-h-0 flex flex-col border-t mt-4 bg-zinc-100/80">
+          <div className="flex-shrink-0 px-6 pt-3 pb-1.5 flex items-center justify-between">
+            <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
+              Aperçu des {rolls.length} rouleau{rolls.length > 1 ? 'x' : ''}
+            </p>
+            <Button variant="ghost" size="sm" className="h-6 px-2 text-[11px] text-accent hover:text-accent hover:bg-accent/10" onClick={addRoll} disabled={submitting}>
+              <Plus className="h-3 w-3 mr-1" />
+              Ajouter un rouleau
+            </Button>
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-3 space-y-1 scrollbar-transparent">
+            {rolls.map((r, i) => {
+              const isCurrent = i === currentIdx
+              const isVisited = visitedKeys.has(i)
+              const hasObs = r.observations.trim().length > 0
+              const hasPoids = Number(r.poids.replace(',', '.')) > 0
+              const hasNumero = r.numero.trim().length > 0
+              const hasData = hasNumero || hasPoids || r.lot.trim().length > 0 || hasObs
+              return (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => goTo(i)}
+                  className={cn(
+                    'w-full rounded-md border bg-card p-2 text-left text-xs flex items-center gap-2 transition-colors',
+                    isCurrent
+                      ? 'border-accent ring-1 ring-accent shadow-[inset_3px_0_0_0_rgb(242_184_10)]'
+                      : 'border-border/60 hover:border-accent/40',
+                  )}
+                >
+                  <div className={cn(
+                    'h-5 w-5 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] font-semibold tabular-nums',
+                    isCurrent ? 'bg-accent text-accent-foreground'
+                      : hasNumero && hasPoids ? 'bg-accent/15 text-accent'
+                      : isVisited ? 'bg-zinc-200 text-foreground'
+                      : 'bg-zinc-100 text-muted-foreground',
+                  )}>
+                    {hasNumero && hasPoids && !isCurrent ? <Check className="h-3 w-3" /> : i + 1}
+                  </div>
+                  <span className="font-semibold truncate flex-shrink-0 max-w-[140px]">
+                    {r.numero.trim() || <span className="italic text-muted-foreground">— en attente</span>}
+                  </span>
+                  <div className="flex items-center gap-2 tabular-nums text-muted-foreground min-w-0 flex-1 truncate">
+                    {r.lot.trim() && <span className="truncate">lot {r.lot}</span>}
+                    {hasPoids && <span>· {fmtNum(Number(r.poids.replace(',', '.')), 1)} kg</span>}
+                    {!hasData && <span className="italic">— en attente</span>}
+                  </div>
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    {r.second_choix && (
+                      <span className="text-[9px] font-bold uppercase tracking-wide text-red-700 bg-red-500/10 border border-red-500/30 rounded px-1 py-0.5">2<sup>e</sup></span>
+                    )}
+                    {hasObs && <MessageSquare className="h-3 w-3 text-blue-600" />}
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
+        {/* Footer — zinc bar with error banner + actions. */}
+        <div className="flex-shrink-0 px-6 py-3 border-t bg-zinc-200/50">
+          {!!error && (
+            <div className="mb-2 flex items-start gap-1.5 text-xs text-destructive">
+              <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+              <span className="break-all">{error}</span>
+            </div>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={onClose} disabled={submitting}>Annuler</Button>
+            <Button onClick={handleSubmit} disabled={!canSubmit}>
+              {submitting
+                ? `Enregistrement... (${doneCount}/${rolls.length})`
+                : `Créer ${rolls.length > 1 ? `${rolls.length} rouleaux` : 'le rouleau'}`}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -3339,62 +4231,106 @@ function SelectableEcruRow({
 // ── Line form fields ──────────────────────────────────
 
 function LineFormFields({
-  form, setForm, refsFini, editable, autoPricing,
+  form, setForm, kind, refsFini, refsEcru, editable, autoPricing,
 }: {
   form: { IDreference: number; IDColoris: number; quantite: string; prix: string; date_livraison: string }
   setForm: (f: typeof form) => void
+  /** Which catalog the line uses:
+   *  - 'fini' → ref_fini + ref_fini_colori (ennoblisseur)
+   *  - 'ecru' → ref_ecru + colori_ecru   (tricoteur — line spec is the
+   *             output écru the knitter must produce, see
+   *             [[project-sst-line-polymorphic]]) */
+  kind: 'fini' | 'ecru'
   refsFini: RefFiniLookup[]
+  refsEcru: RefEcruLookup[]
   editable: boolean
-  /** When true (default), the Prix (€/Kg) input is read-only because the
-   *  server is auto-managing it via recalcLignePrix. Pass `false` for
-   *  out-of-catalog sous-traitants (e.g. FRANCE TEINTURE) where the algo
-   *  has no opinion — the user types prix manually in that case. */
+  /** When true, the Prix input is read-only (ennoblisseur auto-pricing).
+   *  When false, the field is editable — tricoteur defaults the price from
+   *  ref_ecru.prix on selection but the user can override. */
   autoPricing?: boolean
 }) {
-  const prixDisabled = autoPricing !== false
-  // Coloris options for the picked ref_fini — `ref_fini_colori` rows whose
-  // IDref_fini matches. The PK there (IDref_fini_colori) is what gets stored
-  // in `ligne_commande_sous_traitant.IDColoris`.
-  const { data: colorisOptions } = useQuery<Array<{ IDref_fini_colori: number; reference: string }>>({
+  const isEcru = kind === 'ecru'
+  const prixDisabled = !isEcru && autoPricing !== false
+
+  // Coloris options — different table per kind.
+  const { data: coloriFiniOptions } = useQuery<Array<{ IDref_fini_colori: number; reference: string }>>({
     queryKey: ['commande-sst-colori-fini', form.IDreference],
     queryFn: () => apiFetch(`/commandes-sous-traitant/lookups/colori-fini?ref_fini=${form.IDreference}`),
-    enabled: editable && form.IDreference > 0,
+    enabled: !isEcru && editable && form.IDreference > 0,
   })
+  const { data: coloriEcruOptions } = useQuery<Array<{ IDcolori_ecru: number; reference: string }>>({
+    queryKey: ['commande-sst-colori-ecru', form.IDreference],
+    queryFn: () => apiFetch(`/commandes-sous-traitant/lookups/colori-ecru?ref_ecru=${form.IDreference}`),
+    enabled: isEcru && editable && form.IDreference > 0,
+  })
+
+  const coloriOpts = isEcru
+    ? (coloriEcruOptions ?? []).map((c) => ({ id: c.IDcolori_ecru, primary: c.reference }))
+    : (coloriFiniOptions ?? []).map((c) => ({ id: c.IDref_fini_colori, primary: c.reference }))
+
+  // When picking a ref_ecru, auto-fill prix from the catalog value so the
+  // user sees the unit cost up front. They can still override before save.
+  const handleEcruPick = (id: number) => {
+    const ref = refsEcru.find((r) => r.IDref_ecru === id)
+    const nextPrix = ref && ref.prix > 0 && (form.prix === '' || form.prix === '0') ? String(ref.prix) : form.prix
+    setForm({ ...form, IDreference: id, IDColoris: 0, prix: nextPrix })
+  }
 
   return (
     <>
       <div className="space-y-1">
-        <label className="text-xs font-medium text-muted-foreground">Référence fini</label>
-        <SearchableCombobox<RefFiniLookup>
-          options={refsFini}
-          value={form.IDreference}
-          onChange={(id) => setForm({ ...form, IDreference: id, IDColoris: 0 })}
-          getId={(r) => r.IDref_fini}
-          getPrimary={(r) => r.ref_fini}
-          getSecondary={(r) => r.designation || null}
-          disabled={!editable}
-          placeholder="Choisir une référence fini"
-        />
+        <label className="text-xs font-medium text-muted-foreground">
+          {isEcru ? 'Référence écru' : 'Référence fini'}
+        </label>
+        {isEcru ? (
+          <SearchableCombobox<RefEcruLookup>
+            options={refsEcru}
+            value={form.IDreference}
+            onChange={handleEcruPick}
+            getId={(r) => r.IDref_ecru}
+            getPrimary={(r) => r.ref_ecru}
+            getSecondary={(r) => r.designation || null}
+            disabled={!editable}
+            placeholder="Choisir une référence écru"
+          />
+        ) : (
+          <SearchableCombobox<RefFiniLookup>
+            options={refsFini}
+            value={form.IDreference}
+            onChange={(id) => setForm({ ...form, IDreference: id, IDColoris: 0 })}
+            getId={(r) => r.IDref_fini}
+            getPrimary={(r) => r.ref_fini}
+            getSecondary={(r) => r.designation || null}
+            disabled={!editable}
+            placeholder="Choisir une référence fini"
+          />
+        )}
       </div>
       <div className="space-y-1">
         <label className="text-xs font-medium text-muted-foreground">Coloris</label>
         <PopoverSelect
-          options={(colorisOptions ?? []).map((c) => ({ id: c.IDref_fini_colori, primary: c.reference }))}
+          options={coloriOpts}
           value={form.IDColoris}
           onChange={(id) => setForm({ ...form, IDColoris: id })}
           disabled={!editable || form.IDreference === 0}
           emptyLabel={form.IDreference === 0 ? '— Choisir une référence d\'abord —' : '— Aucun —'}
         />
-        <p className="text-[10px] text-muted-foreground">
-          Le tombé métier écru à envoyer est sélectionné dans le tiroir « pièces ».
-        </p>
+        {!isEcru && (
+          <p className="text-[10px] text-muted-foreground">
+            Le tombé métier écru à envoyer est sélectionné dans le tiroir « pièces ».
+          </p>
+        )}
       </div>
       <div className="grid grid-cols-2 gap-2">
-        <LabeledInput label="Quantité (Ml)" type="number" value={form.quantite} onChange={(v) => setForm({ ...form, quantite: v })} />
-        {/* Prix is server-managed only when the sous-traitant has tariff
-            data (`auto_pricing_enabled` on the commande detail). For
-            out-of-catalog suppliers (FRANCE TEINTURE, etc.) the field
-            stays editable so the user can enter a manual €/Kg. */}
+        <LabeledInput
+          label={isEcru ? 'Quantité (kg)' : 'Quantité (Ml)'}
+          type="number"
+          value={form.quantite}
+          onChange={(v) => setForm({ ...form, quantite: v })}
+        />
+        {/* Prix is server-managed only for ennoblisseur lines with tariff
+            data (`auto_pricing_enabled`). Tricoteur lines default the value
+            from ref_ecru.prix but the field stays editable. */}
         <LabeledInput
           label="Prix (€/Kg)"
           type="number"
