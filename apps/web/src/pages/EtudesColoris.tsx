@@ -23,6 +23,7 @@ import {
   ChevronUp,
   ChevronDown,
   MessageSquare,
+  BookOpen,
   Palette,
   Info,
   Building2,
@@ -104,6 +105,9 @@ interface EnvoiEmailRow {
 
 interface EtudeDetail extends EtudeListRow {
   commentaire: string | null
+  /** Free-form action notes — MPS_NG-only field stored as plain text on
+   *  etude_col.journal. Editable from the Info tab in edit mode. */
+  journal: string | null
   ref_fini_designation: string | null
   ref_fini_colori_has_photo: 0 | 1
   soumissions: Soumission[]
@@ -255,6 +259,7 @@ export function EtudesColoris() {
   const [editNumCommande, setEditNumCommande] = useState('')
   const [editDesigClient, setEditDesigClient] = useState('')
   const [editCommentaire, setEditCommentaire] = useState('')
+  const [editJournal, setEditJournal] = useState('')
   const [editDateRecep, setEditDateRecep] = useState('')
   const [editIDClient, setEditIDClient] = useState(0)
   const [editIDRefFini, setEditIDRefFini] = useState(0)
@@ -266,6 +271,7 @@ export function EtudesColoris() {
     numCommande: string
     desigClient: string
     commentaire: string
+    journal: string
     dateRecep: string
     IDclient: number
     IDref_fini: number
@@ -324,6 +330,7 @@ export function EtudesColoris() {
       numCommande: detail.num_commande ?? '',
       desigClient: detail.desig_client ?? '',
       commentaire: detail.commentaire ?? '',
+      journal: detail.journal ?? '',
       dateRecep: hfsqlDateToInput(detail.date_reception_type),
       IDclient: detail.IDclient,
       IDref_fini: detail.IDref_fini,
@@ -334,6 +341,7 @@ export function EtudesColoris() {
     setEditNumCommande(snap.numCommande)
     setEditDesigClient(snap.desigClient)
     setEditCommentaire(snap.commentaire)
+    setEditJournal(snap.journal)
     setEditDateRecep(snap.dateRecep)
     setEditIDClient(snap.IDclient)
     setEditIDRefFini(snap.IDref_fini)
@@ -357,6 +365,7 @@ export function EtudesColoris() {
     if (editNumCommande !== o.numCommande) return true
     if (editDesigClient !== o.desigClient) return true
     if (editCommentaire !== o.commentaire) return true
+    if (editJournal !== o.journal) return true
     if (editDateRecep !== o.dateRecep) return true
     if (editIDClient !== o.IDclient) return true
     if (editIDRefFini !== o.IDref_fini) return true
@@ -364,7 +373,7 @@ export function EtudesColoris() {
     if (editIDSousTraitant !== o.IDsous_traitant) return true
     if (subFormsDirty) return true
     return false
-  }, [isEditing, editLibelle, editNumCommande, editDesigClient, editCommentaire, editDateRecep, editIDClient, editIDRefFini, editIDRefFiniColori, editIDSousTraitant, subFormsDirty])
+  }, [isEditing, editLibelle, editNumCommande, editDesigClient, editCommentaire, editJournal, editDateRecep, editIDClient, editIDRefFini, editIDRefFiniColori, editIDSousTraitant, subFormsDirty])
 
   // ── Mutations ───────────────────────────────────────────
 
@@ -377,6 +386,7 @@ export function EtudesColoris() {
           num_commande: editNumCommande,
           desig_client: editDesigClient,
           commentaire: editCommentaire,
+          journal: editJournal,
           date_reception_type: inputDateToHfsql(editDateRecep),
           IDclient: editIDClient,
           IDref_fini: editIDRefFini,
@@ -580,6 +590,7 @@ export function EtudesColoris() {
               editNumCommande={editNumCommande}
               editDesigClient={editDesigClient}
               editCommentaire={editCommentaire}
+              editJournal={editJournal}
               editDateRecep={editDateRecep}
               editIDClient={editIDClient}
               editIDRefFini={editIDRefFini}
@@ -587,6 +598,7 @@ export function EtudesColoris() {
               onNumCommandeChange={setEditNumCommande}
               onDesigClientChange={setEditDesigClient}
               onCommentaireChange={setEditCommentaire}
+              onJournalChange={setEditJournal}
               onDateRecepChange={setEditDateRecep}
               onIDClientChange={(v) => {
                 setEditIDClient(v)
@@ -1657,9 +1669,9 @@ interface AdresseLite {
 
 function EtudeDetailSidebar({
   detail, isEditing,
-  editNumCommande, editDesigClient, editCommentaire, editDateRecep,
+  editNumCommande, editDesigClient, editCommentaire, editJournal, editDateRecep,
   editIDClient, editIDRefFini, editIDSousTraitant,
-  onNumCommandeChange, onDesigClientChange, onCommentaireChange, onDateRecepChange,
+  onNumCommandeChange, onDesigClientChange, onCommentaireChange, onJournalChange, onDateRecepChange,
   onIDClientChange, onIDRefFiniChange, onIDSousTraitantChange,
   onChangeStatut, isChangingStatut,
 }: {
@@ -1668,6 +1680,7 @@ function EtudeDetailSidebar({
   editNumCommande: string
   editDesigClient: string
   editCommentaire: string
+  editJournal: string
   editDateRecep: string
   editIDClient: number
   editIDRefFini: number
@@ -1675,6 +1688,7 @@ function EtudeDetailSidebar({
   onNumCommandeChange: (s: string) => void
   onDesigClientChange: (s: string) => void
   onCommentaireChange: (s: string) => void
+  onJournalChange: (s: string) => void
   onDateRecepChange: (s: string) => void
   onIDClientChange: (n: number) => void
   onIDRefFiniChange: (n: number) => void
@@ -1768,6 +1782,7 @@ function EtudeDetailSidebar({
               editNumCommande={editNumCommande}
               editDesigClient={editDesigClient}
               editCommentaire={editCommentaire}
+              editJournal={editJournal}
               editDateRecep={editDateRecep}
               editIDClient={editIDClient}
               editIDRefFini={editIDRefFini}
@@ -1775,6 +1790,7 @@ function EtudeDetailSidebar({
               onNumCommandeChange={onNumCommandeChange}
               onDesigClientChange={onDesigClientChange}
               onCommentaireChange={onCommentaireChange}
+              onJournalChange={onJournalChange}
               onDateRecepChange={onDateRecepChange}
               onIDClientChange={onIDClientChange}
               onIDRefFiniChange={onIDRefFiniChange}
@@ -1814,9 +1830,9 @@ function EtudeDetailSidebar({
 
 function EtudeInfoTab({
   detail, isEditing,
-  editNumCommande, editDesigClient, editCommentaire, editDateRecep,
+  editNumCommande, editDesigClient, editCommentaire, editJournal, editDateRecep,
   editIDClient, editIDRefFini, editIDSousTraitant,
-  onNumCommandeChange, onDesigClientChange, onCommentaireChange, onDateRecepChange,
+  onNumCommandeChange, onDesigClientChange, onCommentaireChange, onJournalChange, onDateRecepChange,
   onIDClientChange, onIDRefFiniChange, onIDSousTraitantChange,
   clients, refsFini, sousTraitants, clientCommandes,
 }: {
@@ -1825,6 +1841,7 @@ function EtudeInfoTab({
   editNumCommande: string
   editDesigClient: string
   editCommentaire: string
+  editJournal: string
   editDateRecep: string
   editIDClient: number
   editIDRefFini: number
@@ -1832,6 +1849,7 @@ function EtudeInfoTab({
   onNumCommandeChange: (s: string) => void
   onDesigClientChange: (s: string) => void
   onCommentaireChange: (s: string) => void
+  onJournalChange: (s: string) => void
   onDateRecepChange: (s: string) => void
   onIDClientChange: (n: number) => void
   onIDRefFiniChange: (n: number) => void
@@ -1956,6 +1974,35 @@ function EtudeInfoTab({
           </p>
         ) : (
           <p className="text-sm text-muted-foreground italic">Aucun commentaire</p>
+        )}
+      </div>
+
+      {/* Journal card — mirrors the sst-commande Info-tab journal. Plain
+          text on etude_col.journal; the user opted out of legacy-RTF
+          compatibility for this field. */}
+      <div
+        className={cn(
+          'p-3 rounded-lg border bg-card shadow-sm',
+          isEditing && editCardClass,
+        )}
+      >
+        <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
+          <BookOpen className="h-3.5 w-3.5" />Journal
+        </p>
+        {isEditing ? (
+          <textarea
+            rows={4}
+            value={editJournal}
+            onChange={(e) => onJournalChange(e.target.value)}
+            placeholder="Notes d'action…"
+            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+          />
+        ) : detail.journal?.trim() ? (
+          <p className="text-sm text-muted-foreground whitespace-pre-line">
+            {detail.journal.trim()}
+          </p>
+        ) : (
+          <p className="text-sm text-muted-foreground italic">Aucune note</p>
         )}
       </div>
     </>

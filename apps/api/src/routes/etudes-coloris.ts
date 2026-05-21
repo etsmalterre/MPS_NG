@@ -53,6 +53,11 @@ interface EtudeRow {
   date_reception_type: string | null // YYYYMMDD
   statut_col: EtudeStatut
   commentaire: string | null
+  /** Free-form text journal — added in May 2026, MPS_NG-only field used
+   *  by the user to record action notes on the étude. Stored as plain
+   *  text (the user explicitly opted out of legacy-RTF compatibility for
+   *  this column). */
+  journal: string | null
   date_derniere_action: string | null // YYYY-MM-DD (ISO)
 }
 
@@ -206,12 +211,12 @@ async function loadEtudeDetail(id: number): Promise<Record<string, unknown> | nu
   const rows = await query<any>(
     `SELECT IDetude_col, IDclient, IDref_fini, IDref_fini_colori, IDsous_traitant,
             libelle, num_commande, desig_client, date_reception_type, statut_col,
-            commentaire, date_derniere_action
+            commentaire, journal, date_derniere_action
      FROM etude_col WHERE IDetude_col = ${id}`,
   )
   if (rows.length === 0) return null
   const fixed = await fixEncoding(rows, 'etude_col', 'IDetude_col', [
-    'libelle', 'num_commande', 'desig_client', 'commentaire',
+    'libelle', 'num_commande', 'desig_client', 'commentaire', 'journal',
   ])
   const header = fixed[0] as any as EtudeRow
 
@@ -271,6 +276,7 @@ const etudeBody = z.object({
   desig_client: z.string().max(100).optional(),
   date_reception_type: z.string().optional(), // YYYYMMDD or YYYY-MM-DD
   commentaire: z.string().optional(),
+  journal: z.string().optional(),
 })
 
 const etudeUpdateBody = etudeBody.partial().extend({
@@ -1102,6 +1108,7 @@ etudesColorisRouter.put('/:id', async (req: Request, res: Response) => {
       sets.push(`date_reception_type = '${dateStr(d.date_reception_type)}'`)
     if (d.statut_col !== undefined) sets.push(`statut_col = ${d.statut_col}`)
     if (d.commentaire !== undefined) sets.push(`commentaire = '${esc(d.commentaire)}'`)
+    if (d.journal !== undefined) sets.push(`journal = '${esc(d.journal)}'`)
 
     if (sets.length === 0) {
       res.status(400).json({ error: 'No fields to update' }); return
