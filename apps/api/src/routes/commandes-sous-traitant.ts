@@ -680,14 +680,18 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
       if (!isNaN(qDigits) && qDigits > 0) orParts.push(`cst.IDcommande_sous_traitant = ${qDigits}`)
       if (hits.sstIds.length > 0) orParts.push(`cst.IDsous_traitant IN (${hits.sstIds.join(',')})`)
 
-      // Ref + coloris match on the lines. Type discriminates the catalog:
-      // 0=ecru, 1=fil, 2=fini for refs; 0=colori_ecru, 2=ref_fini_colori
-      // for coloris.
+      // Ref + coloris match on the lines. Type discriminates the catalog,
+      // per the polymorphic rule (CLAUDE.md HFSQL section):
+      //   type=2 → IDreference is IDref_fini, IDColoris is IDref_fini_colori
+      //   type=1 → IDreference is IDref_ecru, IDColoris is IDcolori_ecru
+      //   type=0 → IDreference is IDref_ecru, IDColoris is IDcolori_ecru
+      // So both type=0 AND type=1 share the ref_ecru + colori_ecru
+      // catalogs. `refFilIds` is never stored on sst lines today; the
+      // resolved hits are intentionally ignored.
       const lineConds: string[] = []
-      if (hits.refEcruIds.length) lineConds.push(`(lcs.type = 0 AND lcs.IDreference IN (${hits.refEcruIds.join(',')}))`)
+      if (hits.refEcruIds.length) lineConds.push(`(lcs.type IN (0,1) AND lcs.IDreference IN (${hits.refEcruIds.join(',')}))`)
       if (hits.refFiniIds.length) lineConds.push(`(lcs.type = 2 AND lcs.IDreference IN (${hits.refFiniIds.join(',')}))`)
-      if (hits.refFilIds.length) lineConds.push(`(lcs.type = 1 AND lcs.IDreference IN (${hits.refFilIds.join(',')}))`)
-      if (hits.coloriEcruIds.length) lineConds.push(`(lcs.type = 0 AND lcs.IDColoris IN (${hits.coloriEcruIds.join(',')}))`)
+      if (hits.coloriEcruIds.length) lineConds.push(`(lcs.type IN (0,1) AND lcs.IDColoris IN (${hits.coloriEcruIds.join(',')}))`)
       if (hits.refFiniColoriIds.length) lineConds.push(`(lcs.type = 2 AND lcs.IDColoris IN (${hits.refFiniColoriIds.join(',')}))`)
       if (lineConds.length > 0) {
         orParts.push(

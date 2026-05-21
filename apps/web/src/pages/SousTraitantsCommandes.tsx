@@ -465,6 +465,23 @@ function isEnnoblisseurType(type: string | null): boolean {
   return type.trim().toLowerCase() === TYPE_ENNOBLISSEUR.toLowerCase()
 }
 
+/** Tag classes for the sous-traitant type chip in the left-list commande
+ *  cards. One distinct hue per type so the visual scan is fast (gold is
+ *  reserved for the brand's CTA / active state — never reuse for tags). */
+function sstTypeTagClasses(type: string | null): string {
+  const t = (type ?? '').trim().toLowerCase()
+  // Ennoblisseur → sky (cool, dye/water association). Soft enough that the
+  // chip reads as a category, not an action.
+  if (t === 'ennoblisseur') return 'bg-sky-500/10 text-sky-700 border border-sky-500/25'
+  // Tricoteur → amber (warm, yarn association). The 10% bg + amber-800
+  // text keeps it readable and distinct from the brand's solid gold CTA.
+  if (t === 'tricoteur') return 'bg-amber-500/15 text-amber-800 border border-amber-500/30'
+  // Confectionneur → teal (clean cut-and-sew finishing).
+  if (t === 'confectionneur') return 'bg-teal-500/10 text-teal-700 border border-teal-500/25'
+  // "Autre" or unrecognised — muted stone fallback.
+  return 'bg-stone-500/10 text-stone-700 border border-stone-500/25'
+}
+
 // Debounce a fast-changing value (typically a search input). Returns the
 // last value that has been stable for `delay` ms. Used to throttle the
 // commandes list refetch while the user is still typing.
@@ -1040,7 +1057,10 @@ function CommandeList({
               <div className="flex items-center gap-2 mt-1 text-[11px] text-muted-foreground">
                 {row.date_commande && <span>{formatHfsqlDate(row.date_commande)}</span>}
                 {!!row.sous_traitant_type && (
-                  <span className="px-1.5 py-0.5 rounded bg-accent/10 text-accent text-[10px]">
+                  <span className={cn(
+                    'px-1.5 py-0.5 rounded text-[10px] font-medium',
+                    sstTypeTagClasses(row.sous_traitant_type),
+                  )}>
                     {row.sous_traitant_type}
                   </span>
                 )}
@@ -1126,7 +1146,15 @@ function DetailHeader({
               </h1>
               <div className="flex items-center gap-2 flex-shrink-0">
                 {!!commande?.sous_traitant_type && (
-                  <Badge variant="secondary" className="text-xs">{commande.sous_traitant_type}</Badge>
+                  // Same hue-per-type chip as the left-list cards (see
+                  // sstTypeTagClasses). Use a span with the helper's classes
+                  // rather than the secondary Badge so the colour is type-aware.
+                  <span className={cn(
+                    'px-2 py-0.5 rounded text-xs font-medium',
+                    sstTypeTagClasses(commande.sous_traitant_type),
+                  )}>
+                    {commande.sous_traitant_type}
+                  </span>
                 )}
                 {commande?.date_commande && (
                   <Badge variant="secondary" className="text-xs">{formatHfsqlDate(commande.date_commande)}</Badge>
@@ -4179,17 +4207,52 @@ function LinkEcruDialog({
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Anchor for Shift+click range selection (same pattern as PiecesDrawer's
+  // Affectés tab — lastSelectedEcruIdRef). Set on every plain click, kept
+  // stable across Shift+clicks so the range always extends from the same
+  // anchor (OS file-manager convention).
+  const lastSelectedRef = useRef<number | null>(null)
 
   const totalKg = available
     .filter((r) => selected.has(r.IDstock_ecru))
     .reduce((s, r) => s + (Number(r.poids) || 0), 0)
+  const allSelected = available.length > 0 && available.every((r) => selected.has(r.IDstock_ecru))
 
-  const toggle = (id: number) => {
+  const selectAll = () => {
+    setSelected(new Set(available.map((r) => r.IDstock_ecru)))
+    lastSelectedRef.current = available[available.length - 1]?.IDstock_ecru ?? null
+  }
+  const clearSelection = () => {
+    setSelected(new Set())
+    lastSelectedRef.current = null
+  }
+
+  const handleToggle = (id: number, shiftKey: boolean) => {
+    const ids = available.map((r) => r.IDstock_ecru)
+    const anchor = lastSelectedRef.current
+    // Shift+click: extend the selection from the anchor to the clicked row.
+    // The anchor stays put so successive Shift+clicks keep the range based
+    // on the original starting point — matches OS file-manager behaviour.
+    if (shiftKey && anchor !== null && anchor !== id) {
+      const a = ids.indexOf(anchor)
+      const b = ids.indexOf(id)
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a]
+        setSelected((prev) => {
+          const next = new Set(prev)
+          for (let i = lo; i <= hi; i++) next.add(ids[i])
+          return next
+        })
+        return
+      }
+    }
+    // Plain click — toggle and become the new anchor.
     setSelected((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id); else next.add(id)
       return next
     })
+    lastSelectedRef.current = id
   }
 
   const handleSubmit = async () => {
@@ -4220,7 +4283,36 @@ function LinkEcruDialog({
               {available.length} rouleau{available.length > 1 ? 'x' : ''} disponible{available.length > 1 ? 's' : ''}
               {selected.size > 0 && ` · ${selected.size} sélectionné${selected.size > 1 ? 's' : ''} (${fmtNum(totalKg, 1)} kg)`}
             </p>
+            <p className="text-[10px] text-muted-foreground/80 italic mt-0.5">
+              Astuce : Maj+clic pour sélectionner une plage.
+            </p>
           </div>
+          {available.length > 0 && (
+            // Same selection-toggle pattern as the Affectés tab inside the
+            // ennoblisseur PiecesDrawer — two text links separated by a
+            // mid-dot, each with its own disabled state. `mr-8` keeps the
+            // links clear of the dialog's built-in top-right close X
+            // (matches the Tricobot button positioning in BatchReceptionDialog).
+            <div className="flex items-center gap-1 flex-shrink-0 mt-1 mr-8">
+              <button
+                type="button"
+                onClick={selectAll}
+                disabled={busy || allSelected}
+                className="text-[11px] text-accent hover:underline disabled:text-muted-foreground/50 disabled:no-underline disabled:cursor-default px-1"
+              >
+                Tout sélectionner
+              </button>
+              <span className="text-muted-foreground/40 text-[11px]">·</span>
+              <button
+                type="button"
+                onClick={clearSelection}
+                disabled={busy || selected.size === 0}
+                className="text-[11px] text-muted-foreground hover:text-foreground disabled:text-muted-foreground/40 disabled:cursor-default px-1"
+              >
+                Aucun
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1.5 bg-zinc-100/80 scrollbar-transparent">
@@ -4235,7 +4327,7 @@ function LinkEcruDialog({
                 key={roll.IDstock_ecru}
                 roll={roll}
                 selected={selected.has(roll.IDstock_ecru)}
-                onToggle={() => toggle(roll.IDstock_ecru)}
+                onToggle={(shiftKey) => handleToggle(roll.IDstock_ecru, shiftKey)}
                 disabled={busy}
               />
             ))
@@ -4270,13 +4362,15 @@ function SelectableEcruRow({
 }: {
   roll: StockEcruLite
   selected: boolean
-  onToggle: () => void
+  /** Forward the click's shift modifier so the caller can implement
+   *  range selection (OS file-manager Shift+click convention). */
+  onToggle: (shiftKey: boolean) => void
   disabled?: boolean
 }) {
   return (
     <button
       type="button"
-      onClick={onToggle}
+      onClick={(e) => onToggle(e.shiftKey)}
       disabled={disabled}
       className={cn(
         'w-full rounded-lg border bg-white p-3 flex items-center gap-3 text-left transition-colors',
