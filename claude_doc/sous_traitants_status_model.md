@@ -3,19 +3,34 @@
 Reference doc for the sous-traitant commande detail screen
 (`apps/web/src/pages/SousTraitantsCommandes.tsx` + `apps/api/src/routes/commandes-sous-traitant.ts`).
 
-## Status model — computed "phase" (no DB column)
+## Status model — computed "phase" + line sstatut state machine
 
-Legacy MPS had three layers of status, only one of which writes anywhere
-useful today:
+Legacy MPS had three layers of status. MPS_NG now writes to two of them:
 
 | Layer | Field | Today |
 |---|---|---|
 | Header | `commande_sous_traitant.est_soldee` BOOLEAN | Gates writes via `refuseIfTerminee`. Drives the Clôturer / Rouvrir toggle. |
-| Line | `ligne_commande_sous_traitant.sstatut` VARCHAR (12 legacy values) | **Not surfaced in the new UI.** Legacy app keeps writing; MPS_NG ignores. |
+| Line | `ligne_commande_sous_traitant.sstatut` VARCHAR (12 legacy values) | MPS_NG drives three of them as a state machine (see below). Other legacy values preserved on read, never written from the new app. |
 | Roll | `stock_fini.IDetat_stock_fini` SMALLINT FK → `etat_stock_fini` | Per-roll workflow state, real DB enum (5 values). |
 
-The header pill the user sees is a **computed phase** derived on-read,
-priority top-down (first match wins):
+### Line `sstatut` state machine (writes from MPS_NG)
+
+Three of the 12 legacy values are wired into a state machine that's
+driven entirely from server-side handlers. The four state transitions:
+
+| Transition | Fires from | Server effect |
+|---|---|---|
+| (create) → `Non_Envoye` | `POST /:id/lignes` | Default sstatut on new line, **unless** `envoi_email` already has an `IDtype_doc=13` row for the commande (then defaults to `Attente_Delai` so the commande phase doesn't regress when a line is added after the bon de commande was already sent). |
+| `Non_Envoye` → `Attente_Delai` | `POST /:id/email` (bon de commande) | After `sendMail`, the handler runs `logEnvoiEmails(13, …)` (closes a legacy-only logging gap; the historique tab already expected type=13 rows) AND `UPDATE … SET sstatut = 'Attente_Delai' WHERE sstatut = 'Non_Envoye'`. |
+| `Attente_Delai` → `En_Cours` | `PUT /lignes/:lineId` with `date_livraison` in the patch | When the row's current sstatut is exactly `Attente_Delai`, the same UPDATE that changes `date_livraison` also sets `sstatut = 'En_Cours'`. Lines still in `Non_Envoye` keep their status (the bon de commande hasn't been sent yet — the date is hypothetical). An explicit `sstatut` in the PUT body always wins over this auto-flip. |
+| (any open) → `Terminé` | StatusFooter "Clôturer" button | Header est_soldee=1 path. Per-line sstatut is left as-is. |
+
+Constants: `STATUT_DONE`, `STATUT_OPEN`, `STATUT_NON_ENVOYE`,
+`STATUT_ATTENTE_DELAI` at the top of `commandes-sous-traitant.ts`.
+
+### Computed phase pill — derived on-read
+
+The header pill priority (first match wins):
 
 | Phase | When | Color |
 |---|---|---|
@@ -23,24 +38,48 @@ priority top-down (first match wins):
 | **en_reprise** | any `stock_fini` row has `IDetat_stock_fini = 2` | Orange |
 | **soumis** | any `envoi_email` with `IDtype_doc = 15 AND IDreference = commandeId` | Violet |
 | **en_controle** | any `stock_fini` row exists (rolls received) | Amber |
-| **en_cours** | default | Primary blue |
+| **en_cours** | MAX line rank = 2 (any non-Non_Envoye / non-Attente_Delai sstatut, including legacy values) | Primary blue |
+| **attente_delai** | MAX line rank = 1 (any Attente_Delai line, none higher) | Yellow |
+| **non_envoye** | MAX line rank = 0 OR no lines at all (default for a fresh commande) | Slate |
 
-Helpers in `commandes-sous-traitant.ts`:
-- `computePhase(id, est_soldee)` — single commande, used by `GET /:id` detail
-- `computePhasesBatch(rows)` — batched IN-queries + JS merge, used by `GET /` list
+Sub-phase classification uses `lineStatutRank()`:
+`Non_Envoye=0`, `Attente_Delai=1`, everything else (including all 10 other
+legacy values) `=2`. Helpers: `classifyEnCoursBucket(id)` (detail path) +
+inline batched line-rank query in `computePhasesBatch` (list path).
 
 `SstPhase` type lives in both `commandes-sous-traitant.ts` and
-`SousTraitantsCommandes.tsx`. `SST_PHASE_META` carries label + lucide icon +
-pill class + solid class (for the StatusFooter band).
+`SousTraitantsCommandes.tsx`. `SST_PHASE_META` carries label + lucide icon
+(non_envoye=Mail, attente_delai=Hourglass, …) + pill class + solid class
+(for the StatusFooter band). `lineEtatColors()` mirrors the palette on the
+per-line cards (slate / yellow / blue / green).
 
 **Manual close only**: the auto-close trigger (`maybeAutoCloseCommande`)
 is no longer called from the line-update path. Users clôture via the
 StatusFooter button. The function definition remains for future revert.
 
-**List filter** accepts `?status=` with: `all`, `terminee`, `en_cours`,
-`en_controle`, `soumis`, `en_reprise`. The four sub-phases of
-`est_soldee=0` are resolved server-side via signal-ID sets +
-`IN (…)` / `NOT IN (…)` predicates so pagination still works.
+### List filter + smart phase-keyword search
+
+The toggle bar at the top of the left list exposes only three macro
+buckets: **En cours** (`status=open` → `est_soldee=0`), **Terminées**
+(`status=terminee`), **Toutes** (`status=all`). Sub-phase drilldown
+moves to the search bar via `matchPhaseKeyword(q)`:
+
+- Accent-stripped, lowercased query, minimum 3 chars
+- Prefix match first (`"rep"` → `en_reprise`, `"soum"` → `soumis`,
+  `"term"` → `terminée`)
+- Substring fallback (`"dela"` → `attente_delai`, `"trole"` → `en_controle`)
+- On match, `statusFilter` is overridden to the matched phase and the
+  catalog `resolveSearch` is skipped. Alias order in `PHASE_KEYWORD_ALIASES`
+  controls tie-breaking (e.g. `"en c"` → `en_cours`).
+
+The list endpoint also still accepts every individual sub-phase value
+(`non_envoye`, `attente_delai`, `en_cours`, `en_controle`, `soumis`,
+`en_reprise`) via `SUB_PHASES` so smart-search overrides keep working;
+the `en_cours` bucket is sub-classified server-side by line-rank MAX.
+
+After a commande is created via the "+ Nouveau" dialog, the page auto-
+switches the toggle to **En cours** so the freshly-created `non_envoye`
+row stays visible.
 
 ## Soumission Lot Client feature
 
@@ -115,6 +154,17 @@ timeline. Backed by `GET /:id/historique`.
   row is one client decision: `reponse = 1` (approved, green check) or
   `0` (rejected, red X), with `DATE` + `lot`.
 
+### Linux iODBC quirk on this endpoint
+
+`envoi_email` carries a `société` column with an accented identifier.
+On Linux the iODBC bridge **cannot tokenize accented identifiers in a
+SELECT column list**, so the handler branches on `IS_WINDOWS`: Windows
+keeps the explicit column list, Linux falls back to `SELECT *` and lets
+`fixEncoding` decode the row dict. Same pattern as `computePhase`'s
+soumis-check. Symptom of forgetting: prod returns 500, dev (Windows)
+works. See `apps/api/src/routes/commandes-sous-traitant.ts` historique
+handler.
+
 ### Event grouping (envoi_email)
 
 Multi-recipient sends produce one row per recipient (e.g. 4 MATEL
@@ -188,6 +238,42 @@ History: we briefly used `30` in one session before catching the legacy
 `15` convention. The reverse migration is
 `apps/api/src/scripts/migrate-revert-type-doc-30.ts` (idempotent — safe
 to re-run in any environment that may have stale rows).
+
+## LinkEcruDialog — picker scoped to sst magasin
+
+The "+ Affecter" picker on the ennoblisseur drawer's Affectés tab only
+shows `stock_ecru` rolls whose `IDmagasin = commande.IDsous_traitant`
+(the magasin id space and the sous_traitant id space share the same
+integer column; `stock_*.IDmagasin → sous_traitant.IDsous_traitant`).
+Without this scope an operator could "affecter" rolls still physically
+at Malterre, which the legacy workflow never permits — they have to
+be transferred first. `LineContext.IDsous_traitant` carries the value
+from `loadEnnoblisseurLineContext`; the dialog subtitle reads
+`"N rouleaux disponibles chez <sst>"` so the scope is obvious.
+
+## BatchReceptionDialog — completion gate + Suivant focus
+
+The "Réceptionner N rouleaux" submit is disabled until every roll has a
+non-empty `lot` AND `metrage > 0`. Footer shows `Total : X Ml` (live sum)
++ `K / N rouleaux complets` (amber when incomplete, muted when full).
+`Précédent` / `Suivant` punt focus into the métrage input via a
+`queueMicrotask(() => metrageInputRef.current?.focus().select())` —
+runs after React commits the next row's value so `.select()` selects
+the freshly-rendered string. `LabeledInput` accepts an optional
+`inputRef?: React.Ref<HTMLInputElement>` for this kind of programmatic
+focus.
+
+## Dev-only "Faux envoi" send
+
+`SendEmailDialog` shows a dashed amber "Faux envoi (dev)" button next to
+Annuler / Envoyer when `import.meta.env.DEV` is true. It hardcodes
+recipient to `vincent@etsmalterre.com` and sends `devSkipSend: true`,
+which the server forwards as `dev_skip_send: true`. Backend gate:
+`ALLOW_DEV_SKIP_SEND = process.env.NODE_ENV !== 'production'`. When
+honoured, `getUserEmail` / PDF rendering / `sendMail` are all skipped
+but `logEnvoiEmails` + the sstatut flip (or whatever side effects the
+endpoint has) still run, so status transitions can be exercised in dev
+without spamming real recipients. Prod builds ignore the flag.
 
 ## Tests (manual)
 

@@ -1,4 +1,4 @@
-import type { ComponentType, SVGProps } from 'react'
+import type { ComponentType } from 'react'
 import {
   LayoutDashboard,
   Users,
@@ -12,10 +12,14 @@ import {
   Settings,
 } from 'lucide-react'
 import { BobineIcon } from '@/components/icons/BobineIcon'
-import { KnitIcon } from '@/components/icons/KnitIcon'
-import { FabricRollIcon } from '@/components/icons/FabricRollIcon'
+import { TmRollIcon } from '@/components/icons/TmRollIcon'
+import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
 
-export type NavIcon = ComponentType<SVGProps<SVGSVGElement> & { className?: string }>
+/** Sidebar / mobile-nav only ever pass `className` to the icon, so the
+ *  type is intentionally minimal — that lets both SVG-style components
+ *  (lucide icons, BobineIcon) and our CSS-masked span icons (TmRollIcon,
+ *  FiniRollIcon) plug in without prop-shape gymnastics. */
+export type NavIcon = ComponentType<{ className?: string }>
 
 export interface SubMenuItem {
   title: string
@@ -111,14 +115,14 @@ export const mainNavigation: MainMenuItem[] = [
   {
     id: 'tombe-metier',
     title: 'Tombé Métier',
-    icon: KnitIcon,
+    icon: TmRollIcon,
     href: '/tombe-metier',
     submenus: [],
   },
   {
     id: 'finis',
     title: 'Finis',
-    icon: FabricRollIcon,
+    icon: FiniRollIcon,
     href: '/finis',
     submenus: [
       { title: 'Références', href: '/finis/references' },

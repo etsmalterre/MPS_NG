@@ -101,8 +101,8 @@ Mirrors the legacy WinDev main menu (top → bottom):
 4. **Sous-traitants** — **Commandes** (ennoblisseur; see `sous_traitants_status_model.md`), Gestion
 5. **Transferts** — placeholder
 6. **Fils** (route `/fils/*`, renamed from `/fournisseurs/*`) — Références, Stock (table-centric), Commandes, Gestion, Prévisions
-7. **Tombé Métier** — placeholder, custom `KnitIcon`
-8. **Finis** — Références, Stock, **Études coloris** (implemented), Tarifs, Coloris Teint, Prévisions — custom `FabricRollIcon`
+7. **Tombé Métier** — placeholder, custom `TmRollIcon`
+8. **Finis** — Références, Stock, **Études coloris** (implemented), Tarifs, Coloris Teint, Prévisions — custom `FiniRollIcon`
 9. **Divers** — placeholder
 10. **Qualité** — placeholder
 11. **Rapports** — placeholder
@@ -168,7 +168,7 @@ Full details in `claude_doc/hfsql_odbc.md`. These are the non-negotiable rules f
 
 **Before inventing a pattern, grep the gold-standard reference screens**: `Entreprises.tsx`, `FilsGestion.tsx`, `FilsStock.tsx`, `FilsCommandes.tsx`, `EtudesColoris.tsx`. Existing screens almost always have the pattern — use the exact same icon, strings, and dialog structure. See `claude_doc/implemented_screens.md` for what each reference covers.
 
-**Core visual language**: Vivid Gold `#F2B80A` (not orange), medium-dark blue `#143D6B` (not navy), premium cards with gold borders, icon boxes with gradient backgrounds. Panel backgrounds: `bg-zinc-100/80` (list/sidebar), `bg-zinc-200/50` (header/footer), `bg-white` (cards). Use `scrollbar-transparent` on scrollable panels. **Never hardcode hex values** — use Tailwind CSS variable classes (`text-accent`, `bg-primary`, `border-gold/30`).
+**Core visual language**: panel backgrounds `bg-zinc-100/80` (list/sidebar) / `bg-zinc-200/50` (header/footer) / `bg-white` (cards), `scrollbar-transparent` on scrollable panels. **Never hardcode hex values** — use Tailwind CSS variable classes (`text-accent`, `bg-primary`, `border-gold/30`). Colors in §Branding above.
 
 **Typography**: OS system stack via `system-ui`. Both `font-sans` and `font-heading` resolve to the same stack. **No web fonts are loaded** — no `@import`, no `<link>`, no `@font-face`. Heading pattern: `<h1 className="text-3xl font-heading font-bold tracking-tight">`. Header gradient: `bg-gradient-to-r from-gold/40 via-gold/15 to-transparent`. **Do not re-add Google Fonts `@import`** — earlier Anton/Lato attempts were silently broken; see `mps_designer §2`.
 
