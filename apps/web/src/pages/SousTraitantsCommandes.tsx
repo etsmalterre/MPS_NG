@@ -122,6 +122,10 @@ interface CommandeListRow {
   total_qte: number
   nb_lignes: number
   earliest_delivery: string | null
+  /** Most recent bon-de-commande send date for this commande (envoi_email
+   *  IDtype_doc=13), as "YYYY-MM-DD" or null. Drives the urgency frame on
+   *  cards in `attente_delai` — see `attenteDelaiUrgency`. */
+  bon_envoye_at: string | null
 }
 
 interface LigneCommande {
@@ -460,6 +464,28 @@ function deliveryUrgency(earliestHfsql: string | null, est_soldee: number | null
   const diffDays = Math.round((target.getTime() - today.getTime()) / 86_400_000)
   if (diffDays <= 0) return 'late'
   if (diffDays <= 3) return 'soon'
+  return null
+}
+
+/** Urgency frame for commandes in `attente_delai`: counts days since the
+ *  bon de commande was sent. Day 0 (sent today) and day +1 are tolerated
+ *  with no frame; day +2 is amber; day +3 and beyond is red. Returns null
+ *  when no send date is known (defensive — `attente_delai` implies a send
+ *  did happen).
+ *
+ *  isoDay: "YYYY-MM-DD" (envoi_email.DATE truncated). */
+function attenteDelaiUrgency(isoDay: string | null): 'late' | 'soon' | null {
+  if (!isoDay || !/^\d{4}-\d{2}-\d{2}$/.test(isoDay)) return null
+  const y = Number(isoDay.slice(0, 4))
+  const m = Number(isoDay.slice(5, 7)) - 1
+  const d = Number(isoDay.slice(8, 10))
+  const sent = new Date(y, m, d)
+  sent.setHours(0, 0, 0, 0)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const diffDays = Math.round((today.getTime() - sent.getTime()) / 86_400_000)
+  if (diffDays >= 3) return 'late'
+  if (diffDays === 2) return 'soon'
   return null
 }
 
@@ -1086,7 +1112,12 @@ function CommandeList({
           </div>
         ) : rows.map((row) => {
           const isSelected = selectedId === row.IDcommande_sous_traitant
-          const urgency = deliveryUrgency(row.earliest_delivery, row.est_soldee)
+          // `attente_delai` cards measure urgency from the bon-de-commande
+          // send date (1-day grace, then amber, then red). All other open
+          // phases keep using the earliest-delivery deadline.
+          const urgency = row.phase === 'attente_delai'
+            ? attenteDelaiUrgency(row.bon_envoye_at)
+            : deliveryUrgency(row.earliest_delivery, row.est_soldee)
           const selectedRingClass =
             urgency === 'late' ? 'border-red-500 ring-1 ring-red-500'
             : urgency === 'soon' ? 'border-amber-500 ring-1 ring-amber-500'

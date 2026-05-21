@@ -1003,6 +1003,28 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
       })),
     )
 
+    // Most recent bon de commande send date per commande (envoi_email
+    // IDtype_doc=13). Frontend uses this to drive the "Attente Délai"
+    // urgency frame — once the bon is out, the sst has 1 day grace before
+    // the card starts warning.
+    const bonEnvoyeMap = new Map<number, string>()
+    if (ids.length > 0) {
+      const sendRows = await query<{ IDreference: number; DATE: string | null }>(
+        `SELECT IDreference, DATE FROM envoi_email
+         WHERE IDtype_doc = 13 AND IDreference IN (${ids.join(',')})`,
+      )
+      for (const r of sendRows) {
+        const cid = Number(r.IDreference)
+        const raw = (r.DATE ?? '').toString()
+        if (!cid || !raw) continue
+        // envoi_email.DATE is "YYYY-MM-DD HH:MM:SS.SSS"; take the date prefix.
+        const day = raw.slice(0, 10)
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue
+        const prev = bonEnvoyeMap.get(cid)
+        if (!prev || day > prev) bonEnvoyeMap.set(cid, day)
+      }
+    }
+
     const result = commandes.map((c: any) => {
       const totals = totalsMap.get(Number(c.IDcommande_sous_traitant)) ?? {
         total_eur: 0,
@@ -1017,6 +1039,7 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
         sous_traitant_nom: sst?.nom ?? '',
         sous_traitant_type: sst?.type ?? null,
         phase: phaseMap.get(cid) ?? 'en_cours',
+        bon_envoye_at: bonEnvoyeMap.get(cid) ?? null,
         ...totals,
       }
     })
