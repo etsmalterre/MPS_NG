@@ -123,7 +123,7 @@ Load these on demand when working on the matching topic:
 | `claude_doc/legacy_windows.md` | All 319 windows + 49 reports |
 | `claude_doc/navigation_mapping.md` | Legacy windows → MPS_NG routes |
 | `claude_doc/business_glossary.md` | Domain vocabulary, production flow |
-| `claude_doc/sous_traitants_status_model.md` | Sst commandes computed-phase model, Soumission Lot Client flow, Historique tab, Reprise flow, type_doc codes |
+| `claude_doc/sous_traitants_status_model.md` | Sst commandes computed-phase model, card urgency frames + pills, Soumission Lot Client flow, Historique tab, Reprise flow, type_doc codes |
 
 ## HFSQL rules (footguns — always apply)
 

@@ -81,6 +81,51 @@ After a commande is created via the "+ Nouveau" dialog, the page auto-
 switches the toggle to **En cours** so the freshly-created `non_envoye`
 row stays visible.
 
+### Card urgency frames + header pills
+
+Each left-list card gets a red or amber frame (border + 4 px inset shadow
+on the leading edge) when the underlying commande is running late. Two
+rules drive the colour, depending on phase:
+
+| Phase | Signal | `late` (red) | `soon` (amber) |
+|---|---|---|---|
+| `attente_delai` | days since latest `envoi_email` `IDtype_doc=13` (`bon_envoye_at`, surfaced per row) | diff ≥ 3 days | diff = 2 days |
+| any other open phase | earliest open-line `date_livraison` (`earliest_delivery`, min over `sstatut != Terminé` lines) | deadline ≤ today, OR no valid `earliest_delivery` | deadline within 3 days |
+| `terminée` | — | never | never |
+
+Frontend helpers: `attenteDelaiUrgency(isoDay)` and
+`deliveryUrgency(yyyymmdd, est_soldee)` in `SousTraitantsCommandes.tsx`.
+The list endpoint returns both `bon_envoye_at` (`YYYY-MM-DD`, or null) and
+`earliest_delivery` (`YYYYMMDD`, or null) per row.
+
+Backend `computeUrgencyBuckets()` (shared helper in
+`commandes-sous-traitant.ts`) mirrors the same rules over every open
+commande and returns `{ late: Set<number>, soon: Set<number> }`. Both
+endpoints below consume it so the pill counts and the filter narrow to
+the exact same set the cards paint.
+
+- `GET /commandes-sous-traitant/urgency-counts` → `{ late, soon }`
+  scalars feeding the two header pills. Polled by React Query, 30 s
+  stale window, refetch on window focus.
+- `GET /commandes-sous-traitant?…&urgency_in=late` (or `=soon`, or
+  `=late,soon`) → restricts the result set to commandes whose urgency is
+  in the comma-separated list. Composes with `status`, search, and
+  keyset pagination via an `IN (...)` predicate.
+
+UI pills sit on the same row as the search input
+(`SousTraitantsCommandes.tsx`, `CommandeList`). Number-only, ~28 px high,
+red-tinted / amber-tinted when off, solid red / amber when on. Each pill
+is an independent toggle (`urgencyLateOn`, `urgencySoonOn`); a pill with
+a zero count is hidden. Cross-filter rules:
+
+- Clicking a pill while the toggle bar shows **Terminées** flips the bar
+  back to **En cours** before applying the pill — urgency only exists on
+  open commandes.
+- Clicking **Terminées** while either pill is on clears both pills.
+
+When either pill is on the client-side memo resorts the loaded rows so
+red sits above amber, with ID DESC inside each band.
+
 ## Soumission Lot Client feature
 
 End-to-end flow for sending a soumission to a client whose
