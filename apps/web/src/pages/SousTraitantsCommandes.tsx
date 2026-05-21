@@ -566,6 +566,15 @@ export function SousTraitantsCommandes() {
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('open')
+  // Compact pills (right of the search bar) narrow the open list to
+  // attente_delai commandes whose bon de commande is overdue. They are
+  // independent toggles — both off means no narrowing, either on hides the
+  // rest. When at least one is on the underlying query switches to
+  // `attente_delai`; the loaded rows are then further pruned client-side to
+  // match the selected urgency bucket(s).
+  const [urgencyLateOn, setUrgencyLateOn] = useState(false)
+  const [urgencySoonOn, setUrgencySoonOn] = useState(false)
+  const urgencyFilterActive = urgencyLateOn || urgencySoonOn
   const [isEditing, setIsEditing] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [piecesDrawerLineId, setPiecesDrawerLineId] = useState<number | null>(null)
@@ -611,6 +620,12 @@ export function SousTraitantsCommandes() {
   const COMMANDES_PAGE_SIZE = 100
   const debouncedSearch = useDebouncedValue(searchQuery.trim(), 200)
   const isSearching = debouncedSearch.length > 0
+  // When either urgency pill is on, the underlying query targets
+  // `attente_delai` regardless of the toggle bar selection; the visible
+  // rows are pruned further down via `urgencyLateOn`/`urgencySoonOn`.
+  const effectiveStatusFilter: StatusFilter = urgencyFilterActive
+    ? 'attente_delai'
+    : statusFilter
   const {
     data: commandesPages,
     isLoading,
@@ -620,17 +635,17 @@ export function SousTraitantsCommandes() {
     fetchNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery<CommandeListRow[], Error>({
-    queryKey: ['commandes-sst', statusFilter, debouncedSearch],
+    queryKey: ['commandes-sst', effectiveStatusFilter, debouncedSearch],
     queryFn: async ({ pageParam }) => {
       if (isSearching) {
         return apiFetch(
-          `/commandes-sous-traitant?status=${statusFilter}&q=${encodeURIComponent(debouncedSearch)}`,
+          `/commandes-sous-traitant?status=${effectiveStatusFilter}&q=${encodeURIComponent(debouncedSearch)}`,
         )
       }
       const cursor = typeof pageParam === 'number' && pageParam > 0
         ? `&before_id=${pageParam}` : ''
       return apiFetch(
-        `/commandes-sous-traitant?status=${statusFilter}&limit=${COMMANDES_PAGE_SIZE}${cursor}`,
+        `/commandes-sous-traitant?status=${effectiveStatusFilter}&limit=${COMMANDES_PAGE_SIZE}${cursor}`,
       )
     },
     initialPageParam: 0,
@@ -645,9 +660,41 @@ export function SousTraitantsCommandes() {
     },
   })
   const commandes = useMemo<CommandeListRow[] | undefined>(
-    () => commandesPages?.pages.flatMap((p) => p),
-    [commandesPages],
+    () => {
+      const flat = commandesPages?.pages.flatMap((p) => p)
+      if (!flat) return undefined
+      // No urgency pill on → leave the server's ID-DESC order alone.
+      if (!urgencyFilterActive) return flat
+      // Pills on → narrow to the selected urgency bucket(s) and resort by
+      // send date ASC so the oldest unanswered commande sits at the top.
+      const pruned = flat.filter((row) => {
+        if (row.phase !== 'attente_delai') return false
+        const u = attenteDelaiUrgency(row.bon_envoye_at)
+        if (urgencyLateOn && u === 'late') return true
+        if (urgencySoonOn && u === 'soon') return true
+        return false
+      })
+      return pruned.sort((a, b) => {
+        const ad = a.bon_envoye_at ?? ''
+        const bd = b.bon_envoye_at ?? ''
+        if (ad === bd) return b.IDcommande_sous_traitant - a.IDcommande_sous_traitant
+        if (!ad) return 1
+        if (!bd) return -1
+        return ad < bd ? -1 : 1
+      })
+    },
+    [commandesPages, urgencyFilterActive, urgencyLateOn, urgencySoonOn],
   )
+
+  // Attente Délai counts — drives the two pills on the left-list header.
+  // Polled separately from the list so flipping filters doesn't refetch.
+  // The 30s stale window keeps the counts live without hammering the API.
+  const { data: attenteDelaiCounts } = useQuery<{ late: number; soon: number }>({
+    queryKey: ['commandes-sst-attente-delai-counts'],
+    queryFn: () => apiFetch('/commandes-sous-traitant/attente-delai-counts'),
+    staleTime: 30_000,
+    refetchOnWindowFocus: true,
+  })
 
   const { data: detail, isLoading: detailLoading } = useQuery<CommandeDetail>({
     queryKey: ['commande-sst', selectedId],
@@ -804,8 +851,26 @@ export function SousTraitantsCommandes() {
       setIsEditing(false)
       setStatusFilter(s)
       setSelectedId(null)
+      // Switching to "Terminées" deselects the urgency pills: an attente-
+      // délai bucket is by definition open work, so the two would conflict.
+      if (s === 'terminee') {
+        setUrgencyLateOn(false)
+        setUrgencySoonOn(false)
+      }
     })
   }, [guard])
+
+  // Clicking a pill while "Terminées" is the active toggle bumps the bar
+  // back to "En cours" before applying the pill — the operator clearly
+  // wants to look at open work.
+  const handleToggleUrgencyLate = useCallback(() => {
+    if (statusFilter === 'terminee') setStatusFilter('open')
+    setUrgencyLateOn((v) => !v)
+  }, [statusFilter])
+  const handleToggleUrgencySoon = useCallback(() => {
+    if (statusFilter === 'terminee') setStatusFilter('open')
+    setUrgencySoonOn((v) => !v)
+  }, [statusFilter])
 
   // Server-side search now does the heavy lifting (debounced 200 ms, hits
   // SQL via the catalog-cache in `sst-search-cache.ts`). No client-side
@@ -828,6 +893,12 @@ export function SousTraitantsCommandes() {
             onSearchChange={setSearchQuery}
             statusFilter={statusFilter}
             onStatusFilterChange={handleStatusFilterChange}
+            attenteDelaiLate={attenteDelaiCounts?.late ?? 0}
+            attenteDelaiSoon={attenteDelaiCounts?.soon ?? 0}
+            urgencyLateOn={urgencyLateOn}
+            urgencySoonOn={urgencySoonOn}
+            onToggleUrgencyLate={handleToggleUrgencyLate}
+            onToggleUrgencySoon={handleToggleUrgencySoon}
             onNew={() => setCreateOpen(true)}
             isEditing={isEditing}
             hasNextPage={!!hasNextPage}
@@ -1019,6 +1090,9 @@ function CommandeList({
   selectedId, onSelect,
   searchQuery, onSearchChange,
   statusFilter, onStatusFilterChange,
+  attenteDelaiLate, attenteDelaiSoon,
+  urgencyLateOn, urgencySoonOn,
+  onToggleUrgencyLate, onToggleUrgencySoon,
   onNew, isEditing,
   hasNextPage, onLoadMore, isFetchingNextPage,
 }: {
@@ -1032,6 +1106,15 @@ function CommandeList({
   onSearchChange: (q: string) => void
   statusFilter: StatusFilter
   onStatusFilterChange: (s: StatusFilter) => void
+  /** Count of open `attente_delai` commandes whose bon de commande was
+   *  sent 3+ days ago — shown as the red pill in the header. 0 hides it. */
+  attenteDelaiLate: number
+  /** Same but the 2-days-ago bucket — shown as the amber pill. */
+  attenteDelaiSoon: number
+  urgencyLateOn: boolean
+  urgencySoonOn: boolean
+  onToggleUrgencyLate: () => void
+  onToggleUrgencySoon: () => void
   onNew: () => void
   isEditing: boolean
   /** True while the backend has more rows behind the current cursor. */
@@ -1064,16 +1147,51 @@ function CommandeList({
   return (
     <div className="flex flex-col h-full rounded-lg border shadow-sm bg-zinc-100/80">
       <div className="p-3 border-b rounded-t-lg bg-zinc-200/50 space-y-2">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <input
-            type="text"
-            placeholder="Rechercher (n°, sous-traitant, référence, coloris...)"
-            value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
-            autoComplete="off"
-            className="w-full h-9 pl-9 pr-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-          />
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1 min-w-0">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <input
+              type="text"
+              placeholder="Rechercher (n°, sous-traitant, référence, coloris...)"
+              value={searchQuery}
+              onChange={(e) => onSearchChange(e.target.value)}
+              autoComplete="off"
+              className="w-full h-9 pl-9 pr-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+          {/* Attente Délai urgency pills. Number-only, sit flush to the
+              right of the search input, each pill an independent toggle.
+              Hidden individually when their bucket is empty. */}
+          {attenteDelaiLate > 0 && (
+            <button
+              type="button"
+              onClick={onToggleUrgencyLate}
+              aria-pressed={urgencyLateOn}
+              className={cn(
+                'h-7 min-w-[1.75rem] px-1.5 inline-flex items-center justify-center rounded-md text-xs font-semibold tabular-nums border transition-colors flex-shrink-0',
+                urgencyLateOn
+                  ? 'bg-red-500 text-white border-red-500 shadow-sm'
+                  : 'bg-red-500/10 text-red-700 border-red-500/30 hover:bg-red-500/20'
+              )}
+            >
+              {attenteDelaiLate}
+            </button>
+          )}
+          {attenteDelaiSoon > 0 && (
+            <button
+              type="button"
+              onClick={onToggleUrgencySoon}
+              aria-pressed={urgencySoonOn}
+              className={cn(
+                'h-7 min-w-[1.75rem] px-1.5 inline-flex items-center justify-center rounded-md text-xs font-semibold tabular-nums border transition-colors flex-shrink-0',
+                urgencySoonOn
+                  ? 'bg-amber-500 text-white border-amber-500 shadow-sm'
+                  : 'bg-amber-500/10 text-amber-800 border-amber-500/30 hover:bg-amber-500/20'
+              )}
+            >
+              {attenteDelaiSoon}
+            </button>
+          )}
         </div>
         <div className="flex flex-wrap gap-1">
           {([
