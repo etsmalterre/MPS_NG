@@ -50,6 +50,28 @@ const upload = multer({ storage: multer.memoryStorage() })
 // columns like `stabL_demandée` / `freinte_demandée`) branches on this.
 const IS_WINDOWS = process.platform === 'win32'
 
+/** Soumis-detection predicate that's safe on both Windows ODBC (accepts
+ *  the accented `invalidé` column) and the Linux iODBC bridge (rejects it
+ *  outright — the bridge can't tokenize accented identifiers, so the SQL
+ *  must omit the column reference). On Linux the caller's WHERE clause
+ *  drops the `invalidé` filter and falls back to a JS-level prune via
+ *  `filterActiveSoumisRows`. */
+const SOUMIS_INVALIDE_SQL_PREDICATE = IS_WINDOWS
+  ? `AND (invalidé = 0 OR invalidé IS NULL)`
+  : ''
+
+/** JS-level filter that removes invalidated soumis rows from a result set
+ *  that omitted the SQL predicate (Linux path). Uses both the truncated
+ *  (`invalid`, what the bridge surfaces) and intact (`invalidé`) column
+ *  keys so the helper is also safe to call on Windows-shaped rows. Pass a
+ *  SELECT * row set. */
+function filterActiveSoumisRows<T extends Record<string, unknown>>(rows: T[]): T[] {
+  return rows.filter((r) => {
+    const flag = Number((r as any).invalid ?? (r as any)['invalidé'] ?? 0)
+    return flag === 0
+  })
+}
+
 export const commandesSousTraitantRouter: RouterType = Router()
 
 // ── Status string conventions ───────────────────────────
@@ -615,15 +637,44 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
              ON cst.IDcommande_sous_traitant = lcs.IDcommande_sous_traitant
            WHERE sf.IDetat_stock_fini = 2 AND cst.est_soldee = 0`,
         ),
-        query<{ IDreference: number }>(
-          `SELECT DISTINCT ee.IDreference
-           FROM envoi_email ee
-           JOIN commande_sous_traitant cst
-             ON cst.IDcommande_sous_traitant = ee.IDreference
-           WHERE ee.IDtype_doc = ${TYPE_DOC_SOUMISSION_LOT_CLIENT}
-             AND (ee.invalidé = 0 OR ee.invalidé IS NULL)
-             AND cst.est_soldee = 0`,
-        ),
+        // Soumis IDs — non-invalidé emails on open commandes. SQL omits
+        // the `invalidé` predicate on Linux (iODBC tokenizer chokes on
+        // accented identifiers); we fall back to a JS filter using
+        // `filterActiveSoumisRows`. On Windows the SQL predicate prunes
+        // server-side, JS filter is a no-op.
+        IS_WINDOWS
+          ? query<{ IDreference: number }>(
+              `SELECT DISTINCT ee.IDreference
+               FROM envoi_email ee
+               JOIN commande_sous_traitant cst
+                 ON cst.IDcommande_sous_traitant = ee.IDreference
+               WHERE ee.IDtype_doc = ${TYPE_DOC_SOUMISSION_LOT_CLIENT}
+                 ${SOUMIS_INVALIDE_SQL_PREDICATE}
+                 AND cst.est_soldee = 0`,
+            )
+          : (async () => {
+              // Linux path: pull every soumis email row (small N — bounded
+              // by IDtype_doc=15) and prune locally. Don't JOIN — the
+              // Linux bridge handles bare SELECT cleaner than alias-dot
+              // SELECT for accented-row payloads.
+              const rows = await query<Record<string, unknown>>(
+                `SELECT * FROM envoi_email WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION_LOT_CLIENT}`,
+              )
+              const open = await query<{ IDcommande_sous_traitant: number }>(
+                `SELECT IDcommande_sous_traitant FROM commande_sous_traitant WHERE est_soldee = 0`,
+              )
+              const openSet = new Set(open.map((r) => Number(r.IDcommande_sous_traitant)))
+              const active = filterActiveSoumisRows(rows)
+              const seen = new Set<number>()
+              const out: { IDreference: number }[] = []
+              for (const r of active) {
+                const id = Number((r as any).IDreference) || 0
+                if (id > 0 && openSet.has(id) && !seen.has(id)) {
+                  seen.add(id); out.push({ IDreference: id })
+                }
+              }
+              return out
+            })(),
         query<{ IDcommande_sous_traitant: number }>(
           `SELECT DISTINCT lcs.IDcommande_sous_traitant
            FROM stock_fini sf
@@ -1769,14 +1820,27 @@ async function computePhase(commandeId: number, est_soldee: number): Promise<Sst
   if (Number(reprise[0]?.n) > 0) return 'en_reprise'
 
   // Soumis au client — at least one envoi_email row was logged for this
-  // commande (TYPE_DOC_SOUMISSION_LOT_CLIENT = 15).
-  const soumis = await query<{ n: number }>(
-    `SELECT COUNT(*) AS n FROM envoi_email
-     WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION_LOT_CLIENT}
-       AND IDreference = ${commandeId}
-       AND (invalidé = 0 OR invalidé IS NULL)`,
-  )
-  if (Number(soumis[0]?.n) > 0) return 'soumis'
+  // commande (TYPE_DOC_SOUMISSION_LOT_CLIENT = 15). Linux iODBC bridge
+  // can't tokenize `invalidé` so we omit it from the SQL and prune in JS
+  // via filterActiveSoumisRows. Windows keeps the SQL predicate.
+  let isSoumis = false
+  if (IS_WINDOWS) {
+    const soumis = await query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM envoi_email
+       WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION_LOT_CLIENT}
+         AND IDreference = ${commandeId}
+         ${SOUMIS_INVALIDE_SQL_PREDICATE}`,
+    )
+    isSoumis = Number(soumis[0]?.n) > 0
+  } else {
+    const rows = await query<Record<string, unknown>>(
+      `SELECT * FROM envoi_email
+       WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION_LOT_CLIENT}
+         AND IDreference = ${commandeId}`,
+    )
+    isSoumis = filterActiveSoumisRows(rows).length > 0
+  }
+  if (isSoumis) return 'soumis'
 
   // En contrôle — at least one roll has been received.
   const reception = await query<{ n: number }>(
@@ -1821,13 +1885,31 @@ async function computePhasesBatch(
   )
   const repriseSet = new Set(repriseRows.map((r) => Number(r.IDcommande_sous_traitant)))
 
-  // 2) Soumis au client.
-  const soumisRows = await query<{ IDreference: number }>(
-    `SELECT DISTINCT IDreference FROM envoi_email
-     WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION_LOT_CLIENT}
-       AND IDreference IN (${idList})
-       AND (invalidé = 0 OR invalidé IS NULL)`,
-  )
+  // 2) Soumis au client — Linux iODBC bridge can't tokenize `invalidé`,
+  // so on Linux we read SELECT * for the type_doc + idList scope and prune
+  // in JS via filterActiveSoumisRows.
+  let soumisRows: { IDreference: number }[]
+  if (IS_WINDOWS) {
+    soumisRows = await query<{ IDreference: number }>(
+      `SELECT DISTINCT IDreference FROM envoi_email
+       WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION_LOT_CLIENT}
+         AND IDreference IN (${idList})
+         ${SOUMIS_INVALIDE_SQL_PREDICATE}`,
+    )
+  } else {
+    const rows = await query<Record<string, unknown>>(
+      `SELECT * FROM envoi_email
+       WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION_LOT_CLIENT}
+         AND IDreference IN (${idList})`,
+    )
+    const active = filterActiveSoumisRows(rows)
+    const seen = new Set<number>()
+    soumisRows = []
+    for (const r of active) {
+      const id = Number((r as any).IDreference) || 0
+      if (id > 0 && !seen.has(id)) { seen.add(id); soumisRows.push({ IDreference: id }) }
+    }
+  }
   const soumisSet = new Set(soumisRows.map((r) => Number(r.IDreference)))
 
   // 3) Any reception at all.
