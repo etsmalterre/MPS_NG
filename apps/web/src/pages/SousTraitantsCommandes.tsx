@@ -472,6 +472,21 @@ function deliveryUrgency(earliestHfsql: string | null, est_soldee: number | null
   return null
 }
 
+/** Whole days a YYYYMMDD delivery deadline is past today. Returns 0 when
+ *  the deadline is today or in the future. */
+function deliveryOverdueDays(hfsql: string): number {
+  if (!/^\d{8}$/.test(hfsql)) return 0
+  const y = Number(hfsql.slice(0, 4))
+  const m = Number(hfsql.slice(4, 6)) - 1
+  const d = Number(hfsql.slice(6, 8))
+  const target = new Date(y, m, d)
+  target.setHours(0, 0, 0, 0)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const diff = Math.round((today.getTime() - target.getTime()) / 86_400_000)
+  return diff > 0 ? diff : 0
+}
+
 /** Urgency frame for commandes in `attente_delai`: counts days since the
  *  bon de commande was sent. Day 0 (sent today) and day +1 are tolerated
  *  with no frame; day +2 is amber; day +3 and beyond is red. Returns null
@@ -2025,19 +2040,31 @@ function LineCard({
             </span>
             {dateLivRaw ? (() => {
               const lineUrgency = deliveryUrgency(dateLivRaw, isLineDone(line.sstatut) ? 1 : 0)
+              // When the délai is past, surface how overdue it is on a
+              // second line right under the Livraison date.
+              const overdue = lineUrgency === 'late' ? deliveryOverdueDays(dateLivRaw) : 0
               return (
                 <span
                   className={cn(
-                    'ml-auto flex items-baseline gap-2',
+                    'ml-auto flex flex-col items-end leading-tight',
                     lineUrgency === 'late' ? 'text-red-600'
                       : lineUrgency === 'soon' ? 'text-amber-600'
                       : 'text-foreground'
                   )}
                 >
-                  <span className="font-medium">Livraison {formatHfsqlDate(dateLivRaw)}</span>
-                  {showDelaiInitial && (
-                    <span className="text-xs italic text-muted-foreground">
-                      (initial: {formatHfsqlDate(dateDelaiRaw)})
+                  <span className="flex items-baseline gap-2">
+                    <span className="font-medium">Livraison {formatHfsqlDate(dateLivRaw)}</span>
+                    {showDelaiInitial && (
+                      <span className="text-xs italic text-muted-foreground">
+                        (initial: {formatHfsqlDate(dateDelaiRaw)})
+                      </span>
+                    )}
+                  </span>
+                  {lineUrgency === 'late' && (
+                    <span className="text-xs font-medium">
+                      {overdue >= 1
+                        ? `Expiré depuis ${overdue} jour${overdue > 1 ? 's' : ''}`
+                        : "Échéance aujourd'hui"}
                     </span>
                   )}
                 </span>
