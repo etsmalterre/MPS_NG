@@ -750,7 +750,7 @@ async function buildEtudeEmailDefaults(id: number): Promise<EmailDefaultsPayload
     'Bonjour,',
     '',
     `Veuillez trouver ci-joint notre demande d'étude coloris N°${numero}${
-      sousTraitantNom ? ` à destination de ${sousTraitantNom}` : ''
+      clientNom ? ` à destination de ${clientNom}` : ''
     }.`,
     '',
   ]

@@ -55,6 +55,7 @@ import {
   HelpCircle,
   Mail,
   Hourglass,
+  Scissors,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -3858,7 +3859,8 @@ function EditFiniRollDialog({
   )
 }
 
-/** Batch reception: one stock_fini row per selected écru.
+/** Batch reception: one stock_fini row per selected écru (two when the
+ *  écru is split — see the Couper en deux note below).
  *
  *  Layout — wizard pattern:
  *    - Header band (gold gradient)
@@ -3877,6 +3879,12 @@ function EditFiniRollDialog({
  *  Submit fires sequential POSTs to /pieces/fini. If one fails, the
  *  earlier successes stay persisted and the dialog stops on the error
  *  so the user can fix and retry the remainder.
+ *
+ *  Couper en deux (create mode only): the dyer sometimes returns a single
+ *  tombé-de-métier roll cut into two physical pieces. Toggling `split` on
+ *  a roll turns it into two fini rows on submit — `<numero>-1` (poids /
+ *  metrage) and `<numero>-2` (poids2 / metrage2) — both pointing at the
+ *  same source écru. Matches legacy FEN_Coupe_Fini.
  */
 interface BatchReceptionRow {
   lot: string
@@ -3884,6 +3892,11 @@ interface BatchReceptionRow {
   metrage: string
   observations: string
   observation_sst: string
+  /** When true the écru yields two fini rolls on submit (see couper note). */
+  split: boolean
+  /** Poids / metrage of the second piece — only read when `split`. */
+  poids2: string
+  metrage2: string
 }
 
 type BatchReceptionProps = {
@@ -3942,6 +3955,9 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
           metrage: metrage > 0 ? metrage.toFixed(1) : '',
           observations: r.observations ?? '',
           observation_sst: r.observation_sst ?? '',
+          split: false,
+          poids2: '',
+          metrage2: '',
         }
       }
     } else {
@@ -3957,6 +3973,9 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
           metrage: '',
           observations: '',
           observation_sst: '',
+          split: false,
+          poids2: '',
+          metrage2: '',
         }
       }
     }
@@ -4005,20 +4024,62 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
   const canPrev = currentIndex > 0
   const canNext = currentIndex < rolls.length - 1
 
-  // Every roll must have a non-empty lot AND a positive metrage before the
+  // Fini-level preview: one entry per stock_fini row that will be created
+  // (or PATCHed in reprise). A split écru expands into two entries —
+  // `<base>-1` and `<base>-2` — so the bottom list shows the operator
+  // exactly the rolls they'll receive (3 écru with one cut → 4 finis).
+  // `wizardIndex` points back at the écru editor step the entry belongs to.
+  type FiniPreview = {
+    key: string
+    wizardIndex: number
+    ecruId: number
+    numero: string
+    lot: string
+    poids: number
+    metrage: number
+    complete: boolean
+    hasObs: boolean
+    hasDef: boolean
+    half: 0 | 1 | 2
+  }
+  const finiPreview: FiniPreview[] = []
+  rolls.forEach((r, i) => {
+    const row = rows[r.id]
+    if (!row) return
+    const lot = (row.lot ?? '').trim()
+    const lotOk = lot.length > 0
+    const hasObs = (row.observations ?? '').trim().length > 0
+    const hasDef = (row.observation_sst ?? '').trim().length > 0
+    const baseNum = r.numero || `#${r.id}`
+    if (row.split) {
+      const base = baseNum.slice(0, 18)
+      finiPreview.push({
+        key: `${r.id}-1`, wizardIndex: i, ecruId: r.id, numero: `${base}-1`,
+        lot, poids: Number(row.poids) || 0, metrage: Number(row.metrage) || 0,
+        complete: lotOk && Number(row.metrage) > 0, hasObs, hasDef, half: 1,
+      })
+      finiPreview.push({
+        key: `${r.id}-2`, wizardIndex: i, ecruId: r.id, numero: `${base}-2`,
+        lot, poids: Number(row.poids2) || 0, metrage: Number(row.metrage2) || 0,
+        complete: lotOk && Number(row.metrage2) > 0, hasObs, hasDef, half: 2,
+      })
+    } else {
+      finiPreview.push({
+        key: `${r.id}`, wizardIndex: i, ecruId: r.id, numero: baseNum,
+        lot, poids: Number(row.poids) || 0, metrage: Number(row.metrage) || 0,
+        complete: lotOk && Number(row.metrage) > 0, hasObs, hasDef, half: 0,
+      })
+    }
+  })
+  // Every fini must have a non-empty lot AND a positive metrage before the
   // operator can submit. Without this guard the server happily accepts
   // stock_fini rows with metrage=0 / empty lot, which is invisible at the
   // create call but breaks downstream Soumission-Lot eligibility (the lot
   // key is the join column) and the suivilot insert.
-  const completeCount = rolls.reduce((n, r) => {
-    const row = rows[r.id]
-    if (!row) return n
-    const lotOk = (row.lot ?? '').trim().length > 0
-    const metrageOk = Number(row.metrage) > 0
-    return n + (lotOk && metrageOk ? 1 : 0)
-  }, 0)
-  const allRowsComplete = completeCount === rolls.length
-  const totalMetrage = rolls.reduce((s, r) => s + (Number(rows[r.id]?.metrage) || 0), 0)
+  const finiCount = finiPreview.length
+  const completeCount = finiPreview.reduce((n, e) => n + (e.complete ? 1 : 0), 0)
+  const allRowsComplete = finiCount > 0 && completeCount === finiCount
+  const totalMetrage = finiPreview.reduce((s, e) => s + e.metrage, 0)
   const canSubmit = idRefFini > 0 && rolls.length > 0 && !submitting && allRowsComplete
 
   const updateCurrent = (patch: Partial<BatchReceptionRow>) => {
@@ -4159,31 +4220,52 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
           setDoneCount((n) => n + 1)
         }
       } else {
-        for (const r of ecruRolls) {
-          const row = rows[r.IDstock_ecru]
-          const numeroBase = (r.numero || `#${r.IDstock_ecru}`).slice(0, 20)
-          const poidsNum = Number(row.poids)
-          const metrageNum = Number(row.metrage)
-          const payload = await apiFetch<PiecesPayload>(
+        const postFini = async (body: Record<string, unknown>) =>
+          apiFetch<PiecesPayload>(
             `/commandes-sous-traitant/${commandeId}/lignes/${ligne.IDligne_commande_sous_traitant}/pieces/fini`,
             {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                numero: numeroBase,
-                lot: row.lot,
-                poids: isNaN(poidsNum) ? 0 : poidsNum,
-                metrage: isNaN(metrageNum) ? 0 : metrageNum,
-                IDstock_ecru: r.IDstock_ecru,
-                IDref_fini: idRefFini,
-                IDmagasin: idMagasin || 0,
-                observations: row.observations,
-                observation_sst: row.observation_sst,
-              }),
+              body: JSON.stringify(body),
             },
           )
-          lastPayload = payload
-          setDoneCount((n) => n + 1)
+        const num = (v: string) => {
+          const x = Number(v)
+          return isNaN(x) ? 0 : x
+        }
+        for (const r of ecruRolls) {
+          const row = rows[r.IDstock_ecru]
+          const shared = {
+            lot: row.lot,
+            IDstock_ecru: r.IDstock_ecru,
+            IDref_fini: idRefFini,
+            IDmagasin: idMagasin || 0,
+            observations: row.observations,
+            observation_sst: row.observation_sst,
+          }
+          if (row.split) {
+            // Couper en deux: one écru → two fini rolls `<base>-1` /
+            // `<base>-2`, both pointing at the same source écru. Base is
+            // trimmed to 18 so the suffix fits the 20-char numero column.
+            const base = (r.numero || `#${r.IDstock_ecru}`).slice(0, 18)
+            lastPayload = await postFini({
+              ...shared, numero: `${base}-1`,
+              poids: num(row.poids), metrage: num(row.metrage),
+            })
+            setDoneCount((n) => n + 1)
+            lastPayload = await postFini({
+              ...shared, numero: `${base}-2`,
+              poids: num(row.poids2), metrage: num(row.metrage2),
+            })
+            setDoneCount((n) => n + 1)
+          } else {
+            lastPayload = await postFini({
+              ...shared,
+              numero: (r.numero || `#${r.IDstock_ecru}`).slice(0, 20),
+              poids: num(row.poids), metrage: num(row.metrage),
+            })
+            setDoneCount((n) => n + 1)
+          }
         }
       }
       if (lastPayload) onSuccess(lastPayload)
@@ -4195,6 +4277,10 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
   }
 
   if (!current || !currentRow) return null
+
+  // Base numero for the current roll's two halves when split. Trimmed to
+  // 18 chars so `<base>-2` fits the 20-char stock_fini.numero column.
+  const splitBase = (current.numero || `#${current.id}`).slice(0, 18)
 
   return (
     <Dialog open onOpenChange={(o) => { if (!o && !submitting) onClose() }}>
@@ -4209,11 +4295,11 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
           <div className="flex-1 min-w-0">
             <h2 className="text-base font-heading font-bold tracking-tight truncate">
               {isReprise
-                ? `Reprendre ${rolls.length} rouleau${rolls.length > 1 ? 'x' : ''}`
-                : `Réceptionner ${rolls.length} rouleau${rolls.length > 1 ? 'x' : ''}`}
+                ? `Reprendre ${finiCount} rouleau${finiCount > 1 ? 'x' : ''}`
+                : `Réceptionner ${finiCount} rouleau${finiCount > 1 ? 'x' : ''}`}
             </h2>
             <p className="text-xs text-muted-foreground mt-0.5 tabular-nums">
-              Rouleau {currentIndex + 1} sur {rolls.length}
+              Tombé métier {currentIndex + 1} sur {rolls.length}
             </p>
             {!!tricobotMessage && (
               <p
@@ -4293,27 +4379,110 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-2">
-              <LabeledInput
-                label="Lot"
-                value={currentRow.lot}
-                onChange={(v) => updateCurrent({ lot: v })}
-                autoFocus
-              />
-              <LabeledInput
-                label="Poids (kg)"
-                type="number"
-                value={currentRow.poids}
-                onChange={(v) => updateCurrent({ poids: v })}
-              />
-              <LabeledInput
-                label="Métrage (Ml)"
-                type="number"
-                value={currentRow.metrage}
-                onChange={(v) => updateCurrent({ metrage: v })}
-                inputRef={metrageInputRef}
-              />
+            {/* Lot (shared across both halves when split) + the
+                couper-en-deux toggle. The toggle is create-only — a
+                reprise edits existing rolls, it can't split them. */}
+            <div className="flex items-end gap-3">
+              <div className="flex-1 min-w-0">
+                <LabeledInput
+                  label="Lot"
+                  value={currentRow.lot}
+                  onChange={(v) => updateCurrent({ lot: v })}
+                  autoFocus
+                />
+              </div>
+              {!isReprise && (
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={currentRow.split}
+                  onClick={() => updateCurrent({ split: !currentRow.split })}
+                  title="Le rouleau a été coupé en deux par l'ennoblisseur"
+                  className={cn(
+                    'flex items-center gap-2 h-8 flex-shrink-0 rounded-md border px-2.5 text-xs font-medium transition-colors',
+                    currentRow.split
+                      ? 'border-accent bg-accent/10 text-accent'
+                      : 'border-border/60 bg-white text-muted-foreground hover:border-accent/40',
+                  )}
+                >
+                  <Scissors className="h-3.5 w-3.5" />
+                  Couper en deux
+                  <span
+                    className={cn(
+                      'relative inline-flex h-4 w-7 items-center rounded-full transition-colors',
+                      currentRow.split ? 'bg-accent shadow-inner' : 'bg-zinc-300',
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        'inline-block h-3 w-3 rounded-full bg-white shadow transition-transform duration-200 ease-out',
+                        currentRow.split ? 'translate-x-[14px]' : 'translate-x-0.5',
+                      )}
+                    />
+                  </span>
+                </button>
+              )}
             </div>
+
+            {currentRow.split ? (
+              <div className="grid grid-cols-2 gap-2">
+                <div className="rounded-md border border-border/60 bg-white p-2.5 space-y-2">
+                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold truncate">
+                    Rouleau 1 · {splitBase}-1
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <LabeledInput
+                      label="Poids (kg)"
+                      type="number"
+                      value={currentRow.poids}
+                      onChange={(v) => updateCurrent({ poids: v })}
+                    />
+                    <LabeledInput
+                      label="Métrage (Ml)"
+                      type="number"
+                      value={currentRow.metrage}
+                      onChange={(v) => updateCurrent({ metrage: v })}
+                      inputRef={metrageInputRef}
+                    />
+                  </div>
+                </div>
+                <div className="rounded-md border border-border/60 bg-white p-2.5 space-y-2">
+                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold truncate">
+                    Rouleau 2 · {splitBase}-2
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    <LabeledInput
+                      label="Poids (kg)"
+                      type="number"
+                      value={currentRow.poids2}
+                      onChange={(v) => updateCurrent({ poids2: v })}
+                    />
+                    <LabeledInput
+                      label="Métrage (Ml)"
+                      type="number"
+                      value={currentRow.metrage2}
+                      onChange={(v) => updateCurrent({ metrage2: v })}
+                    />
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-2">
+                <LabeledInput
+                  label="Poids (kg)"
+                  type="number"
+                  value={currentRow.poids}
+                  onChange={(v) => updateCurrent({ poids: v })}
+                />
+                <LabeledInput
+                  label="Métrage (Ml)"
+                  type="number"
+                  value={currentRow.metrage}
+                  onChange={(v) => updateCurrent({ metrage: v })}
+                  inputRef={metrageInputRef}
+                />
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-2">
               <div className="space-y-1">
@@ -4367,26 +4536,20 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
         <div className="flex-1 min-h-0 flex flex-col border-t mt-4 bg-zinc-100/80">
           <div className="flex-shrink-0 px-6 pt-3 pb-1.5">
             <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
-              Aperçu des {rolls.length} rouleaux
+              Aperçu des {finiCount} rouleau{finiCount > 1 ? 'x' : ''} finis
             </p>
           </div>
           <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-3 space-y-1 scrollbar-transparent">
-            {rolls.map((r, i) => {
-              const row = rows[r.id]
-              const isCurrent = i === currentIndex
-              const isVisited = visited.has(r.id)
-              const hasObs = (row.observations ?? '').trim().length > 0
-              const hasDef = (row.observation_sst ?? '').trim().length > 0
+            {finiPreview.map((e, idx) => {
+              const isCurrent = e.wizardIndex === currentIndex
+              const isVisited = visited.has(e.ecruId)
               const hasData =
-                (row.lot ?? '').trim().length > 0
-                || (row.metrage ?? '').trim().length > 0
-                || hasObs
-                || hasDef
+                e.lot.length > 0 || e.metrage > 0 || e.hasObs || e.hasDef
               return (
                 <button
-                  key={r.id}
+                  key={e.key}
                   type="button"
-                  onClick={() => goTo(i)}
+                  onClick={() => goTo(e.wizardIndex)}
                   className={cn(
                     'w-full rounded-md border bg-card p-2 text-left text-xs flex items-center gap-2 transition-colors',
                     isCurrent
@@ -4397,24 +4560,27 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
                   <div className={cn(
                     'h-5 w-5 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] font-semibold tabular-nums',
                     isCurrent ? 'bg-accent text-accent-foreground'
-                      : hasData ? 'bg-accent/15 text-accent'
+                      : e.complete ? 'bg-accent/15 text-accent'
                       : isVisited ? 'bg-zinc-200 text-foreground'
                       : 'bg-zinc-100 text-muted-foreground'
                   )}>
-                    {hasData && !isCurrent ? <Check className="h-3 w-3" /> : i + 1}
+                    {e.complete && !isCurrent ? <Check className="h-3 w-3" /> : idx + 1}
                   </div>
-                  <span className="font-semibold truncate flex-shrink-0 max-w-[120px]">
-                    {r.numero || `#${r.id}`}
+                  <span className="font-semibold truncate flex-shrink-0 max-w-[130px] flex items-center gap-1">
+                    {e.half !== 0 && (
+                      <Scissors className="h-3 w-3 text-accent flex-shrink-0" />
+                    )}
+                    {e.numero}
                   </span>
                   <div className="flex items-center gap-2 tabular-nums text-muted-foreground min-w-0 flex-1 truncate">
-                    {row.lot && <span className="truncate">lot {row.lot}</span>}
-                    {Number(row.poids) > 0 && <span>· {fmtNum(Number(row.poids), 1)} kg</span>}
-                    {Number(row.metrage) > 0 && <span>· {fmtNum(Number(row.metrage), 1)} Ml</span>}
+                    {e.lot && <span className="truncate">lot {e.lot}</span>}
+                    {e.poids > 0 && <span>· {fmtNum(e.poids, 1)} kg</span>}
+                    {e.metrage > 0 && <span>· {fmtNum(e.metrage, 1)} Ml</span>}
                     {!hasData && <span className="italic">— en attente</span>}
                   </div>
                   <div className="flex items-center gap-1 flex-shrink-0">
-                    {hasObs && <MessageSquare className="h-3 w-3 text-blue-600" />}
-                    {hasDef && <AlertTriangle className="h-3 w-3 text-red-600" />}
+                    {e.hasObs && <MessageSquare className="h-3 w-3 text-blue-600" />}
+                    {e.hasDef && <AlertTriangle className="h-3 w-3 text-red-600" />}
                   </div>
                 </button>
               )
@@ -4439,7 +4605,7 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
                 'text-[11px]',
                 allRowsComplete ? 'text-muted-foreground' : 'text-amber-700',
               )}>
-                {completeCount} / {rolls.length} rouleau{rolls.length > 1 ? 'x' : ''} complet{completeCount > 1 ? 's' : ''}
+                {completeCount} / {finiCount} rouleau{finiCount > 1 ? 'x' : ''} complet{completeCount > 1 ? 's' : ''}
               </span>
             </div>
             <div className="ml-auto flex gap-2">
@@ -4450,10 +4616,10 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
                 title={!allRowsComplete ? 'Chaque rouleau doit avoir un lot et un métrage' : undefined}
               >
                 {submitting
-                  ? `Enregistrement... (${doneCount}/${rolls.length})`
+                  ? `Enregistrement... (${doneCount}/${finiCount})`
                   : isReprise
-                    ? `Reprendre ${rolls.length} rouleau${rolls.length > 1 ? 'x' : ''}`
-                    : `Réceptionner ${rolls.length} rouleau${rolls.length > 1 ? 'x' : ''}`}
+                    ? `Reprendre ${finiCount} rouleau${finiCount > 1 ? 'x' : ''}`
+                    : `Réceptionner ${finiCount} rouleau${finiCount > 1 ? 'x' : ''}`}
               </Button>
             </div>
           </div>

@@ -122,6 +122,39 @@ function esc(value: string): string {
   return value.replace(/'/g, "''")
 }
 
+/** SQL literal for a user-supplied text value written to an HFSQL column.
+ *
+ *  Pure-ASCII values use a normal quoted literal (readable in logs).
+ *  Values containing accented / non-ASCII characters are emitted as a hex
+ *  literal `x'<bytes>'` instead: the Linux iODBC bridge corrupts raw
+ *  multi-byte UTF-8 embedded in the SQL line — it desyncs the query
+ *  pipeline and HFSQL then reports "string without end" parse errors
+ *  (a reception with "tâche d'encre" in the observations 500'd this way).
+ *  HFSQL text columns are ANSI/Latin-1 natively, so we encode the value
+ *  to Latin-1 (Windows-1252) bytes; the hex literal is pure ASCII in
+ *  transit and stores the exact bytes. Reads keep going through
+ *  fixEncoding()/CONVERT as before. Smart punctuation that isn't in
+ *  Latin-1 is degraded to ASCII; anything still out of range becomes '?'. */
+function sqlText(value: string | null | undefined): string {
+  const v = (value ?? '').toString()
+  if (v === '') return "''"
+  // Fast path: tab/CR/LF + printable ASCII → normal escaped literal.
+  if (/^[\x09\x0A\x0D\x20-\x7E]*$/.test(v)) return `'${esc(v)}'`
+  const ascii = v
+    .replace(/[‘’‚′]/g, "'")
+    .replace(/[“”„″]/g, '"')
+    .replace(/[–—−]/g, '-')
+    .replace(/…/g, '...')
+    .replace(/ /g, ' ')
+  const bytes = Buffer.from(
+    Array.from(ascii, (ch) => {
+      const c = ch.codePointAt(0) ?? 0x3F
+      return c <= 0xFF ? c : 0x3F
+    }),
+  )
+  return `x'${bytes.toString('hex')}'`
+}
+
 function n(value: unknown): number {
   if (value === null || value === undefined || value === '') return 0
   const parsed = Number(value)
@@ -4912,11 +4945,11 @@ commandesSousTraitantRouter.post(
          (numero, lot, poids, metrage, IDref_ecru, IDcolori_ecru,
           IDmagasin, IDordre_fabrication, IDref_commande_source,
           IDLigne_Commande_TRM, IDsociete, second_choix, observations, date_saisie)
-         VALUES ('${esc(d.numero)}', '${esc(d.lot ?? '')}', ${n(d.poids)}, 0,
+         VALUES (${sqlText(d.numero)}, ${sqlText(d.lot)}, ${n(d.poids)}, 0,
                  ${ctx.IDref_ecru}, ${ctx.IDcolori_ecru},
                  0, 0, ${ligneId},
                  ${IDLigne_Commande_TRM}, 1, ${d.second_choix ?? 0},
-                 '${esc(d.observations ?? '')}', '${todayStr}')`,
+                 ${sqlText(d.observations)}, '${todayStr}')`,
       )
 
       res.status(201).json({ ok: true, payload: await fetchPiecesFilPayload(ctx, ligneId) })
@@ -5192,9 +5225,9 @@ commandesSousTraitantRouter.post(
           IDmagasin, IDref_commande_source, observations, observation_sst, date_saisie,
           second_choix, destockage, don, IDProprietaire, IDcommande_donation, IDligne_commande_client, IDligne_expedition,
           IDetat_stock_fini)
-         VALUES ('${esc(d.numero)}', '${esc(d.lot ?? '')}', ${n(d.poids)}, ${n(d.metrage)},
+         VALUES (${sqlText(d.numero)}, ${sqlText(d.lot)}, ${n(d.poids)}, ${n(d.metrage)},
                  ${d.IDref_fini}, ${inheritedIDColoris}, ${d.IDstock_ecru ?? 0},
-                 ${idMagasin}, ${ligneId}, '${esc(d.observations ?? '')}', '${esc(d.observation_sst ?? '')}', '${dateSaisie}',
+                 ${idMagasin}, ${ligneId}, ${sqlText(d.observations)}, ${sqlText(d.observation_sst)}, '${dateSaisie}',
                  0, 0, 0, 0, 0, ${inheritedLcc}, 0, 1)`,
       )
 
@@ -5323,10 +5356,10 @@ commandesSousTraitantRouter.patch(
       }
 
       const setParts: string[] = []
-      if (d.observations !== undefined) setParts.push(`observations = '${esc(d.observations)}'`)
-      if (d.observation_sst !== undefined) setParts.push(`observation_sst = '${esc(d.observation_sst)}'`)
-      if (d.numero !== undefined) setParts.push(`numero = '${esc(d.numero)}'`)
-      if (d.lot !== undefined) setParts.push(`lot = '${esc(d.lot)}'`)
+      if (d.observations !== undefined) setParts.push(`observations = ${sqlText(d.observations)}`)
+      if (d.observation_sst !== undefined) setParts.push(`observation_sst = ${sqlText(d.observation_sst)}`)
+      if (d.numero !== undefined) setParts.push(`numero = ${sqlText(d.numero)}`)
+      if (d.lot !== undefined) setParts.push(`lot = ${sqlText(d.lot)}`)
       if (d.poids !== undefined) setParts.push(`poids = ${d.poids}`)
       if (d.metrage !== undefined) setParts.push(`metrage = ${d.metrage}`)
       if (d.IDetat_stock_fini !== undefined) setParts.push(`IDetat_stock_fini = ${d.IDetat_stock_fini}`)
