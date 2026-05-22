@@ -2493,6 +2493,16 @@ Decision rule: *"Can the user change this from a dropdown or toggle?"* If yes, i
 
 When building related status indicators elsewhere, note that the shadcn `<Badge>` component in this project defaults to `variant='default'` which is `bg-primary text-primary-foreground` — **solid deep blue**, not a neutral grey. If you append a `badge-warning` / `badge-success` utility via `className`, the variant's `bg-primary` will usually win because both classes sit in the same CSS layer. Always pass an explicit `variant` (`variant='default'`, `variant='success'`, `variant='warning'`, `variant='secondary'`) when building status badges. This is how `CommandeEtatBadge` in `FournisseursCommandes.tsx` is written: `<Badge variant="success">Terminée</Badge>` / `<Badge variant="default">En cours</Badge>`.
 
+### 29.8 Left-list card status pill matches the footer color
+
+The status pill on each **left-list card** must be the **same solid color** as the §29 footer pill for that state — not a pastel / tinted variant. A `terminée` order shows a solid green pill in the list **and** a solid green footer pill; an `en_cours` order shows solid blue in both. The user scans the list and reads each card's state with the exact same color language they then see on the detail footer.
+
+- Drive both surfaces from the **same `STATUT_META` / `*_PHASE_META` record** — one `solid` field (`bg-… border-…`, paired with white text), consumed by the footer band *and* the list-card pill. Do **not** keep a separate pastel `classes` field just for the list pill; that splits the visual language in two and is exactly the mismatch this rule exists to prevent.
+- List-card pill markup: `<Badge variant="outline" className={cn('text-[10px] py-0 gap-1 border text-white', meta.solid, className)}>` + the state icon at `h-2.5 w-2.5`.
+- References: `FilsCommandes.tsx` → `CommandeEtatBadge` (solid `variant="success"` / `variant="default"`, matching its binary `StatusFooter`); `SousTraitantsCommandes.tsx` → `PhasePill` (solid `meta.solid`, matching the multi-phase `StatusFooter`).
+
+This supersedes any earlier "light tinted background for inline use" guidance — the left-list status pill is solid.
+
 ---
 
 ## 30. List Card Deadline / Urgency Indicator

@@ -431,25 +431,24 @@ export type StatusFilter = SstPhase | 'all' | 'open'
 const SST_PHASE_META: Record<SstPhase, {
   label: string
   icon: typeof Clock
-  /** Pill / badge classes — light tinted background for inline use. */
-  classes: string
-  /** Solid background + border for the StatusFooter band (white text). */
+  /** Solid background + border, white text. Shared by the StatusFooter
+   *  band and the left-list card pill so the two always match (§29.8). */
   solid: string
 }> = {
-  non_envoye:    { label: 'Non envoyé',        icon: Mail,         classes: 'bg-slate-500/10 text-slate-700 border-slate-500/30',  solid: 'bg-slate-500 border-slate-500' },
-  attente_delai: { label: 'Attente délai',     icon: Hourglass,    classes: 'bg-yellow-500/10 text-yellow-800 border-yellow-500/30', solid: 'bg-yellow-500 border-yellow-500' },
-  en_cours:      { label: 'En cours',          icon: Clock,        classes: 'bg-blue-500/10 text-blue-700 border-blue-500/30',     solid: 'bg-primary border-primary' },
-  en_controle:   { label: 'En contrôle',       icon: Eye,          classes: 'bg-amber-500/10 text-amber-700 border-amber-500/30',  solid: 'bg-amber-500 border-amber-500' },
-  soumis:        { label: 'Soumis au client',  icon: Send,         classes: 'bg-violet-500/10 text-violet-700 border-violet-500/30', solid: 'bg-violet-500 border-violet-500' },
-  en_reprise:    { label: 'En reprise',        icon: RotateCcw,    classes: 'bg-orange-500/10 text-orange-700 border-orange-500/30', solid: 'bg-orange-500 border-orange-500' },
-  terminee:      { label: 'Terminée',          icon: CheckCircle2, classes: 'bg-green-500/10 text-green-700 border-green-500/30',  solid: 'bg-success border-success' },
+  non_envoye:    { label: 'Non envoyé',        icon: Mail,         solid: 'bg-slate-500 border-slate-500' },
+  attente_delai: { label: 'Attente délai',     icon: Hourglass,    solid: 'bg-yellow-500 border-yellow-500' },
+  en_cours:      { label: 'En cours',          icon: Clock,        solid: 'bg-primary border-primary' },
+  en_controle:   { label: 'En contrôle',       icon: Eye,          solid: 'bg-amber-500 border-amber-500' },
+  soumis:        { label: 'Soumis au client',  icon: Send,         solid: 'bg-violet-500 border-violet-500' },
+  en_reprise:    { label: 'En reprise',        icon: RotateCcw,    solid: 'bg-orange-500 border-orange-500' },
+  terminee:      { label: 'Terminée',          icon: CheckCircle2, solid: 'bg-success border-success' },
 }
 
 function PhasePill({ phase, className }: { phase: SstPhase | null | undefined; className?: string }) {
   const meta = SST_PHASE_META[phase ?? 'en_cours']
   const Icon = meta.icon
   return (
-    <Badge variant="outline" className={cn('text-[10px] py-0 gap-1 border', meta.classes, className)}>
+    <Badge variant="outline" className={cn('text-[10px] py-0 gap-1 border text-white', meta.solid, className)}>
       <Icon className="h-2.5 w-2.5" />
       {meta.label}
     </Badge>
