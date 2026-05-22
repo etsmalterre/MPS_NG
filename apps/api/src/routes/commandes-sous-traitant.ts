@@ -168,6 +168,26 @@ function dateStr(value: unknown): string {
   return /^\d{8}$/.test(s) ? s : ''
 }
 
+/** A copy of `base` advanced by `n` working days (Sat/Sun skipped).
+ *  French bank holidays are intentionally NOT considered — they vary per
+ *  year and per company. Result is normalised to midnight. */
+function addWorkingDays(base: Date, n: number): Date {
+  const r = new Date(base.getFullYear(), base.getMonth(), base.getDate())
+  let added = 0
+  while (added < n) {
+    r.setDate(r.getDate() + 1)
+    const dow = r.getDay()
+    if (dow !== 0 && dow !== 6) added++
+  }
+  return r
+}
+
+/** Today + `n` working days, formatted as an HFSQL `YYYYMMDD` date string. */
+function hfsqlDatePlusWorkingDays(n: number): string {
+  const d = addWorkingDays(new Date(), n)
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
+}
+
 // ── Commande lifecycle helpers ───────────────────────────
 
 async function loadCommandeSoldee(commandeId: number): Promise<number | null> {
@@ -435,6 +455,7 @@ const commandeBody = z.object({
   IDadresse_livraison: z.number().int().nonnegative().optional(),
   commentaire: z.string().optional(),
   journal: z.string().optional(),
+  date_notif: z.string().optional(),
   est_soldee: z.number().int().min(0).max(1).optional(),
 })
 
@@ -676,9 +697,11 @@ commandesSousTraitantRouter.get('/lookups/magasins', async (_req: Request, res: 
 //
 // Mirrors the frontend frame-colour logic so the header pills count
 // exactly the cards that render as red / amber:
-//   - attente_delai → days since the latest bon de commande was sent
-//     (>= 3 → late, === 2 → soon, otherwise no frame). Day 0 and day +1
-//     are tolerated.
+//   - attente_delai → the commande's `date_notif` relance date
+//     (<= today → late, last working day before it → soon, otherwise no
+//     frame). Legacy commandes with no date_notif fall back to the bon de
+//     commande send date + 3 working days. Weekends are skipped; French
+//     bank holidays are not considered.
 //   - any other open phase → earliest open-line `date_livraison` deadline
 //     (<= today → late, within 3 days → soon). Open commandes with no
 //     valid earliest delivery are treated as late, matching the frontend
@@ -692,11 +715,19 @@ async function computeUrgencyBuckets(): Promise<{
   soon: Set<number>
 }> {
   const empty = { late: new Set<number>(), soon: new Set<number>() }
-  const openRows = await query<{ IDcommande_sous_traitant: number }>(
-    `SELECT IDcommande_sous_traitant FROM commande_sous_traitant WHERE est_soldee = 0`,
+  const openRows = await query<{ IDcommande_sous_traitant: number; date_notif: string | null }>(
+    `SELECT IDcommande_sous_traitant, date_notif FROM commande_sous_traitant WHERE est_soldee = 0`,
   )
   const openIds = openRows.map((r) => Number(r.IDcommande_sous_traitant)).filter((n) => n > 0)
   if (openIds.length === 0) return empty
+
+  // Relance date per commande (`date_notif`, HFSQL YYYYMMDD). Drives the
+  // attente_delai urgency frame.
+  const dateNotifByCmd = new Map<number, string>()
+  for (const r of openRows) {
+    const dn = (r.date_notif ?? '').toString()
+    if (/^\d{8}$/.test(dn)) dateNotifByCmd.set(Number(r.IDcommande_sous_traitant), dn)
+  }
   const idList = openIds.join(',')
 
   // Phase per open commande — reuses the same batched logic as the list
@@ -751,15 +782,27 @@ async function computeUrgencyBuckets(): Promise<{
   for (const id of openIds) {
     const phase = phaseMap.get(id) ?? 'en_cours'
     if (phase === 'attente_delai') {
-      const iso = lastSent.get(id)
-      if (!iso) continue
-      const y = Number(iso.slice(0, 4))
-      const m = Number(iso.slice(5, 7)) - 1
-      const d = Number(iso.slice(8, 10))
-      const sent = new Date(y, m, d); sent.setHours(0, 0, 0, 0)
-      const diff = Math.round((today.getTime() - sent.getTime()) / 86_400_000)
-      if (diff >= 3) late.add(id)
-      else if (diff === 2) soon.add(id)
+      // Effective relance date: the stored `date_notif` when set, else the
+      // bon de commande send date + 3 working days — the fallback keeps
+      // legacy commandes (no date_notif) consistent with the seed rule.
+      let notif: Date | null = null
+      const dn = dateNotifByCmd.get(id)
+      if (dn) {
+        notif = new Date(Number(dn.slice(0, 4)), Number(dn.slice(4, 6)) - 1, Number(dn.slice(6, 8)))
+        notif.setHours(0, 0, 0, 0)
+      } else {
+        const iso = lastSent.get(id)
+        if (iso) {
+          const sent = new Date(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10)))
+          notif = addWorkingDays(sent, 3)
+        }
+      }
+      if (!notif) continue
+      // Red on the relance day and after; amber on the last working day
+      // before it (so a Monday relance turns the card amber on Friday,
+      // not over the weekend the employee can't act on).
+      if (notif.getTime() <= today.getTime()) late.add(id)
+      else if (notif.getTime() <= addWorkingDays(today, 1).getTime()) soon.add(id)
       continue
     }
     // All other open phases — deadline-based, matching `deliveryUrgency`.
@@ -1065,7 +1108,7 @@ commandesSousTraitantRouter.get('/', async (req: Request, res: Response) => {
     const whereSql = whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : ''
 
     const commandes = await query<any>(
-      `SELECT TOP ${limit} cst.IDcommande_sous_traitant, cst.IDsous_traitant, cst.date_commande, cst.est_soldee
+      `SELECT TOP ${limit} cst.IDcommande_sous_traitant, cst.IDsous_traitant, cst.date_commande, cst.est_soldee, cst.date_notif
        FROM commande_sous_traitant cst
        ${whereSql}
        ORDER BY cst.IDcommande_sous_traitant DESC`,
@@ -2178,6 +2221,25 @@ commandesSousTraitantRouter.post('/:id/email', async (req: Request, res: Respons
       )
     } catch (e) {
       console.error('sstatut Non_Envoye → Attente_Delai failed for commande', id, e)
+    }
+
+    // Relance reminder: seed `date_notif` 3 working days ahead so the
+    // "Attente Délai" urgency frame has an anchor. Only when none is set
+    // yet — a date the employee already adjusted is left untouched, and so
+    // is one from an earlier send (re-sending does not restart the clock).
+    try {
+      const cur = await query<{ date_notif: string | null }>(
+        `SELECT date_notif FROM commande_sous_traitant WHERE IDcommande_sous_traitant = ${id}`,
+      )
+      const dn = (cur[0]?.date_notif ?? '').toString()
+      if (!/^\d{8}$/.test(dn)) {
+        await query(
+          `UPDATE commande_sous_traitant SET date_notif = '${hfsqlDatePlusWorkingDays(3)}'
+           WHERE IDcommande_sous_traitant = ${id}`,
+        )
+      }
+    } catch (e) {
+      console.error('date_notif seed failed for commande', id, e)
     }
 
     res.json({ ok: true, messageId })
@@ -3323,6 +3385,7 @@ commandesSousTraitantRouter.put('/:id', async (req: Request, res: Response) => {
     if (d.est_soldee !== undefined) sets.push(`est_soldee = ${d.est_soldee}`)
     if (d.commentaire !== undefined) sets.push(`commentaire = '${esc(wrapRtf(d.commentaire))}'`)
     if (d.journal !== undefined) sets.push(`journal = '${esc(wrapRtf(d.journal))}'`)
+    if (d.date_notif !== undefined) sets.push(`date_notif = '${dateStr(d.date_notif)}'`)
     if (d.IDadresse_sous_traitant !== undefined) sets.push(`IDadresse_sous_traitant = ${d.IDadresse_sous_traitant}`)
     if (d.IDadresse_livraison !== undefined) sets.push(`IDadresse_livraison = ${d.IDadresse_livraison}`)
 

@@ -56,6 +56,7 @@ import {
   Mail,
   Hourglass,
   Scissors,
+  BellRing,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -124,9 +125,13 @@ interface CommandeListRow {
   nb_lignes: number
   earliest_delivery: string | null
   /** Most recent bon-de-commande send date for this commande (envoi_email
-   *  IDtype_doc=13), as "YYYY-MM-DD" or null. Drives the urgency frame on
-   *  cards in `attente_delai` — see `attenteDelaiUrgency`. */
+   *  IDtype_doc=13), as "YYYY-MM-DD" or null. Fallback anchor for the
+   *  `attente_delai` urgency frame when `date_notif` is unset. */
   bon_envoye_at: string | null
+  /** Relance date (`commande_sous_traitant.date_notif`, HFSQL YYYYMMDD or
+   *  null). Primary anchor for the `attente_delai` urgency frame — see
+   *  `attenteDelaiUrgency`. */
+  date_notif: string | null
 }
 
 interface LigneCommande {
@@ -196,8 +201,11 @@ interface CommandeDetail {
   phase: SstPhase
   /** Most recent bon-de-commande send date (envoi_email IDtype_doc=13),
    *  "YYYY-MM-DD" or null. Drives the "Attente depuis X jours" label on
-   *  Attente_Delai lines. */
+   *  Attente_Delai lines, and is the fallback urgency anchor. */
   bon_envoye_at: string | null
+  /** Relance date (`date_notif`, HFSQL YYYYMMDD or null). Editable in the
+   *  Info tab; primary anchor for the Attente_Delai urgency colour. */
+  date_notif: string | null
 }
 
 interface SousTraitantLite {
@@ -486,25 +494,55 @@ function deliveryOverdueDays(hfsql: string): number {
   return diff > 0 ? diff : 0
 }
 
-/** Urgency frame for commandes in `attente_delai`: counts days since the
- *  bon de commande was sent. Day 0 (sent today) and day +1 are tolerated
- *  with no frame; day +2 is amber; day +3 and beyond is red. Returns null
- *  when no send date is known (defensive — `attente_delai` implies a send
- *  did happen).
+/** A copy of `base` advanced by `n` working days (Sat/Sun skipped).
+ *  French bank holidays are intentionally NOT considered — they vary per
+ *  year and per company. Result is normalised to midnight. */
+function addWorkingDays(base: Date, n: number): Date {
+  const r = new Date(base.getFullYear(), base.getMonth(), base.getDate())
+  let added = 0
+  while (added < n) {
+    r.setDate(r.getDate() + 1)
+    const dow = r.getDay()
+    if (dow !== 0 && dow !== 6) added++
+  }
+  return r
+}
+
+/** Urgency frame for commandes in `attente_delai`, anchored on the
+ *  `date_notif` relance date: red on the relance day and after, amber on
+ *  the last working day before it (so a Monday relance turns the card
+ *  amber on Friday, not over the weekend), no frame earlier. When
+ *  `date_notif` is unset (legacy commandes), the relance date falls back
+ *  to the bon de commande send date + 3 working days. Returns null when
+ *  neither anchor is known.
  *
- *  isoDay: "YYYY-MM-DD" (envoi_email.DATE truncated). */
-function attenteDelaiUrgency(isoDay: string | null): 'late' | 'soon' | null {
-  if (!isoDay || !/^\d{4}-\d{2}-\d{2}$/.test(isoDay)) return null
-  const y = Number(isoDay.slice(0, 4))
-  const m = Number(isoDay.slice(5, 7)) - 1
-  const d = Number(isoDay.slice(8, 10))
-  const sent = new Date(y, m, d)
-  sent.setHours(0, 0, 0, 0)
+ *  dateNotifHfsql: "YYYYMMDD" relance date, or null.
+ *  isoSentDay: "YYYY-MM-DD" (envoi_email.DATE truncated), fallback anchor. */
+function attenteDelaiUrgency(
+  dateNotifHfsql: string | null,
+  isoSentDay: string | null,
+): 'late' | 'soon' | null {
+  let notif: Date | null = null
+  if (dateNotifHfsql && /^\d{8}$/.test(dateNotifHfsql)) {
+    notif = new Date(
+      Number(dateNotifHfsql.slice(0, 4)),
+      Number(dateNotifHfsql.slice(4, 6)) - 1,
+      Number(dateNotifHfsql.slice(6, 8)),
+    )
+    notif.setHours(0, 0, 0, 0)
+  } else if (isoSentDay && /^\d{4}-\d{2}-\d{2}$/.test(isoSentDay)) {
+    const sent = new Date(
+      Number(isoSentDay.slice(0, 4)),
+      Number(isoSentDay.slice(5, 7)) - 1,
+      Number(isoSentDay.slice(8, 10)),
+    )
+    notif = addWorkingDays(sent, 3)
+  }
+  if (!notif) return null
   const today = new Date()
   today.setHours(0, 0, 0, 0)
-  const diffDays = Math.round((today.getTime() - sent.getTime()) / 86_400_000)
-  if (diffDays >= 3) return 'late'
-  if (diffDays === 2) return 'soon'
+  if (notif.getTime() <= today.getTime()) return 'late'
+  if (notif.getTime() <= addWorkingDays(today, 1).getTime()) return 'soon'
   return null
 }
 
@@ -623,6 +661,7 @@ export function SousTraitantsCommandes() {
 
   // Edit-mode draft state
   const [editDateCommande, setEditDateCommande] = useState('')
+  const [editDateNotif, setEditDateNotif] = useState('')
   const [editCommentaire, setEditCommentaire] = useState('')
   const [editJournal, setEditJournal] = useState('')
   const [editIDAdresseSousTraitant, setEditIDAdresseSousTraitant] = useState<number>(0)
@@ -630,6 +669,7 @@ export function SousTraitantsCommandes() {
 
   const originalDraftRef = useRef<{
     dateCommande: string
+    dateNotif: string
     commentaire: string
     journal: string
     IDadresseSt: number
@@ -705,7 +745,7 @@ export function SousTraitantsCommandes() {
       // (`late`) sits above amber (`soon`), then by ID DESC inside a band.
       const urgencyOf = (row: CommandeListRow) =>
         row.phase === 'attente_delai'
-          ? attenteDelaiUrgency(row.bon_envoye_at)
+          ? attenteDelaiUrgency(row.date_notif, row.bon_envoye_at)
           : deliveryUrgency(row.earliest_delivery, row.est_soldee)
       const rank = (u: 'late' | 'soon' | null) => (u === 'late' ? 0 : u === 'soon' ? 1 : 2)
       return [...flat].sort((a, b) => {
@@ -789,12 +829,14 @@ export function SousTraitantsCommandes() {
     if (!detail) return
     const snapshot = {
       dateCommande: hfsqlDateToInput(detail.date_commande),
+      dateNotif: hfsqlDateToInput(detail.date_notif),
       commentaire: detail.commentaire?.trim() ?? '',
       journal: detail.journal?.trim() ?? '',
       IDadresseSt: detail.IDadresse_sous_traitant ?? 0,
       IDadresseLiv: detail.IDadresse_livraison ?? 0,
     }
     setEditDateCommande(snapshot.dateCommande)
+    setEditDateNotif(snapshot.dateNotif)
     setEditCommentaire(snapshot.commentaire)
     setEditJournal(snapshot.journal)
     setEditIDAdresseSousTraitant(snapshot.IDadresseSt)
@@ -811,19 +853,21 @@ export function SousTraitantsCommandes() {
     const o = originalDraftRef.current
     if (!o) return false
     if (editDateCommande !== o.dateCommande) return true
+    if (editDateNotif !== o.dateNotif) return true
     if (editCommentaire !== o.commentaire) return true
     if (editJournal !== o.journal) return true
     if (editIDAdresseSousTraitant !== o.IDadresseSt) return true
     if (editIDAdresseLivraison !== o.IDadresseLiv) return true
     if (linesDirty) return true
     return false
-  }, [isEditing, editDateCommande, editCommentaire, editJournal, editIDAdresseSousTraitant, editIDAdresseLivraison, linesDirty])
+  }, [isEditing, editDateCommande, editDateNotif, editCommentaire, editJournal, editIDAdresseSousTraitant, editIDAdresseLivraison, linesDirty])
 
   const saveHeaderMut = useMutation({
     mutationFn: () => apiFetch(`/commandes-sous-traitant/${selectedId}`, {
       method: 'PUT',
       body: JSON.stringify({
         date_commande: inputDateToHfsql(editDateCommande),
+        date_notif: inputDateToHfsql(editDateNotif),
         commentaire: editCommentaire,
         journal: editJournal,
         IDadresse_sous_traitant: editIDAdresseSousTraitant || 0,
@@ -978,6 +1022,8 @@ export function SousTraitantsCommandes() {
             isEditing={isEditing}
             editDateCommande={editDateCommande}
             onEditDateCommandeChange={setEditDateCommande}
+            editDateNotif={editDateNotif}
+            onEditDateNotifChange={setEditDateNotif}
             editCommentaire={editCommentaire}
             onEditCommentaireChange={setEditCommentaire}
             editJournal={editJournal}
@@ -1263,11 +1309,11 @@ function CommandeList({
           </div>
         ) : rows.map((row) => {
           const isSelected = selectedId === row.IDcommande_sous_traitant
-          // `attente_delai` cards measure urgency from the bon-de-commande
-          // send date (1-day grace, then amber, then red). All other open
-          // phases keep using the earliest-delivery deadline.
+          // `attente_delai` cards measure urgency from the `date_notif`
+          // relance date (amber the day before, red on the day and after).
+          // All other open phases keep using the earliest-delivery deadline.
           const urgency = row.phase === 'attente_delai'
-            ? attenteDelaiUrgency(row.bon_envoye_at)
+            ? attenteDelaiUrgency(row.date_notif, row.bon_envoye_at)
             : deliveryUrgency(row.earliest_delivery, row.est_soldee)
           const selectedRingClass =
             urgency === 'late' ? 'border-red-500 ring-1 ring-red-500'
@@ -1790,6 +1836,7 @@ function LignesSection({
                   linesEditable={linesEditable}
                   isDrawerOpen={piecesDrawerLineId === l.IDligne_commande_sous_traitant}
                   bonEnvoyeAt={commande.bon_envoye_at}
+                  dateNotif={commande.date_notif}
                   onEdit={() => startEditLine(l)}
                   onDelete={() => setDeleteLineConfirmId(l.IDligne_commande_sous_traitant)}
                   onOpenDrawer={onOpenPiecesDrawer}
@@ -1895,7 +1942,7 @@ function LignesSection({
 }
 
 function LineCard({
-  line, isEditing, linesLocked, isEnnoblisseur, linesEditable, isDrawerOpen, bonEnvoyeAt, onEdit, onDelete, onOpenDrawer,
+  line, isEditing, linesLocked, isEnnoblisseur, linesEditable, isDrawerOpen, bonEnvoyeAt, dateNotif, onEdit, onDelete, onOpenDrawer,
 }: {
   line: LigneCommande
   isEditing: boolean
@@ -1904,6 +1951,9 @@ function LineCard({
   /** Commande-level bon-de-commande send date ("YYYY-MM-DD" or null),
    *  used to show "Attente depuis X jours" on an Attente_Delai line. */
   bonEnvoyeAt: string | null
+  /** Commande-level relance date (`date_notif`, HFSQL YYYYMMDD or null),
+   *  drives the Attente_Delai urgency colour. */
+  dateNotif: string | null
   /** True when the parent commande's sst supports inline line editing in
    *  MPS_NG (ennoblisseur OR tricoteur). Drives the per-card edit/delete
    *  affordances regardless of which exact type. */
@@ -2071,7 +2121,7 @@ function LineCard({
             })() : isAttenteDelai ? (() => {
               // Bon de commande sent, no délai confirmed yet — show how long
               // we've been waiting. Colour mirrors the card urgency frame.
-              const urgency = attenteDelaiUrgency(bonEnvoyeAt)
+              const urgency = attenteDelaiUrgency(dateNotif, bonEnvoyeAt)
               const label = attenteDays == null
                 ? 'En attente du délai'
                 : attenteDays === 0
@@ -5071,6 +5121,7 @@ type SidebarTab = 'info' | 'adresses' | 'docs' | 'historique'
 function DetailSidebar({
   commande, isLoading, isEditing,
   editDateCommande, onEditDateCommandeChange,
+  editDateNotif, onEditDateNotifChange,
   editCommentaire, onEditCommentaireChange,
   editJournal, onEditJournalChange,
   editIDAdresseSousTraitant, onEditIDAdresseSousTraitantChange,
@@ -5082,6 +5133,8 @@ function DetailSidebar({
   isEditing: boolean
   editDateCommande: string
   onEditDateCommandeChange: (v: string) => void
+  editDateNotif: string
+  onEditDateNotifChange: (v: string) => void
   editCommentaire: string
   onEditCommentaireChange: (v: string) => void
   editJournal: string
@@ -5152,6 +5205,8 @@ function DetailSidebar({
               isEditing={isEditing}
               editDateCommande={editDateCommande}
               onEditDateCommandeChange={onEditDateCommandeChange}
+              editDateNotif={editDateNotif}
+              onEditDateNotifChange={onEditDateNotifChange}
               editCommentaire={editCommentaire}
               onEditCommentaireChange={onEditCommentaireChange}
               editJournal={editJournal}
@@ -5241,6 +5296,7 @@ function StatusFooter({
 function InfoTab({
   commande, isEditing,
   editDateCommande, onEditDateCommandeChange,
+  editDateNotif, onEditDateNotifChange,
   editCommentaire, onEditCommentaireChange,
   editJournal, onEditJournalChange,
 }: {
@@ -5248,6 +5304,8 @@ function InfoTab({
   isEditing: boolean
   editDateCommande: string
   onEditDateCommandeChange: (v: string) => void
+  editDateNotif: string
+  onEditDateNotifChange: (v: string) => void
   editCommentaire: string
   onEditCommentaireChange: (v: string) => void
   editJournal: string
@@ -5255,6 +5313,29 @@ function InfoTab({
 }) {
   return (
     <div className="space-y-3">
+      {/* Relance — its own container at the top of the tab. The relance
+          date is an actionable self-reminder, so it gets a distinct card
+          + gold bell icon instead of sitting among the read-only meta. */}
+      <div className={cn('p-3 rounded-lg border bg-card shadow-sm', isEditing && editSectionClass)}>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
+            <BellRing className="h-3.5 w-3.5 text-accent" />Relance
+          </span>
+          {isEditing ? (
+            <input
+              type="date"
+              value={editDateNotif}
+              onChange={(e) => onEditDateNotifChange(e.target.value)}
+              className="h-7 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring text-right"
+            />
+          ) : (
+            <span className="text-sm">
+              {commande.date_notif ? formatHfsqlDate(commande.date_notif) : '—'}
+            </span>
+          )}
+        </div>
+      </div>
+
       <div className={cn('p-3 rounded-lg border bg-card shadow-sm space-y-2', isEditing && editSectionClass)}>
         <KV label="Sous-traitant" value={commande.sous_traitant_nom || '—'} />
         <KV label="Type" value={commande.sous_traitant_type ?? '—'} />
