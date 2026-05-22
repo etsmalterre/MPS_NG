@@ -1490,6 +1490,19 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
     const autoPricingEnabled = await hasTariffData(Number(header.IDsous_traitant) || 0)
     const phase = await computePhase(id, Number(header.est_soldee) || 0)
 
+    // Most recent bon de commande send date (envoi_email IDtype_doc=13) for
+    // this commande. The frontend uses it to show "Attente depuis X jours"
+    // on Attente_Delai lines — same anchor as the list-level urgency frame.
+    const bonRows = await query<{ DATE: string | null }>(
+      `SELECT DATE FROM envoi_email WHERE IDtype_doc = 13 AND IDreference = ${id}`,
+    )
+    let bonEnvoyeAt: string | null = null
+    for (const r of bonRows) {
+      const day = (r.DATE ?? '').toString().slice(0, 10)
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue
+      if (!bonEnvoyeAt || day > bonEnvoyeAt) bonEnvoyeAt = day
+    }
+
     res.json({
       ...header,
       sous_traitant_nom: sousTraitantNom,
@@ -1501,6 +1514,7 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
       lignes: lignesEnriched,
       auto_pricing_enabled: autoPricingEnabled,
       phase,
+      bon_envoye_at: bonEnvoyeAt,
     })
   } catch (err) {
     console.error('Error fetching commande-sous-traitant detail:', err)

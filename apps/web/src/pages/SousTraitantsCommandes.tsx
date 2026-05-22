@@ -194,6 +194,10 @@ interface CommandeDetail {
   auto_pricing_enabled?: boolean
   /** Computed phase (server-derived). See PhasePill / SST_PHASE_META. */
   phase: SstPhase
+  /** Most recent bon-de-commande send date (envoi_email IDtype_doc=13),
+   *  "YYYY-MM-DD" or null. Drives the "Attente depuis X jours" label on
+   *  Attente_Delai lines. */
+  bon_envoye_at: string | null
 }
 
 interface SousTraitantLite {
@@ -488,6 +492,21 @@ function attenteDelaiUrgency(isoDay: string | null): 'late' | 'soon' | null {
   if (diffDays >= 3) return 'late'
   if (diffDays === 2) return 'soon'
   return null
+}
+
+/** Whole days elapsed since the bon de commande was sent. `isoDay` is
+ *  "YYYY-MM-DD" (envoi_email.DATE truncated). Returns null when no send
+ *  date is known, or a clamped count >= 0 otherwise. */
+function attenteDelaiDays(isoDay: string | null): number | null {
+  if (!isoDay || !/^\d{4}-\d{2}-\d{2}$/.test(isoDay)) return null
+  const y = Number(isoDay.slice(0, 4))
+  const m = Number(isoDay.slice(5, 7)) - 1
+  const d = Number(isoDay.slice(8, 10))
+  const sent = new Date(y, m, d)
+  sent.setHours(0, 0, 0, 0)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  return Math.max(0, Math.round((today.getTime() - sent.getTime()) / 86_400_000))
 }
 
 function lineEtatColors(sstatut: string | null) {
@@ -1756,6 +1775,7 @@ function LignesSection({
                   isEnnoblisseur={isEnnoblisseur}
                   linesEditable={linesEditable}
                   isDrawerOpen={piecesDrawerLineId === l.IDligne_commande_sous_traitant}
+                  bonEnvoyeAt={commande.bon_envoye_at}
                   onEdit={() => startEditLine(l)}
                   onDelete={() => setDeleteLineConfirmId(l.IDligne_commande_sous_traitant)}
                   onOpenDrawer={onOpenPiecesDrawer}
@@ -1861,12 +1881,15 @@ function LignesSection({
 }
 
 function LineCard({
-  line, isEditing, linesLocked, isEnnoblisseur, linesEditable, isDrawerOpen, onEdit, onDelete, onOpenDrawer,
+  line, isEditing, linesLocked, isEnnoblisseur, linesEditable, isDrawerOpen, bonEnvoyeAt, onEdit, onDelete, onOpenDrawer,
 }: {
   line: LigneCommande
   isEditing: boolean
   linesLocked: boolean
   isEnnoblisseur: boolean
+  /** Commande-level bon-de-commande send date ("YYYY-MM-DD" or null),
+   *  used to show "Attente depuis X jours" on an Attente_Delai line. */
+  bonEnvoyeAt: string | null
   /** True when the parent commande's sst supports inline line editing in
    *  MPS_NG (ennoblisseur OR tricoteur). Drives the per-card edit/delete
    *  affordances regardless of which exact type. */
@@ -1927,6 +1950,10 @@ function LineCard({
   const dateDelaiRaw = line.date_delai && /^\d{8}$/.test(line.date_delai) ? line.date_delai : ''
   const dateLivRaw = line.date_livraison && /^\d{8}$/.test(line.date_livraison) ? line.date_livraison : ''
   const showDelaiInitial = !!dateDelaiRaw && !!dateLivRaw && dateDelaiRaw !== dateLivRaw
+  // Attente délai: bon de commande sent, no délai confirmed yet. The line
+  // shows how long we've been waiting instead of a Livraison date.
+  const isAttenteDelai = (line.sstatut ?? '').trim() === 'Attente_Delai'
+  const attenteDays = isAttenteDelai ? attenteDelaiDays(bonEnvoyeAt) : null
 
   return (
     <div
@@ -1990,13 +2017,13 @@ function LineCard({
             Livraison date; if a rescheduled date exists, the original
             "(initial: ...)" date appears inline so this row stays a
             single line. */}
-        {(qty > 0 || dateLivRaw) && (
+        {(qty > 0 || dateLivRaw || isAttenteDelai) && (
           <div className="flex items-center gap-3">
             <span className="text-xs uppercase tracking-wide text-muted-foreground/80 w-24 flex-shrink-0">Quantité</span>
             <span className="text-foreground">
               {qty > 0 ? `${fmtNum(qty, 1)} ${qtyUnit}` : '—'}
             </span>
-            {dateLivRaw && (() => {
+            {dateLivRaw ? (() => {
               const lineUrgency = deliveryUrgency(dateLivRaw, isLineDone(line.sstatut) ? 1 : 0)
               return (
                 <span
@@ -2015,7 +2042,29 @@ function LineCard({
                   )}
                 </span>
               )
-            })()}
+            })() : isAttenteDelai ? (() => {
+              // Bon de commande sent, no délai confirmed yet — show how long
+              // we've been waiting. Colour mirrors the card urgency frame.
+              const urgency = attenteDelaiUrgency(bonEnvoyeAt)
+              const label = attenteDays == null
+                ? 'En attente du délai'
+                : attenteDays === 0
+                  ? 'En attente du délai'
+                  : `Attente depuis ${attenteDays} jour${attenteDays > 1 ? 's' : ''}`
+              return (
+                <span
+                  className={cn(
+                    'ml-auto flex items-center gap-1 font-medium',
+                    urgency === 'late' ? 'text-red-600'
+                      : urgency === 'soon' ? 'text-amber-600'
+                      : 'text-muted-foreground'
+                  )}
+                >
+                  <Hourglass className="h-3.5 w-3.5" />
+                  {label}
+                </span>
+              )
+            })() : null}
           </div>
         )}
         {/* Prix unitaire — independent value, €/Kg of finished fabric. */}
