@@ -8,7 +8,6 @@ import {
   FileText,
   Receipt,
   Building2,
-  Megaphone,
   Truck,
   Box,
   ShieldCheck,
@@ -49,7 +48,6 @@ const FilsPrevisionsPage = createPlaceholder('Prévisions Fournisseurs', 'Prévi
 const SousTraitantsGestionPage = createPlaceholder('Gestion Sous-traitants', 'Gérez vos sous-traitants', Building2)
 
 // Legacy-menu top-level placeholders
-const MarketingPage = createPlaceholder('Marketing', 'Outils et suivi marketing', Megaphone)
 const TransfertsPage = createPlaceholder('Transferts', 'Transferts de stock entre sites et sous-traitants', Truck)
 const TombeMetierPage = createPlaceholder('Tombé Métier', 'Suivi du tombé métier', PlaceholderIcon(KnitIcon))
 const FinisReferencesPage = createPlaceholder('Références Finis', 'Catalogue des références de produits finis', Tag)
@@ -74,6 +72,9 @@ import { SousTraitantsCommandes } from '@/pages/SousTraitantsCommandes'
 // Finis pages (real)
 import { EtudesColoris } from '@/pages/EtudesColoris'
 
+// Prospects pages (real)
+import { ProspectsDemandes } from '@/pages/ProspectsDemandes'
+
 // Réseau pages
 import { Entreprises } from '@/pages/Entreprises'
 
@@ -88,8 +89,9 @@ export const router = createBrowserRouter([
       // Dashboard
       { index: true, element: <Dashboard /> },
 
-      // Marketing
-      { path: 'marketing', element: <MarketingPage /> },
+      // Prospects
+      { path: 'prospects', element: <Navigate to="/prospects/demandes" replace /> },
+      { path: 'prospects/demandes', element: <ProspectsDemandes /> },
 
       // Clients
       { path: 'clients', element: <Navigate to="/clients/commandes" replace /> },

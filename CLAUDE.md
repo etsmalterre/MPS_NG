@@ -61,7 +61,7 @@ MPS_NG/
 │   │       │   ├── pricing-sst.ts        # Ennoblisseur auto-pricing (see HFSQL rules)
 │   │       │   ├── pricing-trm.ts        # Tricoteur auto-pricing — PrixDeRevientTRM port
 │   │       │   └── pdf/                  # theme.ts, MalterreDocument.tsx, CommandeFournisseurPdf, CommandeSoustraitantPdf, SoumissionLotPdf, DemandeEtudeColorisPdf, SoumissionPdf, FeuilleColorisPdf
-│   │       ├── routes/                   # entreprises, fournisseurs, references-fil, stock, commandes-fil, commandes-sous-traitant, etudes-coloris, auth, permissions, user-emails
+│   │       ├── routes/                   # entreprises, fournisseurs, references-fil, stock, commandes-fil, commandes-sous-traitant, etudes-coloris, prospects, auth, permissions, user-emails
 │   │       └── index.ts
 │   └── web/           # React frontend
 │       └── src/
@@ -81,7 +81,7 @@ MPS_NG/
 │           │   ├── email.ts      # Types + postEmail helper for SendEmailDialog
 │           │   ├── dates.ts      # HFSQL date helpers
 │           │   └── format.ts     # fmtNum (French formatting)
-│           ├── pages/            # Dashboard, Entreprises, FilsGestion, FilsReferences, FilsStock, FilsCommandes, SousTraitantsCommandes, EtudesColoris, SettingsUtilisateurs
+│           ├── pages/            # Dashboard, Entreprises, FilsGestion, FilsReferences, FilsStock, FilsCommandes, SousTraitantsCommandes, EtudesColoris, ProspectsDemandes, SettingsUtilisateurs
 │           ├── main.tsx          # QueryClient → UserProvider → PermissionsProvider → UserPickerGate → RouterProvider
 │           └── router.tsx
 ├── claude_doc/                   # Detailed reference docs (load on demand, see below)
@@ -96,7 +96,7 @@ MPS_NG/
 Mirrors the legacy WinDev main menu (top → bottom):
 
 1. **Tableau de bord** (`/`)
-2. **Marketing** — placeholder
+2. **Prospects** (renamed from legacy "Marketing") — **Demandes** (`/prospects/demandes`; catalogue requests from the `prospect` table; master-detail, implemented)
 3. **Clients** — Commandes, Devis, Facturation, Gestion
 4. **Sous-traitants** — **Commandes** (ennoblisseur; see `sous_traitants_status_model.md`), Gestion
 5. **Transferts** — placeholder
@@ -140,7 +140,7 @@ Full details in `claude_doc/hfsql_odbc.md`. These are the non-negotiable rules f
 - **Avoid accents in HFSQL table names and in HFSQL backup folder file names** — both cause "fichier de données est déjà décrit" errors at connection time.
 - **Fournisseur ↔ coloris lives in `asso_colorisfil_frs`, NOT `colori_fil.IDfournisseur`**: `colori_fil` is the global catalog (ref_fil, coloris-reference); one coloris can be sold by many fournisseurs via the M:N join `asso_colorisfil_frs (IDfournisseur, IDcolori_fil)`. The legacy `colori_fil.IDfournisseur` is misleading — never read or write it. Pattern in `references-fil.ts` / `fournisseurs.ts`.
 - **JOIN + `CONVERT()` collapses result sets**: `SELECT a.col, CONVERT(b.text USING 'UTF-8') FROM a JOIN b WHERE …` returns **one row** instead of all matches. Split into two flat queries and merge in JS. Same shape kills `CONVERT(tel)` even single-table when `tel` is empty on some rows — read phone-like cols raw. Reference: `commandes-sous-traitant.ts` `/lookups/sous-traitants`.
-- **Reserved-word column `type` returns uppercased**: `SELECT lcs.type FROM ligne_commande_sous_traitant lcs` returns the column key as `TYPE` in the result row, not `type`. Always alias: `lcs.type AS type_kind`. Affected anywhere a `type` column exists (e.g. `ligne_commande_sous_traitant`, `ligne_commande_client`).
+- **Reserved-word columns return uppercased**: `SELECT lcs.type FROM ligne_commande_sous_traitant lcs` returns the column key as `TYPE`, not `type`; likewise `date` comes back as `DATE` (seen on `prospect`). Always alias (`lcs.type AS type_kind`) or read case-insensitively. Affected anywhere a reserved-word column exists (`type` on `ligne_commande_sous_traitant`/`ligne_commande_client`, `date` on `prospect`).
 - **Polymorphic `IDreference` on `ligne_commande_sous_traitant`** (same numeric ID can exist in 3 catalogs): ALWAYS route by `type` SMALLINT (alias `type_kind`). Line stores the **output** the sst produces, NOT the input: `2 → ref_fini`, `1 → ref_ecru` (tricoteur — yarn inputs via `composition_ecru WHERE IDref_ecru = …`), `0 → ref_ecru`. Matching `IDColoris`: `type=2 → ref_fini_colori`, `type=1 → colori_ecru`, `type=0 → colori_ecru`. Reference `resolveRef` in `commandes-sous-traitant.ts`. Memory [[project-sst-line-polymorphic]] has the legacy commande 8582 evidence.
 - **`IDColoris` on fini stock is `ref_fini_colori`, NOT `colori_fini`**: `colori_fini` is a junction (`IDcolori_fini`, `IDgamme_coloris`, `IDcolori_ecru`, `IDref_fini_colori`) with NO `IDColoris` column and NO `reference` column. The actual fini-coloris catalog is `ref_fini_colori` (PK `IDref_fini_colori`, label `reference`, FK `IDref_fini`) — that's what `stock_fini.IDColoris` and `ligne_commande_sous_traitant.IDColoris` reference for fini lines.
 - **Sous-traitant `commentaire` / `journal` are RTF**: read via `stripRtf()`, write via `wrapRtf()` (`rtf-utils.ts`) so the legacy WinDev app keeps reading. Plain-text round-trip — formatting lost on first MPS_NG edit.

@@ -4,7 +4,7 @@ import {
   Users,
   Building2,
   Truck,
-  Megaphone,
+  UserPlus,
   Box,
   ShieldCheck,
   FileBarChart,
@@ -64,11 +64,13 @@ export const settingsItem: MainMenuItem = {
 // Rapports, Réseau.
 export const mainNavigation: MainMenuItem[] = [
   {
-    id: 'marketing',
-    title: 'Marketing',
-    icon: Megaphone,
-    href: '/marketing',
-    submenus: [],
+    id: 'prospects',
+    title: 'Prospects',
+    icon: UserPlus,
+    href: '/prospects',
+    submenus: [
+      { title: 'Demandes', href: '/prospects/demandes' },
+    ],
   },
   {
     id: 'clients',
@@ -184,8 +186,9 @@ export function getActiveMenu(pathname: string): MainMenuItem | undefined {
 // Route titles for breadcrumbs
 export const routeTitles: Record<string, string> = {
   '/': 'Accueil',
-  // Marketing
-  '/marketing': 'Marketing',
+  // Prospects
+  '/prospects': 'Prospects',
+  '/prospects/demandes': 'Demandes',
   // Clients
   '/clients': 'Clients',
   '/clients/commandes': 'Commandes',
