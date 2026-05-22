@@ -4093,6 +4093,10 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
   // the title for either success ("N rouleaux remplis…") or failure.
   const [tricobotState, setTricobotState] = useState<'idle' | 'loading' | 'done'>('idle')
   const [tricobotMessage, setTricobotMessage] = useState<string | null>(null)
+  // Whether `tricobotMessage` is a failure/empty result — drives the red
+  // text. A "found nothing" result still sets state='done' (the run did
+  // complete), so the colour can't key off `tricobotState`.
+  const [tricobotMsgError, setTricobotMsgError] = useState(false)
 
   const current = rolls[currentIndex]
   const currentRow = current ? rows[current.id] : null
@@ -4203,6 +4207,7 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
     if (tricobotState !== 'idle') return
     setTricobotState('loading')
     setTricobotMessage(null)
+    setTricobotMsgError(false)
     try {
       const data = await apiFetch<Array<{
         IDdata_bl_tricotbot: number
@@ -4248,6 +4253,7 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
       }
       setTricobotState('done')
       const missing = ecruRolls.length - filled
+      setTricobotMsgError(filled === 0)
       setTricobotMessage(
         filled === 0
           ? `Tricobot n'a trouvé aucun rouleau correspondant dans la base.`
@@ -4257,6 +4263,7 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
       )
     } catch (err) {
       setTricobotState('idle')
+      setTricobotMsgError(true)
       setTricobotMessage(err instanceof Error ? err.message : 'Erreur Tricobot')
     }
   }
@@ -4380,7 +4387,7 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
               <p
                 className={cn(
                   'text-[11px] mt-1 leading-snug',
-                  tricobotState === 'done' ? 'text-green-700' : 'text-destructive',
+                  tricobotMsgError ? 'text-destructive' : 'text-green-700',
                 )}
               >
                 {tricobotMessage}
