@@ -89,14 +89,17 @@ rules drive the colour, depending on phase:
 
 | Phase | Signal | `late` (red) | `soon` (amber) |
 |---|---|---|---|
-| `attente_delai` | days since latest `envoi_email` `IDtype_doc=13` (`bon_envoye_at`, surfaced per row) | diff ≥ 3 days | diff = 2 days |
+| `attente_delai` | `commande_sous_traitant.date_notif` relance date (HFSQL `YYYYMMDD`; legacy rows without one fall back to bon de commande send + 3 working days) | `date_notif ≤ today` | `date_notif ≤` next working day after today (last working day before the relance) |
 | any other open phase | earliest open-line `date_livraison` (`earliest_delivery`, min over `sstatut != Terminé` lines) | deadline ≤ today, OR no valid `earliest_delivery` | deadline within 3 days |
 | `terminée` | — | never | never |
 
-Frontend helpers: `attenteDelaiUrgency(isoDay)` and
+Frontend helpers: `attenteDelaiUrgency(dateNotifHfsql, isoSentDay)` and
 `deliveryUrgency(yyyymmdd, est_soldee)` in `SousTraitantsCommandes.tsx`.
-The list endpoint returns both `bon_envoye_at` (`YYYY-MM-DD`, or null) and
-`earliest_delivery` (`YYYYMMDD`, or null) per row.
+The list endpoint returns `date_notif` (`YYYYMMDD`, primary anchor),
+`bon_envoye_at` (`YYYY-MM-DD`, fallback anchor) and `earliest_delivery`
+(`YYYYMMDD`) per row. Working-day math (`addWorkingDays` — Sat/Sun skipped,
+French bank holidays not considered) is duplicated in both files; the
+single change point for holiday support is that helper in each.
 
 Backend `computeUrgencyBuckets()` (shared helper in
 `commandes-sous-traitant.ts`) mirrors the same rules over every open
@@ -125,6 +128,16 @@ a zero count is hidden. Cross-filter rules:
 
 When either pill is on the client-side memo resorts the loaded rows so
 red sits above amber, with ID DESC inside each band.
+
+### Relance date (`date_notif`)
+
+`commande_sous_traitant.date_notif` is the per-commande relance reminder
+and the primary anchor for the `attente_delai` urgency frame. Surfaced as
+an editable date field ("Relance", `BellRing` icon) in its own card at the
+top of the Info tab, saved via `PUT /:id`. `POST /:id/email` (bon de
+commande) seeds it to today + 3 working days — **only when unset**, so a
+manual edit, or a value from an earlier send, is never overwritten
+(re-sending does not restart the relance clock).
 
 ## Soumission Lot Client feature
 
