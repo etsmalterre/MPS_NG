@@ -1546,6 +1546,63 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
       if (!bonEnvoyeAt || day > bonEnvoyeAt) bonEnvoyeAt = day
     }
 
+    // TRM mirror — when the sst targets Tricotage Malterre (the sister
+    // company), the legacy bridge auto-creates a `commande_client` on the
+    // TRM ledger with `IDcommande_ETM` pointing back here. Surface the
+    // mirror's status so the user can see whether the knit is done without
+    // leaving the sst screen. Lines on the TRM side mirror the sst lines
+    // 1:1 (ligne_commande_client.IDligne_commande_ETM = sst line id) so the
+    // delivered-rolls count comes from stock_ecru.IDref_commande_source
+    // pointing at the sst line.
+    let trmMirror: {
+      IDcommande_client: number
+      numero: number | null
+      date_commande: string | null
+      ref_client: string | null
+      est_soldee: number
+      rolls_produced: number
+      poids_produced_kg: number
+    } | null = null
+    if (Number(header.IDsous_traitant) === TRICOTAGE_MALTERRE_ID) {
+      const ccRows = await query<{
+        IDcommande_client: number
+        numero: number | null
+        date_commande: string | null
+        ref_client: string | null
+        est_soldee: number | null
+      }>(
+        `SELECT IDcommande_client, numero, date_commande, ref_client, est_soldee
+         FROM commande_client WHERE IDcommande_ETM = ${id}`,
+      )
+      if (ccRows.length > 0) {
+        const ccFixed = await fixEncoding(ccRows as any[], 'commande_client', 'IDcommande_client', ['ref_client'])
+        const cc = ccFixed[0] as any
+        // Tally produced écru rolls via the back-pointer TRM stamps on
+        // every roll it knits (IDref_commande_source = sst line id).
+        let rolls = 0
+        let poids = 0
+        const lineIds = (fixedLignes as any[])
+          .map((l) => Number(l.IDligne_commande_sous_traitant))
+          .filter((x) => x > 0)
+        if (lineIds.length > 0) {
+          const ecruRows = await query<{ poids: number | null }>(
+            `SELECT poids FROM stock_ecru WHERE IDref_commande_source IN (${lineIds.join(',')})`,
+          )
+          rolls = ecruRows.length
+          for (const r of ecruRows) poids += Number(r.poids) || 0
+        }
+        trmMirror = {
+          IDcommande_client: Number(cc.IDcommande_client),
+          numero: cc.numero != null ? Number(cc.numero) : null,
+          date_commande: cc.date_commande ?? null,
+          ref_client: (cc.ref_client ?? null) as string | null,
+          est_soldee: Number(cc.est_soldee) || 0,
+          rolls_produced: rolls,
+          poids_produced_kg: poids,
+        }
+      }
+    }
+
     res.json({
       ...header,
       sous_traitant_nom: sousTraitantNom,
@@ -1558,6 +1615,7 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
       auto_pricing_enabled: autoPricingEnabled,
       phase,
       bon_envoye_at: bonEnvoyeAt,
+      trm_mirror: trmMirror,
     })
   } catch (err) {
     console.error('Error fetching commande-sous-traitant detail:', err)
@@ -2518,24 +2576,37 @@ async function logEnvoiEmails(
 
 // ── Soumission Lot — feature ─────────────────────────────
 //
-// Eligibility: a sous-traitant commande can be "soumis au client" when at
-// least one received fini roll (stock_fini back-linked via
-// IDref_commande_source) is reserved to a client (stock_fini.IDligne_-
-// commande_client → ligne_commande_client → commande_client.IDclient)
-// AND that (IDclient, IDref_fini) tuple has a designation_client row with
+// A sst commande is "soumissable au client" when at least one of its lines
+// is linked (via affected écru OR received fini) to a client commande whose
+// (IDclient, IDref_fini) tuple has a designation_client row with
 // soumettre = 1 AND archivé = 0.
 //
-// Lot key: a single "lot" for the picker is the tuple
-//   (IDref_fini, IDColoris, lot string, IDcommande_client)
-// — we include IDcommande_client because the same physical batch can be
-// split across distinct client orders and the soumission PDF has a single
-// "N° Commande" cell.
+// Two flavours of eligible candidate:
+//
+//   `kind: 'received'`
+//     A fini roll exists (stock_fini back-linked via IDref_commande_source,
+//     reserved to a client via IDligne_commande_client). The lot string is
+//     the actual fini lot (e.g. "MA108391") and we know nb_rolls + Σmetrage.
+//     Grouped by (IDref_fini, IDColoris, lot, IDcommande_client) so a
+//     physical batch split across multiple client orders becomes multiple
+//     candidates (one PDF per client).
+//
+//   `kind: 'manual'`
+//     The fini hasn't been received yet but the line has affected écrus
+//     reserved to a client (stock_ecru.IDref_commande_affectation = line,
+//     stock_ecru.IDligne_commande_client → commande_client → client). The
+//     legacy WinDev app allowed soumission in this state with a user-typed
+//     lot. We surface one candidate per (line ref_fini, line coloris,
+//     IDcommande_client) tuple, with an empty `lot` — the picker prompts
+//     the user. Suppressed when a received candidate already covers the
+//     same (IDref_fini, IDColoris, IDcommande_client) so we don't duplicate.
 
 interface EligibleLot {
+  kind: 'received' | 'manual'
   // Composite key parts (drive the PDF/email URL)
   IDref_fini: number
   IDColoris: number
-  lot: string
+  lot: string                  // '' for manual — user types it
   IDcommande_client: number
   // Resolved display fields
   IDclient: number
@@ -2543,22 +2614,53 @@ interface EligibleLot {
   ref_malterre: string         // ref_fini.reference
   client_designation: string   // designation_client.designation (= ref client)
   coloris_reference: string
-  nb_rolls: number
-  total_metrage: number
+  nb_rolls: number             // 0 for manual
+  total_metrage: number        // 0 for manual (planned qty comes from the line at render time)
   // React-friendly key
   key: string
 }
 
 export async function findEligibleLots(commandeId: number): Promise<EligibleLot[]> {
-  // 1) Lines belonging to this commande_sous_traitant.
-  const lineRows = await query<{ IDligne_commande_sous_traitant: number }>(
-    `SELECT IDligne_commande_sous_traitant FROM ligne_commande_sous_traitant
+  // 1) Lines belonging to this commande_sous_traitant. Carry the line's
+  //    own (IDreference=IDref_fini for type=2 ennoblisseur, IDColoris) so
+  //    the manual path can emit a candidate even when no fini rolls exist.
+  const lineRows = await query<{
+    IDligne_commande_sous_traitant: number
+    IDreference: number
+    IDColoris: number
+    type_kind: number
+  }>(
+    `SELECT IDligne_commande_sous_traitant, IDreference, IDColoris, type AS type_kind
+     FROM ligne_commande_sous_traitant
      WHERE IDcommande_sous_traitant = ${commandeId}`,
   )
   const lineIds = lineRows.map((r) => Number(r.IDligne_commande_sous_traitant)).filter((x) => x > 0)
   if (lineIds.length === 0) return []
+  // type=2 (ennoblisseur) lines: line.IDreference IS ref_fini, line.IDColoris
+  // IS the fini coloris (ref_fini_colori). Only these can be soumis to a
+  // client — tricoteur (type=1) and the rare type=0 emit no fini.
+  const enLines = lineRows.filter((l) => Number(l.type_kind) === 2)
+  // Lookup: lineId → (ref_fini, coloris) for manual fallback
+  const lineRefMap = new Map<number, { IDref_fini: number; IDColoris: number }>()
+  for (const l of enLines) {
+    lineRefMap.set(Number(l.IDligne_commande_sous_traitant), {
+      IDref_fini: Number(l.IDreference),
+      IDColoris: Number(l.IDColoris),
+    })
+  }
 
-  // 2) Fini rolls produced from those lines, with the client-order link.
+  // ── 2a) Received: fini rolls with a client-order reservation.
+  interface GroupAcc {
+    kind: 'received' | 'manual'
+    IDref_fini: number
+    IDColoris: number
+    lot: string
+    IDcommande_client: number
+    IDclient: number
+    nb_rolls: number
+    total_metrage: number
+  }
+  const groups = new Map<string, GroupAcc>()
   const finiRows = await query<{
     IDref_fini: number
     IDColoris: number
@@ -2572,21 +2674,38 @@ export async function findEligibleLots(commandeId: number): Promise<EligibleLot[
        AND IDligne_commande_client > 0`,
   )
   const fixedFini = await fixEncoding(finiRows as any[], 'stock_fini', 'IDstock_fini', ['lot'])
-  if (fixedFini.length === 0) return []
 
-  // 3) Resolve IDligne_commande_client → IDcommande_client.
-  const lccIds = Array.from(new Set(fixedFini.map((r: any) => n(r.IDligne_commande_client))))
-    .filter((x) => x > 0)
+  // Resolve IDligne_commande_client → IDcommande_client (shared by fini + écru).
+  const finiLccIds = new Set<number>(fixedFini.map((r: any) => n(r.IDligne_commande_client)).filter((x) => x > 0))
+
+  // ── 2b) Manual: écru rolls affected to this commande's lines with a
+  //       client-order reservation. The fini lot doesn't exist yet — the
+  //       user types it at picker time.
+  const ecruRows = await query<{
+    IDref_commande_affectation: number
+    IDligne_commande_client: number
+  }>(
+    `SELECT IDref_commande_affectation, IDligne_commande_client
+     FROM stock_ecru
+     WHERE IDref_commande_affectation IN (${lineIds.join(',')})
+       AND IDligne_commande_client > 0`,
+  )
+
+  // Combine all client-order ids we need to resolve.
+  const ecruLccIds = new Set<number>(ecruRows.map((r) => Number(r.IDligne_commande_client)).filter((x) => x > 0))
+  const allLccIds = Array.from(new Set<number>([...finiLccIds, ...ecruLccIds]))
+
+  // ── 3) Resolve IDligne_commande_client → IDcommande_client.
   const lccToCc = new Map<number, number>()
-  if (lccIds.length > 0) {
+  if (allLccIds.length > 0) {
     const lccRows = await query<{ IDligne_commande_client: number; IDcommande_client: number }>(
       `SELECT IDligne_commande_client, IDcommande_client FROM ligne_commande_client
-       WHERE IDligne_commande_client IN (${lccIds.join(',')})`,
+       WHERE IDligne_commande_client IN (${allLccIds.join(',')})`,
     )
     for (const r of lccRows) lccToCc.set(n(r.IDligne_commande_client), n(r.IDcommande_client))
   }
 
-  // 4) Resolve IDcommande_client → IDclient.
+  // ── 4) Resolve IDcommande_client → IDclient.
   const ccIds = Array.from(new Set(Array.from(lccToCc.values()))).filter((x) => x > 0)
   const ccToClient = new Map<number, number>()
   if (ccIds.length > 0) {
@@ -2597,19 +2716,9 @@ export async function findEligibleLots(commandeId: number): Promise<EligibleLot[
     for (const r of ccRows) ccToClient.set(n(r.IDcommande_client), n(r.IDclient))
   }
 
-  // 5) Group rolls by (IDref_fini, IDColoris, lot, IDcommande_client) and
-  //    aggregate nb_rolls + total_metrage. Skip rolls whose lot string is
-  //    empty (defensive — those would group together meaninglessly).
-  interface GroupAcc {
-    IDref_fini: number
-    IDColoris: number
-    lot: string
-    IDcommande_client: number
-    IDclient: number
-    nb_rolls: number
-    total_metrage: number
-  }
-  const groups = new Map<string, GroupAcc>()
+  // ── 5a) Build received groups keyed (IDref_fini, IDColoris, lot, ccId).
+  //        Skip rolls whose lot string is empty (defensive — empty lots
+  //        would group together meaninglessly).
   for (const r of fixedFini as any[]) {
     const lot = (r.lot ?? '').toString().trim()
     if (!lot) continue
@@ -2619,8 +2728,9 @@ export async function findEligibleLots(commandeId: number): Promise<EligibleLot[
     if (ccId === 0 || clientId === 0) continue
     const idRefFini = n(r.IDref_fini)
     const idColoris = n(r.IDColoris)
-    const k = `${idRefFini}|${idColoris}|${lot}|${ccId}`
+    const k = `r|${idRefFini}|${idColoris}|${lot}|${ccId}`
     const acc = groups.get(k) ?? {
+      kind: 'received' as const,
       IDref_fini: idRefFini,
       IDColoris: idColoris,
       lot,
@@ -2633,30 +2743,68 @@ export async function findEligibleLots(commandeId: number): Promise<EligibleLot[
     acc.total_metrage += Number(r.metrage) || 0
     groups.set(k, acc)
   }
+
+  // ── 5b) Build manual groups keyed (IDref_fini, IDColoris, ccId) per
+  //        (line, client) tuple from écru affectations. Suppress when a
+  //        received group already covers the same (ref_fini, coloris, cc).
+  const receivedCoverage = new Set<string>()
+  for (const g of groups.values()) {
+    if (g.kind === 'received') receivedCoverage.add(`${g.IDref_fini}|${g.IDColoris}|${g.IDcommande_client}`)
+  }
+  for (const r of ecruRows) {
+    const lineId = Number(r.IDref_commande_affectation)
+    const refInfo = lineRefMap.get(lineId)
+    if (!refInfo) continue // tricoteur / unknown — not a fini line
+    const lccId = Number(r.IDligne_commande_client)
+    const ccId = lccToCc.get(lccId) ?? 0
+    const clientId = ccToClient.get(ccId) ?? 0
+    if (ccId === 0 || clientId === 0) continue
+    const sig = `${refInfo.IDref_fini}|${refInfo.IDColoris}|${ccId}`
+    if (receivedCoverage.has(sig)) continue
+    const k = `m|${sig}`
+    if (groups.has(k)) continue
+    groups.set(k, {
+      kind: 'manual',
+      IDref_fini: refInfo.IDref_fini,
+      IDColoris: refInfo.IDColoris,
+      lot: '',
+      IDcommande_client: ccId,
+      IDclient: clientId,
+      nb_rolls: 0,
+      total_metrage: 0,
+    })
+  }
+
   if (groups.size === 0) return []
 
-  // 6) Filter by designation_client soumettre = 1 AND get the client's
-  //    preferred reference label. Key the catalog map by `clientId|refFiniId`.
-  const dcPairs = Array.from(groups.values()).map((g) => ({ c: g.IDclient, r: g.IDref_fini }))
-  const uniqueClients = Array.from(new Set(dcPairs.map((p) => p.c)))
-  const uniqueRefFini = Array.from(new Set(dcPairs.map((p) => p.r)))
+  // ── 6) Filter by designation_client soumettre = 1 AND get the client's
+  //       preferred reference label. `archivé` is an accented identifier —
+  //       Linux iODBC bridge can't tokenize it in WHERE, and the truncated
+  //       `archiv` form is bridge-output-only (also unknown to the data
+  //       file). Mirror the SOUMIS_INVALIDE pattern: SELECT * (so the row
+  //       carries the archive flag back under whichever key the platform
+  //       surfaces), filter in JS by both keys.
+  const uniqueClients = Array.from(new Set(Array.from(groups.values()).map((g) => g.IDclient)))
+  const uniqueRefFini = Array.from(new Set(Array.from(groups.values()).map((g) => g.IDref_fini)))
   const dcMap = new Map<string, string>() // `${IDclient}|${IDref_fini}` → designation
   if (uniqueClients.length > 0 && uniqueRefFini.length > 0) {
-    const dcRows = await query<{ IDclient: number; IDref_fini: number; designation: string | null }>(
-      `SELECT IDclient, IDref_fini, designation FROM designation_client
+    const dcRows = await query<any>(
+      `SELECT * FROM designation_client
        WHERE IDclient IN (${uniqueClients.join(',')})
          AND IDref_fini IN (${uniqueRefFini.join(',')})
-         AND soumettre = 1
-         AND archivé = 0`,
+         AND soumettre = 1`,
     )
-    const dcFixed = await fixEncoding(dcRows as any[], 'designation_client', 'IDdesignation_client', ['designation'])
+    const dcActive = (dcRows as any[]).filter(
+      (r) => Number(r.archiv ?? r['archivé'] ?? 0) === 0,
+    )
+    const dcFixed = await fixEncoding(dcActive as any[], 'designation_client', 'IDdesignation_client', ['designation'])
     for (const r of dcFixed as any[]) {
       dcMap.set(`${n(r.IDclient)}|${n(r.IDref_fini)}`, (r.designation ?? '').toString())
     }
   }
 
-  // 7) Display lookups: ref_fini.reference, ref_fini_colori.reference,
-  //    client.nom — all flat queries to avoid CONVERT-in-JOIN collapse.
+  // ── 7) Display lookups: ref_fini.reference, ref_fini_colori.reference,
+  //       client.nom — all flat queries to avoid CONVERT-in-JOIN collapse.
   const refFiniMap = new Map<number, string>()
   if (uniqueRefFini.length > 0) {
     const rf = await query<{ IDref_fini: number; reference: string | null }>(
@@ -2687,13 +2835,20 @@ export async function findEligibleLots(commandeId: number): Promise<EligibleLot[
     }
   }
 
-  // 8) Assemble surviving groups (those with a designation_client.soumettre=1 row).
+  // ── 8) Assemble surviving groups (those with a designation_client.soumettre=1 row).
   const out: EligibleLot[] = []
   for (const g of groups.values()) {
     const dcKey = `${g.IDclient}|${g.IDref_fini}`
     const clientDesignation = dcMap.get(dcKey)
     if (clientDesignation === undefined) continue
+    // Key encodes kind so the same (ref, coloris, cc) tuple can carry both a
+    // received and a manual candidate if we ever want to surface them
+    // side-by-side; today we suppress manual when received covers it.
+    const key = g.kind === 'received'
+      ? `received|${g.IDref_fini}|${g.IDColoris}|${g.lot}|${g.IDcommande_client}`
+      : `manual|${g.IDref_fini}|${g.IDColoris}|${g.IDcommande_client}`
     out.push({
+      kind: g.kind,
       IDref_fini: g.IDref_fini,
       IDColoris: g.IDColoris,
       lot: g.lot,
@@ -2705,11 +2860,14 @@ export async function findEligibleLots(commandeId: number): Promise<EligibleLot[
       coloris_reference: colorisMap.get(g.IDColoris) || '',
       nb_rolls: g.nb_rolls,
       total_metrage: g.total_metrage,
-      key: `${g.IDref_fini}|${g.IDColoris}|${g.lot}|${g.IDcommande_client}`,
+      key,
     })
   }
-  // Stable order: by client_nom then by lot
-  out.sort((a, b) => a.client_nom.localeCompare(b.client_nom) || a.lot.localeCompare(b.lot))
+  // Stable order: received before manual, then by client_nom, then by lot.
+  out.sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === 'received' ? -1 : 1
+    return a.client_nom.localeCompare(b.client_nom) || a.lot.localeCompare(b.lot)
+  })
   return out
 }
 
@@ -2739,6 +2897,18 @@ function parseSoumissionLotParams(q: any): SoumissionLotParams | null {
   return { IDref_fini: idRefFini, IDColoris: idColoris, lot, IDcommande_client: idCommandeClient }
 }
 
+/** Find the eligible candidate matching the params. Received candidates
+ *  require exact lot match; manual candidates ignore the lot (user-typed)
+ *  and match only on (ref_fini, coloris, commande_client). */
+function matchEligibleLot(eligible: EligibleLot[], params: SoumissionLotParams): EligibleLot | null {
+  return eligible.find((l) =>
+    l.IDref_fini === params.IDref_fini &&
+    l.IDColoris === params.IDColoris &&
+    l.IDcommande_client === params.IDcommande_client &&
+    (l.kind === 'manual' || l.lot === params.lot),
+  ) ?? null
+}
+
 export async function buildSoumissionLotPdfData(
   commandeId: number,
   params: SoumissionLotParams,
@@ -2746,14 +2916,14 @@ export async function buildSoumissionLotPdfData(
 ): Promise<SoumissionLotPdfData | null> {
   // 1) Verify the lot is eligible for THIS commande (defensive — also
   //    drops requests for lots not belonging to this commande).
+  //    For 'manual' candidates the lot string is user-input — any non-empty
+  //    string is accepted as long as the (ref, coloris, cc) tuple matches.
   const eligible = await findEligibleLots(commandeId)
-  const lot = eligible.find((l) =>
-    l.IDref_fini === params.IDref_fini &&
-    l.IDColoris === params.IDColoris &&
-    l.lot === params.lot &&
-    l.IDcommande_client === params.IDcommande_client,
-  )
+  const lot = matchEligibleLot(eligible, params)
   if (!lot) return null
+  // Resolve the lot string to use downstream: actual fini lot for received,
+  // user-typed for manual.
+  const lotString = lot.kind === 'manual' ? params.lot : lot.lot
 
   // 2) commande_client row → date_commande, numero, ref_client, IDadresse_livraison.
   const ccRows = await query<{
@@ -2819,13 +2989,27 @@ export async function buildSoumissionLotPdfData(
         .join(' ')
     : ''
 
+  // 7) Quantité Ml — for received lots, Σ stock_fini.metrage; for manual
+  //    (no fini yet) fall back to the matching line's planned quantite.
+  let quantiteMl = lot.total_metrage
+  if (lot.kind === 'manual') {
+    const lineRows = await query<{ quantite: number | null }>(
+      `SELECT quantite FROM ligne_commande_sous_traitant
+       WHERE IDcommande_sous_traitant = ${commandeId}
+         AND IDreference = ${lot.IDref_fini}
+         AND IDColoris = ${lot.IDColoris}
+         AND type = 2`,
+    )
+    quantiteMl = lineRows.reduce((sum, r) => sum + (Number(r.quantite) || 0), 0)
+  }
+
   return {
     numeroCommande: cc?.numero != null ? String(cc.numero) : '',
     dateSoumission: todayLongFr(),
     dateCommande: cc?.date_commande ? formatHfsqlDateFr(cc.date_commande) : '',
     dateLivraison: dlValid ? formatHfsqlDateFr(dlValid) : '',
     refCommandeClient: (cc?.ref_client ?? '').toString().trim(),
-    quantiteMl: lot.total_metrage,
+    quantiteMl,
     clientNom: lot.client_nom,
     refClient: lot.client_designation,
     refMalterre: lot.ref_malterre,
@@ -2833,7 +3017,7 @@ export async function buildSoumissionLotPdfData(
     adresseLivraison,
     expediteur,
     destinataire,
-    lot: lot.lot,
+    lot: lotString,
   }
 }
 
@@ -2897,13 +3081,9 @@ async function buildSoumissionEmailDefaults(
   params: SoumissionLotParams,
 ): Promise<EmailDefaultsPayload | null> {
   const eligible = await findEligibleLots(commandeId)
-  const lot = eligible.find((l) =>
-    l.IDref_fini === params.IDref_fini &&
-    l.IDColoris === params.IDColoris &&
-    l.lot === params.lot &&
-    l.IDcommande_client === params.IDcommande_client,
-  )
+  const lot = matchEligibleLot(eligible, params)
   if (!lot) return null
+  const lotString = lot.kind === 'manual' ? params.lot : lot.lot
 
   // Client contacts. Pre-select envoi_soumission=1 contacts; everything
   // else with a valid email goes into suggestions.
@@ -2941,10 +3121,10 @@ async function buildSoumissionEmailDefaults(
     else suggestions.push(recipient)
   }
 
-  const subject = `Soumission Lot ${lot.lot} — ${lot.ref_malterre}${lot.coloris_reference ? ` · ${lot.coloris_reference}` : ''}`
+  const subject = `Soumission Lot ${lotString} — ${lot.ref_malterre}${lot.coloris_reference ? ` · ${lot.coloris_reference}` : ''}`
   const body =
     `Bonjour,\n\n` +
-    `Veuillez trouver ci-joint la soumission du lot ${lot.lot} pour la référence ${lot.client_designation || lot.ref_malterre}${lot.coloris_reference ? ` (coloris ${lot.coloris_reference})` : ''}.\n\n` +
+    `Veuillez trouver ci-joint la soumission du lot ${lotString} pour la référence ${lot.client_designation || lot.ref_malterre}${lot.coloris_reference ? ` (coloris ${lot.coloris_reference})` : ''}.\n\n` +
     `Un échantillon est joint au document imprimé.\n\n` +
     `Cordialement,\n` +
     `ETS Malterre`
@@ -2954,7 +3134,7 @@ async function buildSoumissionEmailDefaults(
     subject,
     body,
     sousTraitantNom: lot.client_nom, // reuse the field — the email dialog displays it as contextLabel
-    numero: lot.lot,
+    numero: lotString,
   }
 }
 
@@ -3075,12 +3255,7 @@ commandesSousTraitantRouter.post('/:id/soumission/email', async (req: Request, r
     let societe = ''
     try {
       const eligible = await findEligibleLots(id)
-      const lot = eligible.find((l) =>
-        l.IDref_fini === lotParams.IDref_fini &&
-        l.IDColoris === lotParams.IDColoris &&
-        l.lot === lotParams.lot &&
-        l.IDcommande_client === lotParams.IDcommande_client,
-      )
+      const lot = matchEligibleLot(eligible, lotParams)
       societe = lot?.client_nom ?? ''
     } catch {
       // Audit field is informational; fall back to empty.

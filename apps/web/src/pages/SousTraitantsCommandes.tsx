@@ -57,6 +57,7 @@ import {
   Hourglass,
   Scissors,
   BellRing,
+  Factory,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -206,6 +207,22 @@ interface CommandeDetail {
   /** Relance date (`date_notif`, HFSQL YYYYMMDD or null). Editable in the
    *  Info tab; primary anchor for the Attente_Delai urgency colour. */
   date_notif: string | null
+  /** Set only when this sst targets Tricotage Malterre (the sister
+   *  company). Carries the mirrored TRM `commande_client` row + a
+   *  produced-rolls tally derived from stock_ecru.IDref_commande_source
+   *  pointing at this sst's lines. Null on every other ennoblisseur /
+   *  external tricoteur / confectionneur. */
+  trm_mirror: TrmMirror | null
+}
+
+interface TrmMirror {
+  IDcommande_client: number
+  numero: number | null
+  date_commande: string | null       // HFSQL YYYYMMDD
+  ref_client: string | null
+  est_soldee: number                 // 0/1
+  rolls_produced: number
+  poids_produced_kg: number
 }
 
 interface SousTraitantLite {
@@ -378,17 +395,21 @@ interface TricoteurPiecesPayload {
 // (ref_fini, coloris, lot, commande_client) group; only includes groups
 // whose (client, ref_fini) pair has designation_client.soumettre = 1.
 interface EligibleLot {
+  /** 'received' = lot string is already known from received fini rolls;
+   *  'manual' = no fini received yet, écru affectations identify the
+   *  client, user types the lot at picker time. */
+  kind: 'received' | 'manual'
   IDref_fini: number
   IDColoris: number
-  lot: string
+  lot: string                  // '' for manual
   IDcommande_client: number
   IDclient: number
   client_nom: string
   ref_malterre: string
   client_designation: string
   coloris_reference: string
-  nb_rolls: number
-  total_metrage: number
+  nb_rolls: number             // 0 for manual
+  total_metrage: number        // 0 for manual
   key: string
 }
 
@@ -784,12 +805,13 @@ export function SousTraitantsCommandes() {
   })
   const eligibleLots = soumissionEligibility?.lots ?? []
 
-  // Click handler: zero → no-op (button is hidden anyway), one → skip the
-  // picker and open the email modal directly with that lot, many → open
-  // the picker first.
+  // Click handler: zero → no-op (button is hidden anyway). A single
+  // 'received' candidate skips the picker and goes straight to the email
+  // modal; everything else (multiple candidates, or any 'manual' candidate
+  // that needs a typed lot string) routes through the picker.
   const onSoumettreClick = useCallback(() => {
     if (eligibleLots.length === 0) return
-    if (eligibleLots.length === 1) {
+    if (eligibleLots.length === 1 && eligibleLots[0].kind === 'received') {
       setSelectedSoumissionLot(eligibleLots[0])
       setSoumissionEmailOpen(true)
     } else {
@@ -1502,16 +1524,40 @@ function DetailHeader({
 }
 
 // ── Soumission Lot picker ─────────────────────────────────
-// Modelled on AdressePickerDialog (line ~3494). Shown only when 2+ lots
-// are eligible — single-lot flows skip straight to the email modal.
+// Modelled on AdressePickerDialog (line ~3494). Renders two flavours of
+// candidate:
+//   - 'received' (lot known) → click sends straight to email modal
+//   - 'manual'   (no fini yet) → expands an inline "Numéro de lot" input;
+//                                user types the lot then clicks Continuer
 function SoumissionLotPicker({
   open, lots, onClose, onSelect,
 }: {
   open: boolean
   lots: EligibleLot[]
   onClose: () => void
+  /** For manual entries the caller receives the candidate with `lot` set
+   *  to the user-typed string — the downstream URL/params machinery is
+   *  identical to the received path. */
   onSelect: (lot: EligibleLot) => void
 }) {
+  // Which manual entry is currently expanded for lot input, and the typed
+  // value. Keyed by candidate.key.
+  const [manualKey, setManualKey] = useState<string | null>(null)
+  const [manualLot, setManualLot] = useState('')
+  // Reset edit state whenever the dialog reopens.
+  useEffect(() => {
+    if (!open) { setManualKey(null); setManualLot('') }
+  }, [open])
+
+  const received = lots.filter((l) => l.kind === 'received')
+  const manual = lots.filter((l) => l.kind === 'manual')
+
+  const confirmManual = (lot: EligibleLot) => {
+    const v = manualLot.trim()
+    if (!v) return
+    onSelect({ ...lot, lot: v })
+  }
+
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
       <DialogContent className="max-w-lg space-y-4" onClose={onClose}>
@@ -1521,31 +1567,102 @@ function SoumissionLotPicker({
             Choisir un lot à soumettre
           </DialogTitle>
         </DialogHeader>
-        <div className="max-h-[60vh] overflow-y-auto space-y-2 px-1">
-          {lots.map((lot) => (
-            <button
-              key={lot.key}
-              type="button"
-              onClick={() => onSelect(lot)}
-              className="w-full text-left p-3 rounded-md border border-zinc-200 hover:border-accent hover:bg-accent/5 transition-colors"
-            >
-              <div className="flex items-baseline justify-between gap-3">
-                <div className="text-sm font-semibold text-primary truncate">
-                  Lot {lot.lot}
-                </div>
-                <div className="text-xs text-muted-foreground flex-shrink-0">
-                  {lot.client_nom}
-                </div>
+        <div className="max-h-[60vh] overflow-y-auto space-y-3 px-1">
+          {received.length > 0 && (
+            <div className="space-y-2">
+              <div className="text-[11px] uppercase tracking-wide text-muted-foreground px-1">Lots reçus</div>
+              {received.map((lot) => (
+                <button
+                  key={lot.key}
+                  type="button"
+                  onClick={() => onSelect(lot)}
+                  className="w-full text-left p-3 rounded-md border border-zinc-200 hover:border-accent hover:bg-accent/5 transition-colors"
+                >
+                  <div className="flex items-baseline justify-between gap-3">
+                    <div className="text-sm font-semibold text-primary truncate">
+                      Lot {lot.lot}
+                    </div>
+                    <div className="text-xs text-muted-foreground flex-shrink-0">
+                      {lot.client_nom}
+                    </div>
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    {lot.ref_malterre}
+                    {lot.coloris_reference ? ` · ${lot.coloris_reference}` : ''}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    {lot.nb_rolls} rouleau{lot.nb_rolls > 1 ? 'x' : ''} · {fmtNum(lot.total_metrage, 1)} Ml
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {manual.length > 0 && (
+            <div className="space-y-2">
+              <div className="text-[11px] uppercase tracking-wide text-muted-foreground px-1">
+                Saisir un lot (aucun rouleau réceptionné)
               </div>
-              <div className="text-xs text-muted-foreground mt-1">
-                {lot.ref_malterre}
-                {lot.coloris_reference ? ` · ${lot.coloris_reference}` : ''}
-              </div>
-              <div className="text-xs text-muted-foreground mt-1">
-                {lot.nb_rolls} rouleau{lot.nb_rolls > 1 ? 'x' : ''} · {fmtNum(lot.total_metrage, 1)} Ml
-              </div>
-            </button>
-          ))}
+              {manual.map((lot) => {
+                const expanded = manualKey === lot.key
+                return (
+                  <div
+                    key={lot.key}
+                    className={`p-3 rounded-md border transition-colors ${
+                      expanded ? 'border-accent bg-accent/5' : 'border-zinc-200 hover:border-accent hover:bg-accent/5'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (expanded) { setManualKey(null); setManualLot('') }
+                        else { setManualKey(lot.key); setManualLot('') }
+                      }}
+                      className="w-full text-left"
+                    >
+                      <div className="flex items-baseline justify-between gap-3">
+                        <div className="text-sm font-semibold text-primary truncate">
+                          {lot.client_nom}
+                        </div>
+                        <div className="text-xs text-muted-foreground flex-shrink-0">
+                          {lot.ref_malterre}
+                          {lot.coloris_reference ? ` · ${lot.coloris_reference}` : ''}
+                        </div>
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        Réf client : {lot.client_designation || '—'}
+                      </div>
+                    </button>
+                    {!!expanded && (
+                      <div className="mt-3 flex items-center gap-2">
+                        <input
+                          autoFocus
+                          type="text"
+                          value={manualLot}
+                          onChange={(e) => setManualLot(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') { e.preventDefault(); confirmManual(lot) }
+                            if (e.key === 'Escape') { e.preventDefault(); setManualKey(null); setManualLot('') }
+                          }}
+                          placeholder="Numéro de lot"
+                          className="flex-1 h-9 px-3 rounded-md border border-zinc-300 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-accent/50"
+                        />
+                        <Button
+                          variant="gold"
+                          size="sm"
+                          disabled={!manualLot.trim()}
+                          onClick={() => confirmManual(lot)}
+                        >
+                          Continuer
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
           {lots.length === 0 && (
             <p className="text-sm text-muted-foreground italic px-2 py-4 text-center">
               Aucun lot éligible
@@ -5293,6 +5410,34 @@ function StatusFooter({
 
 // ── Sidebar Tab: Info ──────────────────────────────────
 
+// ── TRM mirror card ────────────────────────────────────
+// Shown in the Info tab when the sst targets Tricotage Malterre (the sister
+// knitter). Status-only — Soldée / En cours derived from the mirrored
+// `commande_client.est_soldee` (server gates on IDsous_traitant=1).
+function TrmMirrorCard({ mirror }: { mirror: TrmMirror }) {
+  const soldée = mirror.est_soldee === 1
+  return (
+    <div className="p-3 rounded-lg border bg-card shadow-sm">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
+          <Factory className="h-3.5 w-3.5 text-accent" />Commande TRM
+        </span>
+        <Badge
+          variant="outline"
+          className={cn(
+            'text-[10px] font-semibold uppercase tracking-wide',
+            soldée
+              ? 'border-green-500/40 bg-green-50 text-green-700'
+              : 'border-primary/30 bg-primary/5 text-primary',
+          )}
+        >
+          {soldée ? 'Soldée' : 'En cours'}
+        </Badge>
+      </div>
+    </div>
+  )
+}
+
 function InfoTab({
   commande, isEditing,
   editDateCommande, onEditDateCommandeChange,
@@ -5335,6 +5480,11 @@ function InfoTab({
           )}
         </div>
       </div>
+
+      {/* TRM mirror — visible only when the sst targets Tricotage Malterre.
+          Surfaces the sister-company commande_client's status + produced
+          rolls without leaving the sst screen. */}
+      {!!commande.trm_mirror && <TrmMirrorCard mirror={commande.trm_mirror} />}
 
       <div className={cn('p-3 rounded-lg border bg-card shadow-sm space-y-2', isEditing && editSectionClass)}>
         <KV label="Sous-traitant" value={commande.sous_traitant_nom || '—'} />

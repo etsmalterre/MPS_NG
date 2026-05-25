@@ -39,6 +39,46 @@ Meanwhile the **Windows ODBC driver** has the opposite problem: it silently retu
 - **Recompile**: `gcc -o hfsql_bridge src/hfsql_bridge.c -I/usr/include/iodbc -liodbc -liodbcinst`
 - **Auto-reconnect**: The bridge process holds a single ODBC connection that can die after long idle periods. `query()` and `queryRaw()` detect connection-lost errors (state `[01000]`, "Connection reset by peer", etc.), kill the bridge, and retry once — no manual restart needed.
 
+## Per-table polymorphism / FK quirks
+
+Per-table footguns that are NOT cross-cutting (each only applies to a specific table or polymorphic relationship). Summarised in `CLAUDE.md` as a single pointer line; the detail lives here.
+
+### `ged` rows are polymorphic (multi-parent)
+
+A single `ged` row can be linked to multiple parents at once — e.g. a GOTS cert is shared by the fournisseur / client / sous-traitant commandes in the same chain. The discriminator is `IDtype_doc`, **not** which `IDcommande_*` columns are zero. **Never** add an `IDcommande_<other> = 0` clause to scope a query to one parent type — that silently hides shared rows (e.g. an sst-doc whose parent commande also has a sibling client commande filled in). Whitelist by `IDtype_doc` instead. Per-screen whitelists live in the route files (`commandes-fil.ts`, `commandes-sous-traitant.ts`).
+
+### Fournisseur ↔ coloris is `asso_colorisfil_frs`, NOT `colori_fil.IDfournisseur`
+
+`colori_fil` is the global catalog (ref_fil, coloris-reference); one coloris can be sold by many fournisseurs via the M:N join `asso_colorisfil_frs (IDfournisseur, IDcolori_fil)`. The legacy `colori_fil.IDfournisseur` is misleading — never read or write it. Pattern in `references-fil.ts` / `fournisseurs.ts`.
+
+### `ligne_commande_sous_traitant.IDreference` is polymorphic across 3 catalogs
+
+Same numeric ID can exist in `ref_fini`, `ref_ecru`, or another catalog. ALWAYS route by `type` SMALLINT (alias `type_kind` — `type` is a reserved word). The line stores the **output** the sst produces, NOT the input:
+
+| `type_kind` | `IDreference` resolves to | `IDColoris` resolves to | Inputs read separately |
+|---|---|---|---|
+| `2` (ennoblisseur) | `ref_fini` | `ref_fini_colori` | écru affectations on `stock_ecru.IDref_commande_affectation` |
+| `1` (tricoteur) | `ref_ecru` | `colori_ecru` | yarn via `composition_ecru WHERE IDref_ecru = …` |
+| `0` | `ref_ecru` | `colori_ecru` | — |
+
+Reference `resolveRef` in `commandes-sous-traitant.ts`. Memory [[project-sst-line-polymorphic]] has the legacy commande 8582 evidence.
+
+### `stock_fini.IDColoris` references `ref_fini_colori`, NOT `colori_fini`
+
+`colori_fini` is a junction (`IDcolori_fini`, `IDgamme_coloris`, `IDcolori_ecru`, `IDref_fini_colori`) with NO `IDColoris` column and NO `reference` column. The actual fini-coloris catalog is `ref_fini_colori` (PK `IDref_fini_colori`, label `reference`, FK `IDref_fini`) — that's what `stock_fini.IDColoris` and `ligne_commande_sous_traitant.IDColoris` reference for fini lines.
+
+### `defaut_qualite` polymorphic via `Type_Reference` + `reference`
+
+Integer discriminator (`1`=piece_production, `2`=stock_ecru) with the parent id **stringified** in `reference` (varchar-typed FK). Écru defects: `WHERE Type_Reference = 2 AND reference IN ('id1','id2',...)`. Coexists with `stock_ecru.second_choix` + `observations` — rendered together in the red `RollNotes` banner. Pattern in `commandes-sous-traitant.ts` `fetchPiecesPayload`.
+
+### `envoi_email.IDreference` polymorphic by `IDtype_doc`
+
+- `13`/`15` → `commande_sous_traitant` (bon de commande / soumission lot client)
+- `14` → `expedition`
+- `27` → étude soumission
+
+**Never** query without an `IDtype_doc IN (...)` whitelist — sst commande and expedition IDs collide. Sst-soumission convention: `IDtype_doc=15`, `notes=lot id`. More in `claude_doc/sous_traitants_status_model.md`.
+
 ## WinDev ↔ PostgreSQL (abandoned)
 
 > PostgreSQL migration was attempted but abandoned due to column casing issues. Kept for historical reference.
