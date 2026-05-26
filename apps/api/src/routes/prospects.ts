@@ -402,21 +402,41 @@ prospectsRouter.post('/:id/convert', async (req: Request, res: Response) => {
     }
 
     // The `client` table has no first-name/email/postal-address columns
-    // (those live in the `adresse` / `contact` tables) — create only the
-    // master row here. `bloqué` / `archivé` are accented identifiers, so
-    // they are left to their HFSQL default (0).
+    // (those live in the `adresse` / `contact` tables) — create the master
+    // row here, then a default `adresse` and `contact` below. `bloqué` /
+    // `archivé` are accented identifiers, so they are left to their HFSQL
+    // default (0).
     const clientNom = (p.societe.trim() || `${p.prenom} ${p.nom}`.trim() || `Prospect #${id}`).slice(0, 100)
     const tel = p.telephone.slice(0, 20)
 
+    // IDsociete = 1 (Ets Malterre) — the legacy WinDev Clients screen filters
+    // on this and hides rows where IDsociete = 0. See memory project_societe_multi_company.
+    // commentaire intentionally empty — prospect observation is not copied.
     await query(
-      `INSERT INTO client (nom, tel, IDtransporteur, commentaire, date_creation, est_visible, client_interne) ` +
-      `VALUES (${sqlText(clientNom)}, ${sqlText(tel)}, ${p.IDtransporteur}, ${sqlText(p.observation)}, '${todayHfsql()}', 1, 0)`,
+      `INSERT INTO client (nom, tel, IDtransporteur, commentaire, date_creation, est_visible, client_interne, IDsociete) ` +
+      `VALUES (${sqlText(clientNom)}, ${sqlText(tel)}, ${p.IDtransporteur}, '', '${todayHfsql()}', 1, 0, 1)`,
     )
     const createdClient = await query<Record<string, unknown>>(
       `SELECT IDclient FROM client ORDER BY IDclient DESC`,
     )
     if (createdClient.length === 0) { res.status(500).json({ error: 'Client insert failed' }); return }
     const newClientId = n(createdClient[0].IDclient)
+
+    // Default adresse — flagged as the master default. Other discriminator
+    // FKs (IDsous_traitant, IDfournisseur, IDentreprise) are 0 since this
+    // adresse belongs to a client.
+    await query(
+      `INSERT INTO adresse (IDclient, IDsous_traitant, IDfournisseur, IDentreprise, nom, adresse1, adresse2, adresse3, cp, ville, pays, commentaire, est_defaut, est_defaut_facturation, est_defaut_livraison, est_visible) ` +
+      `VALUES (${newClientId}, 0, 0, 0, ${sqlText(clientNom)}, ${sqlText(p.adresse)}, '', '', ${sqlText(p.code_postal)}, ${sqlText(p.ville)}, ${sqlText(p.pays)}, '', 1, 1, 1, 1)`,
+    )
+
+    // Default contact — carries the prospect's person name / email / phone.
+    // envoi_* flags default to 1 (BL, facture, commande) so the contact is
+    // pre-selected as a recipient by §32 email dialogs; envoi_soumission stays 0.
+    await query(
+      `INSERT INTO contact (IDclient, IDsous_traitant, IDfournisseur, IDentreprise, prenom, nom, tel, mail, commentaire, est_defaut, est_visible, envoi_bl, envoi_facture, envoi_commande, envoi_soumission) ` +
+      `VALUES (${newClientId}, 0, 0, 0, ${sqlText(p.prenom)}, ${sqlText(p.nom)}, ${sqlText(tel)}, ${sqlText(p.email)}, '', 1, 1, 1, 1, 1, 0)`,
+    )
 
     // Linking + status (3 = Terminée) use non-accented columns — safe on Linux.
     await query(

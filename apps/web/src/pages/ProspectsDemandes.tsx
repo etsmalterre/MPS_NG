@@ -85,7 +85,7 @@ const STATUS_META: Record<ProspectStatus, {
   /** Solid bg + matching border for the footer pill and list-card pill. */
   solidBg: string
 }> = {
-  1: { label: 'Nouveau', icon: Sparkles, solidBg: 'bg-blue-500 border-blue-500' },
+  1: { label: 'Nouveau', icon: Sparkles, solidBg: 'bg-primary border-primary' },
   2: { label: 'En attente', icon: Clock, solidBg: 'bg-amber-500 border-amber-500' },
   3: { label: 'Terminée', icon: CheckCircle2, solidBg: 'bg-success border-success' },
 }
@@ -378,10 +378,6 @@ export function ProspectsDemandes() {
             editEmail={editEmail} onEditEmail={setEditEmail}
             editSociete={editSociete} onEditSociete={setEditSociete}
             editTelephone={editTelephone} onEditTelephone={setEditTelephone}
-            editAdresse={editAdresse} onEditAdresse={setEditAdresse}
-            editCodePostal={editCodePostal} onEditCodePostal={setEditCodePostal}
-            editVille={editVille} onEditVille={setEditVille}
-            editPays={editPays} onEditPays={setEditPays}
             editObservation={editObservation} onEditObservation={setEditObservation}
           />
         }
@@ -397,6 +393,10 @@ export function ProspectsDemandes() {
             editIDTransporteur={editIDTransporteur} onEditIDTransporteur={setEditIDTransporteur}
             editTraite={editTraite} onEditTraite={setEditTraite}
             editNotesInterne={editNotesInterne} onEditNotesInterne={setEditNotesInterne}
+            editAdresse={editAdresse} onEditAdresse={setEditAdresse}
+            editCodePostal={editCodePostal} onEditCodePostal={setEditCodePostal}
+            editVille={editVille} onEditVille={setEditVille}
+            editPays={editPays} onEditPays={setEditPays}
             onChangeStatut={(s) => statusMut.mutate(s)}
             isChangingStatut={statusMut.isPending}
           />
@@ -724,10 +724,6 @@ function DetailMain({
   editEmail, onEditEmail,
   editSociete, onEditSociete,
   editTelephone, onEditTelephone,
-  editAdresse, onEditAdresse,
-  editCodePostal, onEditCodePostal,
-  editVille, onEditVille,
-  editPays, onEditPays,
   editObservation, onEditObservation,
 }: {
   demande: DemandeDetail | null
@@ -739,10 +735,6 @@ function DetailMain({
   editEmail: string; onEditEmail: (v: string) => void
   editSociete: string; onEditSociete: (v: string) => void
   editTelephone: string; onEditTelephone: (v: string) => void
-  editAdresse: string; onEditAdresse: (v: string) => void
-  editCodePostal: string; onEditCodePostal: (v: string) => void
-  editVille: string; onEditVille: (v: string) => void
-  editPays: string; onEditPays: (v: string) => void
   editObservation: string; onEditObservation: (v: string) => void
 }) {
   if (!hasSelection) return (
@@ -788,24 +780,6 @@ function DetailMain({
         )}
       </SectionCard>
 
-      <SectionCard title="Adresse" icon={MapPin} isEditing={isEditing}>
-        {isEditing ? (
-          <div className="grid grid-cols-3 gap-2">
-            <LabeledInput label="Adresse" value={editAdresse} onChange={onEditAdresse} className="col-span-3" />
-            <LabeledInput label="Code postal" value={editCodePostal} onChange={onEditCodePostal} />
-            <LabeledInput label="Ville" value={editVille} onChange={onEditVille} className="col-span-2" />
-            <LabeledInput label="Pays" value={editPays} onChange={onEditPays} className="col-span-3" />
-          </div>
-        ) : (
-          <div className="space-y-0.5">
-            <KV label="Adresse" value={demande.adresse} />
-            <KV label="Code postal" value={demande.code_postal} />
-            <KV label="Ville" value={demande.ville} />
-            <KV label="Pays" value={demande.pays} />
-          </div>
-        )}
-      </SectionCard>
-
       <SectionCard title="Observation" icon={StickyNote} isEditing={isEditing}>
         {isEditing ? (
           <textarea
@@ -827,7 +801,7 @@ function DetailMain({
 
 // ── Right: Sidebar ─────────────────────────────────────
 
-type SidebarTab = 'infos' | 'notes'
+type SidebarTab = 'infos' | 'adresse'
 
 function DetailSidebar({
   demande, isLoading, isEditing, transporteurs,
@@ -837,6 +811,10 @@ function DetailSidebar({
   editIDTransporteur, onEditIDTransporteur,
   editTraite, onEditTraite,
   editNotesInterne, onEditNotesInterne,
+  editAdresse, onEditAdresse,
+  editCodePostal, onEditCodePostal,
+  editVille, onEditVille,
+  editPays, onEditPays,
   onChangeStatut, isChangingStatut,
 }: {
   demande: DemandeDetail | null
@@ -849,6 +827,10 @@ function DetailSidebar({
   editIDTransporteur: number; onEditIDTransporteur: (v: number) => void
   editTraite: number; onEditTraite: (v: number) => void
   editNotesInterne: string; onEditNotesInterne: (v: string) => void
+  editAdresse: string; onEditAdresse: (v: string) => void
+  editCodePostal: string; onEditCodePostal: (v: string) => void
+  editVille: string; onEditVille: (v: string) => void
+  editPays: string; onEditPays: (v: string) => void
   onChangeStatut: (s: ProspectStatus) => void
   isChangingStatut: boolean
 }) {
@@ -865,7 +847,7 @@ function DetailSidebar({
   const transporteurOptions = transporteurs.map((t) => ({ id: t.IDtransporteur, primary: t.nom }))
   const tabs: { key: SidebarTab; label: string; icon: typeof Info }[] = [
     { key: 'infos', label: 'Infos', icon: Truck },
-    { key: 'notes', label: 'Notes', icon: StickyNote },
+    { key: 'adresse', label: 'Adresse', icon: MapPin },
   ]
 
   return (
@@ -892,71 +874,94 @@ function DetailSidebar({
         </div>
         <div className="flex-1 overflow-y-auto p-3 space-y-3 scrollbar-transparent">
           {activeTab === 'infos' && (
-            <div className={cn('rounded-lg border bg-card shadow-sm p-3', isEditing && editSectionClass)}>
-              {isEditing ? (
-                <div className="space-y-3">
-                  <LabeledInput label="Date de la demande" type="date" value={editDate} onChange={onEditDate} />
-                  <div className="space-y-1">
-                    <label className="text-xs font-medium text-muted-foreground">Transporteur</label>
-                    <PopoverSelect
-                      options={transporteurOptions}
-                      value={editIDTransporteur}
-                      onChange={onEditIDTransporteur}
-                      emptyLabel="— aucun —"
+            <>
+              <div className={cn('rounded-lg border bg-card shadow-sm p-3', isEditing && editSectionClass)}>
+                {isEditing ? (
+                  <div className="space-y-3">
+                    <LabeledInput label="Date de la demande" type="date" value={editDate} onChange={onEditDate} />
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium text-muted-foreground">Transporteur</label>
+                      <PopoverSelect
+                        options={transporteurOptions}
+                        value={editIDTransporteur}
+                        onChange={onEditIDTransporteur}
+                        emptyLabel="— aucun —"
+                      />
+                    </div>
+                    <LabeledInput label="Date d'expédition du catalogue" type="date" value={editExpeCatalogue} onChange={onEditExpeCatalogue} />
+                    <LabeledInput label="N° de suivi" value={editTrackingNumber} onChange={onEditTrackingNumber} />
+                    <label className="flex items-center gap-2 text-sm cursor-pointer select-none pt-1">
+                      <input
+                        type="checkbox"
+                        checked={!!editTraite}
+                        onChange={(e) => onEditTraite(e.target.checked ? 1 : 0)}
+                        className="h-4 w-4 rounded border-input text-accent focus:ring-2 focus:ring-ring cursor-pointer"
+                      />
+                      <span>Demande traitée</span>
+                    </label>
+                  </div>
+                ) : (
+                  <div className="space-y-0.5">
+                    <KV label="Date de la demande" value={fmtDate(demande.date)} />
+                    <KV label="Transporteur" value={demande.transporteur_nom} />
+                    <KV label="Expédition catalogue" value={fmtDate(demande.expe_catalogue)} />
+                    <KV label="N° de suivi" value={demande.tracking_number} />
+                    <KV
+                      label="Traitée"
+                      value={
+                        <Badge variant={demande.traite ? 'success' : 'secondary'} className="text-[10px] py-0">
+                          {demande.traite ? 'Oui' : 'Non'}
+                        </Badge>
+                      }
+                    />
+                    <KV
+                      label="Client"
+                      value={demande.IDclient ? (
+                        <span className="inline-flex items-center gap-1.5 text-green-600">
+                          <UserCheck className="h-3 w-3" />{demande.client_nom || `#${demande.IDclient}`}
+                        </span>
+                      ) : ''}
                     />
                   </div>
-                  <LabeledInput label="Date d'expédition du catalogue" type="date" value={editExpeCatalogue} onChange={onEditExpeCatalogue} />
-                  <LabeledInput label="N° de suivi" value={editTrackingNumber} onChange={onEditTrackingNumber} />
-                  <label className="flex items-center gap-2 text-sm cursor-pointer select-none pt-1">
-                    <input
-                      type="checkbox"
-                      checked={!!editTraite}
-                      onChange={(e) => onEditTraite(e.target.checked ? 1 : 0)}
-                      className="h-4 w-4 rounded border-input text-accent focus:ring-2 focus:ring-ring cursor-pointer"
-                    />
-                    <span>Demande traitée</span>
-                  </label>
+                )}
+              </div>
+              <div className={cn('rounded-lg border bg-card shadow-sm p-3', isEditing && editSectionClass)}>
+                <div className="flex items-center gap-2 mb-2">
+                  <StickyNote className="h-3.5 w-3.5 text-accent" />
+                  <h3 className="text-xs font-semibold">Journal</h3>
+                </div>
+                {isEditing ? (
+                  <textarea
+                    value={editNotesInterne}
+                    onChange={(e) => onEditNotesInterne(e.target.value)}
+                    rows={6}
+                    placeholder="Journal interne (non visible par le prospect)..."
+                    className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+                  />
+                ) : demande.notes_interne.trim() ? (
+                  <p className="text-sm text-muted-foreground whitespace-pre-line">{demande.notes_interne}</p>
+                ) : (
+                  <p className="text-sm text-muted-foreground italic">Aucune entrée</p>
+                )}
+              </div>
+            </>
+          )}
+          {activeTab === 'adresse' && (
+            <div className={cn('rounded-lg border bg-card shadow-sm p-3', isEditing && editSectionClass)}>
+              {isEditing ? (
+                <div className="grid grid-cols-3 gap-2">
+                  <LabeledInput label="Adresse" value={editAdresse} onChange={onEditAdresse} className="col-span-3" />
+                  <LabeledInput label="Code postal" value={editCodePostal} onChange={onEditCodePostal} />
+                  <LabeledInput label="Ville" value={editVille} onChange={onEditVille} className="col-span-2" />
+                  <LabeledInput label="Pays" value={editPays} onChange={onEditPays} className="col-span-3" />
                 </div>
               ) : (
                 <div className="space-y-0.5">
-                  <KV label="Date de la demande" value={fmtDate(demande.date)} />
-                  <KV label="Transporteur" value={demande.transporteur_nom} />
-                  <KV label="Expédition catalogue" value={fmtDate(demande.expe_catalogue)} />
-                  <KV label="N° de suivi" value={demande.tracking_number} />
-                  <KV
-                    label="Traitée"
-                    value={
-                      <Badge variant={demande.traite ? 'success' : 'secondary'} className="text-[10px] py-0">
-                        {demande.traite ? 'Oui' : 'Non'}
-                      </Badge>
-                    }
-                  />
-                  <KV
-                    label="Client"
-                    value={demande.IDclient ? (
-                      <span className="inline-flex items-center gap-1.5 text-green-600">
-                        <UserCheck className="h-3 w-3" />{demande.client_nom || `#${demande.IDclient}`}
-                      </span>
-                    ) : ''}
-                  />
+                  <KV label="Adresse" value={demande.adresse} />
+                  <KV label="Code postal" value={demande.code_postal} />
+                  <KV label="Ville" value={demande.ville} />
+                  <KV label="Pays" value={demande.pays} />
                 </div>
-              )}
-            </div>
-          )}
-          {activeTab === 'notes' && (
-            <div className={cn('rounded-lg border bg-card shadow-sm p-3', isEditing && editSectionClass)}>
-              {isEditing ? (
-                <textarea
-                  value={editNotesInterne}
-                  onChange={(e) => onEditNotesInterne(e.target.value)}
-                  rows={8}
-                  placeholder="Notes internes (non visibles par le prospect)..."
-                  className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
-                />
-              ) : demande.notes_interne.trim() ? (
-                <p className="text-sm text-muted-foreground whitespace-pre-line">{demande.notes_interne}</p>
-              ) : (
-                <p className="text-sm text-muted-foreground italic">Aucune note interne</p>
               )}
             </div>
           )}
