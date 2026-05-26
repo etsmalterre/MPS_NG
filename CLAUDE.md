@@ -61,7 +61,7 @@ MPS_NG/
 │   │       │   ├── pricing-sst.ts        # Ennoblisseur auto-pricing (see HFSQL rules)
 │   │       │   ├── pricing-trm.ts        # Tricoteur auto-pricing — PrixDeRevientTRM port
 │   │       │   └── pdf/                  # theme.ts, MalterreDocument.tsx, CommandeFournisseurPdf, CommandeSoustraitantPdf, SoumissionLotPdf, DemandeEtudeColorisPdf, SoumissionPdf, FeuilleColorisPdf
-│   │       ├── routes/                   # entreprises, fournisseurs, references-fil, stock, commandes-fil, commandes-sous-traitant, etudes-coloris, prospects, auth, permissions, user-emails
+│   │       ├── routes/                   # entreprises, fournisseurs, references-fil, stock, stock-fini, commandes-fil, commandes-sous-traitant, etudes-coloris, prospects, auth, permissions, user-emails
 │   │       └── index.ts
 │   └── web/           # React frontend
 │       └── src/
@@ -81,7 +81,7 @@ MPS_NG/
 │           │   ├── email.ts      # Types + postEmail helper for SendEmailDialog
 │           │   ├── dates.ts      # HFSQL date helpers
 │           │   └── format.ts     # fmtNum (French formatting)
-│           ├── pages/            # Dashboard, Entreprises, FilsGestion, FilsReferences, FilsStock, FilsCommandes, SousTraitantsCommandes, EtudesColoris, ProspectsDemandes, SettingsUtilisateurs
+│           ├── pages/            # Dashboard, Entreprises, FilsGestion, FilsReferences, FilsStock, FilsCommandes, SousTraitantsCommandes, EtudesColoris, FinisStock, ProspectsDemandes, SettingsUtilisateurs
 │           ├── main.tsx          # QueryClient → UserProvider → PermissionsProvider → UserPickerGate → RouterProvider
 │           └── router.tsx
 ├── claude_doc/                   # Detailed reference docs (load on demand, see below)
@@ -102,7 +102,7 @@ Mirrors the legacy WinDev main menu (top → bottom):
 5. **Transferts** — placeholder
 6. **Fils** (route `/fils/*`, renamed from `/fournisseurs/*`) — Références, Stock (table-centric), Commandes, Gestion, Prévisions
 7. **Tombé Métier** — placeholder, custom `TmRollIcon`
-8. **Finis** — Références, Stock, **Études coloris** (implemented), Tarifs, Coloris Teint, Prévisions — custom `FiniRollIcon`
+8. **Finis** — Références, **Stock** (implemented, table-centric), **Études coloris** (implemented), Tarifs, Coloris Teint, Prévisions — custom `FiniRollIcon`
 9. **Divers** — placeholder
 10. **Qualité** — placeholder
 11. **Rapports** — placeholder
@@ -139,7 +139,8 @@ Full details in `claude_doc/hfsql_odbc.md`. These are the non-negotiable rules f
 - **Avoid accents in HFSQL table names and backup folder file names** — both cause "fichier de données est déjà décrit" errors at connection time.
 - **JOIN + `CONVERT()` collapses result sets**: `SELECT a.col, CONVERT(b.text USING 'UTF-8') FROM a JOIN b WHERE …` returns **one row** instead of all matches. Split into two flat queries and merge in JS. Same shape kills `CONVERT(tel)` even single-table when `tel` is empty on some rows — read phone-like cols raw. Reference: `commandes-sous-traitant.ts` `/lookups/sous-traitants`.
 - **Reserved-word columns return uppercased**: `SELECT lcs.type FROM ligne_commande_sous_traitant lcs` returns the column key as `TYPE`, not `type`; likewise `date` comes back as `DATE` (seen on `prospect`). Always alias (`lcs.type AS type_kind`) or read case-insensitively. Affected anywhere a reserved-word column exists.
-- **Sous-traitant `commentaire` / `journal` are RTF**: read via `stripRtf()`, write via `wrapRtf()` (`rtf-utils.ts`) so the legacy WinDev app keeps reading. Plain-text round-trip — formatting lost on first MPS_NG edit. The new app surfaces `commande_sous_traitant.journal` (header) where the legacy bound the per-line `ligne_commande_sous_traitant.commentaire` to its "journal" field — line comments were migrated into the header column.
+- **`commande_sous_traitant`: `commentaire` is RTF, `journal` is plain text**: `commentaire` round-trips through `stripRtf()` / `wrapRtf()` (legacy WinDev still reads it); `journal` writes go through `sqlText()` — the 5022 RTF-wrapped rows were migrated to plain text on 2026-05-26; reads keep `stripRtf()` defensively. The new app surfaces `commande_sous_traitant.journal` where the legacy "journal" UI was wrongly bound to per-line `ligne_commande_sous_traitant.commentaire` — line comments were backfilled into the header column.
+- **Empty FK columns store `0`, not `NULL`**: HFSQL keeps integer FK columns at `0` when there's no foreign key (not NULL). Predicates like `WHERE IDligne_expedition IS NULL` silently match zero rows. Use `(col IS NULL OR col = 0)`. Bit the `stock-fini.ts` default filter; same shape on `IDligne_commande_client`, `IDcommande_donation`, `IDProprietaire`, etc.
 - **`IDsociete` partitioning**: shared tables (`client`, `commande_client`, likely `facture`/`devis`/similar — verify per table) are partitioned across the 3 Malterre companies via `IDsociete` (1=ETM, 2=TRM, 3=Confection). Legacy WinDev screens filter on it — rows with `IDsociete = 0` are **invisible** in the legacy app. Every MPS_NG INSERT must set it explicitly (= 1 for the ETM app; bridge code that writes to TRM's view sets 2). Memory: `project_societe_multi_company.md`.
 - **Per-table polymorphism / FK quirks** (`ged` multi-parent, `asso_colorisfil_frs`, lcsst `IDreference` × 3 catalogs, fini `IDColoris=ref_fini_colori`, `defaut_qualite` `Type_Reference`, `envoi_email.IDreference` by `IDtype_doc`): see `claude_doc/hfsql_odbc.md` § Per-table polymorphism / FK quirks.
 - **Ennoblisseur lines (sst, `type=2`)**: `quantite=Ml`, `prix=€/Kg` — never multiply directly; € total = `Σ(stock_ecru.poids) × prix`. `prix` auto via `pricing-sst.ts` (ports legacy `CalculTarifSST` with MATEL/ESAT multipliers). Manual entry for out-of-catalog ssts (`auto_pricing_enabled` gates). Algo: memory `project_pricing_calcultarifsst.md`.

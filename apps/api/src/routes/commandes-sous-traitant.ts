@@ -3466,15 +3466,15 @@ commandesSousTraitantRouter.post('/', async (req: Request, res: Response) => {
     const d = parsed.data
     const dateCmd = dateStr(d.date_commande)
 
-    // Wrap commentaire + journal in minimal RTF so the legacy WinDev app
-    // continues to read them.
+    // commentaire is still wrapped in minimal RTF (legacy WinDev windows
+    // outside the migrated sst commande screen may still read it as RTF).
+    // journal is plain text — the legacy screen that bound it is retired.
     const commentaireRtf = wrapRtf(d.commentaire ?? '')
-    const journalRtf = wrapRtf(d.journal ?? '')
     await query(
       `INSERT INTO commande_sous_traitant
        (IDsous_traitant, date_commande, est_soldee, commentaire, journal,
         IDadresse_sous_traitant, IDadresse_livraison, IDdossier, IDcommande_client, IDligne_commande_client)
-       VALUES (${d.IDsous_traitant}, '${dateCmd}', 0, '${esc(commentaireRtf)}', '${esc(journalRtf)}',
+       VALUES (${d.IDsous_traitant}, '${dateCmd}', 0, '${esc(commentaireRtf)}', ${sqlText(d.journal ?? '')},
                ${d.IDadresse_sous_traitant ?? 0}, ${d.IDadresse_livraison ?? 0}, 0, 0, 0)`,
     )
 
@@ -3563,7 +3563,7 @@ commandesSousTraitantRouter.put('/:id', async (req: Request, res: Response) => {
     if (d.date_commande !== undefined) sets.push(`date_commande = '${dateStr(d.date_commande)}'`)
     if (d.est_soldee !== undefined) sets.push(`est_soldee = ${d.est_soldee}`)
     if (d.commentaire !== undefined) sets.push(`commentaire = '${esc(wrapRtf(d.commentaire))}'`)
-    if (d.journal !== undefined) sets.push(`journal = '${esc(wrapRtf(d.journal))}'`)
+    if (d.journal !== undefined) sets.push(`journal = ${sqlText(d.journal)}`)
     if (d.date_notif !== undefined) sets.push(`date_notif = '${dateStr(d.date_notif)}'`)
     if (d.IDadresse_sous_traitant !== undefined) sets.push(`IDadresse_sous_traitant = ${d.IDadresse_sous_traitant}`)
     if (d.IDadresse_livraison !== undefined) sets.push(`IDadresse_livraison = ${d.IDadresse_livraison}`)

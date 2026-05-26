@@ -15,6 +15,7 @@ import { commandesSousTraitantRouter } from './routes/commandes-sous-traitant.js
 import { etudesColorisRouter } from './routes/etudes-coloris.js'
 import { prospectsRouter } from './routes/prospects.js'
 import { stockRouter } from './routes/stock.js'
+import { stockFiniRouter } from './routes/stock-fini.js'
 import { authRouter } from './routes/auth.js'
 import { permissionsRouter } from './routes/permissions.js'
 import { userEmailsRouter } from './routes/user-emails.js'
@@ -60,6 +61,7 @@ app.use('/api/commandes-sous-traitant', commandesSousTraitantRouter)
 app.use('/api/etudes-coloris', etudesColorisRouter)
 app.use('/api/prospects', prospectsRouter)
 app.use('/api/stock', stockRouter)
+app.use('/api/stock', stockFiniRouter)
 
 app.listen(PORT, () => {
   console.log(`MPS API running on port ${PORT} [${env}]`)
