@@ -3384,8 +3384,8 @@ commandesSousTraitantRouter.get('/:id/historique', async (req: Request, res: Res
       const dateSec = rawDate.split('.')[0]
       const tdid = Number(r.IDtype_doc) || 0
       const key = `email|${tdid}|${dateMin}`
-      const event = groups.get(key) ?? {
-        kind: 'email' as const,
+      const event: EmailEvent = groups.get(key) ?? {
+        kind: 'email',
         id: key,
         date: dateSec,
         type_doc_id: tdid,
@@ -3503,16 +3503,20 @@ commandesSousTraitantRouter.post('/', async (req: Request, res: Response) => {
         for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
           const numero = await nextTrmNumero()
           try {
+            // Accented column names (`archivé`, `expedié`, `envoyé_client`)
+            // are omitted: the Linux iODBC bridge can't tokenize accented
+            // identifiers, and HFSQL defaults all three to 0 — which is what
+            // we'd be setting anyway. See memory project-hfsql-bridge-accent-fix.
             await query(
               `INSERT INTO commande_client
                (IDclient, IDsociete, IDcommande_ETM, numero, date_commande,
                 IDadresse_livraison, IDadresse_facturation, IDmode_paiement, IDecheance,
-                ref_client, est_soldee, archivé, expedié, remise, donation,
-                attente_paiement, frais_port, envoyé_client, IDdossier)
+                ref_client, est_soldee, remise, donation,
+                attente_paiement, frais_port, IDdossier)
                VALUES (1, 2, ${Number(newId)}, ${numero}, '${dateCmd}',
                        1, 1, 3, 2,
-                       'commande ${Number(newId)}', 0, 0, 0, 0, 0,
-                       0, 0, 0, 0)`,
+                       'commande ${Number(newId)}', 0, 0, 0,
+                       0, 0, 0)`,
             )
             inserted = true
           } catch (e) {
