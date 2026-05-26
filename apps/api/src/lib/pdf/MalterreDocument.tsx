@@ -483,7 +483,7 @@ export interface MalterreDocumentProps {
 
 export function AddressCard({ data, stretch }: { data: AddressBlockData; stretch?: boolean }) {
   return (
-    <View style={[styles.card, stretch ? styles.cardStretch : null]}>
+    <View style={stretch ? [styles.card, styles.cardStretch] : styles.card}>
       <View style={styles.cardHeader}>
         {data.icon ? <ResolveIcon kind={data.icon} /> : null}
         <Text style={styles.cardTitle}>{data.title.toUpperCase()}</Text>
@@ -498,7 +498,7 @@ export function AddressCard({ data, stretch }: { data: AddressBlockData; stretch
 
 export function MetadataCard({ data, stretch }: { data: MetadataCardData; stretch?: boolean }) {
   return (
-    <View style={[styles.card, stretch ? styles.cardStretch : null]}>
+    <View style={stretch ? [styles.card, styles.cardStretch] : styles.card}>
       {data.items.map((item, i) => (
         <View key={i} style={styles.metaRow}>
           <View style={styles.metaIconBox}>

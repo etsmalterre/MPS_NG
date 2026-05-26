@@ -59,7 +59,7 @@ export async function query<T = Record<string, unknown>>(
  * HFSQL ODBC driver corrupts accented chars; CONVERT(field USING 'UTF-8') fixes them.
  * This does per-row CONVERT queries only for rows that actually have broken encoding.
  */
-export async function fixEncoding<T extends Record<string, unknown>>(
+export async function fixEncoding<T extends object>(
   rows: T[],
   table: string,
   idField: string,
@@ -69,8 +69,9 @@ export async function fixEncoding<T extends Record<string, unknown>>(
   const result: T[] = []
 
   for (const row of rows) {
+    const r = row as Record<string, unknown>
     const needsFix = textFields.some((f) => {
-      const val = row[f]
+      const val = r[f]
       return typeof val === 'string' && val.includes('\ufffd')
     })
 
@@ -79,17 +80,19 @@ export async function fixEncoding<T extends Record<string, unknown>>(
       continue
     }
 
-    const id = row[idField]
-    const fixed = { ...row }
+    const id = r[idField]
+    const fixed = { ...row } as T
+    const fixedRec = fixed as Record<string, unknown>
     for (const field of textFields) {
-      if (typeof row[field] === 'string' && (row[field] as string).includes('\ufffd')) {
+      const orig = r[field]
+      if (typeof orig === 'string' && orig.includes('\ufffd')) {
         try {
-          const r = await conn.query(
+          const qRes = await conn.query<Record<string, unknown>>(
             `SELECT CONVERT(${field} USING 'UTF-8') as v FROM ${table} WHERE ${idField} = ${Number(id)}`
           )
-          if (r.length > 0 && r[0].v != null) {
-            const val = r[0].v
-            ;(fixed as Record<string, unknown>)[field] =
+          if (qRes.length > 0 && qRes[0].v != null) {
+            const val = qRes[0].v
+            fixedRec[field] =
               val instanceof ArrayBuffer ? Buffer.from(val).toString('utf8') : val
           }
         } catch {

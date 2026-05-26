@@ -216,7 +216,7 @@ export async function query<T = Record<string, unknown>>(
  * Fix encoding for text/memo fields - on iODBC bridge, encoding may already be correct.
  * Keeping the same interface as hfsql.ts for compatibility.
  */
-export async function fixEncoding<T extends Record<string, unknown>>(
+export async function fixEncoding<T extends object>(
   rows: T[],
   table: string,
   idField: string,
@@ -225,8 +225,9 @@ export async function fixEncoding<T extends Record<string, unknown>>(
   const result: T[] = []
 
   for (const row of rows) {
+    const r = row as Record<string, unknown>
     const needsFix = textFields.some((f) => {
-      const val = row[f]
+      const val = r[f]
       return typeof val === 'string' && val.includes('\ufffd')
     })
 
@@ -235,16 +236,18 @@ export async function fixEncoding<T extends Record<string, unknown>>(
       continue
     }
 
-    const id = row[idField]
-    const fixed = { ...row }
+    const id = r[idField]
+    const fixed = { ...row } as T
+    const fixedRec = fixed as Record<string, unknown>
     for (const field of textFields) {
-      if (typeof row[field] === 'string' && (row[field] as string).includes('\ufffd')) {
+      const orig = r[field]
+      if (typeof orig === 'string' && orig.includes('\ufffd')) {
         try {
-          const r = await query<{ v: string }>(
+          const qRes = await query<{ v: string }>(
             `SELECT CONVERT(${field} USING 'UTF-8') as v FROM ${table} WHERE ${idField} = ${Number(id)}`
           )
-          if (r.length > 0 && r[0].v != null) {
-            ;(fixed as Record<string, unknown>)[field] = r[0].v
+          if (qRes.length > 0 && qRes[0].v != null) {
+            fixedRec[field] = qRes[0].v
           }
         } catch {
           // keep original value if CONVERT fails

@@ -10,7 +10,7 @@ import { platform } from 'os'
 
 type QueryFn = <T = Record<string, unknown>>(sql: string, params?: (string | number | null)[]) => Promise<T[]>
 type QueryRawFn = (sql: string) => Promise<Record<string, unknown>[]>
-type FixEncodingFn = <T extends Record<string, unknown>>(rows: T[], table: string, idField: string, textFields: string[]) => Promise<T[]>
+type FixEncodingFn = <T extends object>(rows: T[], table: string, idField: string, textFields: string[]) => Promise<T[]>
 type CloseConnectionFn = () => Promise<void>
 
 let _query: QueryFn
