@@ -2088,6 +2088,8 @@ interface EmailDefaultsPayload {
   body: string
   sousTraitantNom: string
   numero: string
+  /** Pre-filled Cc addresses (the dialog hydrates its Cc field from this). */
+  cc?: string[]
 }
 
 async function buildEmailDefaults(id: number): Promise<EmailDefaultsPayload | null> {
@@ -3184,6 +3186,34 @@ async function buildSoumissionEmailDefaults(
     else suggestions.push(recipient)
   }
 
+  // Auto-Cc the commande's sous-traitant contact(s) flagged for soumission
+  // (contact.envoi_soumission = 1, linked via contact.IDsous_traitant). The
+  // ennoblisseur wants a copy of every soumission sent to the client on their
+  // behalf. Skip addresses already in the "to" list.
+  const cc: string[] = []
+  const stRows = await query<{ IDsous_traitant: number | null }>(
+    `SELECT IDsous_traitant FROM commande_sous_traitant WHERE IDcommande_sous_traitant = ${commandeId}`,
+  )
+  const idSt = n((stRows[0] as any)?.IDsous_traitant)
+  if (idSt > 0) {
+    const stContacts = await query<{
+      IDcontact: number; mail: string | null; envoi_soumission: number | null; est_visible: number | null
+    }>(
+      `SELECT IDcontact, mail, envoi_soumission, est_visible
+       FROM contact WHERE IDsous_traitant = ${idSt} AND envoi_soumission = 1`,
+    )
+    const fixedSt = await fixEncoding(stContacts as any[], 'contact', 'IDcontact', ['mail'])
+    for (const c of fixedSt as any[]) {
+      if (c.est_visible === 0) continue
+      const raw = (c.mail ?? '').toString().trim()
+      if (!raw || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) continue
+      const key = raw.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      cc.push(raw)
+    }
+  }
+
   const subject = `Soumission Lot ${lotString} — ${lot.ref_malterre}${lot.coloris_reference ? ` · ${lot.coloris_reference}` : ''}`
   const body =
     `Bonjour,\n\n` +
@@ -3198,6 +3228,7 @@ async function buildSoumissionEmailDefaults(
     body,
     sousTraitantNom: lot.client_nom, // reuse the field — the email dialog displays it as contextLabel
     numero: lotString,
+    cc: cc.length > 0 ? cc : undefined,
   }
 }
 
