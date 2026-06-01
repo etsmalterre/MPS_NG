@@ -793,6 +793,14 @@ commandesFilRouter.put('/:id', async (req: Request, res: Response) => {
 
     await query(`UPDATE commande_fil SET ${sets.join(', ')} WHERE IDcommande_fil = ${id}`)
 
+    // Closing the commande (etat = 1) must close its lines too — a terminée
+    // commande can't carry an "en cours" line. The line-level auto-close
+    // (maybeAutoCloseCommande) only runs the other direction, so the manual
+    // "Clôturer" toggle used to leave lines at etat = 0.
+    if (d.etat === 1) {
+      await query(`UPDATE ref_fil_commande SET etat = 1 WHERE IDcommande_fil = ${id} AND etat = 0`)
+    }
+
     const rows = await query<CommandeFil>(`SELECT * FROM commande_fil WHERE IDcommande_fil = ${id}`)
     if (rows.length === 0) { res.status(404).json({ error: 'Commande not found' }); return }
     const fixed = await fixEncoding(rows, 'commande_fil', 'IDcommande_fil', ['commentaire', 'journal'])

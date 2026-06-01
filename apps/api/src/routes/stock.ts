@@ -137,6 +137,114 @@ stockRouter.get('/fil', async (req: Request, res: Response) => {
   }
 })
 
+// GET /api/stock/fil/etat?ref_fil=X&colori_fil=Y
+// Yarn-stock summary for one (ref_fil, colori_fil): en stock / commandé /
+// besoin / disponible — backs the "État des stocks de fil" dashboard widget.
+// MUST be declared before '/fil/:id' so "etat" isn't captured as an id.
+stockRouter.get('/fil/etat', async (req: Request, res: Response) => {
+  try {
+    const refFil = parseInt(String(req.query.ref_fil ?? ''), 10)
+    const coloriFil = parseInt(String(req.query.colori_fil ?? ''), 10)
+    if (!Number.isFinite(refFil) || refFil <= 0 || !Number.isFinite(coloriFil) || coloriFil <= 0) {
+      res.status(400).json({ error: 'ref_fil and colori_fil are required' }); return
+    }
+
+    // En stock — physical on-hand rolls (stock > 0), with their source
+    // fournisseur. `terminé` is accented (bridge can't tokenize it in WHERE);
+    // consumed rolls carry stock=0 so `stock > 0` already excludes them.
+    const stockRows = await query<{ lot: string | null; stock: number | null; IDfournisseur: number }>(
+      `SELECT lot, stock, IDfournisseur FROM stock_fil
+       WHERE IDref_fil = ${refFil} AND IDcolori_fil = ${coloriFil} AND stock > 0
+       ORDER BY stock DESC`,
+    )
+    const en_stock = stockRows.reduce((s, r) => s + (Number(r.stock) || 0), 0)
+    const nb_lots = stockRows.length
+
+    // Commandé — incoming order lines not yet received (etat = 0). The
+    // fournisseur lives on the commande_fil header, not the line.
+    const cmdRows = await query<{ IDcommande_fil: number; quantite: number | null }>(
+      `SELECT IDcommande_fil, quantite FROM ref_fil_commande
+       WHERE IDref_fil = ${refFil} AND IDcolori_fil = ${coloriFil} AND etat = 0
+       ORDER BY IDcommande_fil DESC`,
+    )
+    const commande = cmdRows.reduce((s, r) => s + (Number(r.quantite) || 0), 0)
+    const nb_commandes = cmdRows.length
+    const cmdIds = Array.from(new Set(cmdRows.map((r) => Number(r.IDcommande_fil)).filter((x) => x > 0)))
+    const cmdFournisseur = new Map<number, number>()
+    if (cmdIds.length > 0) {
+      const headerRows = await query<{ IDcommande_fil: number; IDfournisseur: number }>(
+        `SELECT IDcommande_fil, IDfournisseur FROM commande_fil WHERE IDcommande_fil IN (${cmdIds.join(',')})`,
+      )
+      for (const h of headerRows) cmdFournisseur.set(Number(h.IDcommande_fil), Number(h.IDfournisseur) || 0)
+    }
+
+    // Resolve fournisseur names with a flat query + fixEncoding (names are
+    // accented; a JOIN + CONVERT would collapse the result set on the bridge).
+    const frsIds = Array.from(new Set([
+      ...stockRows.map((r) => Number(r.IDfournisseur)).filter((x) => x > 0),
+      ...Array.from(cmdFournisseur.values()).filter((x) => x > 0),
+    ]))
+    const frsName = new Map<number, string>()
+    if (frsIds.length > 0) {
+      const frsRows = await query<{ IDfournisseur: number; nom: string | null }>(
+        `SELECT IDfournisseur, nom FROM fournisseur WHERE IDfournisseur IN (${frsIds.join(',')})`,
+      )
+      for (const f of await fixEncoding(frsRows as any[], 'fournisseur', 'IDfournisseur', ['nom'])) {
+        frsName.set(Number((f as any).IDfournisseur), ((f as any).nom ?? '').toString().trim())
+      }
+    }
+
+    const en_stock_rows = stockRows.map((r) => ({
+      lot: (r.lot ?? '').toString().trim() || '—',
+      fournisseur: frsName.get(Number(r.IDfournisseur)) || '—',
+      kg: Number(r.stock) || 0,
+    }))
+    const commande_rows = cmdRows.map((r) => ({
+      commande: Number(r.IDcommande_fil) || 0,
+      fournisseur: frsName.get(cmdFournisseur.get(Number(r.IDcommande_fil)) ?? 0) || '—',
+      kg: Number(r.quantite) || 0,
+    }))
+
+    // Besoin — yarn affected to OPEN tricoteur orders. asso_fil_lignecmdsst links
+    // a stock_fil roll → a tricoteur sst line; scope to commandes est_soldee = 0.
+    // All-ASCII columns, no CONVERT → the JOIN is bridge-safe. Lots are ASCII.
+    const besoinRows = await query<{ quantite: number | null; lot: string | null; cmd_sst: number }>(
+      `SELECT a.quantite, sf.lot AS lot, cst.IDcommande_sous_traitant AS cmd_sst
+       FROM asso_fil_lignecmdsst a
+       JOIN stock_fil sf ON a.IDstock_fil = sf.IDstock_fil
+       JOIN ligne_commande_sous_traitant lcs ON a.IDligne_commande_sous_traitant = lcs.IDligne_commande_sous_traitant
+       JOIN commande_sous_traitant cst ON lcs.IDcommande_sous_traitant = cst.IDcommande_sous_traitant
+       WHERE sf.IDref_fil = ${refFil} AND sf.IDcolori_fil = ${coloriFil} AND cst.est_soldee = 0
+       ORDER BY a.quantite DESC`,
+    )
+    const besoin_rows = besoinRows.map((r) => ({
+      lot: (r.lot ?? '').toString().trim() || '—',
+      commande_sst: Number(r.cmd_sst) || 0,
+      kg: Number(r.quantite) || 0,
+    }))
+    const besoin = besoin_rows.reduce((s, r) => s + r.kg, 0)
+    const nb_affectations = besoin_rows.length
+
+    res.json({
+      ref_fil: refFil,
+      colori_fil: coloriFil,
+      en_stock,
+      nb_lots,
+      en_stock_rows,
+      commande,
+      nb_commandes,
+      commande_rows,
+      besoin,
+      nb_affectations,
+      besoin_rows,
+      disponible: en_stock + commande - besoin,
+    })
+  } catch (err) {
+    console.error('Error computing fil etat:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // GET /api/stock/fil/:id - Single stock_fil row + has_certif flags
 stockRouter.get('/fil/:id', async (req: Request, res: Response) => {
   try {
