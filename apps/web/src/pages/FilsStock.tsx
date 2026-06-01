@@ -32,6 +32,7 @@ import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-selec
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
 import { apiFetch, API_URL } from '@/lib/api'
+import { fmtNum } from '@/lib/format'
 import { useHasPermission } from '@/contexts/PermissionsContext'
 
 // ── Types ──────────────────────────────────────────────
@@ -207,6 +208,10 @@ export function FilsStock() {
     setSort((prev) => (prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }))
   }, [])
 
+  // Totalizer over the currently-visible (filtered) rows
+  const lotCount = filteredSorted.length
+  const totalStock = filteredSorted.reduce((sum, r) => sum + (r.stock ?? 0), 0)
+
   // Drawer dirty tracking — populated by the drawer via refs.
   const [drawerDirty, setDrawerDirty] = useState(false)
   const drawerSaveRef = useRef<() => Promise<void>>(async () => {})
@@ -364,6 +369,21 @@ export function FilsStock() {
           </>
         )}
       </div>
+
+      {/* Totalizer — standalone summary bar, detached from the table */}
+      {!isLoading && !isError && filteredSorted.length > 0 && (
+        <div className="flex-shrink-0 flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-zinc-100/80 shadow-sm px-4 py-2.5">
+          <div className="flex items-center gap-2 text-sm">
+            <Boxes className="h-4 w-4 text-accent" />
+            <span className="font-semibold">{lotCount}</span>
+            <span className="text-muted-foreground">lot{lotCount > 1 ? 's' : ''}</span>
+          </div>
+          <div className="flex items-baseline gap-2">
+            <span className="text-xs uppercase tracking-wide text-muted-foreground">Stock total</span>
+            <span className="text-base font-bold tabular-nums">{fmtNum(totalStock, 1)} kg</span>
+          </div>
+        </div>
+      )}
 
       <StockDetailDrawer
         id={selectedId}
