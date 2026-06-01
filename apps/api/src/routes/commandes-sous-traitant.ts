@@ -2556,18 +2556,34 @@ async function logEnvoiEmails(
 ): Promise<void> {
   if (recipients.length === 0) return
   const ts = nowHfsqlDatetime()
-  const soc = esc(societe || '')
-  const notesEsc = esc(notes || '')
   for (const raw of recipients) {
-    const addr = esc(String(raw).trim())
+    const addr = String(raw).trim()
     if (!addr) continue
     try {
-      await query(
-        `INSERT INTO envoi_email
-           (DATE, adresse, société, IDreference, invalidé, notes, IDtype_doc)
-         VALUES
-           ('${ts}', '${addr}', '${soc}', ${idReference}, 0, '${notesEsc}', ${idTypeDoc})`,
-      )
+      if (IS_WINDOWS) {
+        await query(
+          `INSERT INTO envoi_email
+             (DATE, adresse, société, IDreference, invalidé, notes, IDtype_doc)
+           VALUES
+             ('${ts}', ${sqlText(addr)}, ${sqlText(societe || '')}, ${idReference}, 0, ${sqlText(notes || '')}, ${idTypeDoc})`,
+        )
+      } else {
+        // Linux iODBC bridge can't tokenize the accented identifiers
+        // `société`/`invalidé` — naming them throws [HY090] ("Unexpected word")
+        // and the row is never written, while the email still goes out. That's
+        // how soumissions silently failed to flip the phase to "soumis" and
+        // never appeared in the historique (bon-de-commande logging too).
+        // Omit both columns: HFSQL zero-fills `invalidé` (= 0 = active, what the
+        // soumis-check wants) and leaves `société` empty (display-only).
+        // Validated against the prod bridge. Values go through sqlText() so
+        // accented input still survives the bridge.
+        await query(
+          `INSERT INTO envoi_email
+             (DATE, adresse, IDreference, notes, IDtype_doc)
+           VALUES
+             ('${ts}', ${sqlText(addr)}, ${idReference}, ${sqlText(notes || '')}, ${idTypeDoc})`,
+        )
+      }
     } catch (e) {
       console.error(`envoi_email log failed (${idTypeDoc}/${idReference}/${addr}):`, (e as Error).message)
     }
@@ -3507,15 +3523,19 @@ commandesSousTraitantRouter.post('/', async (req: Request, res: Response) => {
             // are omitted: the Linux iODBC bridge can't tokenize accented
             // identifiers, and HFSQL defaults all three to 0 — which is what
             // we'd be setting anyway. See memory project-hfsql-bridge-accent-fix.
+            // `commentaire` mirrors the sst header comment onto the TRM
+            // bon-de-commande comment (plain text — the legacy TRM order
+            // window reads commande_client.commentaire as plain; sqlText keeps
+            // accents bridge-safe). The sst side is the source of truth.
             await query(
               `INSERT INTO commande_client
                (IDclient, IDsociete, IDcommande_ETM, numero, date_commande,
                 IDadresse_livraison, IDadresse_facturation, IDmode_paiement, IDecheance,
-                ref_client, est_soldee, remise, donation,
+                ref_client, commentaire, est_soldee, remise, donation,
                 attente_paiement, frais_port, IDdossier)
                VALUES (1, 2, ${Number(newId)}, ${numero}, '${dateCmd}',
                        1, 1, 3, 2,
-                       'commande ${Number(newId)}', 0, 0, 0,
+                       'commande ${Number(newId)}', ${sqlText(d.commentaire ?? '')}, 0, 0, 0,
                        0, 0, 0)`,
             )
             inserted = true
@@ -3574,21 +3594,30 @@ commandesSousTraitantRouter.put('/:id', async (req: Request, res: Response) => {
       `UPDATE commande_sous_traitant SET ${sets.join(', ')} WHERE IDcommande_sous_traitant = ${id}`,
     )
 
-    // TRM mirror: sync `date_commande` only (Tricotage Malterre commandes).
-    // est_soldee, addresses, and commentaire stay manual (no business case
-    // yet; bidirectional sync is deferred).
+    // TRM mirror sync (Tricotage Malterre commandes): keep the TRM
+    // commande_client in step with the sst header for the fields the user
+    // expects to be linked — `date_commande` and the bon-de-commande comment
+    // (`commande_client.commentaire`). The sst side is the source of truth, so
+    // sst edits overwrite the mirror. commentaire is written plain (the legacy
+    // TRM order window reads it as plain text) via sqlText for accent-safe
+    // bridge transport. est_soldee/addresses still stay manual.
     let mirrorStatus: 'updated' | 'skipped' | 'failed' | undefined
     let mirrorError: string | undefined
-    if (d.date_commande !== undefined && (await isTricotageMalterreSst(id))) {
+    const wantsMirrorSync = d.date_commande !== undefined || d.commentaire !== undefined
+    if (wantsMirrorSync && (await isTricotageMalterreSst(id))) {
       try {
         const mirrorId = await getTrmMirror(id)
         if (mirrorId == null) {
           mirrorStatus = 'skipped'
         } else {
-          await query(
-            `UPDATE commande_client SET date_commande = '${dateStr(d.date_commande)}'
-             WHERE IDcommande_client = ${mirrorId}`,
-          )
+          const mSets: string[] = []
+          if (d.date_commande !== undefined) mSets.push(`date_commande = '${dateStr(d.date_commande)}'`)
+          if (d.commentaire !== undefined) mSets.push(`commentaire = ${sqlText(d.commentaire)}`)
+          if (mSets.length > 0) {
+            await query(
+              `UPDATE commande_client SET ${mSets.join(', ')} WHERE IDcommande_client = ${mirrorId}`,
+            )
+          }
           mirrorStatus = 'updated'
         }
       } catch (e: any) {
@@ -3990,6 +4019,10 @@ interface LineContext {
   commandeId: number
   /** The line's IDreference column — it's an IDref_fini. */
   IDref_fini: number
+  /** The line's IDColoris — for a type=2 ennoblisseur line this IS the
+   *  intended ref_fini_colori of the produced fini. Authoritative coloris
+   *  for rolls received against this line (stock_fini.IDColoris). */
+  IDColoris: number
   /** The IDref_ecru that ref_fini maps to (via ref_fini.IDref_ecru). Used
    *  to filter compatible écru rolls for the drawer. */
   IDref_ecru: number
@@ -4007,8 +4040,9 @@ async function loadEnnoblisseurLineContext(
   const lineRows = await query<{
     IDcommande_sous_traitant: number
     IDreference: number | null
+    IDColoris: number | null
   }>(
-    `SELECT IDcommande_sous_traitant, IDreference
+    `SELECT IDcommande_sous_traitant, IDreference, IDColoris
      FROM ligne_commande_sous_traitant
      WHERE IDligne_commande_sous_traitant = ${ligneId}`,
   )
@@ -4016,6 +4050,7 @@ async function loadEnnoblisseurLineContext(
   const line = lineRows[0] as any
   if (Number(line.IDcommande_sous_traitant) !== commandeId) return null
   const IDref_fini = Number(line.IDreference) || 0
+  const IDColoris = Number(line.IDColoris) || 0
 
   // Resolve the écru ref via ref_fini.IDref_ecru — that's the ref the
   // ennoblisseur receives (greige rolls of that ecru ref are dyed/finished
@@ -4035,7 +4070,7 @@ async function loadEnnoblisseurLineContext(
   )
   const IDsous_traitant = Number((sst[0] as any)?.IDsous_traitant) || 0
 
-  return { commandeId, IDref_fini, IDref_ecru, IDsous_traitant }
+  return { commandeId, IDref_fini, IDColoris, IDref_ecru, IDsous_traitant }
 }
 
 /** Create a `suivilot` row for a (ligne, lot) pair.
@@ -5421,12 +5456,15 @@ commandesSousTraitantRouter.post(
       }
       const d = parsed.data
 
-      // If a source écru roll is referenced, sanity check it points at this
-      // line and inherit its IDcolori_ecru into the new stock_fini's
-      // IDColoris (the dyed roll keeps the écru's coloris designation —
-      // simpler and avoids the stock_fini.IDColoris-vs-colori_fini
-      // mismatch in the legacy schema).
-      let inheritedIDColoris = d.IDColoris ?? 0
+      // stock_fini.IDColoris is the produced fini's coloris (a ref_fini_colori).
+      // The authoritative source is the LINE's IDColoris (the ennoblisseur was
+      // ordered to dye into that coloris) — NOT the source écru's IDcolori_ecru,
+      // which lives in a different id space (colori_ecru). The old code inherited
+      // IDcolori_ecru here, producing rows whose IDColoris resolved to a bogus
+      // cross-referenced ref_fini_colori (wrong coloris in Stock Finis + the
+      // Soumission Lot picker). A body-supplied IDColoris (>0) still wins as an
+      // explicit override; otherwise default to the line's coloris.
+      const inheritedIDColoris = (d.IDColoris && d.IDColoris > 0) ? d.IDColoris : ctx.IDColoris
       // Inherit the source écru's client reservation. When the écru was
       // affected with `IDligne_commande_client > 0` (e.g. reserved for
       // "BONNE NOUVELLE"), the dyed roll keeps the same reservation so
@@ -5435,10 +5473,9 @@ commandesSousTraitantRouter.post(
       if (d.IDstock_ecru && d.IDstock_ecru > 0) {
         const verify = await query<{
           IDref_commande_affectation: number | null
-          IDcolori_ecru: number | null
           IDligne_commande_client: number | null
         }>(
-          `SELECT IDref_commande_affectation, IDcolori_ecru, IDligne_commande_client
+          `SELECT IDref_commande_affectation, IDligne_commande_client
            FROM stock_ecru WHERE IDstock_ecru = ${d.IDstock_ecru}`,
         )
         if (verify.length === 0) {
@@ -5447,9 +5484,6 @@ commandesSousTraitantRouter.post(
         const aff = Number((verify[0] as any).IDref_commande_affectation) || 0
         if (aff !== ligneId) {
           res.status(400).json({ error: 'Source ecru is not affected to this line' }); return
-        }
-        if (!inheritedIDColoris) {
-          inheritedIDColoris = Number((verify[0] as any).IDcolori_ecru) || 0
         }
         inheritedLcc = Number((verify[0] as any).IDligne_commande_client) || 0
       }

@@ -1634,12 +1634,24 @@ async function logEnvoiEmails(
     const addr = esc(String(raw).trim())
     if (!addr) continue
     try {
-      await query(
-        `INSERT INTO envoi_email
-           (DATE, adresse, société, IDreference, invalidé, notes, IDtype_doc)
-         VALUES
-           ('${ts}', '${addr}', '${soc}', ${idReference}, 0, '', ${idTypeDoc})`,
-      )
+      if (IS_WINDOWS) {
+        await query(
+          `INSERT INTO envoi_email
+             (DATE, adresse, société, IDreference, invalidé, notes, IDtype_doc)
+           VALUES
+             ('${ts}', '${addr}', '${soc}', ${idReference}, 0, '', ${idTypeDoc})`,
+        )
+      } else {
+        // Linux iODBC bridge rejects the accented identifiers `société`/
+        // `invalidé` ([HY090]) — omit them (HFSQL defaults invalidé=0=active,
+        // société empty). Same fix as logEnvoiEmails in commandes-sous-traitant.
+        await query(
+          `INSERT INTO envoi_email
+             (DATE, adresse, IDreference, notes, IDtype_doc)
+           VALUES
+             ('${ts}', '${addr}', ${idReference}, '', ${idTypeDoc})`,
+        )
+      }
     } catch (e) {
       console.error(`envoi_email log failed (${idTypeDoc}/${idReference}/${addr}):`, (e as Error).message)
     }
