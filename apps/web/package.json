@@ -11,7 +11,7 @@
     "dev:3004": "cross-env VITE_API_URL=http://localhost:8084/api vite --port 3004",
     "dev:3005": "cross-env VITE_API_URL=http://localhost:8085/api vite --port 3005",
     "dev:3006": "cross-env VITE_API_URL=http://localhost:8086/api vite --port 3006",
-    "build": "tsc -b && vite build",
+    "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
