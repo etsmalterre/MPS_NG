@@ -182,11 +182,18 @@ export function FilsStock() {
 
   const filteredSorted = useMemo(() => {
     let out = rows ?? []
-    const q = searchQuery.trim().toLowerCase()
-    if (q) {
+    // Split the query on whitespace and require EVERY term to match SOME
+    // column (AND across terms, OR across columns). This lets one search combine
+    // criteria from different columns — e.g. "1/34 chanvre ecru" matches a row
+    // whose ref_fil is "1/34 chanvre" AND whose coloris is "ecru". A single
+    // term behaves exactly as the old substring search.
+    const terms = searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    if (terms.length > 0) {
       out = out.filter((r) => {
-        const fields = [r.ref_fil, r.colori_reference, r.lot, r.lot_frs, r.emplacement, r.fournisseur_nom, r.commentaire]
-        return fields.some((f) => f && f.toLowerCase().includes(q))
+        const haystacks = [r.ref_fil, r.colori_reference, r.lot, r.lot_frs, r.emplacement, r.fournisseur_nom, r.commentaire]
+          .filter((f): f is string => !!f)
+          .map((f) => f.toLowerCase())
+        return terms.every((t) => haystacks.some((h) => h.includes(t)))
       })
     }
     out = [...out].sort((a, b) => {
