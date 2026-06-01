@@ -19,8 +19,10 @@ import { cn } from '@/lib/utils'
 
 export function Dashboard() {
   return (
-    <div className="animate-fade-in w-full lg:w-1/2">
-      <FilStockEtatWidget />
+    <div className="animate-fade-in -m-4 lg:-m-6 flex-1 min-h-0 bg-muted/70 p-4 lg:p-6">
+      <div className="w-full lg:w-1/2">
+        <FilStockEtatWidget />
+      </div>
     </div>
   )
 }
@@ -76,8 +78,8 @@ function FilStockEtatWidget() {
   return (
     <RTooltip.Provider delayDuration={120} skipDelayDuration={400}>
     <Card className="card-premium overflow-hidden">
-      {/* Gold gradient header band */}
-      <div className="flex items-center gap-3 border-b border-gold/20 bg-gradient-to-r from-gold/25 via-gold/10 to-transparent px-5 py-4">
+      {/* Gold header band */}
+      <div className="flex items-center gap-3 border-b border-gold/20 bg-gold/25 px-5 py-4">
         <div className="icon-box-gold h-11 w-11 flex items-center justify-center">
           <BobineIcon className="h-[24px] w-[24px]" />
         </div>
