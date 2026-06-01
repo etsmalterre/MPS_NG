@@ -2603,7 +2603,10 @@ function PiecesDrawer({
   const [showBatchReprise, setShowBatchReprise] = useState(false)
   const lastSelectedFiniIdRef = useRef<number | null>(null)
 
-  const ecruLinked = data?.ecruLinked ?? []
+  const ecruLinked = useMemo(
+    () => (data?.ecruLinked ?? []).slice().sort(byNumeroAsc),
+    [data?.ecruLinked],
+  )
 
   const handleEcruClick = useCallback((id: number, shiftKey: boolean) => {
     const ids = ecruLinked.map((r) => r.IDstock_ecru)
@@ -2631,7 +2634,10 @@ function PiecesDrawer({
     lastSelectedEcruIdRef.current = id
   }, [ecruLinked])
   const ecruAvailable = data?.ecruAvailable ?? []
-  const finiReceived = data?.finiReceived ?? []
+  const finiReceived = useMemo(
+    () => (data?.finiReceived ?? []).slice().sort(byNumeroAsc),
+    [data?.finiReceived],
+  )
 
   // Only "En reprise" rolls are selectable for the reprendre batch.
   const finiReprisableIds = useMemo<number[]>(
@@ -4151,6 +4157,13 @@ type BatchReceptionProps = {
   | { mode: 'reprise'; finiRolls: StockFiniLite[]; ecruRolls?: undefined }
 )
 
+// Natural ascending comparator by roll numéro — "3377/1, 3377/2, 3377/22"
+// (numeric collation handles the /N suffix, not lexicographic). Shared by the
+// reception dialog, the Affectés list, and the Réception list.
+function byNumeroAsc(a: { numero: string | null }, b: { numero: string | null }): number {
+  return (a.numero ?? '').localeCompare(b.numero ?? '', undefined, { numeric: true, sensitivity: 'base' })
+}
+
 function BatchReceptionDialog(props: BatchReceptionProps) {
   const { commandeId, ligne, onClose, onSuccess } = props
   const isReprise = props.mode === 'reprise'
@@ -4166,7 +4179,7 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
   // reprise mode we iterate over the existing fini rolls and PATCH them.
   // The wizard, sticky-lot carryover, and submit progress all key on the
   // same "row id" (écru id for create, fini id for reprise).
-  const rolls: Array<{ id: number; numero: string | null; lot: string | null; poidsRef: number | null }> =
+  const rolls: Array<{ id: number; numero: string | null; lot: string | null; poidsRef: number | null }> = (
     isReprise
       ? finiRolls.map((r) => ({
           id: r.IDstock_fini, numero: r.numero, lot: r.lot, poidsRef: Number(r.poids) || null,
@@ -4174,6 +4187,7 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
       : ecruRolls.map((r) => ({
           id: r.IDstock_ecru, numero: r.numero, lot: r.lot, poidsRef: Number(r.poids) || null,
         }))
+  ).sort(byNumeroAsc)
 
   // Référence fini and Magasin are no longer user-editable here; both
   // default once and apply to the whole batch. IDref_fini is taken from
