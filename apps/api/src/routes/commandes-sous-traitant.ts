@@ -5684,8 +5684,8 @@ commandesSousTraitantRouter.patch(
       // Verify the row belongs to this line — symmetric with the DELETE
       // handler. We don't need the downstream-usage guard here because
       // editing notes never breaks an expedition / commande client / etc.
-      const verify = await query<{ IDref_commande_source: number | null }>(
-        `SELECT IDref_commande_source FROM stock_fini WHERE IDstock_fini = ${stockFiniId}`,
+      const verify = await query<{ IDref_commande_source: number | null; lot: string | null }>(
+        `SELECT IDref_commande_source, lot FROM stock_fini WHERE IDstock_fini = ${stockFiniId}`,
       )
       if (verify.length === 0) { res.status(404).json({ error: 'Stock fini not found' }); return }
       if (Number(verify[0].IDref_commande_source) !== ligneId) {
@@ -5703,6 +5703,23 @@ commandesSousTraitantRouter.patch(
       if (setParts.length > 0) {
         await query(`UPDATE stock_fini SET ${setParts.join(', ')} WHERE IDstock_fini = ${stockFiniId}`)
       }
+
+      // Reprise sync: when a roll's état is reset (En reprise 2 → En contrôle 1),
+      // mirror it onto the lot-level status (suivilot.IDetatLot). The legacy
+      // Qualité screen reads suivilot.IDetatLot — without this the lot stays
+      // stuck "en reprise" after the user reprend the rolls (the reported bug).
+      // The reprise dialog sends lot + IDetat_stock_fini together; fall back to
+      // the roll's existing lot when only the état changed.
+      if (d.IDetat_stock_fini === 1 || d.IDetat_stock_fini === 2) {
+        const suiviLot = ((d.lot !== undefined ? d.lot : verify[0].lot) ?? '').toString().trim()
+        if (suiviLot) {
+          await query(
+            `UPDATE suivilot SET IDetatLot = ${d.IDetat_stock_fini}
+             WHERE IDligne_commande_sous_traitant = ${ligneId} AND lot = ${sqlText(suiviLot)}`,
+          )
+        }
+      }
+
       res.json(await fetchPiecesPayload(ctx, ligneId))
     } catch (err) {
       console.error('Error updating stock_fini notes:', err)
