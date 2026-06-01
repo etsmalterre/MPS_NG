@@ -13,9 +13,13 @@ function esc(value: string): string {
 // stock_fini and all the tables we join (ref_fini, ref_fini_colori,
 // etat_stock_fini, sous_traitant) have NO accented columns in the fields we
 // read, so the IS_WINDOWS branching dance from stock.ts is not needed here.
-const STOCK_FINI_SELECT = `sf.IDstock_fini, sf.IDref_fini, sf.IDColoris, sf.IDetat_stock_fini, sf.IDligne_commande_client, sf.IDref_commande_source, sf.IDstock_ecru, sf.IDmagasin, sf.IDligne_expedition, sf.IDProprietaire, sf.IDcommande_donation, sf.poids, sf.metrage, sf.lot, sf.numero, sf.observations, sf.observation_sst, sf.second_choix, sf.date_saisie, sf.destockage, sf.don, sf.pointage, sf.emplacement, sf.conteneur, rf.reference AS ref_fini, rf.designation, rfc.reference AS coloris_reference, esf.libelle AS etat_libelle, st.nom AS magasin_nom`
+// coloris is polymorphic by ref_fini.avec_teinture: 0 = wash only → the
+// IDColoris is a colori_ecru id (joined as `ce`); 1/2 = dyed → it's a
+// ref_fini_colori id (joined as `rfc`). The id spaces collide numerically, so
+// we select BOTH labels + avec_teinture and pick the right one in repairAllJoins.
+const STOCK_FINI_SELECT = `sf.IDstock_fini, sf.IDref_fini, sf.IDColoris, sf.IDetat_stock_fini, sf.IDligne_commande_client, sf.IDref_commande_source, sf.IDstock_ecru, sf.IDmagasin, sf.IDligne_expedition, sf.IDProprietaire, sf.IDcommande_donation, sf.poids, sf.metrage, sf.lot, sf.numero, sf.observations, sf.observation_sst, sf.second_choix, sf.date_saisie, sf.destockage, sf.don, sf.pointage, sf.emplacement, sf.conteneur, rf.reference AS ref_fini, rf.designation, rf.avec_teinture, rfc.reference AS coloris_dyed, ce.reference AS coloris_wash, esf.libelle AS etat_libelle, st.nom AS magasin_nom`
 
-const STOCK_FINI_JOINS = `FROM stock_fini sf LEFT JOIN ref_fini rf ON sf.IDref_fini = rf.IDref_fini LEFT JOIN ref_fini_colori rfc ON sf.IDColoris = rfc.IDref_fini_colori LEFT JOIN etat_stock_fini esf ON sf.IDetat_stock_fini = esf.IDetat_stock_fini LEFT JOIN sous_traitant st ON sf.IDmagasin = st.IDsous_traitant`
+const STOCK_FINI_JOINS = `FROM stock_fini sf LEFT JOIN ref_fini rf ON sf.IDref_fini = rf.IDref_fini LEFT JOIN ref_fini_colori rfc ON sf.IDColoris = rfc.IDref_fini_colori LEFT JOIN colori_ecru ce ON sf.IDColoris = ce.IDcolori_ecru LEFT JOIN etat_stock_fini esf ON sf.IDetat_stock_fini = esf.IDetat_stock_fini LEFT JOIN sous_traitant st ON sf.IDmagasin = st.IDsous_traitant`
 
 const TEXT_FIELDS = ['lot', 'numero', 'observations', 'observation_sst', 'emplacement', 'conteneur']
 
@@ -72,9 +76,22 @@ async function repairAliased<T extends Record<string, unknown>>(
 async function repairAllJoins(rows: StockFini[]): Promise<StockFini[]> {
   let fixed = rows
   fixed = await repairAliased(fixed, 'ref_fini', 'IDref_fini', { ref_fini: 'reference', designation: 'designation' })
-  fixed = await repairAliased(fixed, 'ref_fini_colori', 'IDColoris', { coloris_reference: 'reference' })
+  fixed = await repairAliased(fixed, 'ref_fini_colori', 'IDColoris', { coloris_dyed: 'reference' })
+  fixed = await repairAliased(fixed, 'colori_ecru', 'IDColoris', { coloris_wash: 'reference' })
   fixed = await repairAliased(fixed, 'etat_stock_fini', 'IDetat_stock_fini', { etat_libelle: 'libelle' })
   fixed = await repairAliased(fixed, 'sous_traitant', 'IDmagasin', { magasin_nom: 'nom' })
+  // Pick the coloris label dictated by avec_teinture (0 = wash → colori_ecru,
+  // 1/2 = dyed → ref_fini_colori). Unknown ref (null) defaults to dyed to keep
+  // the previous behaviour. Collapse to the single `coloris_reference` field
+  // the frontend expects and drop the internal helpers.
+  for (const r of fixed) {
+    const av = (r as any).avec_teinture
+    const dyed = av == null ? true : Number(av) !== 0
+    ;(r as any).coloris_reference = (dyed ? (r as any).coloris_dyed : (r as any).coloris_wash) ?? null
+    delete (r as any).coloris_dyed
+    delete (r as any).coloris_wash
+    delete (r as any).avec_teinture
+  }
   return fixed
 }
 
@@ -94,7 +111,7 @@ stockFiniRouter.get('/fini', async (req: Request, res: Response) => {
     if (q) {
       const e = esc(q)
       where.push(
-        `(sf.lot LIKE '%${e}%' OR sf.numero LIKE '%${e}%' OR sf.emplacement LIKE '%${e}%' OR sf.conteneur LIKE '%${e}%' OR sf.observations LIKE '%${e}%' OR rf.reference LIKE '%${e}%' OR rfc.reference LIKE '%${e}%')`,
+        `(sf.lot LIKE '%${e}%' OR sf.numero LIKE '%${e}%' OR sf.emplacement LIKE '%${e}%' OR sf.conteneur LIKE '%${e}%' OR sf.observations LIKE '%${e}%' OR rf.reference LIKE '%${e}%' OR rfc.reference LIKE '%${e}%' OR ce.reference LIKE '%${e}%')`,
       )
     }
     const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''

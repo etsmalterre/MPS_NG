@@ -1382,14 +1382,17 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
     // ref_fini.rendement (Ml/kg) — used by the frontend LineCard to compute
     // "Ml potentiel" = totalKgEcru × rendement. Only populated for fini refs.
     const finiRendementMap = new Map<number, number>()
+    // ref_fini.avec_teinture — 0 = wash only (IDColoris is a colori_ecru),
+    // 1/2 = dyed (IDColoris is a ref_fini_colori). Drives resolveColoris below.
+    const finiAvecTeintureMap = new Map<number, number>()
     if (refIds.length > 0) {
       // Build all three maps in parallel; we'll pick the right one per line below.
       const [ecruRows, finiRows, filRows] = await Promise.all([
         query<{ IDref_ecru: number; reference: string | null }>(
           `SELECT IDref_ecru, reference FROM ref_ecru WHERE IDref_ecru IN (${refIds.join(',')})`,
         ),
-        query<{ IDref_fini: number; reference: string | null; rendement: number | null }>(
-          `SELECT IDref_fini, reference, rendement FROM ref_fini WHERE IDref_fini IN (${refIds.join(',')})`,
+        query<{ IDref_fini: number; reference: string | null; rendement: number | null; avec_teinture: number | null }>(
+          `SELECT IDref_fini, reference, rendement, avec_teinture FROM ref_fini WHERE IDref_fini IN (${refIds.join(',')})`,
         ),
         query<{ IDref_fil: number; reference: string | null }>(
           `SELECT IDref_fil, reference FROM ref_fil WHERE IDref_fil IN (${refIds.join(',')})`,
@@ -1400,6 +1403,7 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
       for (const r of await fixEncoding(finiRows, 'ref_fini', 'IDref_fini', ['reference'])) {
         finiMap.set(r.IDref_fini, r.reference ?? '')
         finiRendementMap.set(r.IDref_fini, Number(r.rendement) || 0)
+        finiAvecTeintureMap.set(r.IDref_fini, Number((r as any).avec_teinture) || 0)
       }
       for (const r of await fixEncoding(filRows, 'ref_fil', 'IDref_fil', ['reference']))
         filMap.set(r.IDref_fil, r.reference ?? '')
@@ -1450,9 +1454,18 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
       for (const c of await fixEncoding(ecruC, 'colori_ecru', 'IDcolori_ecru', ['reference']))
         colorisEcruMap.set(c.IDcolori_ecru, c.reference ?? '')
     }
-    function resolveColoris(IDcoloris: number, typeKind: number): string {
+    // type=2 (ennoblisseur): the IDColoris catalog depends on the ref's
+    // avec_teinture — 0 = wash only → colori_ecru; 1/2 = dyed → ref_fini_colori.
+    // The two id spaces collide numerically, so order matters (a wash-only
+    // IDColoris usually also exists as an unrelated ref_fini_colori).
+    function resolveColoris(IDcoloris: number, typeKind: number, IDref: number): string {
       if (IDcoloris <= 0) return ''
-      if (typeKind === 2) return colorisFiniMap.get(IDcoloris) ?? colorisEcruMap.get(IDcoloris) ?? ''
+      if (typeKind === 2) {
+        const dyed = (finiAvecTeintureMap.get(IDref) ?? 1) !== 0
+        return dyed
+          ? (colorisFiniMap.get(IDcoloris) ?? colorisEcruMap.get(IDcoloris) ?? '')
+          : (colorisEcruMap.get(IDcoloris) ?? colorisFiniMap.get(IDcoloris) ?? '')
+      }
       return colorisEcruMap.get(IDcoloris) ?? colorisFiniMap.get(IDcoloris) ?? ''
     }
 
@@ -1519,7 +1532,7 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
         ref_label: resolved.label || null,
         ref_kind: resolved.kind,
         ref_rendement: refRendement,
-        colori_reference: resolveColoris(colId, typeKind) || null,
+        colori_reference: resolveColoris(colId, typeKind, refId) || null,
         ...agg,
       }
     })
@@ -1744,6 +1757,9 @@ export async function buildCommandePdfData(id: number): Promise<CommandeSoustrai
   const filMap = new Map<number, string>()
   const colorisFiniMap = new Map<number, string>()
   const colorisEcruMap = new Map<number, string>()
+  // ref_fini.avec_teinture: 0 = wash (IDColoris→colori_ecru), 1/2 = dyed
+  // (IDColoris→ref_fini_colori). Drives resolveColoris below.
+  const finiAvecTeintureMap = new Map<number, number>()
   // Per-fini extras for the PDF: cosmetic + technical specs + IDref_ecru
   // pointer so we can pull the "article initial" block (designation +
   // composition) once we know which ref_ecru each line maps to.
@@ -1770,9 +1786,10 @@ export async function buildCommandePdfData(id: number): Promise<CommandeSoustrai
         laizeHT_Moy: number | null
         rendement: number | null
         IDref_ecru: number | null
+        avec_teinture: number | null
       }>(
         `SELECT IDref_fini, reference, designation, conditionnement,
-                poids_Moy, laizeHT_Moy, rendement, IDref_ecru
+                poids_Moy, laizeHT_Moy, rendement, IDref_ecru, avec_teinture
          FROM ref_fini WHERE IDref_fini IN (${refIds.join(',')})`,
       ),
       query<{ IDref_fil: number; reference: string | null }>(
@@ -1783,6 +1800,7 @@ export async function buildCommandePdfData(id: number): Promise<CommandeSoustrai
       ecruMap.set(r.IDref_ecru, r.reference ?? '')
     for (const r of await fixEncoding(fini, 'ref_fini', 'IDref_fini', ['reference', 'designation', 'conditionnement'])) {
       finiMap.set(r.IDref_fini, r.reference ?? '')
+      finiAvecTeintureMap.set(r.IDref_fini, Number((r as any).avec_teinture) || 0)
       finiExtrasMap.set(r.IDref_fini, {
         designation: (r.designation ?? null) || null,
         conditionnement: (r.conditionnement ?? null) || null,
@@ -1923,9 +1941,16 @@ export async function buildCommandePdfData(id: number): Promise<CommandeSoustrai
     for (const c of await fixEncoding(ecruC, 'colori_ecru', 'IDcolori_ecru', ['reference']))
       colorisEcruMap.set(c.IDcolori_ecru, c.reference ?? '')
   }
-  function resolveColoris(IDcoloris: number, typeKind: number): string {
+  // type=2 coloris catalog depends on ref_fini.avec_teinture (0 = wash →
+  // colori_ecru; 1/2 = dyed → ref_fini_colori). See the detail endpoint.
+  function resolveColoris(IDcoloris: number, typeKind: number, IDref: number): string {
     if (IDcoloris <= 0) return ''
-    if (typeKind === 2) return colorisFiniMap.get(IDcoloris) ?? colorisEcruMap.get(IDcoloris) ?? ''
+    if (typeKind === 2) {
+      const dyed = (finiAvecTeintureMap.get(IDref) ?? 1) !== 0
+      return dyed
+        ? (colorisFiniMap.get(IDcoloris) ?? colorisEcruMap.get(IDcoloris) ?? '')
+        : (colorisEcruMap.get(IDcoloris) ?? colorisFiniMap.get(IDcoloris) ?? '')
+    }
     return colorisEcruMap.get(IDcoloris) ?? colorisFiniMap.get(IDcoloris) ?? ''
   }
 
@@ -1971,7 +1996,7 @@ export async function buildCommandePdfData(id: number): Promise<CommandeSoustrai
 
       return {
         ref_label: resolveRef(refId, typeKind) || null,
-        colori_reference: resolveColoris(colId, typeKind) || null,
+        colori_reference: resolveColoris(colId, typeKind, refId) || null,
         ref_designation: finiExtra?.designation ?? null,
         ref_presentation: derivePresentation(finiExtra?.conditionnement ?? null),
         traitements: treatmentsByFini.get(refId) ?? [],
@@ -2822,24 +2847,46 @@ export async function findEligibleLots(commandeId: number): Promise<EligibleLot[
   // ── 7) Display lookups: ref_fini.reference, ref_fini_colori.reference,
   //       client.nom — all flat queries to avoid CONVERT-in-JOIN collapse.
   const refFiniMap = new Map<number, string>()
+  // avec_teinture per ref: 0 = wash (IDColoris→colori_ecru), 1/2 = dyed
+  // (IDColoris→ref_fini_colori). The eligible lots are all type=2 fini lines.
+  const avecTeintureMap = new Map<number, number>()
   if (uniqueRefFini.length > 0) {
-    const rf = await query<{ IDref_fini: number; reference: string | null }>(
-      `SELECT IDref_fini, reference FROM ref_fini WHERE IDref_fini IN (${uniqueRefFini.join(',')})`,
+    const rf = await query<{ IDref_fini: number; reference: string | null; avec_teinture: number | null }>(
+      `SELECT IDref_fini, reference, avec_teinture FROM ref_fini WHERE IDref_fini IN (${uniqueRefFini.join(',')})`,
     )
     for (const r of await fixEncoding(rf as any[], 'ref_fini', 'IDref_fini', ['reference'])) {
       refFiniMap.set(n((r as any).IDref_fini), ((r as any).reference ?? '').toString())
+      avecTeintureMap.set(n((r as any).IDref_fini), Number((r as any).avec_teinture) || 0)
     }
   }
   const uniqueColoris = Array.from(new Set(Array.from(groups.values()).map((g) => g.IDColoris).filter((x) => x > 0)))
-  const colorisMap = new Map<number, string>()
+  const colorisMap = new Map<number, string>()      // ref_fini_colori (dyed)
+  const colorisEcruMap = new Map<number, string>()  // colori_ecru (wash)
   if (uniqueColoris.length > 0) {
-    const rc = await query<{ IDref_fini_colori: number; reference: string | null }>(
-      `SELECT IDref_fini_colori, reference FROM ref_fini_colori
-       WHERE IDref_fini_colori IN (${uniqueColoris.join(',')})`,
-    )
+    const [rc, ec] = await Promise.all([
+      query<{ IDref_fini_colori: number; reference: string | null }>(
+        `SELECT IDref_fini_colori, reference FROM ref_fini_colori
+         WHERE IDref_fini_colori IN (${uniqueColoris.join(',')})`,
+      ),
+      query<{ IDcolori_ecru: number; reference: string | null }>(
+        `SELECT IDcolori_ecru, reference FROM colori_ecru
+         WHERE IDcolori_ecru IN (${uniqueColoris.join(',')})`,
+      ),
+    ])
     for (const r of await fixEncoding(rc as any[], 'ref_fini_colori', 'IDref_fini_colori', ['reference'])) {
       colorisMap.set(n((r as any).IDref_fini_colori), ((r as any).reference ?? '').toString())
     }
+    for (const r of await fixEncoding(ec as any[], 'colori_ecru', 'IDcolori_ecru', ['reference'])) {
+      colorisEcruMap.set(n((r as any).IDcolori_ecru), ((r as any).reference ?? '').toString())
+    }
+  }
+  // Resolve a group's coloris label against the catalog its ref dictates.
+  const resolveGroupColoris = (g: { IDref_fini: number; IDColoris: number }): string => {
+    if (g.IDColoris <= 0) return ''
+    const dyed = (avecTeintureMap.get(g.IDref_fini) ?? 1) !== 0
+    return dyed
+      ? (colorisMap.get(g.IDColoris) ?? colorisEcruMap.get(g.IDColoris) ?? '')
+      : (colorisEcruMap.get(g.IDColoris) ?? colorisMap.get(g.IDColoris) ?? '')
   }
   const clientMap = new Map<number, string>()
   if (uniqueClients.length > 0) {
@@ -2873,7 +2920,7 @@ export async function findEligibleLots(commandeId: number): Promise<EligibleLot[
       client_nom: clientMap.get(g.IDclient) || '',
       ref_malterre: refFiniMap.get(g.IDref_fini) || '',
       client_designation: clientDesignation,
-      coloris_reference: colorisMap.get(g.IDColoris) || '',
+      coloris_reference: resolveGroupColoris(g) || '',
       nb_rolls: g.nb_rolls,
       total_metrage: g.total_metrage,
       key,
