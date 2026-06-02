@@ -178,10 +178,15 @@ export function FinisStock() {
 
   const filteredSorted = useMemo(() => {
     let out = rows ?? []
-    const q = searchQuery.trim().toLowerCase()
-    if (q) {
+    // Split the query on whitespace and require EVERY term to match SOME
+    // column (AND across terms, OR across columns). This lets one search combine
+    // criteria from different columns — e.g. "029A marine" matches a row whose
+    // ref_fini is "029A" AND whose coloris is "marine". A single term behaves
+    // exactly as the old substring search.
+    const terms = searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    if (terms.length > 0) {
       out = out.filter((r) => {
-        const fields = [
+        const haystacks = [
           r.ref_fini,
           r.coloris_reference,
           r.lot,
@@ -192,7 +197,9 @@ export function FinisStock() {
           r.observations,
           r.observation_sst,
         ]
-        return fields.some((f) => f && f.toLowerCase().includes(q))
+          .filter((f): f is string => !!f)
+          .map((f) => f.toLowerCase())
+        return terms.every((t) => haystacks.some((h) => h.includes(t)))
       })
     }
     out = [...out].sort((a, b) => {
