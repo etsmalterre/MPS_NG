@@ -10,6 +10,7 @@ import {
   Info,
   FileSpreadsheet,
   Download,
+  LayoutDashboard,
 } from 'lucide-react'
 import * as RTooltip from '@radix-ui/react-tooltip'
 import { Card, CardContent } from '@/components/ui/card'
@@ -19,15 +20,29 @@ import { BobineIcon } from '@/components/icons/BobineIcon'
 import { apiFetch } from '@/lib/api'
 import { fmtNum } from '@/lib/format'
 import { formatHfsqlDate, inputDateToHfsql } from '@/lib/dates'
+import { useHasPermission } from '@/contexts/PermissionsContext'
 import { cn } from '@/lib/utils'
 
 export function Dashboard() {
+  // Each widget is gated by a per-user permission (admins see all). Toggled in
+  // Paramètres > Utilisateurs › Tableau de bord.
+  const showFilEtat = useHasPermission('dashboard_fil_etat')
+  const showLaGentle = useHasPermission('dashboard_la_gentle')
+  const anyWidget = showFilEtat || showLaGentle
+
   return (
     <div className="animate-fade-in -m-4 lg:-m-6 flex-1 min-h-0 overflow-auto bg-muted/70 p-4 lg:p-6 scrollbar-transparent">
-      <div className="grid items-start gap-4 lg:grid-cols-2">
-        <FilStockEtatWidget />
-        <LaGentleExportWidget />
-      </div>
+      {anyWidget ? (
+        <div className="grid items-start gap-4 lg:grid-cols-2">
+          {showFilEtat && <FilStockEtatWidget />}
+          {showLaGentle && <LaGentleExportWidget />}
+        </div>
+      ) : (
+        <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+          <LayoutDashboard className="h-12 w-12 opacity-30" />
+          <p className="text-sm">Aucun widget n'est activé pour votre compte.</p>
+        </div>
+      )}
     </div>
   )
 }

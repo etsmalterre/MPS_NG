@@ -9,6 +9,22 @@
 // migration.
 
 export const PERMISSION_KEYS = [
+  // Tableau de bord — one key per dashboard widget. Granting shows the widget
+  // for that user; admins always see every widget. Read by useHasPermission in
+  // Dashboard.tsx. Kept first so the "Tableau de bord" section renders at the
+  // top of Paramètres > Utilisateurs.
+  {
+    key: 'dashboard_fil_etat',
+    label: 'État des stocks de fil',
+    description: 'Affiche le widget « État des stocks de fil » sur le tableau de bord.',
+    category: 'Tableau de bord',
+  },
+  {
+    key: 'dashboard_la_gentle',
+    label: 'Stock La Gentle',
+    description: 'Affiche le widget « Stock La Gentle » (export Excel) sur le tableau de bord.',
+    category: 'Tableau de bord',
+  },
   {
     key: 'create_stock_fil',
     label: 'Créer un lot de fil',

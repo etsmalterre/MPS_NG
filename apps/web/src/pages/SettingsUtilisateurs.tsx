@@ -375,6 +375,11 @@ function DetailBody({
   const isVin = isVincent(user)
   const grantedSet = new Set(user.granted)
 
+  // Email card stays at the very top; the "Tableau de bord" section sits just
+  // below it, then all other permission categories.
+  const dashboardGroup = grouped.find(([cat]) => cat === 'Tableau de bord')
+  const otherGroups = grouped.filter(([cat]) => cat !== 'Tableau de bord')
+
   return (
     <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-auto pr-1 scrollbar-transparent">
       <EmailEditor
@@ -384,6 +389,17 @@ function DetailBody({
         isSaving={isSavingEmail}
         saveError={emailSaveError}
       />
+
+      {dashboardGroup && (
+        <CategorySection
+          category={dashboardGroup[0]}
+          items={dashboardGroup[1]}
+          isVin={isVin}
+          isUpdating={isUpdating}
+          grantedSet={grantedSet}
+          onToggle={onToggle}
+        />
+      )}
 
       {isVin && (
         <div className="flex items-start gap-3 p-3 rounded-lg border border-accent/40 bg-accent/[0.06]">
@@ -398,37 +414,62 @@ function DetailBody({
         </div>
       )}
 
-      {grouped.map(([category, items]) => (
-        <div key={category} className="rounded-lg border border-border/60 bg-white shadow-sm">
-          <div className="px-4 py-2 border-b border-border/60 bg-zinc-100/80 rounded-t-lg">
-            <p className="text-xs font-bold text-primary uppercase tracking-wide">{category}</p>
-          </div>
-          <div className="divide-y divide-border/60">
-            {items.map((k) => {
-              const checked = isVin || grantedSet.has(k.key)
-              return (
-                <label
-                  key={k.key}
-                  className={cn(
-                    'flex items-center gap-3 px-4 py-3 transition-colors',
-                    isVin || isUpdating ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-zinc-50',
-                  )}
-                >
-                  <ToggleSwitch
-                    checked={checked}
-                    disabled={isVin || isUpdating}
-                    onChange={(next) => onToggle(k.key, next)}
-                  />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-foreground">{k.label}</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">{k.description}</p>
-                  </div>
-                </label>
-              )
-            })}
-          </div>
-        </div>
+      {otherGroups.map(([category, items]) => (
+        <CategorySection
+          key={category}
+          category={category}
+          items={items}
+          isVin={isVin}
+          isUpdating={isUpdating}
+          grantedSet={grantedSet}
+          onToggle={onToggle}
+        />
       ))}
+    </div>
+  )
+}
+
+// ── A single permission category card (header + toggle rows) ───────────
+
+function CategorySection({
+  category, items, isVin, isUpdating, grantedSet, onToggle,
+}: {
+  category: string
+  items: PermissionKeyDef[]
+  isVin: boolean
+  isUpdating: boolean
+  grantedSet: Set<string>
+  onToggle: (key: string, nextValue: boolean) => void
+}) {
+  return (
+    <div className="rounded-lg border border-border/60 bg-white shadow-sm">
+      <div className="px-4 py-2 border-b border-border/60 bg-zinc-100/80 rounded-t-lg">
+        <p className="text-xs font-bold text-primary uppercase tracking-wide">{category}</p>
+      </div>
+      <div className="divide-y divide-border/60">
+        {items.map((k) => {
+          const checked = isVin || grantedSet.has(k.key)
+          return (
+            <label
+              key={k.key}
+              className={cn(
+                'flex items-center gap-3 px-4 py-3 transition-colors',
+                isVin || isUpdating ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-zinc-50',
+              )}
+            >
+              <ToggleSwitch
+                checked={checked}
+                disabled={isVin || isUpdating}
+                onChange={(next) => onToggle(k.key, next)}
+              />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-foreground">{k.label}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">{k.description}</p>
+              </div>
+            </label>
+          )
+        })}
+      </div>
     </div>
   )
 }
