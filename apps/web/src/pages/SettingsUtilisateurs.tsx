@@ -390,17 +390,6 @@ function DetailBody({
         saveError={emailSaveError}
       />
 
-      {dashboardGroup && (
-        <CategorySection
-          category={dashboardGroup[0]}
-          items={dashboardGroup[1]}
-          isVin={isVin}
-          isUpdating={isUpdating}
-          grantedSet={grantedSet}
-          onToggle={onToggle}
-        />
-      )}
-
       {isVin && (
         <div className="flex items-start gap-3 p-3 rounded-lg border border-accent/40 bg-accent/[0.06]">
           <Shield className="h-4 w-4 text-accent flex-shrink-0 mt-0.5" />
@@ -412,6 +401,17 @@ function DetailBody({
             </p>
           </div>
         </div>
+      )}
+
+      {dashboardGroup && (
+        <CategorySection
+          category={dashboardGroup[0]}
+          items={dashboardGroup[1]}
+          isVin={isVin}
+          isUpdating={isUpdating}
+          grantedSet={grantedSet}
+          onToggle={onToggle}
+        />
       )}
 
       {otherGroups.map(([category, items]) => (
