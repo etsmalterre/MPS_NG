@@ -484,7 +484,11 @@ const styles = StyleSheet.create({
     color: colors.text,
     lineHeight: 1.4,
   },
-  commentaireSpacer: { flexGrow: 1, minHeight: 24 },
+  // Commentaire flows right below the totals with a fixed gap. We deliberately
+  // do NOT bottom-pin it (neither a flexGrow spacer nor marginTop:'auto'):
+  // bottom-aligning a wrap={false} box inside the full-height flex content area
+  // shoves it past the page edge and emits a blank/near-empty overflow page.
+  commentaireBottom: { marginTop: 24 },
   commentaireBox: {
     flexShrink: 0,
     padding: 14,
@@ -596,7 +600,7 @@ export function CommandeSoustraitantPdf({
       documentDate={data.dateCommande || ''}
       title={`Bon de commande sous-traitant ${data.numero}`}
       secondPage={hasAnyPieces ? {
-        paddingTop: 36,
+        withHeader: true,
         children: <V2StockSection data={data} />,
       } : undefined}
     >
@@ -739,10 +743,13 @@ export function CommandeSoustraitantPdf({
         </View>
       </View>
 
-      <View style={styles.commentaireSpacer} />
-
+      {/* Commentaire box, pushed to the bottom of the front page via
+          `marginTop: 'auto'`. A flexGrow spacer is NOT used: it would grow to
+          fill ALL remaining space, then the box's own height would stack on top
+          and overflow into a blank page. `marginTop: auto` bottom-aligns the box
+          while still accounting for its height, so the front page stays single. */}
       {data.commentaire && data.commentaire.trim() && (
-        <View style={styles.commentaireBox} wrap={false}>
+        <View style={[styles.commentaireBox, styles.commentaireBottom]} wrap={false}>
           <View style={styles.commentaireHeaderRow}>
             <MessageSquareIcon />
             <Text style={styles.commentaireTitle}>COMMENTAIRE</Text>

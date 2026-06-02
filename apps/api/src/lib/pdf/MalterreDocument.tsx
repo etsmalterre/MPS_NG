@@ -175,17 +175,25 @@ Font.registerHyphenationCallback((word) => [word])
 const styles = StyleSheet.create({
   page: {
     // Page padding: 0 top/horizontal so the yellow header band reaches the
-    // edges, and 100pt bottom so flow content stops before the absolute
+    // edges, and a bottom band so flow content stops before the absolute
     // footer area. The Page's bottom padding IS respected by the wrapping
     // engine, unlike inner padding which just adds visual whitespace.
+    // 80pt clears the ~66pt footer band plus the page-number line (bottom:72)
+    // while reclaiming dead reserve, so a borderline single-line front page
+    // keeps its wrap={false} totals block on page 1 instead of spilling a
+    // near-empty page. Going much lower risks content touching the page number.
     paddingTop: 0,
-    paddingBottom: 100,
+    paddingBottom: 80,
     paddingHorizontal: 0,
     fontSize: sizes.fontBase,
     color: colors.text,
     fontFamily: 'Lato',
     fontWeight: 400,
-    lineHeight: 1.45,
+    // NOTE: lineHeight intentionally lives on `content`/`contentLean` (the body
+    // text containers), NOT here. A page-level lineHeight is inherited by the
+    // `fixed`+`render` page-number Text and makes its empty-at-layout box
+    // stretch to the full page height, which suppresses the paint-time text
+    // entirely. Keeping it off the Page is what lets "Page X/Y" actually render.
     flexDirection: 'column',
   },
 
@@ -254,6 +262,17 @@ const styles = StyleSheet.create({
     height: 1.5,
     backgroundColor: colors.primaryDark,
   },
+  // Absolute wrapper used when the header is repeated (fixed) on a
+  // continuation page — pins the branded band to the top edge of every
+  // physical page. Flow content clears it via the Page's paddingTop
+  // (HEADER_HEIGHT), exactly mirroring how the footer reserves space via
+  // paddingBottom.
+  headerFixedWrap: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+  },
 
   // ── Content area ────────────────────────────────────
   content: {
@@ -261,6 +280,7 @@ const styles = StyleSheet.create({
     paddingTop: 20,
     flexGrow: 1,
     flexDirection: 'column',
+    lineHeight: 1.45,
   },
   // Variant used by the optional secondPage: same horizontal gutters but
   // no top padding — the Page-level paddingTop already provides the top
@@ -270,6 +290,7 @@ const styles = StyleSheet.create({
     paddingTop: 0,
     flexGrow: 1,
     flexDirection: 'column',
+    lineHeight: 1.45,
   },
 
 
@@ -422,7 +443,26 @@ const styles = StyleSheet.create({
     letterSpacing: 0.3,
     marginTop: 1,
   },
+
+  // Page X/Y indicator — sits in the bottom-right corner, just above the
+  // fixed footer band (which is ~66pt tall; this clears it at bottom 72).
+  pageNumber: {
+    position: 'absolute',
+    bottom: 72,
+    // Span the full content width and right-align the glyphs to the 36pt
+    // gutter (an absolute Text with only `right` and no width collapses).
+    left: 36,
+    right: 36,
+    textAlign: 'right',
+    fontSize: 8,
+    color: colors.muted,
+    fontWeight: 700,
+  },
 })
+
+// Height (pt) of the branded header band + dark bar. Used as the Page-level
+// paddingTop on a continuation page so flow content clears the fixed header.
+const HEADER_HEIGHT = 92
 
 // ── Types ────────────────────────────────────────────────
 
@@ -473,6 +513,11 @@ export interface MalterreDocumentProps {
    *  on continuation pages. */
   secondPage?: {
     paddingTop?: number
+    /** When true, repeat the branded yellow header band (logo + doc title)
+     *  at the top of the second page and every physical overflow page it
+     *  spans. The header is rendered `fixed`+absolute and the Page's
+     *  paddingTop is forced to HEADER_HEIGHT so flow content clears it. */
+    withHeader?: boolean
     children: React.ReactNode
   }
 }
@@ -509,6 +554,58 @@ export function MetadataCard({ data, stretch }: { data: MetadataCardData; stretc
         </View>
       ))}
     </View>
+  )
+}
+
+// Branded yellow header band (logo + document title block) with the thin
+// dark blue bar beneath it. Rendered in-flow on the primary page and, when
+// `fixed`, repeated absolutely on every physical page of a continuation page.
+function PageHeader({
+  documentType,
+  reference,
+  documentDate,
+  fixed = false,
+}: {
+  documentType: string
+  reference: string
+  documentDate: string
+  fixed?: boolean
+}) {
+  return (
+    <View style={fixed ? styles.headerFixedWrap : undefined} fixed={fixed}>
+      <View style={styles.header}>
+        <Image src={LOGO_BUFFER} style={styles.logo} />
+        <View style={styles.headerDocBlock}>
+          <View style={styles.headerDocTypeRow}>
+            <Text style={styles.headerDocType}>{documentType.toUpperCase()}</Text>
+          </View>
+          <View style={styles.headerDocRefRow}>
+            <Text style={styles.headerDocRef}>{reference}</Text>
+          </View>
+          {documentDate ? (
+            <View style={styles.headerDocDateRow}>
+              <Text style={styles.headerDocDate}>Date : {documentDate}</Text>
+            </View>
+          ) : null}
+        </View>
+      </View>
+      {/* Thin dark blue bar separating the yellow header from the body */}
+      <View style={styles.topDarkBar} />
+    </View>
+  )
+}
+
+// "Page X/Y" indicator, fixed to every physical page. Hidden on single-page
+// documents so a lone "Page 1/1" doesn't clutter short docs.
+function PageNumber() {
+  return (
+    <Text
+      style={styles.pageNumber}
+      fixed
+      render={({ pageNumber, totalPages }) =>
+        totalPages > 1 ? `Page ${pageNumber}/${totalPages}` : ''
+      }
+    />
   )
 }
 
@@ -559,27 +656,12 @@ export function MalterreDocument({
     >
       <Page size="A4" style={styles.page}>
         {/* Yellow header band: logo on the left, document title in the
-            top-right (on the gold background, in white text). Each line is
-            wrapped in its own View so they stack cleanly without overlapping. */}
-        <View style={styles.header}>
-          <Image src={LOGO_BUFFER} style={styles.logo} />
-          <View style={styles.headerDocBlock}>
-            <View style={styles.headerDocTypeRow}>
-              <Text style={styles.headerDocType}>{documentType.toUpperCase()}</Text>
-            </View>
-            <View style={styles.headerDocRefRow}>
-              <Text style={styles.headerDocRef}>{reference}</Text>
-            </View>
-            {documentDate ? (
-              <View style={styles.headerDocDateRow}>
-                <Text style={styles.headerDocDate}>Date : {documentDate}</Text>
-              </View>
-            ) : null}
-          </View>
-        </View>
-
-        {/* Thin dark blue bar separating the yellow header from the body */}
-        <View style={styles.topDarkBar} />
+            top-right (on the gold background, in white text). */}
+        <PageHeader
+          documentType={documentType}
+          reference={reference}
+          documentDate={documentDate}
+        />
 
         {/* Content body */}
         <View style={styles.content}>
@@ -602,23 +684,38 @@ export function MalterreDocument({
           {children}
         </View>
 
+        <PageNumber />
         <PageFooter />
       </Page>
 
-      {/* Optional second logical Page — no yellow header band, paddingTop
-          is set per-Page so every physical overflow page that this content
-          spans inherits a clean white top margin. */}
+      {/* Optional second logical Page. When `withHeader`, the branded header
+          band is repeated (fixed) at the top and the Page paddingTop is
+          forced to HEADER_HEIGHT to reserve flow space below it; otherwise
+          paddingTop gives overflow pages a clean white top margin. */}
       {secondPage && (
         <Page
           size="A4"
           style={[
             styles.page,
-            { paddingTop: secondPage.paddingTop ?? 36 },
+            {
+              paddingTop: secondPage.withHeader
+                ? HEADER_HEIGHT
+                : secondPage.paddingTop ?? 36,
+            },
           ]}
         >
+          {secondPage.withHeader && (
+            <PageHeader
+              documentType={documentType}
+              reference={reference}
+              documentDate={documentDate}
+              fixed
+            />
+          )}
           <View style={styles.contentLean}>
             {secondPage.children}
           </View>
+          <PageNumber />
           <PageFooter />
         </Page>
       )}
