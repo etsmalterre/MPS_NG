@@ -162,13 +162,32 @@ stockRouter.get('/fil/etat', async (req: Request, res: Response) => {
 
     // Commandé — incoming order lines not yet received (etat = 0). The
     // fournisseur lives on the commande_fil header, not the line.
-    const cmdRows = await query<{ IDcommande_fil: number; quantite: number | null }>(
-      `SELECT IDcommande_fil, quantite FROM ref_fil_commande
+    const cmdRows = await query<{ IDref_fil_commande: number; IDcommande_fil: number; quantite: number | null }>(
+      `SELECT IDref_fil_commande, IDcommande_fil, quantite FROM ref_fil_commande
        WHERE IDref_fil = ${refFil} AND IDcolori_fil = ${coloriFil} AND etat = 0
        ORDER BY IDcommande_fil DESC`,
     )
-    const commande = cmdRows.reduce((s, r) => s + (Number(r.quantite) || 0), 0)
     const nb_commandes = cmdRows.length
+
+    // Received-against-line — sum of stock_initial of every stock_fil roll
+    // linked back to the order line via IDref_fil_commande (the same aggregate
+    // the commande detail surfaces as "N lots · X kg"). A partially-received
+    // line stays etat = 0, so without this its full ordered quantity would
+    // still count as "commandé" even though some has already landed in stock.
+    // Subtracting it also avoids double-counting: received rolls already sit in
+    // `en_stock`, so a gross "commandé" would inflate `disponible`.
+    const lineIds = cmdRows.map((r) => Number(r.IDref_fil_commande)).filter((x) => x > 0)
+    const recuByLine = new Map<number, number>()
+    if (lineIds.length > 0) {
+      const recuRows = await query<{ IDref_fil_commande: number; stock_initial: number | null }>(
+        `SELECT IDref_fil_commande, stock_initial FROM stock_fil WHERE IDref_fil_commande IN (${lineIds.join(',')})`,
+      )
+      for (const rr of recuRows) {
+        const lid = Number(rr.IDref_fil_commande)
+        recuByLine.set(lid, (recuByLine.get(lid) ?? 0) + (Number(rr.stock_initial) || 0))
+      }
+    }
+
     const cmdIds = Array.from(new Set(cmdRows.map((r) => Number(r.IDcommande_fil)).filter((x) => x > 0)))
     const cmdFournisseur = new Map<number, number>()
     if (cmdIds.length > 0) {
@@ -199,11 +218,20 @@ stockRouter.get('/fil/etat', async (req: Request, res: Response) => {
       fournisseur: frsName.get(Number(r.IDfournisseur)) || '—',
       kg: Number(r.stock) || 0,
     }))
-    const commande_rows = cmdRows.map((r) => ({
-      commande: Number(r.IDcommande_fil) || 0,
-      fournisseur: frsName.get(cmdFournisseur.get(Number(r.IDcommande_fil)) ?? 0) || '—',
-      kg: Number(r.quantite) || 0,
-    }))
+    const commande_rows = cmdRows.map((r) => {
+      const ordered = Number(r.quantite) || 0
+      const recu = recuByLine.get(Number(r.IDref_fil_commande)) ?? 0
+      const reste = Math.max(0, ordered - recu)
+      return {
+        commande: Number(r.IDcommande_fil) || 0,
+        fournisseur: frsName.get(cmdFournisseur.get(Number(r.IDcommande_fil)) ?? 0) || '—',
+        ordered,
+        recu,
+        kg: reste,
+      }
+    })
+    // Outstanding quantity still to receive — gross ordered minus what's landed.
+    const commande = commande_rows.reduce((s, r) => s + r.kg, 0)
 
     // Besoin — yarn affected to OPEN tricoteur orders. asso_fil_lignecmdsst links
     // a stock_fil roll → a tricoteur sst line; scope to commandes est_soldee = 0.

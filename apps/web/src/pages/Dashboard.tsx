@@ -41,7 +41,7 @@ interface FilEtat {
   en_stock_rows: { lot: string; fournisseur: string; kg: number }[]
   commande: number
   nb_commandes: number
-  commande_rows: { commande: number; fournisseur: string; kg: number }[]
+  commande_rows: { commande: number; fournisseur: string; ordered: number; recu: number; kg: number }[]
   besoin: number
   nb_affectations: number
   besoin_rows: { lot: string; commande_sst: number; kg: number }[]
@@ -74,6 +74,9 @@ function FilStockEtatWidget() {
   const ready = refFilId > 0 && coloriId > 0
   const refLabel = refs.find((r) => r.IDref_fil === refFilId)?.reference ?? ''
   const coloriLabel = variantes.find((v) => v.IDcolori_fil === coloriId)?.reference ?? ''
+  // Footer totals for the "Commandé" tooltip breakdown (ordered / received).
+  const cmdOrderedTotal = (etat?.commande_rows ?? []).reduce((s, r) => s + r.ordered, 0)
+  const cmdRecuTotal = (etat?.commande_rows ?? []).reduce((s, r) => s + r.recu, 0)
 
   return (
     <RTooltip.Provider delayDuration={120} skipDelayDuration={400}>
@@ -170,9 +173,11 @@ function FilStockEtatWidget() {
                 iconBox="bg-accent-blue/10 text-accent-blue"
                 info={{
                   title: 'Commandé',
-                  text: 'Commandes fournisseur en cours, pas encore réceptionnées.',
-                  headers: ['N° cmd', 'Fournisseur', 'kg'],
-                  rows: etat.commande_rows.map((r) => [`N°${r.commande}`, r.fournisseur, fmtNum(r.kg, 1)]),
+                  text: 'Commandes fournisseur en cours, déduction faite des lots déjà réceptionnés (reste à recevoir).',
+                  headers: ['N° cmd', 'Commandé', 'Reçu', 'Reste'],
+                  numCols: 3,
+                  rows: etat.commande_rows.map((r) => [`N°${r.commande}`, fmtNum(r.ordered, 1), fmtNum(r.recu, 1), fmtNum(r.kg, 1)]),
+                  colTotals: [fmtNum(cmdOrderedTotal, 1), fmtNum(cmdRecuTotal, 1)],
                   totalKg: etat.commande,
                 }}
               />
@@ -277,14 +282,21 @@ interface TipData {
   title: string
   text: string
   headers: string[]
-  /** Each row's cells; the LAST cell is the kg value (right-aligned). */
+  /** Each row's cells; the trailing `numCols` cells are right-aligned numerics. */
   rows: string[][]
+  /** Total for the LAST numeric column (rendered with a " kg" suffix). */
   totalKg: number
+  /** How many trailing columns are right-aligned numerics. Defaults to 1. */
+  numCols?: number
+  /** Footer totals for the leading numeric columns (all but the last). Length = numCols-1. */
+  colTotals?: string[]
 }
 
 // Hover info icon → portaled, collision-aware Radix tooltip showing a title, a
 // short explanation, and a breakdown table of every lot/line that's counted.
-function InfoTip({ title, text, headers, rows, totalKg }: TipData) {
+function InfoTip({ title, text, headers, rows, totalKg, numCols = 1, colTotals = [] }: TipData) {
+  // Index of the first right-aligned numeric column.
+  const firstNumeric = headers.length - numCols
   return (
     <RTooltip.Root>
       <RTooltip.Trigger asChild>
@@ -312,7 +324,7 @@ function InfoTip({ title, text, headers, rows, totalKg }: TipData) {
                 <thead className="sticky top-0 bg-muted text-muted-foreground">
                   <tr>
                     {headers.map((h, i) => (
-                      <th key={i} className={cn('px-2 py-1 font-medium', i === headers.length - 1 ? 'text-right whitespace-nowrap' : 'text-left')}>
+                      <th key={i} className={cn('px-2 py-1 font-medium', i >= firstNumeric ? 'text-right whitespace-nowrap' : 'text-left')}>
                         {h}
                       </th>
                     ))}
@@ -326,7 +338,7 @@ function InfoTip({ title, text, headers, rows, totalKg }: TipData) {
                           key={ci}
                           className={cn(
                             'px-2 py-1 align-top',
-                            ci === r.length - 1
+                            ci >= firstNumeric
                               ? 'whitespace-nowrap text-right font-medium tabular-nums text-foreground'
                               : 'text-left text-muted-foreground',
                           )}
@@ -339,7 +351,10 @@ function InfoTip({ title, text, headers, rows, totalKg }: TipData) {
                 </tbody>
                 <tfoot>
                   <tr className="border-t border-border bg-muted">
-                    <td className="px-2 py-1 font-semibold text-foreground" colSpan={Math.max(1, headers.length - 1)}>Total</td>
+                    <td className="px-2 py-1 font-semibold text-foreground" colSpan={Math.max(1, firstNumeric)}>Total</td>
+                    {colTotals.map((t, i) => (
+                      <td key={i} className="px-2 py-1 text-right font-semibold tabular-nums text-muted-foreground">{t}</td>
+                    ))}
                     <td className="px-2 py-1 text-right font-bold tabular-nums text-foreground">{fmtNum(totalKg)} kg</td>
                   </tr>
                 </tfoot>
