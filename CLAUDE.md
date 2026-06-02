@@ -39,6 +39,7 @@ Full design system in `.claude/skills/mps_designer/SKILL.md`.
 | Database | HFSQL Client/Server via `odbc` npm package |
 | Auth | Cookie-based (HMAC-signed, no JWT lib) — `cookie-parser` |
 | PDF | `@react-pdf/renderer` (server-side, Lato fonts bundled) |
+| Excel | `xlsx` (SheetJS) — **client-side**, lazy `await import('xlsx')` so it's a separate chunk; API returns JSON, browser builds the `.xlsx` |
 | Email | Gmail API via `googleapis` + domain-wide delegation |
 
 ## Project Structure
@@ -95,7 +96,7 @@ MPS_NG/
 
 Mirrors the legacy WinDev main menu (top → bottom):
 
-1. **Tableau de bord** (`/`)
+1. **Tableau de bord** (`/`) — widgets per-user permission-gated (`dashboard_*` keys); toggled in Paramètres › Utilisateurs
 2. **Prospects** (renamed from legacy "Marketing") — **Demandes** (`/prospects/demandes`; catalogue requests from the `prospect` table; master-detail, implemented)
 3. **Clients** — Commandes, Devis, Facturation, Gestion
 4. **Sous-traitants** — **Commandes** (ennoblisseur; see `sous_traitants_status_model.md`), Gestion
@@ -133,16 +134,17 @@ Full details in `claude_doc/hfsql_odbc.md`. These are the non-negotiable rules f
 - **No `RETURNING *`**: use follow-up `SELECT` after INSERT/UPDATE.
 - **Booleans are `0`/`1`**: in React always `!!value &&` to avoid rendering `0` as text.
 - **Accented identifiers are platform-specific**: Linux bridge rejects them entirely (use `sf.*` + ASCII-truncated column names); Windows silently returns 0 rows on `alias.*` in JOINs (use explicit `alias.terminé AS termine`). Branch on `process.platform === 'win32'` via `IS_WINDOWS`. Canonical pattern in `apps/api/src/routes/stock.ts`.
+- **A query naming a non-existent column = prod outage on Linux**: silently caught on Windows ODBC, but on the bridge it triggers a respawn storm that floods the shared HFSQL server (`mps.malterre`=`10.10.20.2`, shared with mfprod) and hangs both apps. Any helper building `WHERE <col>=<id>` from a row property MUST use the target table's real PK. Memory: `project_hfsql_bridge_storm.md` (verify prod via `https://mpsng.malterre`, NOT `localhost:8081` — IPv6 false 000s; don't hammer-restart).
 - **Encoding (reads)**: ODBC corrupts accents (é→U+FFFD). Use `fixEncoding()` / `CONVERT(field USING 'UTF-8')` per affected field.
-- **Encoding (writes)**: raw multi-byte UTF-8 in a SQL string corrupts the Linux bridge pipeline (→ `[HY090]` / HFSQL "string without end" / 500). HFSQL text columns are Latin-1 natively — emit accented values as a hex literal of their Latin-1 bytes (`x'${Buffer.from(v,'latin1').toString('hex')}'`), not `'${esc(v)}'`; pure-ASCII values keep the normal quoted literal. Helper: `sqlText()` in `commandes-sous-traitant.ts`.
+- **Encoding (writes)**: raw multi-byte UTF-8 in a SQL string corrupts the Linux bridge (→ `[HY090]` / "string without end" / 500). HFSQL text columns are Latin-1 — emit accented values as a hex literal of their Latin-1 bytes (`x'${Buffer.from(v,'latin1').toString('hex')}'`), not `'${esc(v)}'`; ASCII values keep the normal quoted literal. Helper: `sqlText()` in `commandes-sous-traitant.ts`.
 - **BinMemo `IS NOT NULL`**: unreliable — empty blobs pass. File-serving endpoints return 404 if buffer is empty; UI does HEAD pre-check before rendering iframes.
 - **Avoid accents in HFSQL table names and backup folder file names** — both cause "fichier de données est déjà décrit" errors at connection time.
 - **JOIN + `CONVERT()` collapses result sets**: `SELECT a.col, CONVERT(b.text USING 'UTF-8') FROM a JOIN b WHERE …` returns **one row** instead of all matches. Split into two flat queries and merge in JS. Same shape kills `CONVERT(tel)` even single-table when `tel` is empty on some rows — read phone-like cols raw. Reference: `commandes-sous-traitant.ts` `/lookups/sous-traitants`.
 - **Reserved-word columns return uppercased**: `SELECT lcs.type FROM ligne_commande_sous_traitant lcs` returns the column key as `TYPE`, not `type`; likewise `date` comes back as `DATE` (seen on `prospect`). Always alias (`lcs.type AS type_kind`) or read case-insensitively. Affected anywhere a reserved-word column exists.
-- **`commande_sous_traitant`: `commentaire` is RTF, `journal` is plain text**: `commentaire` round-trips through `stripRtf()` / `wrapRtf()` (legacy WinDev still reads it); `journal` writes go through `sqlText()` — the 5022 RTF-wrapped rows were migrated to plain text on 2026-05-26; reads keep `stripRtf()` defensively. The new app surfaces `commande_sous_traitant.journal` where the legacy "journal" UI was wrongly bound to per-line `ligne_commande_sous_traitant.commentaire` — line comments were backfilled into the header column.
+- **`commande_sous_traitant`: `commentaire` is RTF, `journal` is plain text**: `commentaire` round-trips via `stripRtf()`/`wrapRtf()` (legacy still reads it); `journal` writes via `sqlText()` (RTF rows migrated to plain text 2026-05-26, reads keep `stripRtf()` defensively). The app surfaces `journal` where legacy wrongly bound the "journal" UI to per-line `lcsst.commentaire`.
 - **Empty FK columns store `0`, not `NULL`**: HFSQL keeps integer FK columns at `0` when there's no foreign key (not NULL). Predicates like `WHERE IDligne_expedition IS NULL` silently match zero rows. Use `(col IS NULL OR col = 0)`. Bit the `stock-fini.ts` default filter; same shape on `IDligne_commande_client`, `IDcommande_donation`, `IDProprietaire`, etc.
-- **`IDsociete` partitioning**: shared tables (`client`, `commande_client`, likely `facture`/`devis`/similar — verify per table) are partitioned across the 3 Malterre companies via `IDsociete` (1=ETM, 2=TRM, 3=Confection). Legacy WinDev screens filter on it — rows with `IDsociete = 0` are **invisible** in the legacy app. Every MPS_NG INSERT must set it explicitly (= 1 for the ETM app; bridge code that writes to TRM's view sets 2). Memory: `project_societe_multi_company.md`.
-- **Per-table polymorphism / FK quirks** (`ged` multi-parent, `asso_colorisfil_frs`, lcsst `IDreference` × 3 catalogs, fini `IDColoris` by `ref_fini.avec_teinture` [`0`=`colori_ecru` wash / `1`,`2`=`ref_fini_colori` dye — branch every coloris read/PDF path; memory `project_avec_teinture_coloris_rule.md`], `defaut_qualite` `Type_Reference`, `envoi_email.IDreference` by `IDtype_doc`): see `claude_doc/hfsql_odbc.md` § Per-table polymorphism / FK quirks.
+- **`IDsociete` partitioning**: shared tables (`client`, `commande_client`, likely `facture`/`devis` — verify per table) are partitioned across the 3 companies via `IDsociete` (1=ETM, 2=TRM, 3=Confection). Legacy filters on it — `IDsociete = 0` rows are **invisible** in the legacy app. Every MPS_NG INSERT must set it (= 1 for ETM; TRM-view writes set 2). Memory: `project_societe_multi_company.md`.
+- **Per-table polymorphism / FK quirks** (`ged` multi-parent, `asso_colorisfil_frs`, lcsst `IDreference` × 3 catalogs, fini `IDColoris` by `ref_fini.avec_teinture` [`0`=wash `colori_ecru` / `1`,`2`=dye `ref_fini_colori`; memory `project_avec_teinture_coloris_rule.md`], `defaut_qualite` `Type_Reference`, `envoi_email.IDreference` by `IDtype_doc`): see `claude_doc/hfsql_odbc.md`.
 - **Ennoblisseur lines (sst, `type=2`)**: `quantite=Ml`, `prix=€/Kg` — never multiply directly; € total = `Σ(stock_ecru.poids) × prix`. `prix` auto via `pricing-sst.ts` (ports legacy `CalculTarifSST` with MATEL/ESAT multipliers). Manual entry for out-of-catalog ssts (`auto_pricing_enabled` gates). Algo: memory `project_pricing_calcultarifsst.md`.
 - **Tricoteur lines (sst, `type=1`)**: `quantite=kg` (output écru), `prix=€/Kg`, € total = `qty × prix`. `prix` auto via `pricing-trm.ts trmLinePrix = max(PrixDeRevientTRM(IDref_ecru, qty) / 0.7, ref_ecru.prix)`. Gate on `line.type=1` (ALL tricoteurs). Yarn affectations: `asso_fil_lignecmdsst`. Algo: memory `project_pricing_prixderevient_trm.md`.
 - **ETM↔TRM cross-ledger bridge** (TRM = Tricotage Malterre, IDsous_traitant=1): auto-mirrors tricoteur sst as TRM `commande_client` (`IDcommande_ETM` back-pointer). Gate via `isTricotageMalterreSst(sstId)` — external tricoteurs (37/10/66) get NO mirror. TRM-side rolls surface via `stock_ecru.IDref_commande_source`. Detail: memory `project_etm_trm_bridge.md`.
@@ -155,11 +157,11 @@ Full details in `claude_doc/hfsql_odbc.md`. These are the non-negotiable rules f
 - **Shared `apiFetch`**: all fetch calls go through `apps/web/src/lib/api.ts` (sets `credentials: 'include'` for cookie auth). **Never duplicate per page** — the cookie won't be sent without `credentials: 'include'`.
 - **SW denylist for `/api/`**: the PWA SW has `navigateFallbackDenylist` for `/api/`. Never remove — without it, the SW intercepts `/api/` navigations and serves `index.html`, breaking React Router.
 - **Modifier button = `variant="gold"`**: the view-mode "Modifier" CTA on every detail screen MUST use `<Button variant="gold">`. Never `outline` or `default`. Canonical "enter edit mode" affordance.
-- **Stale `.js` build artifacts**: `apps/web/src/**/*.js` is gitignored; web `build` is `tsc --noEmit && vite build` — **never revert to `tsc -b`** (composite tsconfig has no `noEmit`, so it emits `.js`/`.d.ts` into `src/`). Vite resolves `.js` before `.tsx`, so stray emitted `.js` shadow your source and serve stale code (symptom: white screen / edits not showing / `404` on a `*.js` under `/src/pages/`). Fix: delete the `.js`/`.d.ts` AND restart the Vite process (clearing `node_modules/.vite` is not enough — the old module graph lives in memory until restart).
+- **Stale `.js` build artifacts**: `apps/web/src/**/*.js` is gitignored; web `build` is `tsc --noEmit && vite build` — **never revert to `tsc -b`** (composite tsconfig emits `.js`/`.d.ts` into `src/`). Vite resolves `.js` before `.tsx`, so stray emitted `.js` shadow source and serve stale code (symptom: white screen / edits not showing). Fix: delete the `.js`/`.d.ts` AND restart Vite (clearing `node_modules/.vite` isn't enough — old module graph lives in memory until restart).
 
 ## Design system rule
 
-**Before building or modifying any user-facing screen, component, button, tab, card, dialog, or interaction pattern, you MUST invoke the `mps_designer` skill via the Skill tool (`Skill(skill: "mps_designer")`).** This is not optional. The skill encodes every UI/UX convention — colors, layouts, detail-header button trios, placeholder dialogs, drawer patterns, deadline indicators, status footers, etc.
+**Before building or modifying any user-facing screen, component, button, tab, card, dialog, or interaction pattern, you MUST invoke the `mps_designer` skill (`Skill(skill: "mps_designer")`).** Not optional. It encodes every UI/UX convention — colors, layouts, detail-header button trios, placeholder dialogs, drawers, deadline indicators, status footers, etc.
 
 **Invoke the skill when**: building a new screen; adding a button/tab/card/dialog to an existing screen; touching anything the user describes in visual terms ("add a print button", "make it red", "slide a drawer in"); deciding a color/icon/size/spacing/shape.
 
@@ -167,7 +169,7 @@ Full details in `claude_doc/hfsql_odbc.md`. These are the non-negotiable rules f
 
 **Core visual language**: panel backgrounds `bg-zinc-100/80` (list/sidebar) / `bg-zinc-200/50` (header/footer) / `bg-white` (cards), `scrollbar-transparent` on scrollable panels. **Never hardcode hex values** — use Tailwind CSS variable classes (`text-accent`, `bg-primary`, `border-gold/30`). Colors in §Branding above.
 
-**Typography**: OS system stack via `system-ui`. Both `font-sans` and `font-heading` resolve to the same stack. **No web fonts are loaded** — no `@import`, no `<link>`, no `@font-face`. Heading pattern: `<h1 className="text-3xl font-heading font-bold tracking-tight">`. Header gradient: `bg-gradient-to-r from-gold/40 via-gold/15 to-transparent`. **Do not re-add Google Fonts `@import`** — earlier Anton/Lato attempts were silently broken; see `mps_designer §2`.
+**Typography**: OS system stack via `system-ui` (`font-sans` = `font-heading`). **No web fonts** — no `@import`/`<link>`/`@font-face`. Heading: `<h1 className="text-3xl font-heading font-bold tracking-tight">`. Header gradient: `bg-gradient-to-r from-gold/40 via-gold/15 to-transparent`. **Do not re-add Google Fonts `@import`** (earlier Anton/Lato attempts silently broke). See `mps_designer §2`.
 
 **Edit mode pattern** (follow `Entreprises.tsx`): `isEditing` toggle, gold "Mode edition" badge, `border-l-4 border-l-accent/70 bg-accent/[0.03]` on editable cards, hover-reveal actions (`opacity-0 group-hover:opacity-100`), `LabeledInput` + `InlineForm` components.
 
@@ -175,7 +177,7 @@ Full details in `claude_doc/hfsql_odbc.md`. These are the non-negotiable rules f
 
 **Status management**: user-controlled primary state goes to the **sidebar footer pill** (not a header badge), regardless of how many values it can take. Binary → split toggle button (`FilsCommandes`); 3+ values → menu button + popover (`EtudesColoris`). See `mps_designer §29`.
 
-**"+ Nouveau" button**: at the bottom of every master-detail left list, visible **only in view mode** (`{!isEditing && ...}`). Click either inline-creates a placeholder row (Entreprises, FilsGestion, FilsReferences) or opens a small initial-data modal (FilsCommandes, EtudesColoris) — pick based on whether the row needs real data up front. After save: `setSelectedId(newId)` + auto-enter edit mode. `FilsStock` is exempt (table layout, header button, permission-gated). See `mps_designer §5`.
+**"+ Nouveau" button**: bottom of every master-detail left list, **view mode only** (`{!isEditing && ...}`). Either inline-creates a placeholder row or opens a small initial-data modal (pick per whether the row needs data up front). After save: `setSelectedId(newId)` + auto-enter edit. `FilsStock` exempt (table layout). Full rules: `mps_designer §5`.
 
 **Sidebar logo**: `public/logo-full.png` (expanded, `h-10 mx-auto`) / `public/logo-small.png` (collapsed, `h-8 mx-auto`).
 
