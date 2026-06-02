@@ -464,6 +464,12 @@ const styles = StyleSheet.create({
 // paddingTop on a continuation page so flow content clears the fixed header.
 const HEADER_HEIGHT = 92
 
+// Page-level paddingTop for a `withHeader` continuation page: the header band
+// height plus a breathing gap, so flow content (and especially the first row
+// of a repeated table on an overflow page) doesn't butt right against the
+// branded band. Applies to every physical page the continuation Page spans.
+const HEADER_PAGE_PADDING_TOP = HEADER_HEIGHT + 10
+
 // ── Types ────────────────────────────────────────────────
 
 export interface AddressBlockData {
@@ -699,7 +705,7 @@ export function MalterreDocument({
             styles.page,
             {
               paddingTop: secondPage.withHeader
-                ? HEADER_HEIGHT
+                ? HEADER_PAGE_PADDING_TOP
                 : secondPage.paddingTop ?? 36,
             },
           ]}

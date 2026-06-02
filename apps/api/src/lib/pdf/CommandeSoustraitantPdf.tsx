@@ -259,7 +259,11 @@ const styles = StyleSheet.create({
     lineHeight: 1.35,
   },
   // ── Dedicated "Stock à mettre en œuvre" page (secondPage) ──
-  v2Section: { marginTop: 24 },
+  // No top margin: the secondPage's paddingTop already provides the gap below
+  // the repeated header. An extra marginTop here pushed the title + first line
+  // group past the page boundary, orphaning the title on its own near-empty
+  // page (and spilling a blank trailing page on short single-line stock lists).
+  v2Section: {},
   // Page 2 fonts are sized to mirror page 1's hierarchy: the line header
   // matches page 1's refMainBig (primary blue, weight 900); the écru
   // subheader matches page 1's designationSub; the table content sits at
@@ -278,12 +282,12 @@ const styles = StyleSheet.create({
   v2Subtitle: {
     fontSize: 10,
     color: colors.muted,
-    marginBottom: 18,
+    marginBottom: 10,
   },
   v2TitleRule: {
     height: 2,
     backgroundColor: colors.gold,
-    marginBottom: 18,
+    marginBottom: 12,
   },
   v2LineGroup: {
     marginBottom: 18,
@@ -339,13 +343,16 @@ const styles = StyleSheet.create({
   },
   v2Row: {
     flexDirection: 'row',
-    paddingVertical: 6,
+    paddingVertical: 4,
     paddingHorizontal: 10,
     borderBottomWidth: 0.5,
     borderBottomColor: '#EEEEEE',
     borderBottomStyle: 'solid',
   },
-  v2Cell: { fontSize: 10.5, color: colors.text },
+  // Tighter line-height than the body default (contentLean's 1.45): table rows
+  // are single-line, and the extra leading needlessly inflated each row, which
+  // pushed long piece lists onto extra/blank pages.
+  v2Cell: { fontSize: 10.5, color: colors.text, lineHeight: 1.2 },
   v2ColNumero: { width: 110 },
   v2ColPoids: { width: 90, textAlign: 'right' },
   v2ColObs: { flex: 1, paddingLeft: 14, color: '#5A5A5A' },
