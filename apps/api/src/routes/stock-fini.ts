@@ -32,6 +32,13 @@ async function repairAliased<T extends Record<string, unknown>>(
   table: string,
   idField: string,
   aliasMap: Record<string, string>,
+  // Column to match in the target `table`. Defaults to idField (used when the
+  // row's id property and the target table's PK share a name). When they differ
+  // — e.g. stock_fini.IDColoris → ref_fini_colori.IDref_fini_colori, or
+  // stock_fini.IDmagasin → sous_traitant.IDsous_traitant — pass the target PK
+  // explicitly. Getting this wrong issues a query against a non-existent column,
+  // which on the Linux HFSQL bridge triggers a connection-respawn storm.
+  keyCol: string = idField,
 ): Promise<T[]> {
   const aliasNames = Object.keys(aliasMap)
   const out: T[] = []
@@ -56,7 +63,7 @@ async function repairAliased<T extends Record<string, unknown>>(
         const sourceCol = aliasMap[alias]
         try {
           const r = await query<{ v: unknown }>(
-            `SELECT CONVERT(${sourceCol} USING 'UTF-8') AS v FROM ${table} WHERE ${idField} = ${Number(id)}`,
+            `SELECT CONVERT(${sourceCol} USING 'UTF-8') AS v FROM ${table} WHERE ${keyCol} = ${Number(id)}`,
           )
           if (r.length > 0 && r[0].v != null) {
             const val = r[0].v
@@ -76,10 +83,10 @@ async function repairAliased<T extends Record<string, unknown>>(
 async function repairAllJoins(rows: StockFini[]): Promise<StockFini[]> {
   let fixed = rows
   fixed = await repairAliased(fixed, 'ref_fini', 'IDref_fini', { ref_fini: 'reference', designation: 'designation' })
-  fixed = await repairAliased(fixed, 'ref_fini_colori', 'IDColoris', { coloris_dyed: 'reference' })
-  fixed = await repairAliased(fixed, 'colori_ecru', 'IDColoris', { coloris_wash: 'reference' })
+  fixed = await repairAliased(fixed, 'ref_fini_colori', 'IDColoris', { coloris_dyed: 'reference' }, 'IDref_fini_colori')
+  fixed = await repairAliased(fixed, 'colori_ecru', 'IDColoris', { coloris_wash: 'reference' }, 'IDcolori_ecru')
   fixed = await repairAliased(fixed, 'etat_stock_fini', 'IDetat_stock_fini', { etat_libelle: 'libelle' })
-  fixed = await repairAliased(fixed, 'sous_traitant', 'IDmagasin', { magasin_nom: 'nom' })
+  fixed = await repairAliased(fixed, 'sous_traitant', 'IDmagasin', { magasin_nom: 'nom' }, 'IDsous_traitant')
   // Pick the coloris label dictated by avec_teinture (0 = wash → colori_ecru,
   // 1/2 = dyed → ref_fini_colori). Unknown ref (null) defaults to dyed to keep
   // the previous behaviour. Collapse to the single `coloris_reference` field
