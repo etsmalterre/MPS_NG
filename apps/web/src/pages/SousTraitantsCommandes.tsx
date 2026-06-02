@@ -5839,20 +5839,22 @@ function EmailEventCard({ evt }: { evt: Extract<HistoriqueEvent, { kind: 'email'
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
-            <p className="text-sm font-semibold truncate">
-              {meta.label}
-              {evt.notes && (
-                <span className="ml-1.5 text-xs font-normal text-muted-foreground">
-                  · lot {evt.notes}
-                </span>
-              )}
-            </p>
+            <p className="text-sm font-semibold truncate">{meta.label}</p>
             <span className="text-[10px] text-muted-foreground tabular-nums flex-shrink-0">
               {formatHistoriqueDate(evt.date)}
             </span>
           </div>
+          {evt.notes && (
+            <span className={cn(
+              'inline-flex items-center gap-1 mt-1.5 px-1.5 py-0.5 rounded border text-[11px] font-medium',
+              meta.accent,
+            )}>
+              <Package className="h-3 w-3 flex-shrink-0" />
+              Lot {evt.notes}
+            </span>
+          )}
           {evt.recipients.length > 0 && (
-            <p className="text-xs text-muted-foreground mt-0.5 break-all">
+            <p className="text-xs text-muted-foreground mt-1.5 break-all">
               {evt.recipients.map((r) => r.email).join(', ')}
             </p>
           )}
@@ -5876,18 +5878,20 @@ function ReponseEventCard({ evt }: { evt: Extract<HistoriqueEvent, { kind: 'repo
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
-            <p className="text-sm font-semibold truncate">
-              {meta.label}
-              {evt.lot && (
-                <span className="ml-1.5 text-xs font-normal text-muted-foreground">
-                  · lot {evt.lot}
-                </span>
-              )}
-            </p>
+            <p className="text-sm font-semibold truncate">{meta.label}</p>
             <span className="text-[10px] text-muted-foreground tabular-nums flex-shrink-0">
               {formatHistoriqueDate(evt.date)}
             </span>
           </div>
+          {evt.lot && (
+            <span className={cn(
+              'inline-flex items-center gap-1 mt-1.5 px-1.5 py-0.5 rounded border text-[11px] font-medium',
+              meta.accent,
+            )}>
+              <Package className="h-3 w-3 flex-shrink-0" />
+              Lot {evt.lot}
+            </span>
+          )}
         </div>
       </div>
     </div>
