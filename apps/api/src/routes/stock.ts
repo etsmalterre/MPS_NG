@@ -374,7 +374,9 @@ stockRouter.get('/fil/la-gentle-stale', async (req: Request, res: Response) => {
           dernier_mouvement: dernier, // YYYYMMDD
         }
       })
-      .filter((r) => r.dernier_mouvement !== '' && r.dernier_mouvement <= cutoff)
+      // Legacy report only lists lots actually holding stock — exclude
+      // depleted (0) and anomalous negative rows.
+      .filter((r) => r.stock > 0 && r.dernier_mouvement !== '' && r.dernier_mouvement <= cutoff)
       .sort((a, b) => a.dernier_mouvement.localeCompare(b.dernier_mouvement))
 
     res.json({ client_nom: 'La Gentle Factory', cutoff, count: out.length, rows: out })

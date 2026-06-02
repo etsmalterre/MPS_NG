@@ -70,27 +70,42 @@ interface LaGentleResponse {
   rows: LaGentleRow[]
 }
 
-// Default cutoff = 6 months ago (mirrors the legacy DATEADD(month,-6,SYSDATE)).
-function sixMonthsAgoInput(): string {
+// The widget asks for the REPORT date (default today). The movement cutoff is
+// derived as report_date − 6 months, mirroring the legacy DATEADD(month,-6,SYSDATE):
+// the report lists La Gentle lots with no movement in the 6 months before the
+// chosen date.
+function todayInput(): string {
   const d = new Date()
-  d.setMonth(d.getMonth() - 6)
   const y = d.getFullYear()
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
 }
 
+// "2026-06-01" → "20251201" (report date minus 6 months, HFSQL YYYYMMDD).
+function movementCutoffHfsql(reportInputDate: string): string {
+  const [y, m, day] = reportInputDate.split('-').map(Number)
+  const d = new Date(y, (m - 1), day)
+  d.setMonth(d.getMonth() - 6)
+  const yy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${yy}${mm}${dd}`
+}
+
 function LaGentleExportWidget() {
-  const [date, setDate] = useState(sixMonthsAgoInput)
+  const [date, setDate] = useState(todayInput)
   const [status, setStatus] = useState<'idle' | 'loading' | 'done' | 'empty' | 'error'>('idle')
   const [lastCount, setLastCount] = useState(0)
   const [errorMsg, setErrorMsg] = useState('')
 
   async function handleDownload() {
-    const cutoff = inputDateToHfsql(date)
-    if (!/^\d{8}$/.test(cutoff)) {
+    const reportDate = inputDateToHfsql(date)
+    if (!/^\d{8}$/.test(reportDate)) {
       setStatus('error'); setErrorMsg('Date invalide.'); return
     }
+    // Legacy semantics: filter on movements ≥ 6 months old at the report date.
+    const cutoff = movementCutoffHfsql(date)
     setStatus('loading'); setErrorMsg('')
     try {
       const data = await apiFetch<LaGentleResponse>(`/stock/fil/la-gentle-stale?cutoff=${cutoff}`)
@@ -119,7 +134,7 @@ function LaGentleExportWidget() {
       ]
       const wb = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(wb, ws, 'Stock La Gentle')
-      XLSX.writeFile(wb, `Stock_La_Gentle_${cutoff}.xlsx`)
+      XLSX.writeFile(wb, `Stock_La_Gentle_${reportDate}.xlsx`)
       setStatus('done')
     } catch (err) {
       console.error('La Gentle export failed:', err)
@@ -138,20 +153,20 @@ function LaGentleExportWidget() {
         <div className="min-w-0">
           <h2 className="text-lg font-heading font-bold tracking-tight">Stock La Gentle</h2>
           <p className="text-xs text-muted-foreground">
-            Rouleaux sans mouvement depuis une date — export Excel
+            Rouleaux sans mouvement depuis 6 mois — export Excel
           </p>
         </div>
       </div>
 
       <CardContent className="space-y-5 p-5">
         <p className="text-sm text-muted-foreground">
-          Génère un fichier Excel des lots de fil de <span className="font-semibold text-foreground">La Gentle Factory</span> dont
-          le dernier mouvement remonte à la date choisie ou avant.
+          Génère un fichier Excel des lots de fil de <span className="font-semibold text-foreground">La Gentle Factory</span> en
+          stock dont le dernier mouvement remonte à plus de 6 mois avant la date du rapport.
         </p>
 
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1">
-            <label className="text-xs font-medium text-muted-foreground">Dernier mouvement le ou avant</label>
+            <label className="text-xs font-medium text-muted-foreground">Date du rapport</label>
             <input
               type="date"
               value={date}
