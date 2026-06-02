@@ -28,6 +28,7 @@ import { Badge } from '@/components/ui/badge'
 import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
+import { fmtNum } from '@/lib/format'
 import { apiFetch } from '@/lib/api'
 
 // ── Types ──────────────────────────────────────────────
@@ -230,6 +231,11 @@ export function FinisStock() {
     queryClient.invalidateQueries({ queryKey: ['stock-fini'] })
   }, [queryClient])
 
+  // Totalizer over the currently-visible (filtered) rows
+  const rollCount = filteredSorted.length
+  const totalPoids = filteredSorted.reduce((sum, r) => sum + (r.poids ?? 0), 0)
+  const totalMetrage = filteredSorted.reduce((sum, r) => sum + (r.metrage ?? 0), 0)
+
   return (
     <div className="h-full flex flex-col gap-3 min-h-0">
       {/* Toolbar */}
@@ -370,6 +376,27 @@ export function FinisStock() {
           </>
         )}
       </div>
+
+      {/* Totalizer — standalone summary bar, detached from the table */}
+      {!isLoading && !isError && filteredSorted.length > 0 && (
+        <div className="flex-shrink-0 flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-zinc-100/80 shadow-sm px-4 py-2.5">
+          <div className="flex items-center gap-2 text-sm">
+            <Package className="h-4 w-4 text-accent" />
+            <span className="font-semibold">{rollCount}</span>
+            <span className="text-muted-foreground">rouleau{rollCount > 1 ? 'x' : ''}</span>
+          </div>
+          <div className="flex items-center gap-5">
+            <div className="flex items-baseline gap-2">
+              <span className="text-xs uppercase tracking-wide text-muted-foreground">Poids total</span>
+              <span className="text-base font-bold tabular-nums">{fmtNum(totalPoids, 1)} kg</span>
+            </div>
+            <div className="flex items-baseline gap-2 border-l border-border/60 pl-5">
+              <span className="text-xs uppercase tracking-wide text-muted-foreground">Métrage total</span>
+              <span className="text-base font-bold tabular-nums">{fmtNum(totalMetrage, 1)} m</span>
+            </div>
+          </div>
+        </div>
+      )}
 
       <StockFiniDrawer
         id={selectedId}
