@@ -273,6 +273,117 @@ stockRouter.get('/fil/etat', async (req: Request, res: Response) => {
   }
 })
 
+// Normalise a HFSQL date value to "YYYYMMDD". Handles both the 8-char string
+// form (stock_fil.date_entree = "20201021") and the datetime form
+// (stock_ecru.date_saisie = "2020-09-30 00:00:00.000").
+function toYmd(v: unknown): string {
+  if (v == null) return ''
+  const s = String(v).trim()
+  if (/^\d{8}$/.test(s)) return s
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (m) return m[1] + m[2] + m[3]
+  return ''
+}
+
+// GET /api/stock/fil/la-gentle-stale?cutoff=YYYYMMDD
+// Stale-stock report for client "La Gentle Factory" (IDclient = 8): yarn lots
+// (terminé = 0) whose last movement — max(stock_ecru.date_saisie via
+// asso_fil_of), falling back to stock_fil.date_entree — is on or before the
+// cutoff. Returns JSON rows; the frontend builds the .xlsx.
+//
+// HFSQL footguns handled per the canonical /fil list pattern:
+//   - `terminé` is accented → can't WHERE on the Linux bridge; filter in JS.
+//   - no inline CONVERT in the JOIN (collapses result sets); encoding fixed
+//     afterwards via fixEncoding (stock_fil) + repairAliased (ref/coloris/client).
+//   - the max + HAVING(date) is done in JS to avoid an accent-tainted aggregate.
+// MUST be declared before '/fil/:id' so "la-gentle-stale" isn't captured as an id.
+const LA_GENTLE_CLIENT_ID = 8
+stockRouter.get('/fil/la-gentle-stale', async (req: Request, res: Response) => {
+  try {
+    const cutoffRaw = String(req.query.cutoff ?? '')
+    if (!/^\d{8}$/.test(cutoffRaw)) {
+      res.status(400).json({ error: 'cutoff (YYYYMMDD) is required' }); return
+    }
+    const cutoff = cutoffRaw
+
+    // Main rows — JOIN without CONVERT. On Windows we can name terminé; on the
+    // Linux bridge we fall back to sf.* and read the truncated key in JS.
+    const sfCols = IS_WINDOWS
+      ? `sf.IDstock_fil, sf.IDref_fil, sf.IDcolori_fil, sf.IDclient, sf.lot, sf.stock, sf.emplacement, sf.commentaire, sf.date_entree, sf.terminé AS termine`
+      : `sf.*`
+    const rows = await query<Record<string, unknown>>(
+      `SELECT ${sfCols}, c.nom AS client_nom, rf.reference AS ref_fil, cf.reference AS coloris
+       FROM stock_fil sf
+       LEFT JOIN client c ON c.IDclient = sf.IDclient
+       LEFT JOIN ref_fil rf ON rf.IDref_fil = sf.IDref_fil
+       LEFT JOIN colori_fil cf ON cf.IDcolori_fil = sf.IDcolori_fil
+       WHERE sf.IDclient = ${LA_GENTLE_CLIENT_ID}`,
+    )
+
+    // terminé filter in JS (accented column, key varies by platform).
+    const active = rows.filter((r) => {
+      const t = (r as any).termine ?? (r as any)['terminé'] ?? (r as any).termin ?? 0
+      return !t || Number(t) === 0
+    })
+
+    // Encoding repair (only re-queries rows that actually contain U+FFFD).
+    let fixed = await fixEncoding(active, 'stock_fil', 'IDstock_fil', ['lot', 'emplacement', 'commentaire'])
+    fixed = await repairAliased(fixed as any, 'ref_fil', 'IDref_fil', { ref_fil: 'reference' })
+    fixed = await repairAliased(fixed as any, 'colori_fil', 'IDcolori_fil', { coloris: 'reference' })
+    fixed = await repairAliased(fixed as any, 'client', 'IDclient', { client_nom: 'nom' })
+
+    // dernier_mouvement = max( IFNULL(stock_ecru.date_saisie, date_entree) ) per
+    // lot. Fetch the raw (lot → ecru date) pairs and fold in JS.
+    const entreeBySfid = new Map<number, string>()
+    for (const r of fixed) entreeBySfid.set(Number((r as any).IDstock_fil), toYmd((r as any).date_entree))
+
+    const ids = Array.from(entreeBySfid.keys()).filter((x) => x > 0)
+    const ecruBySfid = new Map<number, string[]>()
+    if (ids.length > 0) {
+      const ecruRows = await query<{ sfid: number; ds: unknown }>(
+        `SELECT a.IDstock_fil AS sfid, se.date_saisie AS ds
+         FROM asso_fil_of a
+         JOIN stock_ecru se ON se.IDordre_fabrication = a.IDordre_fabrication
+         WHERE a.IDstock_fil IN (${ids.join(',')})`,
+      )
+      for (const er of ecruRows) {
+        const sfid = Number(er.sfid)
+        // IFNULL(date_saisie, date_entree)
+        const eff = toYmd(er.ds) || entreeBySfid.get(sfid) || ''
+        if (!eff) continue
+        const arr = ecruBySfid.get(sfid) ?? []
+        arr.push(eff)
+        ecruBySfid.set(sfid, arr)
+      }
+    }
+
+    const out = fixed
+      .map((r) => {
+        const sfid = Number((r as any).IDstock_fil)
+        const entree = entreeBySfid.get(sfid) || ''
+        const cands = ecruBySfid.get(sfid) ?? (entree ? [entree] : [])
+        const dernier = cands.length > 0 ? cands.reduce((a, b) => (a >= b ? a : b)) : ''
+        return {
+          client: ((r as any).client_nom ?? '').toString().trim(),
+          lot: ((r as any).lot ?? '').toString().trim(),
+          reference: ((r as any).ref_fil ?? '').toString().trim(),
+          coloris: ((r as any).coloris ?? '').toString().trim(),
+          stock: Number((r as any).stock) || 0,
+          emplacement: ((r as any).emplacement ?? '').toString().trim(),
+          commentaire: ((r as any).commentaire ?? '').toString().trim(),
+          dernier_mouvement: dernier, // YYYYMMDD
+        }
+      })
+      .filter((r) => r.dernier_mouvement !== '' && r.dernier_mouvement <= cutoff)
+      .sort((a, b) => a.dernier_mouvement.localeCompare(b.dernier_mouvement))
+
+    res.json({ client_nom: 'La Gentle Factory', cutoff, count: out.length, rows: out })
+  } catch (err) {
+    console.error('Error computing la-gentle stale stock:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // GET /api/stock/fil/:id - Single stock_fil row + has_certif flags
 stockRouter.get('/fil/:id', async (req: Request, res: Response) => {
   try {

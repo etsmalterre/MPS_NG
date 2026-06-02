@@ -8,22 +8,176 @@ import {
   AlertTriangle,
   Loader2,
   Info,
+  FileSpreadsheet,
+  Download,
 } from 'lucide-react'
 import * as RTooltip from '@radix-ui/react-tooltip'
 import { Card, CardContent } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
 import { SearchableCombobox } from '@/components/ui/popover-select'
 import { BobineIcon } from '@/components/icons/BobineIcon'
 import { apiFetch } from '@/lib/api'
 import { fmtNum } from '@/lib/format'
+import { formatHfsqlDate, inputDateToHfsql } from '@/lib/dates'
 import { cn } from '@/lib/utils'
 
 export function Dashboard() {
   return (
-    <div className="animate-fade-in -m-4 lg:-m-6 flex-1 min-h-0 bg-muted/70 p-4 lg:p-6">
-      <div className="w-full lg:w-1/2">
+    <div className="animate-fade-in -m-4 lg:-m-6 flex-1 min-h-0 overflow-auto bg-muted/70 p-4 lg:p-6 scrollbar-transparent">
+      <div className="grid items-start gap-4 lg:grid-cols-2">
         <FilStockEtatWidget />
+        <LaGentleExportWidget />
       </div>
     </div>
+  )
+}
+
+// ── Stock La Gentle export widget ─────────────────────────────
+// Pick a cutoff date → download an Excel of La Gentle Factory (client 8) yarn
+// lots (terminé = 0) whose last movement is on or before that date. Backed by
+// GET /api/stock/fil/la-gentle-stale; the .xlsx is built client-side (SheetJS
+// lazy-loaded on click so it never bloats the main bundle).
+
+interface LaGentleRow {
+  client: string
+  lot: string
+  reference: string
+  coloris: string
+  stock: number
+  emplacement: string
+  commentaire: string
+  dernier_mouvement: string // YYYYMMDD
+}
+interface LaGentleResponse {
+  client_nom: string
+  cutoff: string
+  count: number
+  rows: LaGentleRow[]
+}
+
+// Default cutoff = 6 months ago (mirrors the legacy DATEADD(month,-6,SYSDATE)).
+function sixMonthsAgoInput(): string {
+  const d = new Date()
+  d.setMonth(d.getMonth() - 6)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function LaGentleExportWidget() {
+  const [date, setDate] = useState(sixMonthsAgoInput)
+  const [status, setStatus] = useState<'idle' | 'loading' | 'done' | 'empty' | 'error'>('idle')
+  const [lastCount, setLastCount] = useState(0)
+  const [errorMsg, setErrorMsg] = useState('')
+
+  async function handleDownload() {
+    const cutoff = inputDateToHfsql(date)
+    if (!/^\d{8}$/.test(cutoff)) {
+      setStatus('error'); setErrorMsg('Date invalide.'); return
+    }
+    setStatus('loading'); setErrorMsg('')
+    try {
+      const data = await apiFetch<LaGentleResponse>(`/stock/fil/la-gentle-stale?cutoff=${cutoff}`)
+      setLastCount(data.count)
+      if (data.count === 0) { setStatus('empty'); return }
+
+      const XLSX = await import('xlsx')
+      const headers = ['Client', 'Lot', 'Référence', 'Coloris', 'Stock (kg)', 'Emplacement', 'Commentaire', 'Dernier mouvement']
+      const aoa: (string | number)[][] = [
+        headers,
+        ...data.rows.map((r) => [
+          r.client,
+          r.lot,
+          r.reference,
+          r.coloris,
+          r.stock,
+          r.emplacement,
+          r.commentaire,
+          r.dernier_mouvement ? formatHfsqlDate(r.dernier_mouvement) : '',
+        ]),
+      ]
+      const ws = XLSX.utils.aoa_to_sheet(aoa)
+      ws['!cols'] = [
+        { wch: 18 }, { wch: 10 }, { wch: 24 }, { wch: 14 },
+        { wch: 10 }, { wch: 14 }, { wch: 32 }, { wch: 16 },
+      ]
+      const wb = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb, ws, 'Stock La Gentle')
+      XLSX.writeFile(wb, `Stock_La_Gentle_${cutoff}.xlsx`)
+      setStatus('done')
+    } catch (err) {
+      console.error('La Gentle export failed:', err)
+      setStatus('error')
+      setErrorMsg(err instanceof Error ? err.message : 'Échec de la génération.')
+    }
+  }
+
+  return (
+    <Card className="card-premium overflow-hidden">
+      {/* Gold header band */}
+      <div className="flex items-center gap-3 border-b border-gold/20 bg-gold/25 px-5 py-4">
+        <div className="icon-box-gold h-11 w-11 flex items-center justify-center">
+          <FileSpreadsheet className="h-[22px] w-[22px]" />
+        </div>
+        <div className="min-w-0">
+          <h2 className="text-lg font-heading font-bold tracking-tight">Stock La Gentle</h2>
+          <p className="text-xs text-muted-foreground">
+            Rouleaux sans mouvement depuis une date — export Excel
+          </p>
+        </div>
+      </div>
+
+      <CardContent className="space-y-5 p-5">
+        <p className="text-sm text-muted-foreground">
+          Génère un fichier Excel des lots de fil de <span className="font-semibold text-foreground">La Gentle Factory</span> dont
+          le dernier mouvement remonte à la date choisie ou avant.
+        </p>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Dernier mouvement le ou avant</label>
+            <input
+              type="date"
+              value={date}
+              onChange={(e) => { setDate(e.target.value); setStatus('idle') }}
+              className="w-full h-9 px-2.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+          <div className="flex items-end">
+            <Button
+              onClick={handleDownload}
+              disabled={status === 'loading'}
+              className="w-full"
+            >
+              {status === 'loading'
+                ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                : <Download className="h-4 w-4 mr-1.5" />}
+              Télécharger l'export Excel
+            </Button>
+          </div>
+        </div>
+
+        {/* Status line */}
+        <div className="min-h-[20px] text-sm">
+          {status === 'done' && (
+            <p className="flex items-center gap-1.5 text-success">
+              <CheckCircle2 className="h-4 w-4" />
+              {lastCount} rouleau{lastCount > 1 ? 'x' : ''} exporté{lastCount > 1 ? 's' : ''}.
+            </p>
+          )}
+          {status === 'empty' && (
+            <p className="text-muted-foreground italic">Aucun rouleau ne correspond à cette date.</p>
+          )}
+          {status === 'error' && (
+            <p className="flex items-center gap-1.5 text-destructive">
+              <AlertTriangle className="h-4 w-4" />
+              {errorMsg || 'Une erreur est survenue.'}
+            </p>
+          )}
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 
