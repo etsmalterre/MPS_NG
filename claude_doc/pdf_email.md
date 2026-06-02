@@ -25,6 +25,16 @@ Server-side PDF rendering for documents (`Bon de commande` shipped, `Devis` / `F
 - **`<Page paddingBottom>` is respected by the wrap engine; inner `<View paddingBottom>` is not** — for absolute footers, set padding on the Page so flow content stops before the footer area.
 - **`textTransform` accent stripping affects every label** — the canonical pattern is to pre-uppercase strings + drop the `textTransform` style. See `MalterreDocument.tsx`.
 
+### Pagination & page numbers (`MalterreDocument` `secondPage` / sst stock section)
+
+Hard-won footguns from wiring "Page X/Y" + the multi-page stock section (commits `3ac2c3d`, `ce74df6`). See memory `project_reactpdf_pagenumber_lineheight.md`.
+
+- **Never put `lineHeight` on the `Page` style.** It's inherited by the `fixed`+`render` page-number `Text`, whose layout-time content is empty (text comes from `render` at paint time); the box then stretches to full page height and the text paints off-screen behind the header — i.e. page numbers silently don't render. Put `lineHeight` on the body containers (`content` / `contentLean`) instead. Overriding `lineHeight` on the Text itself does NOT fix it.
+- **An absolute `Text` with only `right` (no `left`/width) collapses to a zero-width box** and never paints. Use both `left` + `right` + `textAlign: 'right'` (mirrors the footer).
+- **`wrap={false}` blocks spill a phantom/near-empty page when they end within ~25-30pt of the page-height boundary** — not just on true overflow. Symptoms seen: the stock-section title orphaned alone on a page with the first piece table bumped to the next; blank trailing pages after short lists; the front-page totals card on its own sparse page. Fixes: tighten content (piece-table rows use `paddingVertical: 4` + per-row `lineHeight: 1.2`, not the inherited 1.45 body leading — the biggest space lever); keep the page's bottom reserve modest (`paddingBottom: 80`, clears the ~66pt footer + page-number line); never bottom-pin a `wrap={false}` block with a `flexGrow` spacer or `marginTop: 'auto'` (let it flow). Test the boundary case: a single-line order with ~10-16 pieces.
+- **`secondPage.withHeader` continuation pages need `paddingTop = HEADER_HEIGHT + ~10`** (`HEADER_PAGE_PADDING_TOP`), else flow content butts directly against the repeated branded header on every physical overflow page.
+- **Rasterizing a PDF to verify output**: no poppler on the box. Use the pure-JS `pdf-to-img` + `sharp` from a temp dir (`npm i` outside the workspace — `workspace:*` refs break in-repo installs). Harness: `apps/api/src/scripts/dump-sst-pdf.ts <id>`.
+
 ## Email send (Gmail API via domain-wide delegation)
 
 Document-centric screens (bons de commande shipped; devis / facture / BL / expédition to follow) send email from within the app using a single Google service account with domain-wide delegation — no per-user OAuth flow. Full pattern documented in `.claude/skills/mps_designer/SKILL.md` §32.
