@@ -24,7 +24,7 @@ Full design system in `.claude/skills/mps_designer/SKILL.md`.
 ## Project Phases
 
 - **Phase 1 — UI Shell**: complete.
-- **Phase 2 — Database**: web app connects directly to HFSQL via ODBC. POC validated 2026-03-25. PostgreSQL migration was attempted and abandoned (column casing issues); legacy scripts remain in `data_migration/` for reference. WinDev app stays on HFSQL as-is — both apps share the same live data.
+- **Phase 2 — Database**: web app connects directly to HFSQL via ODBC (POC validated 2026-03-25). PostgreSQL migration was abandoned (column casing); legacy scripts remain in `data_migration/`. WinDev app stays on HFSQL — both apps share the same live data.
 - **Phase 3 — Features**: match legacy WinDev functionality screen by screen.
 
 ## Tech Stack
@@ -103,7 +103,7 @@ Mirrors the legacy WinDev main menu (top → bottom):
 5. **Transferts** — placeholder
 6. **Fils** (route `/fils/*`, renamed from `/fournisseurs/*`) — Références, Stock (table-centric), Commandes, Gestion, Prévisions
 7. **Tombé Métier** — placeholder, custom `TmRollIcon`
-8. **Finis** — Références, **Stock** (implemented, table-centric), **Études coloris** (implemented), Tarifs, Coloris Teint, Prévisions — custom `FiniRollIcon`
+8. **Finis** — Références, **Stock** (implemented, table-centric; edit-mode multi-select + cut-roll via `POST stock-fini/:id/cut`), **Études coloris** (implemented), Tarifs, Coloris Teint, Prévisions — custom `FiniRollIcon`
 9. **Divers** — placeholder
 10. **Qualité** — placeholder
 11. **Rapports** — placeholder
@@ -134,8 +134,8 @@ Full details in `claude_doc/hfsql_odbc.md`. These are the non-negotiable rules f
 - **No `RETURNING *`**: use follow-up `SELECT` after INSERT/UPDATE.
 - **Booleans are `0`/`1`**: in React always `!!value &&` to avoid rendering `0` as text.
 - **Accented identifiers are platform-specific**: Linux bridge rejects them entirely (use `sf.*` + ASCII-truncated column names); Windows silently returns 0 rows on `alias.*` in JOINs (use explicit `alias.terminé AS termine`). Branch on `process.platform === 'win32'` via `IS_WINDOWS`. Canonical pattern in `apps/api/src/routes/stock.ts`.
-- **A query naming a non-existent column = prod outage on Linux**: silently caught on Windows ODBC, but on the bridge it triggers a respawn storm that floods the shared HFSQL server (`mps.malterre`=`10.10.20.2`, shared with mfprod) and hangs both apps. Any helper building `WHERE <col>=<id>` from a row property MUST use the target table's real PK. Memory: `project_hfsql_bridge_storm.md` (verify prod via `https://mpsng.malterre`, NOT `localhost:8081` — IPv6 false 000s; don't hammer-restart).
-- **Encoding (reads)**: ODBC corrupts accents (é→U+FFFD). Use `fixEncoding()` / `CONVERT(field USING 'UTF-8')` per affected field.
+- **A query naming a non-existent column = prod outage on Linux**: silently caught on Windows ODBC, but on the bridge it triggers a respawn storm that floods the shared HFSQL server (`mps.malterre`=`10.10.20.2`, shared with mfprod) and hangs both apps. Any helper building `WHERE <col>=<id>` from a row property MUST use the target table's real PK. Verify prod via `https://mpsng.malterre` (NOT `localhost:8081` — IPv6 false 000s); don't hammer-restart. Memories: `project_hfsql_bridge_storm`, `feedback_prod_health_check`.
+- **Encoding (reads)**: ODBC corrupts accents (é→U+FFFD). Use `fixEncoding()` / `CONVERT(field USING 'UTF-8')` per affected field. **On large lists, batch the repair** — one `CONVERT … WHERE id IN (…)` per source column, not per row: the naive per-row CONVERT is an N+1 that floods the bridge (état/coloris labels corrupt on *every* row → thousands of round-trips). Batched pattern in `stock-fini.ts repairAliased`.
 - **Encoding (writes)**: raw multi-byte UTF-8 in a SQL string corrupts the Linux bridge (→ `[HY090]` / "string without end" / 500). HFSQL text columns are Latin-1 — emit accented values as a hex literal of their Latin-1 bytes (`x'${Buffer.from(v,'latin1').toString('hex')}'`), not `'${esc(v)}'`; ASCII values keep the normal quoted literal. Helper: `sqlText()` in `commandes-sous-traitant.ts`.
 - **BinMemo `IS NOT NULL`**: unreliable — empty blobs pass. File-serving endpoints return 404 if buffer is empty; UI does HEAD pre-check before rendering iframes.
 - **Avoid accents in HFSQL table names and backup folder file names** — both cause "fichier de données est déjà décrit" errors at connection time.
