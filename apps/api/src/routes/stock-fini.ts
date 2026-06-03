@@ -27,6 +27,14 @@ const TEXT_FIELDS = ['lot', 'numero', 'observations', 'observation_sst', 'emplac
  * Lazy CONVERT() repair for aliased columns that came back with U+FFFD glyphs.
  * Mirrors stock.ts:402.
  */
+// Repair U+FFFD-corrupted accents on aliased columns coming back from a join.
+// BATCHED: instead of one CONVERT query per row (an N+1 explosion that, on the
+// Linux bridge, turned a single list load into hundreds of serialized round
+// trips — état labels like "Réservé"/"Expédié" corrupt on *every* row), we issue
+// at most one CONVERT query per source column, fetching every distinct id at
+// once with `WHERE keyCol IN (...)`. Only ids whose value actually has a U+FFFD
+// are requested, so empty values never enter the CONVERT (which would otherwise
+// collapse the result set — see CLAUDE.md).
 async function repairAliased<T extends Record<string, unknown>>(
   rows: T[],
   table: string,
@@ -41,43 +49,65 @@ async function repairAliased<T extends Record<string, unknown>>(
   keyCol: string = idField,
 ): Promise<T[]> {
   const aliasNames = Object.keys(aliasMap)
-  const out: T[] = []
+
+  // Collect, per alias, the distinct ids whose value is corrupted.
+  const idsByAlias: Record<string, Set<number>> = {}
+  for (const alias of aliasNames) idsByAlias[alias] = new Set<number>()
+  let anyNeedsFix = false
   for (const row of rows) {
-    const needsFix = aliasNames.some((alias) => {
-      const v = row[alias]
-      return typeof v === 'string' && v.includes('�')
-    })
-    if (!needsFix) {
-      out.push(row)
-      continue
-    }
     const id = row[idField]
-    if (id == null) {
-      out.push(row)
-      continue
-    }
-    const fixed = { ...row }
+    if (id == null) continue
     for (const alias of aliasNames) {
       const v = row[alias]
       if (typeof v === 'string' && v.includes('�')) {
-        const sourceCol = aliasMap[alias]
-        try {
-          const r = await query<{ v: unknown }>(
-            `SELECT CONVERT(${sourceCol} USING 'UTF-8') AS v FROM ${table} WHERE ${keyCol} = ${Number(id)}`,
-          )
-          if (r.length > 0 && r[0].v != null) {
-            const val = r[0].v
-            ;(fixed as Record<string, unknown>)[alias] =
-              val instanceof ArrayBuffer ? Buffer.from(val).toString('utf8') : val
-          }
-        } catch {
-          // keep original
+        idsByAlias[alias].add(Number(id))
+        anyNeedsFix = true
+      }
+    }
+  }
+  if (!anyNeedsFix) return rows
+
+  // One batched CONVERT query per source column, over all distinct ids.
+  const valueByAlias: Record<string, Map<number, string>> = {}
+  for (const alias of aliasNames) {
+    valueByAlias[alias] = new Map<number, string>()
+    const ids = idsByAlias[alias]
+    if (ids.size === 0) continue
+    const sourceCol = aliasMap[alias]
+    try {
+      const r = await query<{ id: number; v: unknown }>(
+        `SELECT ${keyCol} AS id, CONVERT(${sourceCol} USING 'UTF-8') AS v FROM ${table} WHERE ${keyCol} IN (${Array.from(ids).join(',')})`,
+      )
+      for (const rec of r) {
+        if (rec.v == null) continue
+        const val = rec.v
+        valueByAlias[alias].set(
+          Number(rec.id),
+          val instanceof ArrayBuffer ? Buffer.from(val).toString('utf8') : String(val),
+        )
+      }
+    } catch {
+      // keep originals on failure
+    }
+  }
+
+  // Apply the fetched values back onto every corrupted row.
+  return rows.map((row) => {
+    const id = row[idField]
+    if (id == null) return row
+    let fixed: T | null = null
+    for (const alias of aliasNames) {
+      const v = row[alias]
+      if (typeof v === 'string' && v.includes('�')) {
+        const nv = valueByAlias[alias].get(Number(id))
+        if (nv != null) {
+          if (!fixed) fixed = { ...row }
+          ;(fixed as Record<string, unknown>)[alias] = nv
         }
       }
     }
-    out.push(fixed)
-  }
-  return out
+    return fixed ?? row
+  })
 }
 
 async function repairAllJoins(rows: StockFini[]): Promise<StockFini[]> {
@@ -126,7 +156,16 @@ stockFiniRouter.get('/fini', async (req: Request, res: Response) => {
     const sql = `SELECT ${STOCK_FINI_SELECT} ${STOCK_FINI_JOINS} ${whereSql} ORDER BY sf.date_saisie DESC, sf.IDstock_fini DESC`
     const rows = await query<StockFini>(sql)
 
-    let fixed = await fixEncoding(rows, 'stock_fini', 'IDstock_fini', TEXT_FIELDS)
+    // Batched accent repair for the base table's own text columns, then the
+    // joined columns — both via the batched repairAliased (no per-row N+1).
+    let fixed = await repairAliased(rows, 'stock_fini', 'IDstock_fini', {
+      lot: 'lot',
+      numero: 'numero',
+      observations: 'observations',
+      observation_sst: 'observation_sst',
+      emplacement: 'emplacement',
+      conteneur: 'conteneur',
+    })
     fixed = await repairAllJoins(fixed)
 
     res.json(fixed)
@@ -226,6 +265,90 @@ stockFiniRouter.patch('/fini/:id', async (req: Request, res: Response) => {
     res.json(fixed[0])
   } catch (err) {
     console.error('Error updating stock_fini:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// POST /api/stock/fini/:id/cut - cut one physical roll into N rolls.
+//   Body: { pieces: Array<{ poids: number; metrage: number }> } (length 2..10).
+//   Piece 0 is the original row (updated in place, numero kept); pieces 1..N-1
+//   are new rows that inherit EVERY other column from the original (ref, coloris,
+//   lot, état, magasin, emplacement, client-line link, …) with numero suffixed
+//   -2, -3, … The poids/metrage of the pieces must sum to the original (value
+//   conservation), re-validated here regardless of what the client sent.
+//
+//   New rows are created with INSERT ... SELECT so accented text columns
+//   (observations, …) are copied inside the DB — no encoding round-trip through
+//   the SQL string, which keeps the Linux bridge happy.
+stockFiniRouter.post('/fini/:id/cut', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) {
+      res.status(400).json({ error: 'Invalid ID' })
+      return
+    }
+
+    const pieces = (req.body?.pieces ?? []) as Array<{ poids?: unknown; metrage?: unknown }>
+    if (!Array.isArray(pieces) || pieces.length < 2 || pieces.length > 10) {
+      res.status(400).json({ error: 'pieces must be an array of length 2..10' })
+      return
+    }
+    const norm = pieces.map((p) => ({
+      poids: Number(p?.poids),
+      metrage: Number(p?.metrage),
+    }))
+    if (norm.some((p) => !Number.isFinite(p.poids) || !Number.isFinite(p.metrage) || p.poids < 0 || p.metrage < 0)) {
+      res.status(400).json({ error: 'each piece needs a non-negative poids and metrage' })
+      return
+    }
+
+    const origRows = await query<{ poids: number | null; metrage: number | null; numero: string | null; IDligne_expedition: number | null }>(
+      `SELECT poids, metrage, numero, IDligne_expedition FROM stock_fini WHERE IDstock_fini = ${id}`,
+    )
+    if (origRows.length === 0) {
+      res.status(404).json({ error: 'Stock fini not found' })
+      return
+    }
+    const orig = origRows[0]
+    if (Number(orig.IDligne_expedition) > 0) {
+      res.status(400).json({ error: 'Roll already shipped' })
+      return
+    }
+
+    const origPoids = Number(orig.poids) || 0
+    const origMetrage = Number(orig.metrage) || 0
+    const sumPoids = norm.reduce((s, p) => s + p.poids, 0)
+    const sumMetrage = norm.reduce((s, p) => s + p.metrage, 0)
+    if (Math.abs(sumPoids - origPoids) > 0.01 || Math.abs(sumMetrage - origMetrage) > 0.1) {
+      res.status(400).json({ error: 'Sum mismatch: pieces must total the original poids and metrage' })
+      return
+    }
+
+    // Round to avoid float artefacts in the stored values.
+    const r2 = (v: number) => Math.round(v * 100) / 100
+    const base = (orig.numero ?? '').trim() || `#${id}`
+
+    // Piece 0 -> update the original row in place (numero unchanged).
+    await query(
+      `UPDATE stock_fini SET poids = ${r2(norm[0].poids)}, metrage = ${r2(norm[0].metrage)} WHERE IDstock_fini = ${id}`,
+    )
+
+    // Pieces 1..N-1 -> new rows copying every other column from the original.
+    const COPY_COLS =
+      'numero, IDstock_ecru, poids, metrage, lot, observations, second_choix, IDref_commande_source, IDmagasin, IDref_fini, IDColoris, date_saisie, IDetat_stock_fini, destockage, IDligne_commande_client, IDProprietaire, IDcommande_donation, conteneur, emplacement, don, pointage, observation_sst, IDligne_expedition'
+    for (let i = 1; i < norm.length; i++) {
+      const suffix = `-${i + 1}`
+      const child = base.slice(0, 20 - suffix.length) + suffix
+      await query(
+        `INSERT INTO stock_fini (${COPY_COLS})
+         SELECT '${esc(child)}', IDstock_ecru, ${r2(norm[i].poids)}, ${r2(norm[i].metrage)}, lot, observations, second_choix, IDref_commande_source, IDmagasin, IDref_fini, IDColoris, date_saisie, IDetat_stock_fini, destockage, IDligne_commande_client, IDProprietaire, IDcommande_donation, conteneur, emplacement, don, pointage, observation_sst, IDligne_expedition
+         FROM stock_fini WHERE IDstock_fini = ${id}`,
+      )
+    }
+
+    res.json({ ok: true, created: norm.length - 1 })
+  } catch (err) {
+    console.error('Error cutting stock_fini:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

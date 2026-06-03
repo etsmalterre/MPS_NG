@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
+import { useState, useMemo, useCallback, useEffect, useRef, useTransition, memo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
@@ -10,6 +10,7 @@ import {
   AlertCircle,
   Pencil,
   X,
+  Check,
   Save,
   ArrowUp,
   ArrowDown,
@@ -22,9 +23,19 @@ import {
   Sparkles,
   Gift,
   Trash2,
+  Scissors,
+  Plus,
+  Minus,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog'
 import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
@@ -154,6 +165,7 @@ const COLUMNS: { key: SortKey; label: string; width: string; align?: 'left' | 'r
   { key: 'observations', label: 'Observations', width: '9%' },
 ]
 const ICON_COL_WIDTH = '3%'
+const SELECT_COL_WIDTH = '4%' // leading selection box column, edit mode only
 
 function compareRows(a: StockFiniRow, b: StockFiniRow, key: SortKey): number {
   const va = a[key]
@@ -173,6 +185,15 @@ export function FinisStock() {
   const [hideShipped, setHideShipped] = useState(true)
   const [sort, setSort] = useState<SortState>({ key: 'date_saisie', dir: 'desc' })
   const [selectedId, setSelectedId] = useState<number | null>(null)
+
+  // Edit mode — multi-roll selection.
+  const [isEditing, setIsEditing] = useState(false)
+  const [selectedRollIds, setSelectedRollIds] = useState<Set<number>>(new Set())
+  const lastSelectedRollIdRef = useRef<number | null>(null)
+  const [cutOpen, setCutOpen] = useState(false)
+  // The edit-mode toggle re-renders the whole (large) table; mark it as a
+  // transition so the click stays responsive instead of freezing the UI.
+  const [, startModeTransition] = useTransition()
 
   const { data: rows, isLoading, isError, error } = useStockFiniList({ hideShipped })
 
@@ -234,19 +255,85 @@ export function FinisStock() {
     })
   }, [guard])
 
+  // Anchor-based multi-select (mirrors the "Affecté" tab of the sst drawer):
+  // plain click toggles the row and becomes the anchor; Shift+click adds the
+  // inclusive range between the anchor and the clicked row, in the current
+  // sort/filter order.
+  const handleSelectRoll = useCallback((id: number, shiftKey: boolean) => {
+    const ids = filteredSorted.map((r) => r.IDstock_fini)
+    const anchor = lastSelectedRollIdRef.current
+    if (shiftKey && anchor !== null && anchor !== id) {
+      const a = ids.indexOf(anchor)
+      const b = ids.indexOf(id)
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a]
+        setSelectedRollIds((prev) => {
+          const next = new Set(prev)
+          for (let i = lo; i <= hi; i++) next.add(ids[i])
+          return next
+        })
+        return
+      }
+    }
+    setSelectedRollIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+    lastSelectedRollIdRef.current = id
+  }, [filteredSorted])
+
+  const enterEditMode = useCallback(() => {
+    // Close the drawer first (guarded, so unsaved drawer edits prompt).
+    guard.guardAction(() => {
+      setSelectedId(null)
+      startModeTransition(() => setIsEditing(true))
+    })
+  }, [guard])
+
+  const exitEditMode = useCallback(() => {
+    lastSelectedRollIdRef.current = null
+    startModeTransition(() => {
+      setIsEditing(false)
+      setSelectedRollIds(new Set())
+    })
+  }, [])
+
   const onMutationSuccess = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['stock-fini'] })
   }, [queryClient])
+
+  // The single selected roll (only when exactly one is selected) — drives the
+  // "Couper" button + cut dialog.
+  const selectedRow =
+    selectedRollIds.size === 1
+      ? filteredSorted.find((r) => r.IDstock_fini === [...selectedRollIds][0]) ?? null
+      : null
 
   // Totalizer over the currently-visible (filtered) rows
   const rollCount = filteredSorted.length
   const totalPoids = filteredSorted.reduce((sum, r) => sum + (r.poids ?? 0), 0)
   const totalMetrage = filteredSorted.reduce((sum, r) => sum + (r.metrage ?? 0), 0)
 
+  // Selection summary (edit mode) — shown inside the totalizer card.
+  const selectedRows = isEditing
+    ? filteredSorted.filter((r) => selectedRollIds.has(r.IDstock_fini))
+    : []
+  const selCount = selectedRows.length
+  const selPoids = selectedRows.reduce((sum, r) => sum + (r.poids ?? 0), 0)
+  const selMetrage = selectedRows.reduce((sum, r) => sum + (r.metrage ?? 0), 0)
+
   return (
     <div className="h-full flex flex-col gap-3 min-h-0">
       {/* Toolbar */}
       <div className="flex-shrink-0 flex items-center gap-3">
+        {isEditing && (
+          <Badge className="bg-accent text-accent-foreground gap-1 shadow-sm flex-shrink-0">
+            <Pencil className="h-3 w-3" />
+            Mode édition
+          </Badge>
+        )}
         <div className="relative flex-1 min-w-0">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <input
@@ -267,6 +354,31 @@ export function FinisStock() {
           />
           <span>Masquer les rouleaux expédiés</span>
         </label>
+
+        {!isEditing ? (
+          <Button variant="gold" size="sm" className="flex-shrink-0" onClick={enterEditMode}>
+            <Pencil className="h-3.5 w-3.5 mr-1.5" />
+            Modifier
+          </Button>
+        ) : (
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {selectedRollIds.size === 1 && (
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-8 w-8 flex-shrink-0"
+                title="Couper le rouleau"
+                onClick={() => setCutOpen(true)}
+              >
+                <Scissors className="h-4 w-4" />
+              </Button>
+            )}
+            <Button size="sm" onClick={exitEditMode}>
+              <X className="h-3.5 w-3.5 mr-1.5" />
+              Terminer
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* Table */}
@@ -290,6 +402,10 @@ export function FinisStock() {
             {/* Header table (non-scrolling) */}
             <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
               <colgroup>
+                {/* Selection column: always present (kept structurally stable so
+                    toggling edit mode doesn't mount/unmount a cell on every row),
+                    collapsed to 0 width in view mode. */}
+                <col style={{ width: isEditing ? SELECT_COL_WIDTH : '0' }} />
                 {COLUMNS.map((c) => (
                   <col key={c.key} style={{ width: c.width }} />
                 ))}
@@ -297,6 +413,7 @@ export function FinisStock() {
               </colgroup>
               <thead className="bg-zinc-200/60 border-b border-border/60">
                 <tr className="text-xs uppercase tracking-wide text-muted-foreground">
+                  <th className={isEditing ? 'px-3 py-2.5' : 'p-0'}></th>
                   {COLUMNS.map((c) => (
                     <SortHeader
                       key={c.key}
@@ -316,67 +433,25 @@ export function FinisStock() {
             <div className="flex-1 min-h-0 overflow-auto scrollbar-transparent">
               <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
                 <colgroup>
+                  <col style={{ width: isEditing ? SELECT_COL_WIDTH : '0' }} />
                   {COLUMNS.map((c) => (
                     <col key={c.key} style={{ width: c.width }} />
                   ))}
                   <col style={{ width: ICON_COL_WIDTH }} />
                 </colgroup>
                 <tbody>
-                  {filteredSorted.map((r) => {
-                    const isSelected = r.IDstock_fini === selectedId
-                    return (
-                      <tr
-                        key={r.IDstock_fini}
-                        data-stock-row
-                        onClick={() => handleRowClick(r.IDstock_fini)}
-                        className={cn(
-                          'border-b border-border/40 cursor-pointer transition-colors',
-                          isSelected ? 'bg-accent/10' : 'hover:bg-accent/5',
-                        )}
-                      >
-                        <td className="px-3 py-2 font-medium truncate">{r.ref_fini ?? '—'}</td>
-                        <td className="px-3 py-2 truncate">{r.coloris_reference ?? '—'}</td>
-                        <td className="px-3 py-2 tabular-nums truncate">{r.lot ?? '—'}</td>
-                        <td className="px-3 py-2 tabular-nums truncate text-muted-foreground">{r.numero ?? '—'}</td>
-                        <td className="px-3 py-2 text-right tabular-nums font-medium">{formatKg(r.poids)}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{formatMeters(r.metrage)}</td>
-                        <td className="px-3 py-2">
-                          {r.etat_libelle ? (
-                            <span
-                              className={cn(
-                                'inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border',
-                                etatPillClass(r.etat_libelle),
-                              )}
-                            >
-                              {r.etat_libelle}
-                            </span>
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
-                        </td>
-                        <td className="px-3 py-2 truncate">{r.emplacement ?? '—'}</td>
-                        <td className="px-3 py-2 truncate text-muted-foreground">{r.magasin_nom ?? '—'}</td>
-                        <td className="px-3 py-2 tabular-nums text-muted-foreground">
-                          {r.date_saisie ? formatHfsqlDate(r.date_saisie) : '—'}
-                        </td>
-                        <td
-                          className="px-3 py-2 text-muted-foreground truncate"
-                          title={r.observations ?? undefined}
-                        >
-                          {r.observations?.trim() || ''}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          <div className="flex items-center justify-end gap-1">
-                            {!!r.second_choix && (
-                              <Badge variant="outline" className="text-[10px] py-0 border-red-300 text-red-700">2C</Badge>
-                            )}
-                            {!!r.don && <Gift className="h-3.5 w-3.5 text-amber-600" />}
-                            {!!r.destockage && <Trash2 className="h-3.5 w-3.5 text-zinc-500" />}
-                          </div>
-                        </td>
-                      </tr>
-                    )
-                  })}
+                  {filteredSorted.map((r) => (
+                    <StockRow
+                      key={r.IDstock_fini}
+                      row={r}
+                      isEditing={isEditing}
+                      selected={
+                        isEditing ? selectedRollIds.has(r.IDstock_fini) : r.IDstock_fini === selectedId
+                      }
+                      onSelect={handleSelectRoll}
+                      onOpen={handleRowClick}
+                    />
+                  ))}
                 </tbody>
               </table>
             </div>
@@ -391,6 +466,17 @@ export function FinisStock() {
             <Package className="h-4 w-4 text-accent" />
             <span className="font-semibold">{rollCount}</span>
             <span className="text-muted-foreground">rouleau{rollCount > 1 ? 'x' : ''}</span>
+            {selCount > 0 && (
+              <span className="ml-3 pl-3 border-l border-border/60 flex items-center gap-1.5 text-accent">
+                <Check className="h-3.5 w-3.5" />
+                <span className="font-semibold tabular-nums">{selCount}</span>
+                <span>sélectionné{selCount > 1 ? 's' : ''}</span>
+                <span className="text-muted-foreground/50">·</span>
+                <span className="font-medium tabular-nums">{fmtNum(selPoids, 1)} kg</span>
+                <span className="text-muted-foreground/50">·</span>
+                <span className="font-medium tabular-nums">{fmtNum(selMetrage, 1)} m</span>
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-5">
             <div className="flex items-baseline gap-2">
@@ -419,9 +505,343 @@ export function FinisStock() {
         onAction={guard.handleAction}
         isSaving={guard.isSaving}
       />
+
+      <CutRollDialog
+        open={cutOpen}
+        row={selectedRow}
+        onClose={() => setCutOpen(false)}
+        onSuccess={() => {
+          onMutationSuccess()
+          setCutOpen(false)
+          setSelectedRollIds(new Set())
+          lastSelectedRollIdRef.current = null
+        }}
+      />
     </div>
   )
 }
+
+// ── Cut-roll dialog ────────────────────────────────────
+// Split one physical roll into N rolls. Pieces 1..N-1 are editable; the LAST
+// piece is auto-computed as the remainder so the weight & length totals always
+// equal the original (value conservation). Piece 1 keeps the original numero;
+// the others preview as "<base>-2", "<base>-3", …
+
+interface CutPieceDraft {
+  poids: string
+  metrage: string
+}
+
+function CutRollDialog({
+  open,
+  row,
+  onClose,
+  onSuccess,
+}: {
+  open: boolean
+  row: StockFiniRow | null
+  onClose: () => void
+  onSuccess: () => void
+}) {
+  // `editable` holds the first N-1 pieces (the user-controlled ones). The last
+  // piece is always derived. Two editable entries → 3 pieces total by default? No:
+  // we start with ONE editable + the auto remainder = 2 pieces total.
+  const [editable, setEditable] = useState<CutPieceDraft[]>([{ poids: '', metrage: '' }])
+
+  const origId = row?.IDstock_fini ?? null
+  // Reset the draft whenever the dialog opens for a different roll.
+  useEffect(() => {
+    if (open) setEditable([{ poids: '', metrage: '' }])
+  }, [open, origId])
+
+  const origPoids = Number(row?.poids) || 0
+  const origMetrage = Number(row?.metrage) || 0
+  const base = ((row?.numero ?? '').trim() || (origId != null ? `#${origId}` : '')).slice(0, 18)
+
+  const num = (s: string) => {
+    const v = Number(String(s).replace(',', '.'))
+    return Number.isFinite(v) ? v : 0
+  }
+  const sumEditPoids = editable.reduce((s, p) => s + num(p.poids), 0)
+  const sumEditMetrage = editable.reduce((s, p) => s + num(p.metrage), 0)
+  const lastPoids = origPoids - sumEditPoids
+  const lastMetrage = origMetrage - sumEditMetrage
+
+  const negative = lastPoids < -0.0001 || lastMetrage < -0.0001
+  const valid = !negative && editable.every((p) => p.poids.trim() !== '' && p.metrage.trim() !== '')
+
+  const cutMutation = useMutation({
+    mutationFn: () => {
+      const pieces = [
+        ...editable.map((p) => ({ poids: num(p.poids), metrage: num(p.metrage) })),
+        { poids: Math.max(0, lastPoids), metrage: Math.max(0, lastMetrage) },
+      ]
+      return apiFetch(`/stock/fini/${origId}/cut`, {
+        method: 'POST',
+        body: JSON.stringify({ pieces }),
+      })
+    },
+    onSuccess: () => onSuccess(),
+  })
+
+  const pieceLabel = (idx: number) => (idx === 0 ? row?.numero || base : `${base}-${idx + 1}`)
+  const totalPieces = editable.length + 1
+
+  // Cross-multiplication (règle de trois): a cut preserves the original roll's
+  // linear density, so poids and metrage stay proportional. Editing one field
+  // auto-fills the other from the original ratio. Guarded against a zero
+  // original dimension (can't derive a ratio from 0).
+  const round2 = (v: number) => Math.round(v * 100) / 100
+  const mPerKg = origPoids > 0 ? origMetrage / origPoids : 0
+  const kgPerM = origMetrage > 0 ? origPoids / origMetrage : 0
+
+  const setPoids = (idx: number, value: string) =>
+    setEditable((prev) =>
+      prev.map((p, i) => {
+        if (i !== idx) return p
+        if (value.trim() === '') return { poids: '', metrage: origPoids > 0 ? '' : p.metrage }
+        const metrage = origPoids > 0 ? String(round2(num(value) * mPerKg)) : p.metrage
+        return { poids: value, metrage }
+      }),
+    )
+  const setMetrage = (idx: number, value: string) =>
+    setEditable((prev) =>
+      prev.map((p, i) => {
+        if (i !== idx) return p
+        if (value.trim() === '') return { metrage: '', poids: origMetrage > 0 ? '' : p.poids }
+        const poids = origMetrage > 0 ? String(round2(num(value) * kgPerM)) : p.poids
+        return { metrage: value, poids }
+      }),
+    )
+  const addPiece = () =>
+    setEditable((prev) => (prev.length + 1 < 10 ? [...prev, { poids: '', metrage: '' }] : prev))
+  const removePiece = (idx: number) =>
+    setEditable((prev) => (prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev))
+
+  return (
+    <Dialog open={open && !!row} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-lg" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Scissors className="h-5 w-5 text-accent" />
+            Couper le rouleau{row?.numero ? ` ${row.numero}` : ''}
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="mt-4 space-y-3">
+          {/* Original summary */}
+          <div className="rounded-lg border border-border/60 bg-zinc-100/80 px-3 py-2 text-sm">
+            <div className="font-medium truncate">
+              {row?.ref_fini ?? '—'}
+              {row?.coloris_reference ? ` · ${row.coloris_reference}` : ''}
+            </div>
+            <div className="text-xs text-muted-foreground tabular-nums mt-0.5">
+              Original : {fmtNum(origPoids, 1)} kg · {fmtNum(origMetrage, 1)} m
+            </div>
+          </div>
+
+          {/* Piece rows */}
+          <div className="space-y-2">
+            <div className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-2 px-1 text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
+              <span>Numéro</span>
+              <span className="w-24 text-right">Poids (kg)</span>
+              <span className="w-24 text-right">Métrage (m)</span>
+              <span className="w-6" />
+            </div>
+
+            {editable.map((p, idx) => (
+              <div key={idx} className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-2">
+                <span className="text-sm tabular-nums truncate">{pieceLabel(idx)}</span>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  step="0.01"
+                  min="0"
+                  value={p.poids}
+                  onChange={(e) => setPoids(idx, e.target.value)}
+                  className="h-8 w-24 px-2 text-sm text-right rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  step="0.01"
+                  min="0"
+                  value={p.metrage}
+                  onChange={(e) => setMetrage(idx, e.target.value)}
+                  className="h-8 w-24 px-2 text-sm text-right rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                  title="Retirer ce morceau"
+                  disabled={editable.length <= 1}
+                  onClick={() => removePiece(idx)}
+                >
+                  <Minus className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
+
+            {/* Auto-balanced last piece */}
+            <div className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-2">
+              <span className="text-sm tabular-nums truncate text-muted-foreground">
+                {pieceLabel(editable.length)}
+                <span className="ml-1.5 text-[10px] uppercase tracking-wide">auto</span>
+              </span>
+              <span
+                className={cn(
+                  'h-8 w-24 px-2 inline-flex items-center justify-end text-sm tabular-nums rounded-md border bg-zinc-100/60',
+                  lastPoids < -0.0001 ? 'border-destructive text-destructive' : 'border-border/60 text-muted-foreground',
+                )}
+              >
+                {fmtNum(lastPoids, 1)}
+              </span>
+              <span
+                className={cn(
+                  'h-8 w-24 px-2 inline-flex items-center justify-end text-sm tabular-nums rounded-md border bg-zinc-100/60',
+                  lastMetrage < -0.0001 ? 'border-destructive text-destructive' : 'border-border/60 text-muted-foreground',
+                )}
+              >
+                {fmtNum(lastMetrage, 1)}
+              </span>
+              <span className="w-6" />
+            </div>
+          </div>
+
+          {/* Add piece + totals */}
+          <div className="flex items-center justify-between pt-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-accent hover:text-accent hover:bg-accent/10"
+              disabled={totalPieces >= 10}
+              onClick={addPiece}
+            >
+              <Plus className="h-3.5 w-3.5 mr-1" />
+              Ajouter un morceau
+            </Button>
+            <div className="text-xs text-muted-foreground tabular-nums flex items-center gap-1.5">
+              {negative ? (
+                <span className="text-destructive font-medium">Le dernier morceau serait négatif</span>
+              ) : (
+                <>
+                  <Check className="h-3.5 w-3.5 text-success" />
+                  {totalPieces} morceaux · {fmtNum(origPoids, 1)} kg · {fmtNum(origMetrage, 1)} m
+                </>
+              )}
+            </div>
+          </div>
+
+          {cutMutation.isError && (
+            <p className="text-sm text-destructive mt-3">
+              {(cutMutation.error as Error)?.message || 'Erreur lors de la découpe'}
+            </p>
+          )}
+        </div>
+
+        <DialogFooter className="mt-4">
+          <Button variant="outline" onClick={onClose} disabled={cutMutation.isPending}>
+            Annuler
+          </Button>
+          <Button onClick={() => cutMutation.mutate()} disabled={!valid || cutMutation.isPending}>
+            {cutMutation.isPending ? (
+              <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+            ) : (
+              <Scissors className="h-4 w-4 mr-1.5" />
+            )}
+            Couper
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ── Table row (memoized) ──────────────────────────────
+// Extracted + React.memo'd so selecting a single roll in edit mode re-renders
+// only the affected row, not all ~1.4k rows. The selection cell is always
+// rendered (collapsed via `p-0` in view mode) so the column structure never
+// changes — toggling edit mode is a cheap className/width flip, not a per-row
+// cell mount.
+
+const StockRow = memo(function StockRow({
+  row,
+  isEditing,
+  selected,
+  onSelect,
+  onOpen,
+}: {
+  row: StockFiniRow
+  isEditing: boolean
+  selected: boolean
+  onSelect: (id: number, shiftKey: boolean) => void
+  onOpen: (id: number) => void
+}) {
+  return (
+    <tr
+      data-stock-row
+      onClick={(e) =>
+        isEditing ? onSelect(row.IDstock_fini, e.shiftKey) : onOpen(row.IDstock_fini)
+      }
+      className={cn(
+        'border-b border-border/40 cursor-pointer transition-colors',
+        isEditing && 'select-none',
+        selected ? 'bg-accent/10' : 'hover:bg-accent/5',
+      )}
+    >
+      <td className={isEditing ? 'px-3 py-2' : 'p-0'}>
+        {isEditing && (
+          <div
+            className={cn(
+              'h-5 w-5 rounded border flex items-center justify-center transition-colors',
+              selected ? 'bg-accent border-accent text-accent-foreground' : 'bg-white border-input',
+            )}
+          >
+            {selected && <Check className="h-3.5 w-3.5" />}
+          </div>
+        )}
+      </td>
+      <td className="px-3 py-2 font-medium truncate">{row.ref_fini ?? '—'}</td>
+      <td className="px-3 py-2 truncate">{row.coloris_reference ?? '—'}</td>
+      <td className="px-3 py-2 tabular-nums truncate">{row.lot ?? '—'}</td>
+      <td className="px-3 py-2 tabular-nums truncate text-muted-foreground">{row.numero ?? '—'}</td>
+      <td className="px-3 py-2 text-right tabular-nums font-medium">{formatKg(row.poids)}</td>
+      <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{formatMeters(row.metrage)}</td>
+      <td className="px-3 py-2">
+        {row.etat_libelle ? (
+          <span
+            className={cn(
+              'inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border',
+              etatPillClass(row.etat_libelle),
+            )}
+          >
+            {row.etat_libelle}
+          </span>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        )}
+      </td>
+      <td className="px-3 py-2 truncate">{row.emplacement ?? '—'}</td>
+      <td className="px-3 py-2 truncate text-muted-foreground">{row.magasin_nom ?? '—'}</td>
+      <td className="px-3 py-2 tabular-nums text-muted-foreground">
+        {row.date_saisie ? formatHfsqlDate(row.date_saisie) : '—'}
+      </td>
+      <td className="px-3 py-2 text-muted-foreground truncate" title={row.observations ?? undefined}>
+        {row.observations?.trim() || ''}
+      </td>
+      <td className="px-3 py-2 text-right">
+        <div className="flex items-center justify-end gap-1">
+          {!!row.second_choix && (
+            <Badge variant="outline" className="text-[10px] py-0 border-red-300 text-red-700">2C</Badge>
+          )}
+          {!!row.don && <Gift className="h-3.5 w-3.5 text-amber-600" />}
+          {!!row.destockage && <Trash2 className="h-3.5 w-3.5 text-zinc-500" />}
+        </div>
+      </td>
+    </tr>
+  )
+})
 
 // ── Sort header cell ───────────────────────────────────
 
