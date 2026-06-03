@@ -1311,12 +1311,28 @@ etudesColorisRouter.post('/soumissions/:soumId/respond', async (req: Request, re
         let newColoriId = Number(etu.IDref_fini_colori) || 0
 
         if (idRefFini > 0) {
+          // Default the coloris' dye (IDteinture) from the ref's avec_teinture.
+          // avec_teinture already encodes the simple/double/no-dye choice, so a
+          // newly-accepted coloris defaults to the "Tous Coloris" tier of the
+          // matching tier (white is reassigned by hand later if needed):
+          //   1 (simple) -> 7 (Tous Coloris simple)
+          //   2 (double) -> 5 (Tous Coloris double)
+          //   0 (no dye) -> 0
+          // Without this, HFSQL stores IDteinture = 0 and ennoblisseur
+          // auto-pricing (pricing-sst.ts) can't resolve the dye-only base
+          // price, silently dropping the teinture cost from the line.
+          const refFiniDyeRows = await query<{ avec_teinture: number }>(
+            `SELECT avec_teinture FROM ref_fini WHERE IDref_fini = ${idRefFini}`,
+          )
+          const avecTeinture = Number(refFiniDyeRows[0]?.avec_teinture) || 0
+          const defaultTeinture = avecTeinture === 1 ? 7 : avecTeinture === 2 ? 5 : 0
+
           // Include IDsous_traitant so the new colori is owned by the
           // étude's sous-traitant (otherwise legacy screens display it as
           // orphan / default "Tricotage Malterre").
           await query(
-            `INSERT INTO ref_fini_colori (IDref_fini, IDsous_traitant, reference, observations)
-             VALUES (${idRefFini}, ${idSousTraitant}, '${esc(newLibelle)}', '')`,
+            `INSERT INTO ref_fini_colori (IDref_fini, IDsous_traitant, IDteinture, reference, observations)
+             VALUES (${idRefFini}, ${idSousTraitant}, ${defaultTeinture}, '${esc(newLibelle)}', '')`,
           )
           // Look up the new row's ID (HFSQL has no RETURNING).
           const inserted = await query<{ IDref_fini_colori: number }>(
