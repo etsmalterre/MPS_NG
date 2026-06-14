@@ -660,13 +660,21 @@ export function MalterreDocument({
       title={title ?? `${documentType} ${reference}`}
       author={company.legalName}
     >
-      <Page size="A4" style={styles.page}>
+      {/* paddingTop reserves the branded header's height so the now-`fixed`
+          header (repeated on every physical overflow page) doesn't overlap the
+          flow content. Matches HEADER_HEIGHT exactly so page-1 content keeps the
+          same vertical position it had when the header was in-flow — no change
+          to per-page capacity, just a header on the continuation pages too. */}
+      <Page size="A4" style={[styles.page, { paddingTop: HEADER_HEIGHT }]}>
         {/* Yellow header band: logo on the left, document title in the
-            top-right (on the gold background, in white text). */}
+            top-right (on the gold background, in white text). `fixed` so it
+            repeats at the top of every physical page this logical Page spans
+            (e.g. when the line-items table overflows onto a second page). */}
         <PageHeader
           documentType={documentType}
           reference={reference}
           documentDate={documentDate}
+          fixed
         />
 
         {/* Content body */}
