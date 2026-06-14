@@ -106,11 +106,19 @@ wsl bash -c "ssh -i $SSH_KEY debian@10.10.2.165 'command'"
 
 ### Deploy Steps (Web)
 
-1. **Build locally**:
+1. **Build locally** — `VITE_API_URL=/api` MUST be set in the build env:
    ```bash
-   pnpm --filter web build
+   VITE_API_URL=/api pnpm --filter web build          # bash
+   $env:VITE_API_URL='/api'; pnpm --filter web build   # PowerShell
    ```
    This produces `apps/web/dist/` with hashed assets.
+   **Footgun (caused a prod outage 2026-06-14):** if the var is unset at build
+   time, `apiFetch` silently bakes in its dev fallback `http://localhost:3002/api`
+   (`apps/web/src/lib/api.ts:5`). The build succeeds, but on the HTTPS prod page
+   every API call goes to `localhost:3002` and is blocked → the whole app shows
+   "Impossible de charger la liste" on the user picker (and the same on every
+   screen) while the API itself is fine. **Verify before/after deploy:**
+   `grep -rl 'localhost:3002' apps/web/dist/assets/` must return nothing.
 
 2. **Upload** the dist folder:
    ```bash
