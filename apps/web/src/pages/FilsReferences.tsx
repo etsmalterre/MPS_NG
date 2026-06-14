@@ -354,6 +354,8 @@ export function FilsReferences() {
   // Delete confirm
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  // Create failure feedback (the POST has no inline surface — surface it here)
+  const [createError, setCreateError] = useState<string | null>(null)
 
   const { data: refs, isLoading, isError, error } = useRefsFil()
   const { data: detail, isLoading: detailLoading } = useRefFilDetail(selectedId)
@@ -452,11 +454,19 @@ export function FilsReferences() {
         }),
       }),
     onSuccess: (data) => {
+      setCreateError(null)
       queryClient.invalidateQueries({ queryKey: ['refs-fil'] })
       if (data.IDref_fil != null) {
         setSelectedId(data.IDref_fil)
         setAutoEditForId(data.IDref_fil)
       }
+    },
+    onError: (err: Error & { status?: number }) => {
+      setCreateError(
+        err.status === 401
+          ? 'Votre session a expiré. Veuillez vous reconnecter, puis réessayer.'
+          : 'La création de la référence a échoué. Veuillez réessayer.',
+      )
     },
   })
 
@@ -639,6 +649,23 @@ export function FilsReferences() {
           </AlertDialogHeader>
           <AlertDialogFooter className="gap-2 sm:gap-2 mt-4">
             <Button onClick={() => setSaveBlockedReason(null)}>OK</Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
+        open={createError !== null}
+        onOpenChange={(o) => { if (!o) setCreateError(null) }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertCircle className="h-5 w-5 text-destructive" />
+              Création impossible
+            </AlertDialogTitle>
+            <AlertDialogDescription>{createError}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="gap-2 sm:gap-2 mt-4">
+            <Button onClick={() => setCreateError(null)}>OK</Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
