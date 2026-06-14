@@ -14,6 +14,32 @@ function esc(value: string): string {
   return value.replace(/'/g, "''")
 }
 
+/**
+ * Emit a SQL text literal that survives the Linux HFSQL bridge.
+ * HFSQL text columns are Latin-1; raw multi-byte UTF-8 inside a quoted string
+ * corrupts the bridge (→ [HY090] "string without end"). ASCII goes through a
+ * normal quoted literal; anything with accents becomes a Latin-1 byte hex
+ * literal. Mirrors sqlText() in commandes-sous-traitant.ts.
+ */
+function sqlText(value: string | null | undefined): string {
+  const v = (value ?? '').toString()
+  if (v === '') return "''"
+  if (/^[\x09\x0A\x0D\x20-\x7E]*$/.test(v)) return `'${esc(v)}'`
+  const ascii = v
+    .replace(/[‘’‚′]/g, "'")
+    .replace(/[“”„″]/g, '"')
+    .replace(/[–—−]/g, '-')
+    .replace(/…/g, '...')
+    .replace(/ /g, ' ')
+  const bytes = Buffer.from(
+    Array.from(ascii, (ch) => {
+      const c = ch.codePointAt(0) ?? 0x3f
+      return c <= 0xff ? c : 0x3f
+    }),
+  )
+  return `x'${bytes.toString('hex')}'`
+}
+
 /** Coerce a possibly-nullable numeric value (string | number | null) to number | null. */
 function toNumOrNull(v: unknown): number | null {
   if (v == null || v === '') return null
@@ -409,8 +435,8 @@ const refFilBody = z.object({
 
 function buildRefFilSets(body: z.infer<typeof refFilBody>): string[] {
   const sets: string[] = []
-  sets.push(`reference = '${esc(body.reference)}'`)
-  sets.push(`commentaire = '${esc(body.commentaire ?? '')}'`)
+  sets.push(`reference = ${sqlText(body.reference)}`)
+  sets.push(`commentaire = ${sqlText(body.commentaire ?? '')}`)
   sets.push(`prix_kg = ${body.prix_kg ?? 0}`)
   sets.push(`titrage = ${body.titrage ?? 0}`)
   sets.push(`nb_fil = ${body.nb_fil ?? 0}`)
@@ -435,8 +461,8 @@ referencesFilRouter.post('/', async (req: Request, res: Response) => {
     // Build column list — exclude recyclé on Linux
     const cols = ['reference', 'commentaire', 'prix_kg', 'titrage', 'nb_fil', 'nb_brin', 'IDunite_titrage', 'bio']
     const vals: string[] = [
-      `'${esc(b.reference)}'`,
-      `'${esc(b.commentaire ?? '')}'`,
+      sqlText(b.reference),
+      sqlText(b.commentaire ?? ''),
       String(b.prix_kg ?? 0),
       String(b.titrage ?? 0),
       String(b.nb_fil ?? 0),
@@ -452,7 +478,7 @@ referencesFilRouter.post('/', async (req: Request, res: Response) => {
 
     // HFSQL has no RETURNING — fetch back by reference + latest id
     const rows = await query<{ IDref_fil: number }>(
-      `SELECT IDref_fil FROM ref_fil WHERE reference = '${esc(b.reference)}' ORDER BY IDref_fil DESC`,
+      `SELECT IDref_fil FROM ref_fil WHERE reference = ${sqlText(b.reference)} ORDER BY IDref_fil DESC`,
     )
     const newId = rows[0]?.IDref_fil ?? null
     res.status(201).json({ IDref_fil: newId })
@@ -546,11 +572,11 @@ referencesFilRouter.post('/:id/variantes', async (req: Request, res: Response) =
     // NB: colori_fil.IDfournisseur is deprecated legacy metadata — fournisseur
     // links go into asso_colorisfil_frs via /:id/variantes/:coloriId/fournisseurs.
     await query(
-      `INSERT INTO colori_fil (IDref_fil, reference, prix_kg, stock_mini, commentaire) VALUES (${id}, '${esc(b.reference)}', ${b.prix_kg ?? 0}, ${b.stock_mini ?? 0}, '${esc(b.commentaire ?? '')}')`,
+      `INSERT INTO colori_fil (IDref_fil, reference, prix_kg, stock_mini, commentaire) VALUES (${id}, ${sqlText(b.reference)}, ${b.prix_kg ?? 0}, ${b.stock_mini ?? 0}, ${sqlText(b.commentaire ?? '')})`,
     )
     // Fetch the new id — match by (IDref_fil, reference) and take the latest
     const rows = await query<{ IDcolori_fil: number }>(
-      `SELECT IDcolori_fil FROM colori_fil WHERE IDref_fil = ${id} AND reference = '${esc(b.reference)}' ORDER BY IDcolori_fil DESC`,
+      `SELECT IDcolori_fil FROM colori_fil WHERE IDref_fil = ${id} AND reference = ${sqlText(b.reference)} ORDER BY IDcolori_fil DESC`,
     )
     const newId = rows[0]?.IDcolori_fil ?? null
     res.status(201).json({ IDcolori_fil: newId })
@@ -583,7 +609,7 @@ referencesFilRouter.put('/:id/variantes/:coloriId', async (req: Request, res: Re
     }
     const b = parsed.data
     await query(
-      `UPDATE colori_fil SET reference = '${esc(b.reference)}', prix_kg = ${b.prix_kg ?? 0}, stock_mini = ${b.stock_mini ?? 0}, commentaire = '${esc(b.commentaire ?? '')}' WHERE IDcolori_fil = ${coloriId}`,
+      `UPDATE colori_fil SET reference = ${sqlText(b.reference)}, prix_kg = ${b.prix_kg ?? 0}, stock_mini = ${b.stock_mini ?? 0}, commentaire = ${sqlText(b.commentaire ?? '')} WHERE IDcolori_fil = ${coloriId}`,
     )
     res.json({ ok: true })
   } catch (err) {
@@ -788,7 +814,7 @@ referencesFilRouter.post('/:id/offres', async (req: Request, res: Response) => {
 
     await query(
       `INSERT INTO offre_fil (IDref_fil, IDfournisseur, IDcolori_fil, prix, unite, quantite, DATE, observation)
-       VALUES (${id}, ${b.IDfournisseur}, ${b.IDcolori_fil ?? 0}, ${b.prix}, 1, ${b.quantite ?? 0}, '${esc(b.date)}', '${esc(b.observation ?? '')}')`,
+       VALUES (${id}, ${b.IDfournisseur}, ${b.IDcolori_fil ?? 0}, ${b.prix}, 1, ${b.quantite ?? 0}, '${esc(b.date)}', ${sqlText(b.observation ?? '')})`,
     )
     res.status(201).json({ ok: true })
   } catch (err) {
