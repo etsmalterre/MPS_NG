@@ -8,7 +8,13 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.ico', 'icons/*.png'],
+      // `png` is intentionally NOT in workbox.globPatterns below (so the 4.92 MB
+      // tricobot mascot isn't globbed into the precache and fails the build), so
+      // the real shell pngs we DO want offline are precached explicitly here.
+      // includeAssets are globbed from publicDir and injected as manifest
+      // entries, bypassing the precache-size check — safe because all of these
+      // are small (logos < 15 KB, icons < 150 KB).
+      includeAssets: ['favicon.ico', 'icons/*.png', 'logo-full.png', 'logo-small.png'],
       manifest: {
         name: 'MPS - ETS Malterre',
         short_name: 'MPS',
@@ -37,13 +43,14 @@ export default defineConfig({
         ]
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
-        // Skip the heavy Tricobot reception-modal mascot from the precache:
-        // it's loaded only inside the ennoblisseur reception dialog and
-        // doesn't belong in the offline shell. Without this exclusion the
-        // workbox step fails the build because the wave PNG (~5 MB)
-        // exceeds the default 2 MiB precache cap.
-        globIgnores: ['tricobot/**'],
+        // `png` is deliberately omitted here. The Tricobot reception-modal
+        // mascot (public/tricobot/tricobot-wave.png, ~5 MB) is loaded only
+        // inside the ennoblisseur reception dialog and must NOT land in the
+        // offline precache. With `png` in this glob it gets precached and the
+        // build fails ("Assets exceeding the limit" — workbox's 2 MiB cap).
+        // The small pngs we DO want offline (logos, icons) are precached
+        // explicitly via `includeAssets` above instead.
+        globPatterns: ['**/*.{js,css,html,ico,svg}'],
         navigateFallbackDenylist: [/^\/api\//],
         runtimeCaching: [
           {
