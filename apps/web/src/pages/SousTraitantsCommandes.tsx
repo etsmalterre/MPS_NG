@@ -408,6 +408,8 @@ interface EligibleLot {
   ref_malterre: string
   client_designation: string
   coloris_reference: string
+  numero: number               // commande_client.numero
+  date_commande: string        // commande_client.date_commande (YYYYMMDD)
   nb_rolls: number             // 0 for manual
   total_metrage: number        // 0 for manual
   key: string
@@ -1590,6 +1592,12 @@ function SoumissionLotPicker({
                     {lot.ref_malterre}
                     {lot.coloris_reference ? ` · ${lot.coloris_reference}` : ''}
                   </div>
+                  {lot.numero > 0 && (
+                    <div className="text-xs mt-1">
+                      <span className="font-medium text-foreground tabular-nums">Commande N° {lot.numero}</span>
+                      {lot.date_commande ? <span className="text-muted-foreground"> · {formatHfsqlDate(lot.date_commande)}</span> : ''}
+                    </div>
+                  )}
                   <div className="text-xs text-muted-foreground mt-1">
                     {lot.nb_rolls} rouleau{lot.nb_rolls > 1 ? 'x' : ''} · {fmtNum(lot.total_metrage, 1)} Ml
                   </div>
@@ -1632,6 +1640,12 @@ function SoumissionLotPicker({
                       <div className="text-xs text-muted-foreground mt-1">
                         Réf client : {lot.client_designation || '—'}
                       </div>
+                      {lot.numero > 0 && (
+                        <div className="text-xs mt-1">
+                          <span className="font-medium text-foreground tabular-nums">Commande N° {lot.numero}</span>
+                          {lot.date_commande ? <span className="text-muted-foreground"> · {formatHfsqlDate(lot.date_commande)}</span> : ''}
+                        </div>
+                      )}
                     </button>
                     {!!expanded && (
                       <div className="mt-3 flex items-center gap-2">

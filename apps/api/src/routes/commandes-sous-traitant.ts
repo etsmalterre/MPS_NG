@@ -2657,6 +2657,8 @@ interface EligibleLot {
   ref_malterre: string         // ref_fini.reference
   client_designation: string   // designation_client.designation (= ref client)
   coloris_reference: string
+  numero: number               // commande_client.numero — disambiguates same-client/ref/coloris cards
+  date_commande: string        // commande_client.date_commande (YYYYMMDD)
   nb_rolls: number             // 0 for manual
   total_metrage: number        // 0 for manual (planned qty comes from the line at render time)
   // React-friendly key
@@ -2899,6 +2901,21 @@ export async function findEligibleLots(commandeId: number): Promise<EligibleLot[
       clientMap.set(n((r as any).IDclient), ((r as any).nom ?? '').toString().trim())
     }
   }
+  // commande_client numero + date — disambiguates cards that share the same
+  // client / ref / coloris but target different client orders.
+  const uniqueCc = Array.from(new Set(Array.from(groups.values()).map((g) => g.IDcommande_client).filter((x) => x > 0)))
+  const ccInfoMap = new Map<number, { numero: number; date_commande: string }>()
+  if (uniqueCc.length > 0) {
+    const ccRows = await query<{ IDcommande_client: number; numero: number | null; date_commande: string | null }>(
+      `SELECT IDcommande_client, numero, date_commande FROM commande_client WHERE IDcommande_client IN (${uniqueCc.join(',')})`,
+    )
+    for (const r of ccRows) {
+      ccInfoMap.set(n(r.IDcommande_client), {
+        numero: n(r.numero),
+        date_commande: (r.date_commande ?? '').toString(),
+      })
+    }
+  }
 
   // ── 8) Assemble surviving groups (those with a designation_client.soumettre=1 row).
   const out: EligibleLot[] = []
@@ -2923,6 +2940,8 @@ export async function findEligibleLots(commandeId: number): Promise<EligibleLot[
       ref_malterre: refFiniMap.get(g.IDref_fini) || '',
       client_designation: clientDesignation,
       coloris_reference: resolveGroupColoris(g) || '',
+      numero: ccInfoMap.get(g.IDcommande_client)?.numero ?? 0,
+      date_commande: ccInfoMap.get(g.IDcommande_client)?.date_commande ?? '',
       nb_rolls: g.nb_rolls,
       total_metrage: g.total_metrage,
       key,
@@ -2931,7 +2950,7 @@ export async function findEligibleLots(commandeId: number): Promise<EligibleLot[
   // Stable order: received before manual, then by client_nom, then by lot.
   out.sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === 'received' ? -1 : 1
-    return a.client_nom.localeCompare(b.client_nom) || a.lot.localeCompare(b.lot)
+    return a.client_nom.localeCompare(b.client_nom) || a.numero - b.numero || a.lot.localeCompare(b.lot)
   })
   return out
 }
