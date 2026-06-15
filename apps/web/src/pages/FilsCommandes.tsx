@@ -2332,7 +2332,10 @@ function DocCreateEditDialog({
                 <input
                   type="file"
                   className="hidden"
-                  accept=".pdf,image/*"
+                  /* No `accept` filter: documents can be any file type (PDF,
+                   * image, Excel, Word, email…). Omitting it makes the Windows
+                   * picker show all files by default instead of forcing the
+                   * user to switch to "Tous les fichiers". */
                   onClick={(e) => { (e.target as HTMLInputElement).value = '' }}
                   onChange={(e) => {
                     const f = e.target.files?.[0]

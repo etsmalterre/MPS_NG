@@ -824,7 +824,7 @@ function CertificatEditDialog({ cert, onClose, fournisseurId, onSuccess, isNew }
             </div>
             <div className="flex items-center gap-2">
               <label className="cursor-pointer">
-                <input type="file" className="hidden" accept=".pdf,image/*" onClick={(e) => { (e.target as HTMLInputElement).value = '' }} onChange={(e) => {
+                <input type="file" className="hidden" onClick={(e) => { (e.target as HTMLInputElement).value = '' }} onChange={(e) => {
                   const f = e.target.files?.[0]
                   if (f) {
                     if (newFileUrl) URL.revokeObjectURL(newFileUrl)
