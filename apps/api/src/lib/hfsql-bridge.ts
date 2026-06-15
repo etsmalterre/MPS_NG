@@ -182,6 +182,19 @@ function cleanRowRaw(row: Record<string, unknown>): Record<string, unknown> {
 
 /** Detect errors that indicate the HFSQL connection is dead and the bridge needs respawning */
 function isConnectionLostError(errMsg: string): boolean {
+  // A server-side SQL error (unknown column, bad syntax) is ALSO returned with
+  // SQLSTATE [01000], but it is NOT a lost connection. Respawning + retrying it
+  // does nothing but hammer the shared HFSQL server — a single bad-column query
+  // (e.g. an accented identifier the Linux bridge can't tokenize) turns into a
+  // respawn storm that hangs every app on the server. Treat those as fatal SQL
+  // errors (let them throw) instead of connection losses.
+  const looksLikeSqlError =
+    errMsg.includes('item unknown')
+    || errMsg.includes('Unable to initialize the query')
+    || errMsg.includes('Unexpected word')
+    || errMsg.includes('consistent with file description')
+    || errMsg.includes('description of the data files')
+  if (looksLikeSqlError) return false
   return errMsg.includes('[01000]')
     || errMsg.includes('Unable to establish communication')
     || errMsg.includes('Connection reset by peer')
