@@ -1068,7 +1068,6 @@ const COMMANDE_FIL_DOC_TYPES = '1, 5, 6, 15, 29'
 // all 29 types; offering types like "labo coloris" in the create dropdown
 // would let the user attach a doc that the list endpoint (filtered on
 // COMMANDE_FIL_DOC_TYPES) then silently hides. Keep both in sync.
-// (Type 15 has no row in `type_doc`, so it naturally drops out here.)
 commandesFilRouter.get('/lookups/type-doc', async (_req: Request, res: Response) => {
   try {
     const rows = await query<{ IDtype_doc: number; nom: string | null }>(
