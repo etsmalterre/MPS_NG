@@ -106,19 +106,42 @@ wsl bash -c "ssh -i $SSH_KEY debian@10.10.2.165 'command'"
 
 ### Deploy Steps (Web)
 
-1. **Build locally** — `VITE_API_URL=/api` MUST be set in the build env:
+1. **Build locally — use PowerShell, NOT the Bash tool.** `VITE_API_URL=/api`
+   MUST be set in the build env:
+   ```powershell
+   cd C:\dev\MPS_NG; $env:VITE_API_URL='/api'; pnpm --filter web build   # USE THIS
+   ```
    ```bash
-   VITE_API_URL=/api pnpm --filter web build          # bash
-   $env:VITE_API_URL='/api'; pnpm --filter web build   # PowerShell
+   MSYS_NO_PATHCONV=1 VITE_API_URL=/api pnpm --filter web build          # bash ONLY with the guard
    ```
    This produces `apps/web/dist/` with hashed assets.
-   **Footgun (caused a prod outage 2026-06-14):** if the var is unset at build
-   time, `apiFetch` silently bakes in its dev fallback `http://localhost:3002/api`
-   (`apps/web/src/lib/api.ts:5`). The build succeeds, but on the HTTPS prod page
-   every API call goes to `localhost:3002` and is blocked → the whole app shows
-   "Impossible de charger la liste" on the user picker (and the same on every
-   screen) while the API itself is fine. **Verify before/after deploy:**
-   `grep -rl 'localhost:3002' apps/web/dist/assets/` must return nothing.
+
+   **Footgun A — git-bash path mangling (caused a prod outage 2026-06-15):**
+   the Claude Code Bash tool on this machine is **git-bash**, whose MSYS
+   path-conversion rewrites any value that looks like an absolute Unix path. So
+   `VITE_API_URL=/api ... build` run through Bash bakes the API base as
+   **`C:/Program Files/Git/api`**, and the prod bundle does
+   `fetch(\`C:/Program Files/Git/api/auth/users\`)` → resolves to
+   `https://mpsng.malterre/C:/Program Files/Git/api/...` → never matches `/api/*`.
+   Result is identical to Footgun B ("Impossible de charger la liste" everywhere)
+   but the `localhost:3002` grep below PASSES because the var *was* set, just to a
+   garbage value. Build with PowerShell to avoid it entirely.
+
+   **Footgun B — unset var (caused a prod outage 2026-06-14):** if the var is
+   unset at build time, `apiFetch` silently bakes in its dev fallback
+   `http://localhost:3002/api` (`apps/web/src/lib/api.ts:5`). The build succeeds,
+   but every prod API call goes to `localhost:3002` and is blocked.
+
+   **Verify the built bundle BEFORE upload — both a negative AND a positive
+   check (the negative alone is necessary-but-not-sufficient, it misses Footgun A):**
+   ```bash
+   B=$(ls apps/web/dist/assets/index-*.js)
+   grep -oc 'localhost:3002'        "$B"   # must be 0  (Footgun B)
+   grep -oc 'Program Files/Git/api' "$B"   # must be 0  (Footgun A)
+   grep -oE  'ht="/api"|="/api"'    "$B"   # MUST match — confirms API base is literally /api
+   ```
+   If the positive `="/api"` assertion doesn't match, do NOT deploy — the base is
+   wrong regardless of what the negative checks say.
 
 2. **Upload** the dist folder:
    ```bash
@@ -155,4 +178,10 @@ After deployment, verify:
 - **hfsql_bridge binary**: Compiled on the server from `src/hfsql_bridge.c`. Must be recompiled when the C source changes. Build: `gcc -o hfsql_bridge src/hfsql_bridge.c -I/usr/include/iodbc -liodbc -liodbcinst`
 - **Logo files**: `logo-full.png`, `logo-small.png`, `logo-dev.webp` are in `public/` and included in the build. The `logo-dev.webp` only shows in dev mode (`import.meta.env.DEV`), so it won't appear in production.
 - **Service Worker caching**: After deploying, users may need to hard-refresh (Ctrl+Shift+R) or unregister the SW in DevTools to pick up the new bundle. The SW precaches assets by hash, so new filenames are picked up on next SW update cycle.
+- **Diagnosing "Impossible de charger la liste" / "API inaccessible" in the browser while curl works**: do NOT assume stale service worker and send the user through cache-clearing rituals first. **Diagnose server-side before touching the client**, in this order:
+  1. `curl -sk https://mpsng.malterre/api/auth/users` — if it returns JSON, the API is fine.
+  2. Check the nginx access log for the user's request: `sudo grep 'auth/users' /var/log/nginx/access.log | tail`. **If the browser shows the error but NO matching request appears in the log, the bundle is sending the request to the wrong URL** (Footgun A `C:/Program Files/Git/api/...` or Footgun B `localhost:3002`) — it's a bad build, not a cache problem.
+  3. Confirm by grepping the *served* bundle: `curl -sk https://mpsng.malterre/$(curl -sk https://mpsng.malterre/ | grep -oE 'assets/index-[^"]+\.js')` then check for `ht="/api"` vs `Program Files`/`localhost`.
+  Only after the served bundle is confirmed correct is a client-side SW clear the right next step. Rebuilding wrong → re-pushing → telling the user to clear cache again wastes everyone's time.
+- **Missing PWA manifest icons**: `manifest.webmanifest` references `/icons/icon-192.png` and `/icons/icon-512.png`, but `apps/web/public/icons/` only contains `fini.png` and `tm.png` — so these 404 in the nginx error log after every deploy. Cosmetic (only affects the PWA install icon), NOT a sign of a broken deploy. Don't chase it while diagnosing API failures.
 - **SW NavigationRoute**: The `navigateFallbackDenylist: [/^\/api\//]` in `vite.config.ts` is critical — without it, the SW intercepts iframe loads to `/api/` and serves `index.html`, causing React Router 404 errors.
