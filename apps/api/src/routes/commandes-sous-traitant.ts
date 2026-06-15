@@ -3023,17 +3023,49 @@ export async function buildSoumissionLotPdfData(
   const ccFixed = await fixEncoding(ccRows as any[], 'commande_client', 'IDcommande_client', ['ref_client'])
   const cc = (ccFixed[0] as any) ?? null
 
-  // 3) Earliest ligne_commande_client.date_livraison for the lot's parent
-  //    order (the legacy uses the line date, not the order date). Pick any
-  //    ligne_commande_client of this commande_client (often there's only
-  //    one); if multiple, take the earliest valid date.
-  const lccRows = await query<{ date_livraison: string | null }>(
-    `SELECT date_livraison FROM ligne_commande_client
-     WHERE IDcommande_client = ${lot.IDcommande_client}`,
-  )
-  const dlValid = (lccRows
-    .map((r) => (typeof r.date_livraison === 'string' ? r.date_livraison : ''))
-    .filter((s: string) => /^\d{8}$/.test(s)) as string[]).sort()[0] ?? null
+  // 3) date_livraison of the SPECIFIC client-order line this lot fulfils.
+  //    A commande_client can hold many lines (different refs/coloris/dates);
+  //    taking the earliest across all of them returns an unrelated line's date
+  //    (bug: lot MA108499 → line 12617 due 20/07, but the order's earliest line
+  //    is 30/04 for another coloris). Resolve the real line(s):
+  //      • received lot → the lot's fini rolls carry IDligne_commande_client
+  //      • manual lot (no fini yet) → narrow to lines matching ref + coloris
+  const earliestValid = (rows: { date_livraison: string | null }[]): string | null =>
+    (rows
+      .map((r) => (typeof r.date_livraison === 'string' ? r.date_livraison : ''))
+      .filter((s: string) => /^\d{8}$/.test(s)) as string[]).sort()[0] ?? null
+
+  let targetLccIds: number[] = []
+  if (lot.kind !== 'manual') {
+    const sfRows = await query<{ IDligne_commande_client: number | null }>(
+      `SELECT IDligne_commande_client FROM stock_fini
+       WHERE lot = ${sqlText(lotString)}
+         AND IDref_fini = ${lot.IDref_fini}
+         AND IDColoris = ${lot.IDColoris}`,
+    )
+    targetLccIds = [...new Set(sfRows.map((r) => n(r.IDligne_commande_client)).filter((x) => x > 0))]
+  }
+
+  let dlValid: string | null = null
+  if (targetLccIds.length > 0) {
+    const dRows = await query<{ date_livraison: string | null }>(
+      `SELECT date_livraison FROM ligne_commande_client
+       WHERE IDligne_commande_client IN (${targetLccIds.join(',')})`,
+    )
+    dlValid = earliestValid(dRows)
+  }
+  if (dlValid === null) {
+    // Manual lots, or received with no resolvable reservation: narrow to the
+    // order's lines matching this lot's ref + coloris (still far better than
+    // every line of the order).
+    const narrowRows = await query<{ date_livraison: string | null }>(
+      `SELECT date_livraison FROM ligne_commande_client
+       WHERE IDcommande_client = ${lot.IDcommande_client}
+         AND IDreference = ${lot.IDref_fini}
+         AND IDcolori = ${lot.IDColoris}`,
+    )
+    dlValid = earliestValid(narrowRows)
+  }
 
   // 4) Adresse de livraison.
   const idAdresse = n(cc?.IDadresse_livraison)
