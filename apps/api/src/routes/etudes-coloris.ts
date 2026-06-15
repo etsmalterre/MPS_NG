@@ -29,6 +29,16 @@ export const etudesColorisRouter: RouterType = Router()
 // canonicalised in `apps/api/src/routes/stock.ts`.
 const IS_WINDOWS = process.platform === 'win32'
 
+// `envoi_email.invalidé` is an accented column. Naming it in SQL is FATAL on the
+// Linux iODBC bridge: the truncated `invalid` reaches the server → [01000] →
+// the bridge respawns and retries → respawn storm that floods the shared HFSQL
+// server and hangs every app on it. So never name `invalidé` (nor `société`) in
+// a query: SELECT * (or only ASCII columns), drop the `invalidé` predicate, and
+// prune invalidated rows in JS via the surfaced (truncated) key.
+function isActiveEnvoi(r: Record<string, unknown>): boolean {
+  return Number((r as any).invalid ?? (r as any)['invalidé'] ?? 0) === 0
+}
+
 // Read the `archivé` column off a row regardless of the platform-specific
 // column-name shape (Linux returns it truncated to `archiv`).
 function isArchive(row: Record<string, unknown>): boolean {
@@ -176,13 +186,13 @@ async function loadSoumissions(
   const soumIds = base.map((s) => s.IDsoum_col)
   const envoiAgg = new Map<number, { count: number; last: string | null }>()
   try {
-    const aggRows = await query<{ IDreference: number; DATE: string | null }>(
-      `SELECT IDreference, DATE FROM envoi_email
+    const aggRows = await query<Record<string, unknown>>(
+      `SELECT * FROM envoi_email
        WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION}
-         AND IDreference IN (${soumIds.join(',')})
-         AND invalidé = 0`,
+         AND IDreference IN (${soumIds.join(',')})`,
     )
     for (const r of aggRows) {
+      if (!isActiveEnvoi(r)) continue
       const id = Number(r.IDreference)
       const acc = envoiAgg.get(id) ?? { count: 0, last: null as string | null }
       acc.count += 1
@@ -943,24 +953,22 @@ etudesColorisRouter.get('/:id/history', async (req: Request, res: Response) => {
     const soumIds = Array.from(soumMap.keys())
 
     // Pull both kinds of envois in parallel.
-    const [etudeEnvois, soumissionEnvois] = await Promise.all([
+    const [etudeEnvoisRaw, soumissionEnvoisRaw] = await Promise.all([
       query<any>(
-        `SELECT IDenvoi_email, DATE, adresse, société, IDreference
-         FROM envoi_email
+        `SELECT * FROM envoi_email
          WHERE IDtype_doc = ${TYPE_DOC_DEMANDE_ETUDE_COLORIS}
-           AND IDreference = ${id}
-           AND invalidé = 0`,
+           AND IDreference = ${id}`,
       ),
       soumIds.length > 0
         ? query<any>(
-            `SELECT IDenvoi_email, DATE, adresse, société, IDreference
-             FROM envoi_email
+            `SELECT * FROM envoi_email
              WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION}
-               AND IDreference IN (${soumIds.join(',')})
-               AND invalidé = 0`,
+               AND IDreference IN (${soumIds.join(',')})`,
           )
         : Promise.resolve([]),
     ])
+    const etudeEnvois = (etudeEnvoisRaw as any[]).filter(isActiveEnvoi)
+    const soumissionEnvois = (soumissionEnvoisRaw as any[]).filter(isActiveEnvoi)
     const fixedEtudeEnvois = await fixEncoding(etudeEnvois as any[], 'envoi_email', 'IDenvoi_email', ['adresse', 'société'])
     const fixedSoumEnvois = await fixEncoding(soumissionEnvois as any[], 'envoi_email', 'IDenvoi_email', ['adresse', 'société'])
 
@@ -1763,19 +1771,13 @@ etudesColorisRouter.get('/soumissions/:soumId/envois', async (req: Request, res:
   try {
     const soumId = parseInt(String(req.params.soumId), 10)
     if (isNaN(soumId)) { res.status(400).json({ error: 'Invalid ID' }); return }
-    const rows = await query<{
-      IDenvoi_email: number
-      DATE: string | null
-      adresse: string | null
-      IDtype_doc: number
-    }>(
-      `SELECT IDenvoi_email, DATE, adresse, société, IDtype_doc
-       FROM envoi_email
+    const rowsRaw = await query<Record<string, unknown>>(
+      `SELECT * FROM envoi_email
        WHERE IDtype_doc = ${TYPE_DOC_SOUMISSION}
          AND IDreference = ${soumId}
-         AND invalidé = 0
        ORDER BY DATE DESC, IDenvoi_email DESC`,
     )
+    const rows = (rowsRaw as any[]).filter(isActiveEnvoi)
     const fixed = await fixEncoding(rows as any[], 'envoi_email', 'IDenvoi_email', ['adresse', 'société'])
     res.json(
       (fixed as any[]).map((r) => ({
