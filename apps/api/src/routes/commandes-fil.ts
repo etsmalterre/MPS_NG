@@ -1054,14 +1054,22 @@ commandesFilRouter.delete('/:commandeId/lignes/:ligneId/stock/:stockId', async (
 // Per-lot linkage (a doc attached to specific lots within the order) is
 // handled separately via `stock_fil_ged`.
 
-// IDtype_doc values where `ged.IDreference` points at commande_fil:
-//   1  = facture fil
-//   5  = certificat de transaction GOTS
-//   6  = bl fournisseur
-//   15 = bl fournisseur (legacy variant, no row in `type_doc` — common
-//        in older data, mostly named "ARC" or "PL")
-//   29 = bl fil
-const COMMANDE_FIL_DOC_TYPES = '1, 5, 6, 15, 29'
+// IDtype_doc values offered in (and displayed in) a commande_fil's documents
+// tab. Deliberately curated — BOTH the create dropdown (/lookups/type-doc) and
+// the list/scope guards read this constant, so a type absent here can be
+// neither created nor shown.
+//   1 = facture fil
+//   2 = autre (misc). Safe to share the generic "autre" type: every existing
+//       "autre" row has IDreference=0 and is scoped by IDcommande_client/sst,
+//       so a fil "autre" row (keyed by IDreference) can never collide with one.
+//   5 = certificat de transaction GOTS
+//   6 = bl fournisseur — the canonical delivery note for yarn orders
+// Removed 2026-06-15:
+//   15 (soumission) — a client-commande doc type. Its IDreference points at
+//       commande_client ids that numerically collide with commande_fil ids, so
+//       it leaked ~333 unrelated client docs (bl/certif/ARC/PL…) into fil tabs.
+//   29 (bl fil) — unused (0 rows) and redundant with bl fournisseur.
+const COMMANDE_FIL_DOC_TYPES = '1, 2, 5, 6'
 
 // Type-doc lookup scoped to the types that can actually appear in a
 // commande_fil's documents tab. The generic /fournisseurs/type-doc returns
