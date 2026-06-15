@@ -2039,8 +2039,8 @@ function DocCreateEditDialog({
   const modeInitializedRef = useRef(false)
 
   const { data: typeDocs } = useQuery<TypeDoc[]>({
-    queryKey: ['types-doc'],
-    queryFn: () => apiFetch('/fournisseurs/type-doc'),
+    queryKey: ['commande-fil-types-doc'],
+    queryFn: () => apiFetch('/commandes-fil/lookups/type-doc'),
     enabled: open,
   })
 
