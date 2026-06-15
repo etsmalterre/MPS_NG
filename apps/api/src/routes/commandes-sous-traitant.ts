@@ -3201,59 +3201,28 @@ async function buildSoumissionEmailDefaults(
   if (!lot) return null
   const lotString = lot.kind === 'manual' ? params.lot : lot.lot
 
-  // Client contacts. Pre-select envoi_soumission=1 contacts; everything
-  // else with a valid email goes into suggestions.
-  const contactRows = await query<{
-    IDcontact: number; nom: string | null; prenom: string | null; mail: string | null;
-    envoi_soumission: number | null; est_visible: number | null
-  }>(
-    `SELECT IDcontact, nom, prenom, mail, envoi_soumission, est_visible
-     FROM contact WHERE IDclient = ${lot.IDclient}`,
-  )
-  const fixedContacts = await fixEncoding(contactRows as any[], 'contact', 'IDcontact', ['nom', 'prenom', 'mail'])
-
+  // Recipients are INVERTED relative to a normal client-facing document: the
+  // lot soumission is addressed TO the sous-traitant (ennoblisseur) contacts,
+  // with the client's soumission contacts in Cc.
   const selected: EmailRecipientPayload[] = []
   const suggestions: EmailRecipientPayload[] = []
   const seen = new Set<string>()
-  for (const c of fixedContacts as any[]) {
-    if (c.est_visible === 0) continue
-    const raw = (c.mail ?? '').toString().trim()
-    if (!raw) continue
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) continue
-    const key = raw.toLowerCase()
-    if (seen.has(key)) continue
-    seen.add(key)
-    const displayName = [c.prenom, c.nom]
-      .map((s: string | null) => (s ?? '').toString().trim())
-      .filter((s: string) => s.length > 0)
-      .join(' ')
-    const recipient: EmailRecipientPayload = {
-      email: raw,
-      source: 'contact',
-      contactId: n(c.IDcontact),
-    }
-    if (displayName) recipient.name = displayName
-    if (c.envoi_soumission === 1) selected.push(recipient)
-    else suggestions.push(recipient)
-  }
 
-  // Auto-Cc the commande's sous-traitant contact(s) flagged for soumission
-  // (contact.envoi_soumission = 1, linked via contact.IDsous_traitant). The
-  // ennoblisseur wants a copy of every soumission sent to the client on their
-  // behalf. Skip addresses already in the "to" list.
-  const cc: string[] = []
+  // To: sous-traitant contacts. envoi_soumission=1 → pre-selected; other
+  // visible contacts → suggestions (click to add).
   const stRows = await query<{ IDsous_traitant: number | null }>(
     `SELECT IDsous_traitant FROM commande_sous_traitant WHERE IDcommande_sous_traitant = ${commandeId}`,
   )
   const idSt = n((stRows[0] as any)?.IDsous_traitant)
   if (idSt > 0) {
     const stContacts = await query<{
-      IDcontact: number; mail: string | null; envoi_soumission: number | null; est_visible: number | null
+      IDcontact: number; nom: string | null; prenom: string | null; mail: string | null;
+      envoi_soumission: number | null; est_visible: number | null
     }>(
-      `SELECT IDcontact, mail, envoi_soumission, est_visible
-       FROM contact WHERE IDsous_traitant = ${idSt} AND envoi_soumission = 1`,
+      `SELECT IDcontact, nom, prenom, mail, envoi_soumission, est_visible
+       FROM contact WHERE IDsous_traitant = ${idSt}`,
     )
-    const fixedSt = await fixEncoding(stContacts as any[], 'contact', 'IDcontact', ['mail'])
+    const fixedSt = await fixEncoding(stContacts as any[], 'contact', 'IDcontact', ['nom', 'prenom', 'mail'])
     for (const c of fixedSt as any[]) {
       if (c.est_visible === 0) continue
       const raw = (c.mail ?? '').toString().trim()
@@ -3261,8 +3230,38 @@ async function buildSoumissionEmailDefaults(
       const key = raw.toLowerCase()
       if (seen.has(key)) continue
       seen.add(key)
-      cc.push(raw)
+      const displayName = [c.prenom, c.nom]
+        .map((s: string | null) => (s ?? '').toString().trim())
+        .filter((s: string) => s.length > 0)
+        .join(' ')
+      const recipient: EmailRecipientPayload = {
+        email: raw,
+        source: 'contact',
+        contactId: n(c.IDcontact),
+      }
+      if (displayName) recipient.name = displayName
+      if (c.envoi_soumission === 1) selected.push(recipient)
+      else suggestions.push(recipient)
     }
+  }
+
+  // Cc: the client's soumission contacts (envoi_soumission = 1).
+  const cc: string[] = []
+  const clientContacts = await query<{
+    IDcontact: number; mail: string | null; envoi_soumission: number | null; est_visible: number | null
+  }>(
+    `SELECT IDcontact, mail, envoi_soumission, est_visible
+     FROM contact WHERE IDclient = ${lot.IDclient} AND envoi_soumission = 1`,
+  )
+  const fixedClient = await fixEncoding(clientContacts as any[], 'contact', 'IDcontact', ['mail'])
+  for (const c of fixedClient as any[]) {
+    if (c.est_visible === 0) continue
+    const raw = (c.mail ?? '').toString().trim()
+    if (!raw || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) continue
+    const key = raw.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    cc.push(raw)
   }
 
   const subject = `Soumission Lot ${lotString} — ${lot.ref_malterre}${lot.coloris_reference ? ` · ${lot.coloris_reference}` : ''}`
