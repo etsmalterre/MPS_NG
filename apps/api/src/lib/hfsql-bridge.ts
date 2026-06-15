@@ -236,15 +236,24 @@ export async function fixEncoding<T extends object>(
       continue
     }
 
-    const id = r[idField]
+    const idNum = Number(r[idField])
     const fixed = { ...row } as T
+    // Guard: a non-finite id would emit `WHERE col = NaN`, which HFSQL treats as
+    // an unknown identifier and rejects with [01000] \u2014 on the Linux bridge that
+    // is classed as "connection lost" and triggers a respawn storm that floods
+    // the shared HFSQL server. Skip the CONVERT and keep the original (a leftover
+    // U+FFFD glyph is purely cosmetic; a prod outage is not).
+    if (!Number.isInteger(idNum)) {
+      result.push(fixed)
+      continue
+    }
     const fixedRec = fixed as Record<string, unknown>
     for (const field of textFields) {
       const orig = r[field]
       if (typeof orig === 'string' && orig.includes('\ufffd')) {
         try {
           const qRes = await query<{ v: string }>(
-            `SELECT CONVERT(${field} USING 'UTF-8') as v FROM ${table} WHERE ${idField} = ${Number(id)}`
+            `SELECT CONVERT(${field} USING 'UTF-8') as v FROM ${table} WHERE ${idField} = ${idNum}`
           )
           if (qRes.length > 0 && qRes[0].v != null) {
             fixedRec[field] = qRes[0].v

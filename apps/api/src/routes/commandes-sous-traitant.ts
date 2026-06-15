@@ -5376,8 +5376,10 @@ commandesSousTraitantRouter.get(
       if (!bd) { res.json({ enabled: false, reason: 'no-weight' }); return }
 
       // Resolve human-readable names for the IDs in the breakdown.
-      const stRows = await query<{ nom: string | null }>(
-        `SELECT nom FROM sous_traitant WHERE IDsous_traitant = ${IDsous_traitant}`,
+      // Must select IDsous_traitant: fixEncoding uses it as idField; omitting it
+      // makes the CONVERT run `WHERE IDsous_traitant = NaN` → bridge respawn storm.
+      const stRows = await query<{ IDsous_traitant: number; nom: string | null }>(
+        `SELECT IDsous_traitant, nom FROM sous_traitant WHERE IDsous_traitant = ${IDsous_traitant}`,
       )
       const sstFixed = await fixEncoding(stRows, 'sous_traitant', 'IDsous_traitant', ['nom'])
       const sst_nom = ((sstFixed[0] as any)?.nom ?? '').trim()

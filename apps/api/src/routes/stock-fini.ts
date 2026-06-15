@@ -55,12 +55,15 @@ async function repairAliased<T extends Record<string, unknown>>(
   for (const alias of aliasNames) idsByAlias[alias] = new Set<number>()
   let anyNeedsFix = false
   for (const row of rows) {
-    const id = row[idField]
-    if (id == null) continue
+    const idNum = Number(row[idField])
+    // Only finite integer ids are usable in the `WHERE key IN (…)` below — a NaN
+    // in that list makes HFSQL reject the whole query ([01000]) and, on the Linux
+    // bridge, triggers a connection-respawn storm against the shared server.
+    if (!Number.isInteger(idNum)) continue
     for (const alias of aliasNames) {
       const v = row[alias]
       if (typeof v === 'string' && v.includes('�')) {
-        idsByAlias[alias].add(Number(id))
+        idsByAlias[alias].add(idNum)
         anyNeedsFix = true
       }
     }

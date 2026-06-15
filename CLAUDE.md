@@ -24,7 +24,7 @@ Full design system in `.claude/skills/mps_designer/SKILL.md`.
 ## Project Phases
 
 - **Phase 1 — UI Shell**: complete.
-- **Phase 2 — Database**: web app connects directly to HFSQL via ODBC (POC validated 2026-03-25). PostgreSQL migration was abandoned (column casing); legacy scripts remain in `data_migration/`. WinDev app stays on HFSQL — both apps share the same live data.
+- **Phase 2 — Database**: web app connects directly to HFSQL via ODBC. PostgreSQL migration abandoned (column casing); legacy scripts in `data_migration/`. WinDev app stays on HFSQL — both apps share live data.
 - **Phase 3 — Features**: match legacy WinDev functionality screen by screen.
 
 ## Tech Stack
@@ -116,6 +116,7 @@ Load these on demand when working on the matching topic:
 
 | File | When to load |
 |------|--------------|
+| `claude_doc/dev_setup.md` | Fresh-machine setup: HFSQL server/driver, `.env.development`, dev ports |
 | `claude_doc/hfsql_odbc.md` | HFSQL connection details, driver install, bridge, platform-specific SQL, accented columns |
 | `claude_doc/implemented_screens.md` | Canonical reference screens (Entreprises, Fournisseurs, Commandes, Stock) — grep first before inventing patterns |
 | `claude_doc/auth_permissions.md` | Cookie auth picker, effective vs session admin, permission catalog, admin guard |
@@ -133,9 +134,9 @@ Full details in `claude_doc/hfsql_odbc.md`. These are the non-negotiable rules f
 - **No parameterized queries**: `?` placeholders fail. Use string interpolation with `esc()` (single-quote doubling) for strings, `parseInt` for IDs, hex literals `x'${buffer.toString('hex')}'` for blobs.
 - **No `RETURNING *`**: use follow-up `SELECT` after INSERT/UPDATE.
 - **Booleans are `0`/`1`**: in React always `!!value &&` to avoid rendering `0` as text.
-- **Accented identifiers are platform-specific**: Linux bridge rejects them entirely (use `sf.*` + ASCII-truncated column names); Windows silently returns 0 rows on `alias.*` in JOINs (use explicit `alias.terminé AS termine`). Branch on `process.platform === 'win32'` via `IS_WINDOWS`. Canonical pattern in `apps/api/src/routes/stock.ts`.
-- **A query naming a non-existent column = prod outage on Linux**: silently caught on Windows ODBC, but on the bridge it triggers a respawn storm that floods the shared HFSQL server (`mps.malterre`=`10.10.20.2`, shared with mfprod) and hangs both apps. Any helper building `WHERE <col>=<id>` from a row property MUST use the target table's real PK. Verify prod via `https://mpsng.malterre` (NOT `localhost:8081` — IPv6 false 000s); don't hammer-restart. Memories: `project_hfsql_bridge_storm`, `feedback_prod_health_check`.
-- **Encoding (reads)**: ODBC corrupts accents (é→U+FFFD). Use `fixEncoding()` / `CONVERT(field USING 'UTF-8')` per affected field. **On large lists, batch the repair** — one `CONVERT … WHERE id IN (…)` per source column, not per row: the naive per-row CONVERT is an N+1 that floods the bridge (état/coloris labels corrupt on *every* row → thousands of round-trips). Batched pattern in `stock-fini.ts repairAliased`.
+- **Accented identifiers are platform-specific**: Linux bridge rejects them entirely (use `sf.*` + ASCII-truncated column names); Windows silently returns 0 rows on `alias.*` in JOINs (use explicit `alias.terminé AS termine`). Branch on `process.platform === 'win32'` via `IS_WINDOWS`. Canonical pattern in `apps/api/src/routes/stock.ts`. Truncation is **in the driver itself** (even a raw Latin-1 `0xE9` is dropped) — the "Latin-1 bridge" idea is a dead end (`project_hfsql_bridge_accent_fix`). Resolve accent-mangled `SELECT *` keys with a `/^prefix/i` regex (`pickKey`), not hardcoded fallbacks. **Writing accented columns on Linux** (e.g. `asso_fil_matiere`): never name them — positional `INSERT … VALUES(...)` in column order (PK isn't auto-assigned; compute `max+1`), edit/delete via delete-by-ASCII-key + reinsert. Canonical: `references-fil.ts` composition (`project_matiere_premiere_unreachable_pk`).
+- **A query naming a non-existent column = prod outage on Linux**: silently caught on Windows ODBC, but on the bridge it triggers a respawn storm that floods the shared HFSQL server (`mps.malterre`=`10.10.20.2`, shared with mfprod) and hangs both apps. Any helper building `WHERE <col>=<id>` from a row property MUST use the target table's real PK. **`WHERE col = NaN` storms identically**: `fixEncoding`/`repairAliased`'s `idField` MUST be selected by the feeding query — `SELECT nom FROM x` + `fixEncoding(…,'IDx',['nom'])` reads `undefined`→`NaN` (helpers now skip non-integer ids as backstop; `project_fixencoding_nan_storm`). Verify prod via `https://mpsng.malterre` (NOT `localhost:8081` — IPv6 false 000s); don't hammer-restart. Memories: `project_hfsql_bridge_storm`, `feedback_prod_health_check`.
+- **Encoding (reads)**: ODBC corrupts accents (é→U+FFFD). Use `fixEncoding()` / `CONVERT(field USING 'UTF-8')` per affected field. **On large lists, batch the repair** — one `CONVERT … WHERE id IN (…)` per source column, not per row (per-row CONVERT is an N+1 that floods the bridge). Batched pattern in `stock-fini.ts repairAliased`.
 - **Encoding (writes)**: raw multi-byte UTF-8 in a SQL string corrupts the Linux bridge (→ `[HY090]` / "string without end" / 500). HFSQL text columns are Latin-1 — emit accented values as a hex literal of their Latin-1 bytes (`x'${Buffer.from(v,'latin1').toString('hex')}'`), not `'${esc(v)}'`; ASCII values keep the normal quoted literal. Helper: `sqlText()` in `commandes-sous-traitant.ts`.
 - **BinMemo `IS NOT NULL`**: unreliable — empty blobs pass. File-serving endpoints return 404 if buffer is empty; UI does HEAD pre-check before rendering iframes.
 - **Avoid accents in HFSQL table names and backup folder file names** — both cause "fichier de données est déjà décrit" errors at connection time.
@@ -196,22 +197,7 @@ pnpm build        # build all packages
 pnpm test         # run tests
 ```
 
-### First-time setup on a new Windows machine
-
-The factory PC has everything pre-installed; on a fresh machine you also need:
-
-1. **HFSQL Client/Server** running on `localhost:4900` with the `MPS` database.
-2. **HFSQL ODBC driver** — install once via `C:\PC SOFT\WINDEV Suite <year>\Install\ODBC\WX310PACKODBC.exe` (admin required). Without this, the API throws ODBC `IM002` ("Source de données introuvable") on every query and the user picker shows "Impossible de charger la liste".
-3. **`apps/api/.env.development`** with at minimum `PORT=3002`, `CORS_ORIGIN=http://localhost:5174`, `AUTH_COOKIE_SECRET=<32-byte hex>`, `HFSQL_CONNECTION_STRING=DRIVER={HFSQL};Server Name=localhost;Server Port=4900;Database=MPS;UID=Admin;PWD=;`. Gitignored. Gmail send/draft is disabled until `apps/api/secrets/<service-account>.json` exists and `GOOGLE_SERVICE_ACCOUNT_KEY_FILE` points at it.
-
-### Dev Ports
-
-| Service | Port | Notes |
-|---------|------|-------|
-| MPS_NG API | 3002 | Set in `apps/api/.env.development` |
-| MPS_NG Web | 5175 | Vite (5173/5174 taken by MFProd) |
-| MFProd API | 8080 | Separate project |
-| MFProd Web | 5173 | Separate project |
+Fresh-machine setup (HFSQL server, ODBC driver, `.env.development`, dev ports): see `claude_doc/dev_setup.md`.
 
 ## Business Domain (Quick Reference)
 
@@ -225,10 +211,4 @@ Full glossary in `claude_doc/business_glossary.md`.
 | Confection | Assembly/Manufacturing |
 | Matières premières | Raw materials |
 | Produits finis | Finished goods |
-| Commande | Order |
-| Devis | Quotation |
-| Facture | Invoice |
-| Livraison | Delivery |
-| Expédition | Shipment |
-| Fournisseur | Supplier |
 | Sous-traitant | Subcontractor |

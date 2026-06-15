@@ -1410,20 +1410,22 @@ async function loadSoumissionContext(soumId: number): Promise<SoumissionWithCont
   const e = fixedEtude[0] as any
 
   const [refFiniRows, colorisRows, clientRows, sousTraitantRows] = await Promise.all([
+    // Each SELECT must include the id column used as fixEncoding's idField below:
+    // without it, fixEncoding reads an undefined id → `WHERE col = NaN` → bridge storm.
     Number(e.IDref_fini) > 0
-      ? query<{ reference: string | null }>(`SELECT reference FROM ref_fini WHERE IDref_fini = ${Number(e.IDref_fini)}`)
+      ? query<{ IDref_fini: number; reference: string | null }>(`SELECT IDref_fini, reference FROM ref_fini WHERE IDref_fini = ${Number(e.IDref_fini)}`)
       : Promise.resolve([]),
     Number(e.IDref_fini_colori) > 0
-      ? query<{ reference: string | null }>(
-          `SELECT reference FROM ref_fini_colori WHERE IDref_fini_colori = ${Number(e.IDref_fini_colori)}`,
+      ? query<{ IDref_fini_colori: number; reference: string | null }>(
+          `SELECT IDref_fini_colori, reference FROM ref_fini_colori WHERE IDref_fini_colori = ${Number(e.IDref_fini_colori)}`,
         )
       : Promise.resolve([]),
     Number(e.IDclient) > 0
-      ? query<{ nom: string | null }>(`SELECT nom FROM client WHERE IDclient = ${Number(e.IDclient)}`)
+      ? query<{ IDclient: number; nom: string | null }>(`SELECT IDclient, nom FROM client WHERE IDclient = ${Number(e.IDclient)}`)
       : Promise.resolve([]),
     Number(e.IDsous_traitant) > 0
-      ? query<{ nom: string | null }>(
-          `SELECT nom FROM sous_traitant WHERE IDsous_traitant = ${Number(e.IDsous_traitant)}`,
+      ? query<{ IDsous_traitant: number; nom: string | null }>(
+          `SELECT IDsous_traitant, nom FROM sous_traitant WHERE IDsous_traitant = ${Number(e.IDsous_traitant)}`,
         )
       : Promise.resolve([]),
   ])

@@ -14,13 +14,12 @@ function esc(value: string): string {
   return value.replace(/'/g, "''")
 }
 
-/**
- * Emit a SQL text literal that survives the Linux HFSQL bridge.
- * HFSQL text columns are Latin-1; raw multi-byte UTF-8 inside a quoted string
- * corrupts the bridge (→ [HY090] "string without end"). ASCII goes through a
- * normal quoted literal; anything with accents becomes a Latin-1 byte hex
- * literal. Mirrors sqlText() in commandes-sous-traitant.ts.
- */
+/** SQL literal for user-supplied text written to an HFSQL column. ASCII values
+ *  use a normal quoted literal; accented / non-ASCII values are emitted as a
+ *  Latin-1 hex literal `x'<bytes>'`, because raw multi-byte UTF-8 embedded in a
+ *  SQL line corrupts the Linux iODBC bridge (→ [HY090] / "string without end").
+ *  HFSQL text columns are Latin-1; reads keep going through fixEncoding/CONVERT.
+ *  Mirrors sqlText() in commandes-sous-traitant.ts (see CLAUDE.md HFSQL rules). */
 function sqlText(value: string | null | undefined): string {
   const v = (value ?? '').toString()
   if (v === '') return "''"
@@ -61,34 +60,81 @@ function normalizeRefFilRow(row: Record<string, unknown>): Record<string, unknow
 }
 
 /**
- * Normalise an asso_fil_matiere row. Maps:
- *   IDasso_fil_matière / any mangled variant → IDasso_fil_matiere
- *   IDMatière           / any mangled variant → IDmatiere
- *   recyclé             / recycl              → recycle
+ * Normalise an asso_fil_matiere row. The accented columns (IDasso_fil_matière,
+ * IDMatière, recyclé) come back from the Linux ODBC driver under a mangled key
+ * (truncated/altered at the accent — exact shape varies), so resolve each by a
+ * case-insensitive prefix regex rather than a hardcoded fallback list.
  */
 function normalizeAssoFilMatiereRow(row: Record<string, unknown>): Record<string, unknown> {
-  const r = row as any
   return {
-    IDasso_fil_matiere: Number(
-      r.IDasso_fil_matiere ?? r['IDasso_fil_matière'] ?? r.IDasso_fil_matir ?? r.IDasso_fil_mati ?? 0,
-    ),
-    IDRef_fil: Number(r.IDRef_fil ?? 0),
-    IDmatiere: Number(r.IDmatiere ?? r['IDMatière'] ?? r.IDMatir ?? r.IDMati ?? 0),
-    pourcentage: toNumOrNull(r.pourcentage),
-    bio: Number(r.bio) || 0,
-    recycle: Number(r.recycle ?? r['recyclé'] ?? r.recycl ?? 0) || 0,
+    IDasso_fil_matiere: Number(pickKey(row, /^idasso_fil_mat/i) ?? 0),
+    IDRef_fil: Number(pickKey(row, /^idref_fil/i) ?? 0),
+    IDmatiere: Number(pickKey(row, /^idmat/i) ?? 0),
+    pourcentage: toNumOrNull(pickKey(row, /^pourcentage/i)),
+    bio: Number(pickKey(row, /^bio/i)) || 0,
+    recycle: Number(pickKey(row, /^recyc/i)) || 0,
   }
 }
 
-/** Normalise a matiere_premiere row: IDmatière_première → IDmatiere_premiere. */
-function normalizeMatiereRow(row: Record<string, unknown>): Record<string, unknown> {
-  const r = row as any
+interface MatiereLookup {
+  IDmatiere_premiere: number
+  libelle: string | null
+}
+
+/** Value of the first row key matching `re`. The Linux HFSQL ODBC path returns
+ *  accented identifiers truncated at the first accent (IDmatière_première →
+ *  IDmati), so we can't hardcode the key — resolve it dynamically. */
+function pickKey(row: Record<string, unknown>, re: RegExp): unknown {
+  const k = Object.keys(row).find((key) => re.test(key))
+  return k === undefined ? undefined : row[k]
+}
+
+/** Normalise a matiere_premiere row: IDmatière_première (any shape) → IDmatiere_premiere. */
+function normalizeMatiereRow(row: Record<string, unknown>): MatiereLookup {
   return {
-    IDmatiere_premiere: Number(
-      r.IDmatiere_premiere ?? r['IDmatière_première'] ?? r.IDmatire_premire ?? r.IDmati_premi ?? 0,
-    ),
-    libelle: r.libelle ?? null,
+    IDmatiere_premiere: Number(pickKey(row, /^idmati/i) ?? 0),
+    libelle: ((row as any).libelle ?? null) as string | null,
   }
+}
+
+/** Repair U+FFFD glyphs in matiere_premiere.libelle WITHOUT naming the accented
+ *  PK. The usual `WHERE pk IN (…)` CONVERT batch is impossible here — the only
+ *  key is IDmatière_première, which can't appear in a Linux query — and naming a
+ *  non-existent ASCII column would risk a bridge respawn storm. Instead we
+ *  CONVERT every label in this tiny static table at once, then match each corrupt
+ *  label to its fixed twin positionally (one accent → one length-preserving
+ *  U+FFFD). Leaves the corrupt value in place if no unambiguous match is found. */
+async function repairMatiereLabels(rows: MatiereLookup[]): Promise<MatiereLookup[]> {
+  if (!rows.some((r) => typeof r.libelle === 'string' && r.libelle.includes('�'))) return rows
+  let fixedLabels: string[] = []
+  try {
+    const conv = await query<{ libelle: unknown }>(
+      `SELECT CONVERT(libelle USING 'UTF-8') AS libelle FROM matiere_premiere`,
+    )
+    fixedLabels = conv
+      .map((c) => (typeof c.libelle === 'string' ? c.libelle : ''))
+      .filter((s) => s.length > 0 && !s.includes('�'))
+  } catch {
+    return rows
+  }
+  const matches = (corrupt: string, fixed: string): boolean =>
+    corrupt.length === fixed.length &&
+    [...corrupt].every((ch, i) => ch === '�' || ch === fixed[i])
+  for (const r of rows) {
+    if (typeof r.libelle === 'string' && r.libelle.includes('�')) {
+      const m = fixedLabels.find((f) => matches(r.libelle as string, f))
+      if (m) r.libelle = m
+    }
+  }
+  return rows
+}
+
+/** Load all matieres with resolved ASCII id + accent-repaired libelle. Shared by
+ *  the lookup endpoint and the composition-detail enrich. */
+async function loadMatieres(): Promise<MatiereLookup[]> {
+  const rows = await query(`SELECT * FROM matiere_premiere`)
+  const normalised = rows.map((r) => normalizeMatiereRow(r as Record<string, unknown>))
+  return repairMatiereLabels(normalised)
 }
 
 // ──────────────────────────────────────────────────────────
@@ -98,22 +144,9 @@ function normalizeMatiereRow(row: Record<string, unknown>): Record<string, unkno
 // GET /api/references-fil/lookups/matieres
 referencesFilRouter.get('/lookups/matieres', async (_req: Request, res: Response) => {
   try {
-    const rows = await query(`SELECT * FROM matiere_premiere`)
-    let normalised = rows.map((r) => normalizeMatiereRow(r as Record<string, unknown>))
-    // encoding fix on libelle via the ASCII id we just assigned
-    normalised = await fixEncoding(
-      normalised as any,
-      'matiere_premiere',
-      // NOTE: fixEncoding's CONVERT uses the id field literally. On Linux the
-      // accented PK is unreachable — but CONVERT only runs when a row already
-      // contains U+FFFD, and libelle values like "coton", "polyester" are
-      // ASCII so we typically skip the fix path entirely. When a broken value
-      // does appear on Windows, fixEncoding will use the ASCII key we set.
-      'IDmatiere_premiere' as any,
-      ['libelle'],
-    ) as any
+    const normalised = await loadMatieres()
     // Sort by libelle
-    normalised.sort((a: any, b: any) => String(a.libelle ?? '').localeCompare(String(b.libelle ?? '')))
+    normalised.sort((a, b) => String(a.libelle ?? '').localeCompare(String(b.libelle ?? '')))
     res.json(normalised)
   } catch (err) {
     console.error('Error fetching matieres lookup:', err)
@@ -261,16 +294,8 @@ referencesFilRouter.get('/:id', async (req: Request, res: Response) => {
     const matiereIds = Array.from(new Set(assoNormalised.map((a: any) => a.IDmatiere).filter((n: number) => n > 0)))
     const matiereLabelByld = new Map<number, string>()
     if (matiereIds.length > 0) {
-      // SELECT * + normalise because the PK is accented on Linux
-      const matRows = await query(`SELECT * FROM matiere_premiere`)
-      let matNormalised = matRows.map((r) => normalizeMatiereRow(r as Record<string, unknown>))
-      matNormalised = (await fixEncoding(
-        matNormalised as any,
-        'matiere_premiere',
-        'IDmatiere_premiere' as any,
-        ['libelle'],
-      )) as any
-      for (const m of matNormalised as any[]) {
+      const matNormalised = await loadMatieres()
+      for (const m of matNormalised) {
         matiereLabelByld.set(Number(m.IDmatiere_premiere), String(m.libelle ?? ''))
       }
     }
@@ -847,8 +872,24 @@ referencesFilRouter.delete('/:id/offres/:offreId', async (req: Request, res: Res
 })
 
 // ──────────────────────────────────────────────────────────
-// COMPOSITION (asso_fil_matiere) — Windows-only writes
+// COMPOSITION (asso_fil_matiere)
 // ──────────────────────────────────────────────────────────
+// asso_fil_matiere has accented column names — IDasso_fil_matière (PK),
+// IDMatière (FK), recyclé. The HFSQL Linux ODBC driver cannot resolve an
+// accented identifier when it is NAMED in a query: it truncates the token at
+// the first accent and HFSQL reports "item unknown" (verified on prod — even
+// sending the é as a raw Latin-1 byte is truncated by the driver itself, so the
+// "Latin-1 transport" idea does not help). So on Linux we NEVER name those
+// columns:
+//   • reads     — SELECT * (driver returns truncated keys; normalizeAssoFilMatiereRow maps them)
+//   • inserts   — positional `VALUES (...)` in physical column order
+//                 [IDasso_fil_matière, IDMatière, IDRef_fil, pourcentage, bio, recyclé].
+//                 The PK does NOT auto-assign on a positional insert (an explicit
+//                 0 is stored verbatim), so we compute max(existing)+1.
+//   • edit/del  — can't target the accented PK in a WHERE, so we delete the ref's
+//                 whole set via the ASCII IDRef_fil column and re-insert the
+//                 surviving/edited rows, preserving their original PK values.
+// Windows keeps the simpler named-column path.
 
 const compositionBody = z.object({
   IDmatiere: z.number().int().positive(),
@@ -857,15 +898,68 @@ const compositionBody = z.object({
   recycle: z.boolean().optional(),
 })
 
-function linuxGuard(res: Response): boolean {
-  if (!IS_WINDOWS) {
-    res.status(501).json({
-      error:
-        "L'édition de la composition n'est pas disponible sur cet environnement. Utilisez l'application WinDev pour modifier les matières.",
-    })
-    return true
+interface CompoRow {
+  IDasso_fil_matiere: number
+  IDmatiere: number
+  pourcentage: number
+  bio: number
+  recycle: number
+}
+
+/** Read a ref's composition rows (works on both platforms via SELECT *). */
+async function readCompoRows(refId: number): Promise<CompoRow[]> {
+  const rows = await query(`SELECT * FROM asso_fil_matiere WHERE IDRef_fil = ${refId}`)
+  return rows.map((r) => {
+    const n = normalizeAssoFilMatiereRow(r as Record<string, unknown>) as any
+    return {
+      IDasso_fil_matiere: Number(n.IDasso_fil_matiere) || 0,
+      IDmatiere: Number(n.IDmatiere) || 0,
+      pourcentage: Number(n.pourcentage) || 0,
+      bio: Number(n.bio) ? 1 : 0,
+      recycle: Number(n.recycle) ? 1 : 0,
+    }
+  })
+}
+
+/** Next PK across the whole table + 1 (Linux positional inserts don't auto-assign
+ *  and MAX() can't name the accented PK, so scan via SELECT *). */
+async function nextAssoId(): Promise<number> {
+  const rows = await query(`SELECT * FROM asso_fil_matiere`)
+  let max = 0
+  for (const r of rows) {
+    const id = Number((normalizeAssoFilMatiereRow(r as Record<string, unknown>) as any).IDasso_fil_matiere) || 0
+    if (id > max) max = id
   }
-  return false
+  return max + 1
+}
+
+/** Positional insert in physical column order (Linux-safe — names no column). */
+async function insertCompoRowPositional(
+  pk: number,
+  refId: number,
+  row: { IDmatiere: number; pourcentage: number; bio: number; recycle: number },
+): Promise<void> {
+  await query(
+    `INSERT INTO asso_fil_matiere VALUES (${pk}, ${row.IDmatiere}, ${refId}, ${row.pourcentage}, ${row.bio ? 1 : 0}, ${row.recycle ? 1 : 0})`,
+  )
+}
+
+/** Replace a ref's whole composition set: delete via ASCII IDRef_fil, then
+ *  positional re-insert (PK values preserved). Best-effort restore on failure. */
+async function replaceCompoRows(refId: number, rows: CompoRow[]): Promise<void> {
+  const original = await readCompoRows(refId)
+  await query(`DELETE FROM asso_fil_matiere WHERE IDRef_fil = ${refId}`)
+  try {
+    for (const row of rows) await insertCompoRowPositional(row.IDasso_fil_matiere, refId, row)
+  } catch (err) {
+    try {
+      await query(`DELETE FROM asso_fil_matiere WHERE IDRef_fil = ${refId}`)
+      for (const row of original) await insertCompoRowPositional(row.IDasso_fil_matiere, refId, row)
+    } catch {
+      /* best-effort restore only */
+    }
+    throw err
+  }
 }
 
 // POST /api/references-fil/:id/compositions
@@ -873,7 +967,6 @@ referencesFilRouter.post('/:id/compositions', async (req: Request, res: Response
   try {
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
-    if (linuxGuard(res)) return
 
     const parsed = compositionBody.safeParse(req.body)
     if (!parsed.success) {
@@ -881,18 +974,26 @@ referencesFilRouter.post('/:id/compositions', async (req: Request, res: Response
       return
     }
     const b = parsed.data
-    // Accented column names work directly on Windows
-    await query(
-      `INSERT INTO asso_fil_matiere (IDRef_fil, IDMatière, pourcentage, bio, recyclé) VALUES (${id}, ${b.IDmatiere}, ${b.pourcentage}, ${b.bio ? 1 : 0}, ${b.recycle ? 1 : 0})`,
-    )
-    // Fetch newest id in this ref
-    const rows = await query(
-      `SELECT * FROM asso_fil_matiere WHERE IDRef_fil = ${id}`,
-    )
-    const normalised = rows.map((r) => normalizeAssoFilMatiereRow(r as Record<string, unknown>))
-    // Latest by id
-    normalised.sort((a: any, b: any) => Number(b.IDasso_fil_matiere) - Number(a.IDasso_fil_matiere))
-    res.status(201).json({ IDasso_fil_matiere: Number((normalised[0] as any)?.IDasso_fil_matiere) || null })
+    let newId: number | null
+    if (IS_WINDOWS) {
+      // Accented column names work directly on Windows; PK auto-assigns.
+      await query(
+        `INSERT INTO asso_fil_matiere (IDRef_fil, IDMatière, pourcentage, bio, recyclé) VALUES (${id}, ${b.IDmatiere}, ${b.pourcentage}, ${b.bio ? 1 : 0}, ${b.recycle ? 1 : 0})`,
+      )
+      const rows = await query(`SELECT * FROM asso_fil_matiere WHERE IDRef_fil = ${id}`)
+      const normalised = rows.map((r) => normalizeAssoFilMatiereRow(r as Record<string, unknown>))
+      normalised.sort((a: any, b: any) => Number(b.IDasso_fil_matiere) - Number(a.IDasso_fil_matiere))
+      newId = Number((normalised[0] as any)?.IDasso_fil_matiere) || null
+    } else {
+      newId = await nextAssoId()
+      await insertCompoRowPositional(newId, id, {
+        IDmatiere: b.IDmatiere,
+        pourcentage: b.pourcentage,
+        bio: b.bio ? 1 : 0,
+        recycle: b.recycle ? 1 : 0,
+      })
+    }
+    res.status(201).json({ IDasso_fil_matiere: newId })
   } catch (err) {
     console.error('Error creating asso_fil_matiere:', err)
     res.status(500).json({ error: 'Internal server error' })
@@ -905,7 +1006,6 @@ referencesFilRouter.put('/:id/compositions/:assoId', async (req: Request, res: R
     const id = parseInt(req.params.id, 10)
     const assoId = parseInt(req.params.assoId, 10)
     if (isNaN(id) || isNaN(assoId)) { res.status(400).json({ error: 'Invalid ID' }); return }
-    if (linuxGuard(res)) return
 
     const parsed = compositionBody.safeParse(req.body)
     if (!parsed.success) {
@@ -913,17 +1013,24 @@ referencesFilRouter.put('/:id/compositions/:assoId', async (req: Request, res: R
       return
     }
     const b = parsed.data
-    // Scope guard: the asso row must belong to this ref
-    const scopeRows = await query(
-      `SELECT IDRef_fil FROM asso_fil_matiere WHERE IDasso_fil_matière = ${assoId}`,
-    )
-    if (scopeRows.length === 0 || Number((scopeRows[0] as any).IDRef_fil) !== id) {
+    // Scope guard via SELECT * (the accented PK can't be named in a WHERE on Linux).
+    const current = await readCompoRows(id)
+    if (!current.some((r) => r.IDasso_fil_matiere === assoId)) {
       res.status(404).json({ error: 'Composition row not found for this reference' })
       return
     }
-    await query(
-      `UPDATE asso_fil_matiere SET IDMatière = ${b.IDmatiere}, pourcentage = ${b.pourcentage}, bio = ${b.bio ? 1 : 0}, recyclé = ${b.recycle ? 1 : 0} WHERE IDasso_fil_matière = ${assoId}`,
-    )
+    if (IS_WINDOWS) {
+      await query(
+        `UPDATE asso_fil_matiere SET IDMatière = ${b.IDmatiere}, pourcentage = ${b.pourcentage}, bio = ${b.bio ? 1 : 0}, recyclé = ${b.recycle ? 1 : 0} WHERE IDasso_fil_matière = ${assoId}`,
+      )
+    } else {
+      const updated = current.map((r) =>
+        r.IDasso_fil_matiere === assoId
+          ? { ...r, IDmatiere: b.IDmatiere, pourcentage: b.pourcentage, bio: b.bio ? 1 : 0, recycle: b.recycle ? 1 : 0 }
+          : r,
+      )
+      await replaceCompoRows(id, updated)
+    }
     res.json({ ok: true })
   } catch (err) {
     console.error('Error updating asso_fil_matiere:', err)
@@ -937,17 +1044,19 @@ referencesFilRouter.delete('/:id/compositions/:assoId', async (req: Request, res
     const id = parseInt(req.params.id, 10)
     const assoId = parseInt(req.params.assoId, 10)
     if (isNaN(id) || isNaN(assoId)) { res.status(400).json({ error: 'Invalid ID' }); return }
-    if (linuxGuard(res)) return
 
-    // Scope guard
-    const scopeRows = await query(
-      `SELECT IDRef_fil FROM asso_fil_matiere WHERE IDasso_fil_matière = ${assoId}`,
-    )
-    if (scopeRows.length === 0 || Number((scopeRows[0] as any).IDRef_fil) !== id) {
+    // Scope guard via SELECT * (the accented PK can't be named in a WHERE on Linux).
+    const current = await readCompoRows(id)
+    if (!current.some((r) => r.IDasso_fil_matiere === assoId)) {
       res.status(404).json({ error: 'Composition row not found for this reference' })
       return
     }
-    await query(`DELETE FROM asso_fil_matiere WHERE IDasso_fil_matière = ${assoId}`)
+    if (IS_WINDOWS) {
+      await query(`DELETE FROM asso_fil_matiere WHERE IDasso_fil_matière = ${assoId}`)
+    } else {
+      const survivors = current.filter((r) => r.IDasso_fil_matiere !== assoId)
+      await replaceCompoRows(id, survivors)
+    }
     res.json({ ok: true })
   } catch (err) {
     console.error('Error deleting asso_fil_matiere:', err)
