@@ -128,7 +128,14 @@ static int connect_db(const char *conn_str) {
     return 0;
 }
 
-static void execute_query(const char *sql) {
+/* When b64text is set, text (non-numeric, non-binary) column VALUES are emitted
+ * base64-encoded with a "b64t:" prefix instead of raw. HFSQL stores text as
+ * Latin-1; the raw path prints those bytes straight into JSON, so any byte > 0x7F
+ * (é, °, …) is invalid UTF-8 and Node decodes it to U+FFFD (lossy). The usual fix
+ * is CONVERT(col USING 'UTF-8'), but that requires naming the column — impossible
+ * for accented column names (prénom, société) on this driver. b64text sidesteps
+ * it: the caller base64-decodes then reads the bytes as Latin-1. Default off. */
+static void execute_query(const char *sql, int b64text) {
     SQLHSTMT hstmt = SQL_NULL_HSTMT;
     SQLRETURN ret;
 
@@ -232,6 +239,17 @@ static void execute_query(const char *sql) {
                     } else if (col_types[i] == SQL_FLOAT || col_types[i] == SQL_DOUBLE ||
                                col_types[i] == SQL_DECIMAL || col_types[i] == SQL_NUMERIC || col_types[i] == SQL_REAL) {
                         printf("\"%s\":%s", escaped_name, data);
+                    } else if (b64text) {
+                        /* Emit raw bytes base64-encoded so the caller can decode
+                         * them as Latin-1 losslessly (handles accented values in
+                         * columns we can't CONVERT, e.g. prénom/société). */
+                        char *b64 = base64_encode((unsigned char*)data, strlen(data));
+                        if (b64) {
+                            printf("\"%s\":\"b64t:%s\"", escaped_name, b64);
+                            free(b64);
+                        } else {
+                            printf("\"%s\":null", escaped_name);
+                        }
                     } else {
                         char escaped_val[MAX_DATA * 2];
                         json_escape(data, escaped_val, sizeof(escaped_val));
@@ -329,7 +347,11 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        execute_query(sql);
+        /* Opt-in base64 text mode — only when the line is prefixed exactly with
+         * {"b64text":1,  (constructed by the TS wrapper; never inside the SQL). */
+        int b64text = (strncmp(input, "{\"b64text\":1", 12) == 0);
+
+        execute_query(sql, b64text);
     }
 
     free(input);

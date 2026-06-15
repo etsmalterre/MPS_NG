@@ -16,7 +16,7 @@ let pendingResolve: ((value: string) => void) | null = null
 let connected = false
 
 // Query queue to serialize concurrent requests
-const queryQueue: Array<{ sql: string; resolve: (value: string) => void; reject: (err: Error) => void }> = []
+const queryQueue: Array<{ sql: string; b64text?: boolean; resolve: (value: string) => void; reject: (err: Error) => void }> = []
 let processing = false
 
 function getBridgePath(): string {
@@ -90,7 +90,7 @@ async function ensureConnected(): Promise<void> {
   })
 }
 
-function sendQueryRaw(sql: string): Promise<string> {
+function sendQueryRaw(sql: string, b64text?: boolean): Promise<string> {
   return new Promise((resolve, reject) => {
     if (!bridge || !bridge.stdin) {
       reject(new Error('Bridge not connected'))
@@ -98,7 +98,9 @@ function sendQueryRaw(sql: string): Promise<string> {
     }
     pendingResolve = resolve
     const escaped = sql.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r')
-    bridge.stdin.write(`{"sql":"${escaped}"}\n`)
+    // The C bridge detects b64text only when the line is prefixed EXACTLY with
+    // {"b64text":1, — keep this literal in sync with the strncmp in hfsql_bridge.c.
+    bridge.stdin.write(b64text ? `{"b64text":1,"sql":"${escaped}"}\n` : `{"sql":"${escaped}"}\n`)
   })
 }
 
@@ -110,7 +112,7 @@ async function processQueue(): Promise<void> {
     const item = queryQueue.shift()!
     try {
       await ensureConnected()
-      const result = await sendQueryRaw(item.sql)
+      const result = await sendQueryRaw(item.sql, item.b64text)
       item.resolve(result)
     } catch (err) {
       item.reject(err instanceof Error ? err : new Error(String(err)))
@@ -120,9 +122,9 @@ async function processQueue(): Promise<void> {
   processing = false
 }
 
-function sendQuery(sql: string): Promise<string> {
+function sendQuery(sql: string, b64text?: boolean): Promise<string> {
   return new Promise((resolve, reject) => {
-    queryQueue.push({ sql, resolve, reject })
+    queryQueue.push({ sql, b64text, resolve, reject })
     processQueue()
   })
 }
@@ -136,6 +138,26 @@ function cleanRow<T>(row: Record<string, unknown>): T {
     } else if (typeof value === 'string' && value.startsWith('b64:')) {
       // Decode base64 — for text fields (CONVERT results), return as UTF-8 string
       cleaned[key] = Buffer.from(value.slice(4), 'base64').toString('utf8')
+    } else {
+      cleaned[key] = value
+    }
+  }
+  return cleaned as T
+}
+
+/** Clean row for b64text-mode results: text columns arrive as "b64t:<base64 of
+ *  raw Latin-1 bytes>" — decode them as latin1 so accented chars survive (the
+ *  only way to read accented-NAMED columns like prénom/société correctly on the
+ *  Linux bridge, which can't CONVERT them). Binary "b64:" stays a Buffer. */
+function cleanRowB64Text<T>(row: Record<string, unknown>): T {
+  const cleaned: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(row)) {
+    if (typeof value === 'string' && (value === '\x00' || value.charCodeAt(0) === 0)) {
+      cleaned[key] = null
+    } else if (typeof value === 'string' && value.startsWith('b64t:')) {
+      cleaned[key] = Buffer.from(value.slice(5), 'base64').toString('latin1')
+    } else if (typeof value === 'string' && value.startsWith('b64:')) {
+      cleaned[key] = Buffer.from(value.slice(4), 'base64')
     } else {
       cleaned[key] = value
     }
@@ -210,6 +232,41 @@ export async function query<T = Record<string, unknown>>(
     }
   }
   throw new Error('Query failed after retry')
+}
+
+/**
+ * Run a SQL query in base64-text mode: every text column value is returned
+ * decoded from its raw Latin-1 bytes, so accented characters survive even in
+ * columns whose NAME is accented (prénom, société) and therefore can't be
+ * CONVERT()'d. Use for tables with accented column names; ordinary routes keep
+ * using query() + fixEncoding(). Numeric/date columns are unaffected.
+ */
+export async function queryB64Text<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const raw = await sendQuery(sql, true)
+      if (!raw) throw new Error('Empty response from bridge')
+      const result = JSON.parse(raw)
+      if (result.error) {
+        if (isConnectionLostError(result.error) && attempt === 0) {
+          console.warn('[hfsql_bridge] Connection lost in queryB64Text, respawning:', result.error)
+          killBridge()
+          continue
+        }
+        throw new Error(result.error)
+      }
+      return (result.rows as Record<string, unknown>[]).map((row) => cleanRowB64Text<T>(row))
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (isConnectionLostError(msg) && attempt === 0) {
+        console.warn('[hfsql_bridge] Connection error in queryB64Text, respawning:', msg)
+        killBridge()
+        continue
+      }
+      throw err
+    }
+  }
+  throw new Error('queryB64Text failed after retry')
 }
 
 /**

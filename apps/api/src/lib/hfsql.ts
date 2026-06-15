@@ -55,6 +55,17 @@ export async function query<T = Record<string, unknown>>(
 }
 
 /**
+ * Windows counterpart of the Linux bridge's queryB64Text. The base64-text trick
+ * is a Linux-only workaround (the iODBC driver can't CONVERT accented-named
+ * columns); on Windows the odbc driver path handles encoding via fixEncoding, so
+ * this is a plain passthrough. The prospects route only calls queryB64Text on
+ * Linux — this export exists so hfsql-auto can wire it uniformly.
+ */
+export async function queryB64Text<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+  return query<T>(sql)
+}
+
+/**
  * Fix encoding for text/memo fields that contain U+FFFD replacement characters.
  * HFSQL ODBC driver corrupts accented chars; CONVERT(field USING 'UTF-8') fixes them.
  * This does per-row CONVERT queries only for rows that actually have broken encoding.

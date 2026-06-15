@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
 import { z } from 'zod'
-import { query, fixEncoding } from '../lib/hfsql-auto.js'
+import { query, fixEncoding, queryB64Text } from '../lib/hfsql-auto.js'
 
 export const prospectsRouter: RouterType = Router()
 
@@ -114,13 +114,25 @@ function normalizeProspectRow(raw: Record<string, unknown>): ProspectRow {
     const v = get(folded)
     return v === null || v === undefined ? '' : String(v)
   }
+  // The Linux bridge truncates accented identifiers AT the first accent, so
+  // `prénom` arrives as key `pr` and `société` as `soci` (verified on prod).
+  // The generic `get()` fallback can't catch these (`pr` is too short for its
+  // length>=3 guard; `soci`→`societe` exceeds its 1-char-diff guard), so resolve
+  // them with a prefix regex against the raw keys — matches both the truncated
+  // Linux keys and the full `prénom`/`société` keys Windows returns.
+  const strRaw = (re: RegExp): string => {
+    for (const [k, v] of Object.entries(raw)) {
+      if (re.test(k)) return v === null || v === undefined ? '' : String(v)
+    }
+    return ''
+  }
 
   return {
     IDprospect: n(get('idprospect')),
-    prenom: str('prenom'),
+    prenom: strRaw(/^pr/i),
     nom: str('nom'),
     email: str('email'),
-    societe: str('societe'),
+    societe: strRaw(/^soci/i),
     adresse: str('adresse'),
     code_postal: str('code_postal'),
     ville: str('ville'),
@@ -146,7 +158,34 @@ const TEXT_FIELDS_BASE = [
   'observation', 'notes_interne', 'tracking_number',
 ]
 const TEXT_FIELDS_FULL = IS_WINDOWS ? [...TEXT_FIELDS_BASE, 'prénom', 'société'] : TEXT_FIELDS_BASE
-const TEXT_FIELDS_LIST = IS_WINDOWS ? ['nom', 'ville', 'email', 'prénom', 'société'] : ['nom', 'ville', 'email']
+
+// Full physical column set of `prospect`, in catalog order (verified via SELECT *
+// on prod). Used for positional INSERT on Linux, where the accented column names
+// (prénom, société, traité) can't be named in a column list.
+interface ProspectFields {
+  prenom: string; nom: string; email: string; societe: string; adresse: string
+  code_postal: string; ville: string; pays: string; telephone: string
+  status_catalogue: number; date: string; observation: string; notes_interne: string
+  expe_catalogue: string; tracking_number: string; IDtransporteur: number
+  traite: number; IDclient: number
+}
+
+/** Build a positional VALUES(...) list for `INSERT INTO prospect VALUES (...)`,
+ *  columns in physical order:
+ *  IDprospect, prénom, nom, email, société, adresse, code_postal, ville, pays,
+ *  telephone, status_catalogue, date, observation, notes_interne, expe_catalogue,
+ *  tracking_number, IDtransporteur, traité, IDclient */
+function prospectPositionalValues(id: number, f: ProspectFields): string {
+  return [
+    String(id),
+    sqlText(f.prenom), sqlText(f.nom), sqlText(f.email), sqlText(f.societe),
+    sqlText(f.adresse), sqlText(f.code_postal), sqlText(f.ville), sqlText(f.pays),
+    sqlText(f.telephone), String(n(f.status_catalogue)),
+    `'${dateStr(f.date)}'`, sqlText(f.observation), sqlText(f.notes_interne),
+    `'${dateStr(f.expe_catalogue)}'`, sqlText(f.tracking_number),
+    String(n(f.IDtransporteur)), String(f.traite ? 1 : 0), String(n(f.IDclient)),
+  ].join(', ')
+}
 
 // ── Validation ───────────────────────────────────────────
 
@@ -173,13 +212,26 @@ const statusBody = z.object({
   status_catalogue: z.union([z.literal(1), z.literal(2), z.literal(3)]),
 })
 
+// Read prospect rows with CLEAN text values on both platforms.
+//   • Linux: the accented column names (prénom, société) can't be CONVERT()'d,
+//     so use the bridge's base64-text mode — every text value comes back decoded
+//     from its raw Latin-1 bytes (accents intact). No fixEncoding needed.
+//   • Windows: the odbc driver path uses the usual SELECT * + fixEncoding(CONVERT).
+async function selectProspectRows(tail: string): Promise<Record<string, unknown>[]> {
+  const sql = `SELECT * FROM prospect ${tail}`
+  if (IS_WINDOWS) {
+    const rows = await query<Record<string, unknown>>(sql)
+    return fixEncoding(rows, 'prospect', 'IDprospect', TEXT_FIELDS_FULL)
+  }
+  return queryB64Text<Record<string, unknown>>(sql)
+}
+
 // ── Detail loader (shared by GET /:id, PUT, status, convert) ──
 
 async function loadProspectDetail(id: number): Promise<Record<string, unknown> | null> {
-  const rows = await query<Record<string, unknown>>(`SELECT * FROM prospect WHERE IDprospect = ${id}`)
+  const rows = await selectProspectRows(`WHERE IDprospect = ${id}`)
   if (rows.length === 0) return null
-  const fixed = await fixEncoding(rows, 'prospect', 'IDprospect', TEXT_FIELDS_FULL)
-  const p = normalizeProspectRow(fixed[0])
+  const p = normalizeProspectRow(rows[0])
 
   let transporteur_nom: string | null = null
   if (p.IDtransporteur > 0) {
@@ -224,11 +276,8 @@ prospectsRouter.get('/', async (req: Request, res: Response) => {
     const q = String(req.query.q ?? '').trim().toLowerCase()
     const statusFilter = String(req.query.status ?? 'all')
 
-    const rows = await query<Record<string, unknown>>(
-      `SELECT * FROM prospect ORDER BY date DESC, IDprospect DESC`,
-    )
-    const fixed = await fixEncoding(rows, 'prospect', 'IDprospect', TEXT_FIELDS_LIST)
-    let demandes = fixed.map(normalizeProspectRow)
+    const rows = await selectProspectRows(`ORDER BY date DESC, IDprospect DESC`)
+    let demandes = rows.map(normalizeProspectRow)
 
     if (statusFilter === 'nouveau') demandes = demandes.filter((d) => d.status_catalogue === 1)
     else if (statusFilter === 'en_attente') demandes = demandes.filter((d) => d.status_catalogue === 2)
@@ -275,31 +324,47 @@ prospectsRouter.post('/', async (req: Request, res: Response) => {
     const d = parsed.data
 
     // New demandes always start at status_catalogue 1 (Nouveau), unconverted.
-    const cols = [
-      'nom', 'email', 'adresse', 'code_postal', 'ville', 'pays', 'telephone',
-      'status_catalogue', 'date', 'observation', 'notes_interne',
-      'expe_catalogue', 'tracking_number', 'IDtransporteur', 'IDclient',
-    ]
-    const vals = [
-      sqlText(d.nom), sqlText(d.email), sqlText(d.adresse), sqlText(d.code_postal),
-      sqlText(d.ville), sqlText(d.pays), sqlText(d.telephone),
-      '1', `'${dateStr(d.date) || todayHfsql()}'`, sqlText(d.observation),
-      sqlText(d.notes_interne), `'${dateStr(d.expe_catalogue)}'`, sqlText(d.tracking_number),
-      String(d.IDtransporteur ?? 0), '0',
-    ]
-    if (IS_WINDOWS) {
-      cols.push('prénom', 'société', 'traité')
-      vals.push(sqlText(d.prenom), sqlText(d.societe), String(d.traite ?? 0))
+    const f: ProspectFields = {
+      prenom: d.prenom ?? '', nom: d.nom ?? '', email: d.email ?? '', societe: d.societe ?? '',
+      adresse: d.adresse ?? '', code_postal: d.code_postal ?? '', ville: d.ville ?? '',
+      pays: d.pays ?? '', telephone: d.telephone ?? '',
+      status_catalogue: 1,
+      date: dateStr(d.date) || todayHfsql(),
+      observation: d.observation ?? '', notes_interne: d.notes_interne ?? '',
+      expe_catalogue: dateStr(d.expe_catalogue), tracking_number: d.tracking_number ?? '',
+      IDtransporteur: d.IDtransporteur ?? 0, traite: d.traite ?? 0, IDclient: 0,
     }
 
-    await query(`INSERT INTO prospect (${cols.join(', ')}) VALUES (${vals.join(', ')})`)
+    let newId: number
+    if (IS_WINDOWS) {
+      // Windows ODBC accepts accented column names → ordinary column-list INSERT.
+      const cols = [
+        'nom', 'email', 'adresse', 'code_postal', 'ville', 'pays', 'telephone',
+        'status_catalogue', 'date', 'observation', 'notes_interne',
+        'expe_catalogue', 'tracking_number', 'IDtransporteur', 'IDclient',
+        'prénom', 'société', 'traité',
+      ]
+      const vals = [
+        sqlText(f.nom), sqlText(f.email), sqlText(f.adresse), sqlText(f.code_postal),
+        sqlText(f.ville), sqlText(f.pays), sqlText(f.telephone),
+        '1', `'${dateStr(f.date)}'`, sqlText(f.observation),
+        sqlText(f.notes_interne), `'${dateStr(f.expe_catalogue)}'`, sqlText(f.tracking_number),
+        String(n(f.IDtransporteur)), '0',
+        sqlText(f.prenom), sqlText(f.societe), String(f.traite ? 1 : 0),
+      ]
+      await query(`INSERT INTO prospect (${cols.join(', ')}) VALUES (${vals.join(', ')})`)
+      const created = await selectProspectRows(`ORDER BY IDprospect DESC`)
+      newId = normalizeProspectRow(created[0]).IDprospect
+    } else {
+      // Linux: accented column names are unwriteable → positional INSERT with an
+      // explicit, self-assigned PK (max+1; positional INSERT doesn't auto-number).
+      const maxRows = await query<{ m: unknown }>(`SELECT MAX(IDprospect) AS m FROM prospect`)
+      newId = n(maxRows[0]?.m) + 1
+      await query(`INSERT INTO prospect VALUES (${prospectPositionalValues(newId, f)})`)
+    }
 
-    const created = await query<Record<string, unknown>>(
-      `SELECT * FROM prospect ORDER BY IDprospect DESC`,
-    )
-    if (created.length === 0) { res.status(500).json({ error: 'Insert failed' }); return }
-    const newId = normalizeProspectRow(created[0]).IDprospect
     const detail = await loadProspectDetail(newId)
+    if (!detail) { res.status(500).json({ error: 'Insert failed' }); return }
     res.status(201).json(detail)
   } catch (err) {
     console.error('Error creating prospect:', err)
@@ -320,6 +385,55 @@ prospectsRouter.put('/:id', async (req: Request, res: Response) => {
       return
     }
     const d = parsed.data
+
+    // Linux: prénom/société/traité are accented column names → unwriteable in an
+    // UPDATE on the iODBC bridge. When any of them actually changes, rewrite the
+    // whole row positionally, preserving the PK. Reads are clean (b64text), so no
+    // corrupted value is written back; the original row is restored if the
+    // re-insert fails so a botched rewrite can never lose data.
+    if (!IS_WINDOWS && (d.prenom !== undefined || d.societe !== undefined || d.traite !== undefined)) {
+      const cur = await loadProspectDetail(id)
+      if (!cur) { res.status(404).json({ error: 'Demande not found' }); return }
+      const c = cur as unknown as ProspectFields & { IDprospect: number }
+      const accentedChanged =
+        (d.prenom !== undefined && d.prenom !== c.prenom) ||
+        (d.societe !== undefined && d.societe !== c.societe) ||
+        (d.traite !== undefined && (n(d.traite) ? 1 : 0) !== (c.traite ? 1 : 0))
+      if (accentedChanged) {
+        const merged: ProspectFields = {
+          prenom: d.prenom ?? c.prenom,
+          nom: d.nom ?? c.nom,
+          email: d.email ?? c.email,
+          societe: d.societe ?? c.societe,
+          adresse: d.adresse ?? c.adresse,
+          code_postal: d.code_postal ?? c.code_postal,
+          ville: d.ville ?? c.ville,
+          pays: d.pays ?? c.pays,
+          telephone: d.telephone ?? c.telephone,
+          status_catalogue: c.status_catalogue,
+          date: d.date !== undefined ? dateStr(d.date) : c.date,
+          observation: d.observation ?? c.observation,
+          notes_interne: d.notes_interne ?? c.notes_interne,
+          expe_catalogue: d.expe_catalogue !== undefined ? dateStr(d.expe_catalogue) : c.expe_catalogue,
+          tracking_number: d.tracking_number ?? c.tracking_number,
+          IDtransporteur: d.IDtransporteur ?? c.IDtransporteur,
+          traite: d.traite !== undefined ? (n(d.traite) ? 1 : 0) : c.traite,
+          IDclient: c.IDclient,
+        }
+        const restore = prospectPositionalValues(id, c)
+        const next = prospectPositionalValues(id, merged)
+        await query(`DELETE FROM prospect WHERE IDprospect = ${id}`)
+        try {
+          await query(`INSERT INTO prospect VALUES (${next})`)
+        } catch (e) {
+          try { await query(`INSERT INTO prospect VALUES (${restore})`) } catch { /* keep original error */ }
+          throw e
+        }
+        const detail = await loadProspectDetail(id)
+        res.json(detail); return
+      }
+      // accented fields present but unchanged → fall through to the named UPDATE
+    }
 
     const sets: string[] = []
     if (d.nom !== undefined) sets.push(`nom = ${sqlText(d.nom)}`)
