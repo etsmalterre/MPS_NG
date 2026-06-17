@@ -67,6 +67,10 @@ Reference `resolveRef` in `commandes-sous-traitant.ts`. Memory [[project-sst-lin
 
 `colori_fini` is a junction (`IDcolori_fini`, `IDgamme_coloris`, `IDcolori_ecru`, `IDref_fini_colori`) with NO `IDColoris` column and NO `reference` column. The actual fini-coloris catalog is `ref_fini_colori` (PK `IDref_fini_colori`, label `reference`, FK `IDref_fini`) — that's what `stock_fini.IDColoris` and `ligne_commande_sous_traitant.IDColoris` reference for fini lines.
 
+### `stock_fil.IDref_fil_commande` is the order-LINE PK, NOT the commande N°
+
+A yarn-stock roll links to its purchase order via `stock_fil.IDref_fil_commande`, which is the PK of the **order line** in `ref_fil_commande` — *not* the commande number. The commande N° (what the UI/legacy calls "Commande N°") is `ref_fil_commande.IDcommande_fil`, the FK to the `commande_fil` header. To show the commande number for a roll: `stock_fil.IDref_fil_commande` → `SELECT IDcommande_fil FROM ref_fil_commande WHERE IDref_fil_commande = …`. (e.g. lot 10471 → line 920 → commande 646.) Displaying `IDref_fil_commande` directly = wrong number on every roll. Resolved in `stock.ts` `GET /fil/:id`; surfaced in `FilsStock.tsx` provenance card.
+
 ### `defaut_qualite` polymorphic via `Type_Reference` + `reference`
 
 Integer discriminator (`1`=piece_production, `2`=stock_ecru) with the parent id **stringified** in `reference` (varchar-typed FK). Écru defects: `WHERE Type_Reference = 2 AND reference IN ('id1','id2',...)`. Coexists with `stock_ecru.second_choix` + `observations` — rendered together in the red `RollNotes` banner. Pattern in `commandes-sous-traitant.ts` `fetchPiecesPayload`.
