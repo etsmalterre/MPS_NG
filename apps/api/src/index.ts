@@ -12,6 +12,7 @@ import { fournisseursRouter } from './routes/fournisseurs.js'
 import { referencesFilRouter } from './routes/references-fil.js'
 import { commandesFilRouter } from './routes/commandes-fil.js'
 import { commandesSousTraitantRouter } from './routes/commandes-sous-traitant.js'
+import { sousTraitantsRouter } from './routes/sous-traitants.js'
 import { etudesColorisRouter } from './routes/etudes-coloris.js'
 import { prospectsRouter } from './routes/prospects.js'
 import { stockRouter } from './routes/stock.js'
@@ -58,6 +59,7 @@ app.use('/api/fournisseurs', fournisseursRouter)
 app.use('/api/references-fil', referencesFilRouter)
 app.use('/api/commandes-fil', commandesFilRouter)
 app.use('/api/commandes-sous-traitant', commandesSousTraitantRouter)
+app.use('/api/sous-traitants', sousTraitantsRouter)
 app.use('/api/etudes-coloris', etudesColorisRouter)
 app.use('/api/prospects', prospectsRouter)
 app.use('/api/stock', stockRouter)

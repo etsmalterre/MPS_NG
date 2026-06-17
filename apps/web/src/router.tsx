@@ -7,7 +7,6 @@ import {
   ShoppingCart,
   FileText,
   Receipt,
-  Building2,
   Truck,
   Box,
   ShieldCheck,
@@ -43,9 +42,6 @@ const ClientsGestionPage = createPlaceholder('Gestion Clients', 'Gérez votre po
 // Fils placeholder (prévisions only — other Fils sub-screens are real)
 const FilsPrevisionsPage = createPlaceholder('Prévisions Fournisseurs', 'Prévisions d\'approvisionnement fournisseurs', FileText)
 
-// Sous-traitants pages
-const SousTraitantsGestionPage = createPlaceholder('Gestion Sous-traitants', 'Gérez vos sous-traitants', Building2)
-
 // Legacy-menu top-level placeholders
 const TransfertsPage = createPlaceholder('Transferts', 'Transferts de stock entre sites et sous-traitants', Truck)
 const TombeMetierPage = createPlaceholder('Tombé Métier', 'Suivi du tombé métier', PlaceholderIcon(KnitIcon))
@@ -66,6 +62,7 @@ import { FilsCommandes } from '@/pages/FilsCommandes'
 
 // Sous-traitants pages (real)
 import { SousTraitantsCommandes } from '@/pages/SousTraitantsCommandes'
+import { SousTraitantsGestion } from '@/pages/SousTraitantsGestion'
 
 // Finis pages (real)
 import { EtudesColoris } from '@/pages/EtudesColoris'
@@ -102,7 +99,7 @@ export const router = createBrowserRouter([
       // Sous-traitants
       { path: 'sous-traitants', element: <Navigate to="/sous-traitants/commandes" replace /> },
       { path: 'sous-traitants/commandes', element: <SousTraitantsCommandes /> },
-      { path: 'sous-traitants/gestion', element: <SousTraitantsGestionPage /> },
+      { path: 'sous-traitants/gestion', element: <SousTraitantsGestion /> },
 
       // Transferts
       { path: 'transferts', element: <TransfertsPage /> },
