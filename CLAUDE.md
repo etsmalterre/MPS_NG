@@ -44,53 +44,7 @@ Full design system in `.claude/skills/mps_designer/SKILL.md`.
 
 ## Project Structure
 
-```
-MPS_NG/
-├── apps/
-│   ├── api/           # Express API
-│   │   ├── data/      # Runtime JSON (gitignored): permissions.json, user-emails.json
-│   │   ├── secrets/   # Gitignored: Google service account key
-│   │   └── src/
-│   │       ├── assets/           # fonts/, logo-malterre-wide.png (PDF)
-│   │       ├── lib/
-│   │       │   ├── hfsql.ts              # ODBC singleton, query(), queryRaw(), fixEncoding()
-│   │       │   ├── auth.ts               # Cookie HMAC, attachUser, requireAdmin, isEffectiveAdmin
-│   │       │   ├── permissions.ts        # JSON-backed per-user permissions (TODO: DB)
-│   │       │   ├── permission-keys.ts    # PERMISSION_KEYS catalog
-│   │       │   ├── user-emails.ts        # JSON-backed per-user emails (TODO: DB)
-│   │       │   ├── gmail.ts              # Gmail API send helper (JWT + DWD)
-│   │       │   ├── pricing-sst.ts        # Ennoblisseur auto-pricing (see HFSQL rules)
-│   │       │   ├── pricing-trm.ts        # Tricoteur auto-pricing — PrixDeRevientTRM port
-│   │       │   └── pdf/                  # theme.ts, MalterreDocument.tsx, CommandeFournisseurPdf, CommandeSoustraitantPdf, SoumissionLotPdf, DemandeEtudeColorisPdf, SoumissionPdf, FeuilleColorisPdf
-│   │       ├── routes/                   # entreprises, fournisseurs, references-fil, stock, stock-fini, commandes-fil, commandes-sous-traitant, etudes-coloris, prospects, auth, permissions, user-emails
-│   │       └── index.ts
-│   └── web/           # React frontend
-│       └── src/
-│           ├── components/
-│           │   ├── auth/         # UserPickerGate, UserPicker
-│           │   ├── email/        # SendEmailDialog (shared two-pane send dialog)
-│           │   ├── icons/        # BobineIcon, KnitIcon, FabricRollIcon, FiniRollIcon, TmRollIcon
-│           │   ├── layout/       # AppShell, Sidebar, Header, MobileNav, MasterDetailLayout
-│           │   └── ui/           # Radix-based (Button has 'gold' variant)
-│           ├── config/navigation.ts      # SubMenuItem.adminOnly flag
-│           ├── contexts/
-│           │   ├── UserContext.tsx       # useUser, canSwitchUser
-│           │   └── PermissionsContext.tsx # usePermissions, useHasPermission
-│           ├── hooks/useResponsiveLayout.ts
-│           ├── lib/
-│           │   ├── api.ts        # SHARED apiFetch (credentials: 'include') — do NOT duplicate
-│           │   ├── email.ts      # Types + postEmail helper for SendEmailDialog
-│           │   ├── dates.ts      # HFSQL date helpers
-│           │   └── format.ts     # fmtNum (French formatting)
-│           ├── pages/            # Dashboard, Entreprises, FilsGestion, FilsReferences, FilsStock, FilsCommandes, SousTraitantsCommandes, EtudesColoris, FinisStock, ProspectsDemandes, SettingsUtilisateurs
-│           ├── main.tsx          # QueryClient → UserProvider → PermissionsProvider → UserPickerGate → RouterProvider
-│           └── router.tsx
-├── claude_doc/                   # Detailed reference docs (load on demand, see below)
-├── data_migration/               # Legacy PostgreSQL migration scripts (reference)
-├── packages/                     # shared/, db/ (legacy PostgreSQL, unused)
-├── .claude/skills/               # mps_designer/, terminate_mps/, mps_deploy/, ssh_context/
-└── CLAUDE.md
-```
+Full file/directory tree with per-file annotations: **`claude_doc/project_structure.md`** (load when navigating the codebase layout).
 
 ## Navigation Structure
 
@@ -99,7 +53,7 @@ Mirrors the legacy WinDev main menu (top → bottom):
 1. **Tableau de bord** (`/`) — widgets per-user permission-gated (`dashboard_*` keys); toggled in Paramètres › Utilisateurs
 2. **Prospects** (renamed from legacy "Marketing") — **Demandes** (`/prospects/demandes`; catalogue requests from the `prospect` table; master-detail, implemented)
 3. **Clients** — Commandes, Devis, Facturation, Gestion
-4. **Sous-traitants** — **Commandes** (ennoblisseur; see `sous_traitants_status_model.md`), Gestion
+4. **Sous-traitants** — **Commandes** (ennoblisseur; see `sous_traitants_status_model.md`), **Gestion** (`/sous-traitants/gestion`, implemented; master-detail mirror of FilsGestion over `sous_traitant`+`type_sst` with contacts/adresses — route `apps/api/src/routes/sous-traitants.ts`)
 5. **Transferts** — placeholder
 6. **Fils** (route `/fils/*`, renamed from `/fournisseurs/*`) — Références, Stock (table-centric), Commandes, Gestion, Prévisions
 7. **Tombé Métier** — placeholder, custom `TmRollIcon`
@@ -116,6 +70,7 @@ Load these on demand when working on the matching topic:
 
 | File | When to load |
 |------|--------------|
+| `claude_doc/project_structure.md` | Full file/directory tree with per-file annotations |
 | `claude_doc/dev_setup.md` | Fresh-machine setup: HFSQL server/driver, `.env.development`, dev ports |
 | `claude_doc/hfsql_odbc.md` | HFSQL connection details, driver install, bridge, platform-specific SQL, accented columns |
 | `claude_doc/implemented_screens.md` | Canonical reference screens (Entreprises, Fournisseurs, Commandes, Stock) — grep first before inventing patterns |

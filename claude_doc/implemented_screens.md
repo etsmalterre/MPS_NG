@@ -39,6 +39,17 @@ First fully implemented data screen. 3-panel layout with:
 - **Email endpoints**: `GET /api/commandes-fil/:id/email-defaults` returns the shared `EmailDefaults` shape `{ recipients: { selected, suggestions }, subject, body, fournisseurNom, numero }` — selected = `envoi_commande=1` contacts with `"Prénom Nom"` display names, suggestions = every other visible contact with a valid email. `POST /api/commandes-fil/:id/email` body `{ to, cc?, subject, body, attach_pdf?, extra_attachments? }` sends impersonating the acting user; `extra_attachments` is base64-decoded and merged with the server-rendered PDF. PDF generation refactored into shared `buildCommandePdfData` + `renderCommandePdfBuffer` helpers consumed by both `/pdf` and `/email`. **This is also the reference screen for the shared `SendEmailDialog` (mps_designer §32 / `claude_doc/pdf_email.md`)** — the old per-screen `EmailCommandeDialog` fork was replaced with `<SendEmailDialog pdfUrl={...} pdfAttachmentLabel="commande-fournisseur-${id}.pdf" />` wired via `postEmail`.
 - **HFSQL tables**: `commande_fil`, `ref_fil_commande`, `stock_fil` (linkage), `stock_fil_ged` (per-lot doc scoping), `ged`, `type_doc`, `mode_paiement`, `echeance`, `adresse`, `fournisseur`
 
+## Sous-traitants Gestion (`/sous-traitants/gestion`)
+
+Subcontractor management screen — a near-clone of **FilsGestion** (the fournisseur gold standard) for the `sous_traitant` entity. 3-panel `MasterDetailLayout`. Files: `apps/web/src/pages/SousTraitantsGestion.tsx`, `apps/api/src/routes/sous-traitants.ts` (mounted `/api/sous-traitants`).
+- **Left**: searchable list (Building2 icon); each card shows a **type badge** (Tricoteur/Ennoblisseur/Autre/Confectionneur) + an **"Inactif"** badge when `est_visible=0`. List shows ALL rows (not just visible — it's where you reactivate them); search matches name/type/tel.
+- **Center**: header (name + type/Inactif badges, gold Modifier) + a **"Coordonnées" card**: Type (`PopoverSelect`), Téléphone, Fax, and an **active/visible toggle pill** (mps_designer §35). The fournisseur certs/refs/commandes sections do NOT apply here.
+- **Right sidebar**: 3 tabs — Info (commentaire), Contacts, Adresses — identical to FilsGestion (contacts carry `envoi_*` flags). Full unsaved-changes guard (§28), auto-edit-after-create (§25.1).
+- **Detail API**: `GET /api/sous-traitants/:id` → sous_traitant + `type_label` + adresses + contacts. `GET /api/sous-traitants/type-sst` (the 4-row type catalog; `type` is a reserved word → qualified + aliased `type_label`). List/create/update/delete + `/:id/{contacts,adresses}` CRUD mirror fournisseurs.ts.
+- **Encoding**: writes use the Latin-1 hex-literal `sqlText()` helper (NOT `esc()`) so accented names survive the Linux prod bridge — fournisseurs.ts still uses `esc()` and is a latent prod-write risk; new routes should follow this route, not that one.
+- **FK linkage**: `contact.IDsous_traitant` and `adresse.IDsous_traitant` (same polymorphic tables as fournisseur/entreprise, different FK column).
+- **HFSQL tables**: `sous_traitant`, `type_sst`, `contact`, `adresse`
+
 ## Fournisseurs Stock (`/fournisseurs/stock`)
 
 **Reference for table-centric screens** — first screen in MPS_NG that does NOT use `MasterDetailLayout`. Mirrors the legacy `FEN_Stock_fil.wdw` window. Layout:
