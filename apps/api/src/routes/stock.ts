@@ -416,6 +416,18 @@ stockRouter.get('/fil/:id', async (req: Request, res: Response) => {
     const recycleMap = await loadRefFilRecycleMap()
     const normalised = normalizeStockRow(fixed[0] as Record<string, unknown>, recycleMap)
 
+    // Resolve the real commande number. stock_fil.IDref_fil_commande is the
+    // ref_fil_commande LINE PK, NOT the commande N° — the commande number lives
+    // on the line as IDcommande_fil. (e.g. lot 10471 → line 920 → commande 646.)
+    let IDcommande_fil = 0
+    const lineId = Number((normalised as Record<string, unknown>).IDref_fil_commande) || 0
+    if (lineId > 0) {
+      const cmdRows = await query<{ IDcommande_fil: number }>(
+        `SELECT IDcommande_fil FROM ref_fil_commande WHERE IDref_fil_commande = ${lineId}`
+      )
+      IDcommande_fil = Number(cmdRows[0]?.IDcommande_fil) || 0
+    }
+
     // has_certif flags: SELECT * on the row and check the mangled blob column for non-null.
     // Cannot reference certif_recyclé directly; SELECT * returns it as certif_recycl (bridge)
     // or 'certif_recyclé' (Windows ODBC). Check both.
@@ -435,7 +447,7 @@ stockRouter.get('/fil/:id', async (req: Request, res: Response) => {
       // ignore — default to false
     }
 
-    res.json({ ...normalised, has_certif_bio, has_certif_recycle })
+    res.json({ ...normalised, IDcommande_fil, has_certif_bio, has_certif_recycle })
   } catch (err) {
     console.error('Error fetching stock_fil detail:', err)
     res.status(500).json({ error: 'Internal server error' })

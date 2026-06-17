@@ -67,6 +67,7 @@ interface StockRow {
 }
 
 interface StockDetail extends StockRow {
+  IDcommande_fil: number | null
   has_certif_bio: boolean
   has_certif_recycle: boolean
 }
@@ -653,8 +654,8 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess, onDirtyChange, save
                   label="Date d'entrée"
                   value={detail.date_entree ? formatHfsqlDate(detail.date_entree) : '—'}
                 />
-                {detail.IDref_fil_commande ? (
-                  <KV label="Commande" value={`#${detail.IDref_fil_commande}`} mono />
+                {detail.IDcommande_fil ? (
+                  <KV label="Commande N°" value={String(detail.IDcommande_fil)} mono />
                 ) : null}
               </div>
             </DrawerCard>
