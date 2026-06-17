@@ -262,13 +262,6 @@ export function FilsCommandes() {
     enabled: selectedId !== null,
   })
 
-  // Auto-select first on load
-  useEffect(() => {
-    if (commandes && commandes.length > 0 && selectedId === null) {
-      setSelectedId(commandes[0].IDcommande_fil)
-    }
-  }, [commandes, selectedId])
-
   // Reset the stock-linkage drawer every time the active commande changes.
   // Without this the previous commande's drawer state leaks into the next
   // one: the rows container stays shrunk to max-h-[40%], no drawer renders
@@ -412,6 +405,17 @@ export function FilsCommandes() {
       || (c.commentaire ?? '').toLowerCase().includes(q)
     )
   }, [commandes, searchQuery])
+
+  // Keep the selection valid against the (possibly search-filtered) list: when
+  // the selected commande isn't among the current results, select the one at
+  // the top. Covers both the initial load and search narrowing the list — so
+  // typing in the search bar auto-selects the first visible commande. Skip
+  // while editing so we never discard unsaved changes out from under the user.
+  useEffect(() => {
+    if (isEditing || filtered.length === 0) return
+    const stillVisible = selectedId !== null && filtered.some((c) => c.IDcommande_fil === selectedId)
+    if (!stillVisible) setSelectedId(filtered[0].IDcommande_fil)
+  }, [filtered, selectedId, isEditing])
 
   return (
     <>
