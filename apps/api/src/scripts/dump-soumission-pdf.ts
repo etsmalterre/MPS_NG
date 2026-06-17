@@ -4,6 +4,7 @@
 // Usage: tsx src/scripts/dump-soumission-pdf.ts [commandeId] [out]
 //   defaults to commande 8518 (lot MA108050 — Bonne Nouvelle, ref 825/1056).
 import * as fs from 'fs'
+import * as os from 'os'
 import * as path from 'path'
 import React from 'react'
 import { renderToBuffer } from '@react-pdf/renderer'
@@ -16,7 +17,7 @@ async function main() {
   const routeMod: any = await import('../routes/commandes-sous-traitant.js')
 
   const commandeId = parseInt(process.argv[2] ?? '8518', 10)
-  const out = process.argv[3] ?? `C:/Users/vince/Downloads/soumission-lot-${commandeId}.pdf`
+  const out = process.argv[3] ?? path.join(os.homedir(), 'Downloads', `soumission-lot-${commandeId}.pdf`)
 
   // findEligibleLots + buildSoumissionLotPdfData are not exported. Test via
   // the running app instead. For an offline dump, we hit the eligibility

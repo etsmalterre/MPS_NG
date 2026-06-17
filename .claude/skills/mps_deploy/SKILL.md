@@ -16,17 +16,21 @@ Both servers are Debian Linux (x86_64). The MFProd (separate project) also runs 
 
 ## SSH Access
 
-Connect via WSL using the `claude_deploy` key:
+**Connect with the Windows-native OpenSSH binary** (`C:\Windows\System32\OpenSSH\ssh.exe`) and the `claude_deploy` key — NOT WSL and NOT Git Bash's `ssh` (its libcrypto rejects these keys with `error in libcrypto: unsupported`). This is the method defined in the user-level **`ssh-context`** skill; load that skill for the full flag rationale and the access model. The recipe below is portable across machines (laptop user `malte`, factory PC user `vince`) because it derives the key path from `$HOME`.
 
 ```bash
-SSH_KEY="/home/vincent/.ssh/claude_deploy/claude_deploy"
+SSH="/c/Windows/System32/OpenSSH/ssh.exe"
+SCP="/c/Windows/System32/OpenSSH/scp.exe"
+KEY="$HOME/.ssh/claude_deploy/claude_deploy"   # C:\Users\<current-user>\.ssh\claude_deploy\claude_deploy
+OPTS="-F none -i $KEY -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
+
 # API server
-wsl bash -c "ssh -i $SSH_KEY debian@10.10.2.163 'command'"
+"$SSH" $OPTS debian@10.10.2.163 'command'
 # Web server
-wsl bash -c "ssh -i $SSH_KEY debian@10.10.2.165 'command'"
+"$SSH" $OPTS debian@10.10.2.165 'command'
 ```
 
-**Important**: The claude_deploy key is only enabled during active sessions. The user enables it before deployment and disables it after for security.
+**Important**: The claude_deploy key is only enabled during active sessions. The user enables it before deployment and disables it after for security. `Permission denied (publickey)` = the key isn't enabled right now (normal, not a bug) — ask the user to enable it. A timeout on a `10.10.x.x` address = not on the factory LAN/VPN.
 
 ## API Server (10.10.2.163)
 
@@ -61,9 +65,9 @@ wsl bash -c "ssh -i $SSH_KEY debian@10.10.2.165 'command'"
    - `.env.production` → `.env`
    - Do NOT include `node_modules/`, `hfsql_bridge` binary (already on server), or `.env.development`
 
-2. **Upload** the tarball to the server:
+2. **Upload** the tarball to the server (uses `$SCP`/`$KEY` from the SSH Access block):
    ```bash
-   wsl bash -c "scp -i $SSH_KEY tarball.tar.gz debian@10.10.2.163:/home/debian/"
+   "$SCP" -i "$KEY" -o IdentitiesOnly=yes tarball.tar.gz debian@10.10.2.163:/home/debian/
    ```
 
 3. **On the server**: extract, install deps, restart service:
@@ -143,15 +147,15 @@ wsl bash -c "ssh -i $SSH_KEY debian@10.10.2.165 'command'"
    If the positive `="/api"` assertion doesn't match, do NOT deploy — the base is
    wrong regardless of what the negative checks say.
 
-2. **Upload** the dist folder:
+2. **Upload** the dist folder (uses `$SSH`/`$SCP`/`$KEY`/`$OPTS` from the SSH Access block):
    ```bash
-   wsl bash -c "scp -i $SSH_KEY -r apps/web/dist/* debian@10.10.2.165:/home/debian/mps_erp/dist/"
+   "$SCP" -i "$KEY" -o IdentitiesOnly=yes -r apps/web/dist/* debian@10.10.2.165:/home/debian/mps_erp/dist/
    ```
    Or tar it first for speed:
    ```bash
    tar czf /tmp/mps_web_dist.tar.gz -C apps/web/dist .
-   wsl bash -c "scp -i $SSH_KEY /tmp/mps_web_dist.tar.gz debian@10.10.2.165:/home/debian/"
-   wsl bash -c "ssh -i $SSH_KEY debian@10.10.2.165 'rm -rf /home/debian/mps_erp/dist/* && tar xzf /home/debian/mps_web_dist.tar.gz -C /home/debian/mps_erp/dist/'"
+   "$SCP" -i "$KEY" -o IdentitiesOnly=yes /tmp/mps_web_dist.tar.gz debian@10.10.2.165:/home/debian/
+   "$SSH" $OPTS debian@10.10.2.165 'rm -rf /home/debian/mps_erp/dist/* && tar xzf /home/debian/mps_web_dist.tar.gz -C /home/debian/mps_erp/dist/'
    ```
 
 3. **No restart needed** — nginx serves static files directly. Just verify:

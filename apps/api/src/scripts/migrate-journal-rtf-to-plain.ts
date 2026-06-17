@@ -21,7 +21,8 @@ dotenv.config({ path: '.env' })
 import { query, closeConnection } from '../lib/hfsql-auto.js'
 import { stripRtf } from '../lib/rtf-utils.js'
 import { writeFileSync, mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 
 const APPLY = process.argv.includes('--apply')
 
@@ -80,7 +81,7 @@ async function main() {
 
   // Backup dump — written in both dry-run and apply modes
   const ts = new Date().toISOString().replace(/[:.]/g, '-').replace('Z', '')
-  const backupPath = `C:/Users/vince/AppData/Local/Temp/mps-journal-backup-${ts}.json`
+  const backupPath = join(tmpdir(), `mps-journal-backup-${ts}.json`)
   mkdirSync(dirname(backupPath), { recursive: true })
   writeFileSync(
     backupPath,
