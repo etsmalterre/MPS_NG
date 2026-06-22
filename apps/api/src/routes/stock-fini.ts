@@ -457,6 +457,46 @@ stockFiniRouter.get('/fini/:id/label', async (req: Request, res: Response) => {
   }
 })
 
+// PATCH /api/stock/fini/batch - batch-edit ("Édition groupée") emplacement
+//   and/or observations across many rolls at once. Body:
+//     { ids: number[], emplacement?: string, observations?: string }
+//   Only the provided fields are written (an empty string clears the field);
+//   omit a field to leave it untouched. Accented values are emitted via
+//   sqlText() so French observations don't corrupt the Linux bridge.
+//   MUST be registered before PATCH /fini/:id, otherwise "batch" is parsed as
+//   the :id param.
+stockFiniRouter.patch('/fini/batch', async (req: Request, res: Response) => {
+  try {
+    const body = req.body ?? {}
+    const ids = (Array.isArray(body.ids) ? body.ids : [])
+      .map((x: unknown) => parseInt(String(x), 10))
+      .filter((n: number) => Number.isInteger(n) && n > 0)
+    if (ids.length === 0) {
+      res.status(400).json({ error: 'ids must be a non-empty array of roll ids' })
+      return
+    }
+    if (ids.length > 1000) {
+      res.status(400).json({ error: 'too many ids (max 1000)' })
+      return
+    }
+
+    const sets: string[] = []
+    if (typeof body.emplacement === 'string') sets.push(`emplacement = ${sqlText(body.emplacement)}`)
+    if (typeof body.observations === 'string') sets.push(`observations = ${sqlText(body.observations)}`)
+    if (sets.length === 0) {
+      res.status(400).json({ error: 'No editable fields provided' })
+      return
+    }
+
+    await query(`UPDATE stock_fini SET ${sets.join(', ')} WHERE IDstock_fini IN (${ids.join(',')})`)
+
+    res.json({ updated: ids.length })
+  } catch (err) {
+    console.error('Error batch-updating stock_fini:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // PATCH /api/stock/fini/:id - whitelist edit
 //   poids, metrage, IDref_fini, IDColoris, IDref_commande_source, IDstock_ecru,
 //   IDligne_expedition, IDligne_commande_client are NOT editable here — they

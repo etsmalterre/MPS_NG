@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useEffect, useRef, useTransition, memo } from 'react'
+import { useState, useMemo, useCallback, useEffect, useRef, useTransition, useDeferredValue, memo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
@@ -25,6 +25,7 @@ import {
   Trash2,
   Scissors,
   Printer,
+  Layers,
   Plus,
   Minus,
 } from 'lucide-react'
@@ -170,6 +171,11 @@ const COLUMNS: { key: SortKey; label: string; width: string; align?: 'left' | 'r
 const ICON_COL_WIDTH = '3%'
 const SELECT_COL_WIDTH = '4%' // leading selection box column, edit mode only
 
+// One shared collator — constructing the Intl collation options on every
+// String.localeCompare() call (≈14k calls to sort 1.4k rows) is a measurable
+// per-sort cost; a cached Intl.Collator.compare is far cheaper.
+const ROW_COLLATOR = new Intl.Collator('fr', { numeric: true, sensitivity: 'base' })
+
 function compareRows(a: StockFiniRow, b: StockFiniRow, key: SortKey): number {
   const va = a[key]
   const vb = b[key]
@@ -177,7 +183,7 @@ function compareRows(a: StockFiniRow, b: StockFiniRow, key: SortKey): number {
   if (va == null) return 1
   if (vb == null) return -1
   if (typeof va === 'number' && typeof vb === 'number') return va - vb
-  return String(va).localeCompare(String(vb), 'fr', { numeric: true, sensitivity: 'base' })
+  return ROW_COLLATOR.compare(String(va), String(vb))
 }
 
 // ── Main Page ──────────────────────────────────────────
@@ -200,11 +206,16 @@ export function FinisStock() {
   const [selectedRollIds, setSelectedRollIds] = useState<Set<number>>(new Set())
   const lastSelectedRollIdRef = useRef<number | null>(null)
   const [cutOpen, setCutOpen] = useState(false)
+  const [batchOpen, setBatchOpen] = useState(false)
   // The edit-mode toggle re-renders the whole (large) table; mark it as a
   // transition so the click stays responsive instead of freezing the UI.
   const [, startModeTransition] = useTransition()
 
   const { data: rows, isLoading, isError, error } = useStockFiniList({ hideShipped })
+
+  // Defer the search term so each keystroke updates the input instantly while
+  // the (expensive) 1.4k-row filter+sort+reconcile runs at lower priority.
+  const deferredSearch = useDeferredValue(searchQuery)
 
   const filteredSorted = useMemo(() => {
     let out = rows ?? []
@@ -213,7 +224,7 @@ export function FinisStock() {
     // criteria from different columns — e.g. "029A marine" matches a row whose
     // ref_fini is "029A" AND whose coloris is "marine". A single term behaves
     // exactly as the old substring search.
-    const terms = searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    const terms = deferredSearch.trim().toLowerCase().split(/\s+/).filter(Boolean)
     if (terms.length > 0) {
       out = out.filter((r) => {
         const haystacks = [
@@ -237,7 +248,7 @@ export function FinisStock() {
       return sort.dir === 'asc' ? cmp : -cmp
     })
     return out
-  }, [rows, searchQuery, sort])
+  }, [rows, deferredSearch, sort])
 
   const handleSort = useCallback((key: SortKey) => {
     setSort((prev) => (prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }))
@@ -254,20 +265,27 @@ export function FinisStock() {
     onDiscard: () => drawerDiscardRef.current(),
   })
 
+  // Depend on the STABLE guard.guardAction, not the whole `guard` object —
+  // useUnsavedGuard returns a fresh object literal every render, so listing
+  // `[guard]` here would change these callbacks' identity on every render and
+  // defeat the React.memo on StockRow (forcing all ~1.4k rows to re-render on
+  // every parent render).
   const handleClose = useCallback(() => {
     guard.guardAction(() => setSelectedId(null))
-  }, [guard])
+  }, [guard.guardAction])
 
   const handleRowClick = useCallback((rowId: number) => {
     guard.guardAction(() => {
       setSelectedId((prev) => (prev === rowId ? null : rowId))
     })
-  }, [guard])
+  }, [guard.guardAction])
 
   // Anchor-based multi-select (mirrors the "Affecté" tab of the sst drawer):
-  // plain click toggles the row and becomes the anchor; Shift+click adds the
+  // plain click toggles the row and becomes the anchor; Shift+click applies the
   // inclusive range between the anchor and the clicked row, in the current
-  // sort/filter order.
+  // sort/filter order. The range operation is add-or-remove depending on the
+  // clicked row's current state: Shift+clicking an already-selected row
+  // deselects the whole range (so re-clicking the end of a range clears it).
   const handleSelectRoll = useCallback((id: number, shiftKey: boolean) => {
     const ids = filteredSorted.map((r) => r.IDstock_fini)
     const anchor = lastSelectedRollIdRef.current
@@ -278,7 +296,11 @@ export function FinisStock() {
         const [lo, hi] = a < b ? [a, b] : [b, a]
         setSelectedRollIds((prev) => {
           const next = new Set(prev)
-          for (let i = lo; i <= hi; i++) next.add(ids[i])
+          const deselect = prev.has(id) // clicked end already selected → clear the range
+          for (let i = lo; i <= hi; i++) {
+            if (deselect) next.delete(ids[i])
+            else next.add(ids[i])
+          }
           return next
         })
         return
@@ -292,6 +314,22 @@ export function FinisStock() {
     })
     lastSelectedRollIdRef.current = id
   }, [filteredSorted])
+
+  // Single, stable per-row click handler. Reading the mode from a ref (mirrored
+  // each render) keeps this callback's identity stable across edit-mode toggles
+  // and selection changes, so StockRow's memo isn't busted and toggling edit
+  // mode does NOT pass a changed prop to every row. The row's view ↔ edit
+  // presentation is driven purely by CSS (a data-editing attribute on <tbody>),
+  // so flipping edit mode re-renders zero rows.
+  const isEditingRef = useRef(isEditing)
+  isEditingRef.current = isEditing
+  const onRowClick = useCallback(
+    (id: number, shiftKey: boolean) => {
+      if (isEditingRef.current) handleSelectRoll(id, shiftKey)
+      else handleRowClick(id)
+    },
+    [handleSelectRoll, handleRowClick],
+  )
 
   const enterEditMode = useCallback(() => {
     // Close the drawer first (guarded, so unsaved drawer edits prompt).
@@ -390,6 +428,17 @@ export function FinisStock() {
                 <Scissors className="h-4 w-4" />
               </Button>
             )}
+            {selectedRollIds.size > 1 && (
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-8 w-8 flex-shrink-0"
+                title="Édition groupée"
+                onClick={() => setBatchOpen(true)}
+              >
+                <Pencil className="h-4 w-4" />
+              </Button>
+            )}
             <Button size="sm" onClick={exitEditMode}>
               <X className="h-3.5 w-3.5 mr-1.5" />
               Terminer
@@ -456,17 +505,15 @@ export function FinisStock() {
                   ))}
                   <col style={{ width: ICON_COL_WIDTH }} />
                 </colgroup>
-                <tbody>
+                <tbody className="group" data-editing={isEditing ? 'true' : 'false'}>
                   {filteredSorted.map((r) => (
                     <StockRow
                       key={r.IDstock_fini}
                       row={r}
-                      isEditing={isEditing}
                       selected={
                         isEditing ? selectedRollIds.has(r.IDstock_fini) : r.IDstock_fini === selectedId
                       }
-                      onSelect={handleSelectRoll}
-                      onOpen={handleRowClick}
+                      onRowClick={onRowClick}
                     />
                   ))}
                 </tbody>
@@ -530,6 +577,18 @@ export function FinisStock() {
         onSuccess={() => {
           onMutationSuccess()
           setCutOpen(false)
+          setSelectedRollIds(new Set())
+          lastSelectedRollIdRef.current = null
+        }}
+      />
+
+      <BatchEditDialog
+        open={batchOpen}
+        ids={[...selectedRollIds]}
+        onClose={() => setBatchOpen(false)}
+        onSuccess={() => {
+          onMutationSuccess()
+          setBatchOpen(false)
           setSelectedRollIds(new Set())
           lastSelectedRollIdRef.current = null
         }}
@@ -778,6 +837,187 @@ function CutRollDialog({
               <Scissors className="h-4 w-4 mr-1.5" />
             )}
             Couper
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ── Batch edit dialog ──────────────────────────────────
+// "Édition groupée": apply an emplacement and/or observation to every selected
+// roll at once. Each field is gated by a toggle — only enabled fields are
+// written (an enabled-but-empty field clears the value), so the user can set
+// one field without wiping the other.
+
+function SwitchPill({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: boolean
+  onChange: (v: boolean) => void
+  disabled?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={value}
+      disabled={disabled}
+      onClick={() => onChange(!value)}
+      className={cn(
+        'relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full transition-colors',
+        'focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+        'disabled:opacity-50 disabled:cursor-not-allowed',
+        value ? 'bg-accent shadow-inner' : 'bg-zinc-300 hover:bg-zinc-400/80',
+      )}
+    >
+      <span
+        className={cn(
+          'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200 ease-out',
+          value ? 'translate-x-[18px]' : 'translate-x-0.5',
+        )}
+      />
+    </button>
+  )
+}
+
+function BatchEditDialog({
+  open,
+  ids,
+  onClose,
+  onSuccess,
+}: {
+  open: boolean
+  ids: number[]
+  onClose: () => void
+  onSuccess: () => void
+}) {
+  const [editEmplacement, setEditEmplacement] = useState(false)
+  const [emplacement, setEmplacement] = useState('')
+  const [editObservations, setEditObservations] = useState(false)
+  const [observations, setObservations] = useState('')
+
+  const count = ids.length
+
+  // Reset the form each time the dialog opens.
+  useEffect(() => {
+    if (open) {
+      setEditEmplacement(false)
+      setEmplacement('')
+      setEditObservations(false)
+      setObservations('')
+    }
+  }, [open])
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      apiFetch('/stock/fini/batch', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          ids,
+          ...(editEmplacement ? { emplacement } : {}),
+          ...(editObservations ? { observations } : {}),
+        }),
+      }),
+    onSuccess: () => onSuccess(),
+  })
+
+  const valid = (editEmplacement || editObservations) && count > 0
+
+  return (
+    <Dialog open={open && count > 0} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-md" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Layers className="h-5 w-5 text-accent" />
+            Édition groupée
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="mt-4 space-y-3">
+          <div className="rounded-lg border border-border/60 bg-zinc-100/80 px-3 py-2 text-sm flex items-center gap-2">
+            <Check className="h-4 w-4 text-accent" />
+            <span className="font-semibold tabular-nums">{count}</span>
+            <span className="text-muted-foreground">
+              rouleau{count > 1 ? 'x' : ''} sélectionné{count > 1 ? 's' : ''}
+            </span>
+          </div>
+
+          <p className="text-xs text-muted-foreground">
+            Activez un champ pour l'appliquer à tous les rouleaux sélectionnés. Un champ activé
+            mais vide efface la valeur existante.
+          </p>
+
+          {/* Emplacement */}
+          <div
+            className={cn(
+              'rounded-lg border p-3',
+              editEmplacement ? 'border-l-4 border-l-accent/70 bg-accent/[0.03]' : 'border-border/60',
+            )}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-1.5 text-sm font-medium">
+                <MapPin className="h-3.5 w-3.5 text-accent" />
+                Emplacement
+              </div>
+              <SwitchPill value={editEmplacement} onChange={setEditEmplacement} />
+            </div>
+            {editEmplacement && (
+              <input
+                type="text"
+                value={emplacement}
+                onChange={(e) => setEmplacement(e.target.value)}
+                placeholder="Nouvel emplacement"
+                className="mt-2 h-8 w-full px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+              />
+            )}
+          </div>
+
+          {/* Observation */}
+          <div
+            className={cn(
+              'rounded-lg border p-3',
+              editObservations ? 'border-l-4 border-l-accent/70 bg-accent/[0.03]' : 'border-border/60',
+            )}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-1.5 text-sm font-medium">
+                <MessageSquare className="h-3.5 w-3.5 text-accent" />
+                Observation
+              </div>
+              <SwitchPill value={editObservations} onChange={setEditObservations} />
+            </div>
+            {editObservations && (
+              <textarea
+                rows={3}
+                value={observations}
+                onChange={(e) => setObservations(e.target.value)}
+                placeholder="Nouvelle observation"
+                className="mt-2 w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+              />
+            )}
+          </div>
+
+          {mutation.isError && (
+            <p className="text-sm text-destructive">
+              {(mutation.error as Error)?.message || "Erreur lors de l'enregistrement"}
+            </p>
+          )}
+        </div>
+
+        <DialogFooter className="mt-4">
+          <Button variant="outline" onClick={onClose} disabled={mutation.isPending}>
+            Annuler
+          </Button>
+          <Button onClick={() => mutation.mutate()} disabled={!valid || mutation.isPending}>
+            {mutation.isPending ? (
+              <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+            ) : (
+              <Save className="h-4 w-4 mr-1.5" />
+            )}
+            Enregistrer
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1043,48 +1283,42 @@ function CreateFiniRollDialog({
 }
 
 // ── Table row (memoized) ──────────────────────────────
-// Extracted + React.memo'd so selecting a single roll in edit mode re-renders
-// only the affected row, not all ~1.4k rows. The selection cell is always
-// rendered (collapsed via `p-0` in view mode) so the column structure never
-// changes — toggling edit mode is a cheap className/width flip, not a per-row
-// cell mount.
+// Extracted + React.memo'd. Crucially, the row does NOT take `isEditing` as a
+// prop: its only changing prop is `selected`, so selecting a roll re-renders
+// only the affected row, and toggling edit mode re-renders ZERO rows. The
+// view ↔ edit presentation (checkbox visibility, cell padding, select-none) is
+// driven entirely by CSS via the `data-editing` attribute on the parent
+// <tbody className="group">, so flipping edit mode is a single attribute change
+// + cheap browser reflow rather than a 1.4k-component React reconciliation.
+// The click handler is a single stable callback that reads the mode from a ref.
 
 const StockRow = memo(function StockRow({
   row,
-  isEditing,
   selected,
-  onSelect,
-  onOpen,
+  onRowClick,
 }: {
   row: StockFiniRow
-  isEditing: boolean
   selected: boolean
-  onSelect: (id: number, shiftKey: boolean) => void
-  onOpen: (id: number) => void
+  onRowClick: (id: number, shiftKey: boolean) => void
 }) {
   return (
     <tr
       data-stock-row
-      onClick={(e) =>
-        isEditing ? onSelect(row.IDstock_fini, e.shiftKey) : onOpen(row.IDstock_fini)
-      }
+      onClick={(e) => onRowClick(row.IDstock_fini, e.shiftKey)}
       className={cn(
-        'border-b border-border/40 cursor-pointer transition-colors',
-        isEditing && 'select-none',
+        'border-b border-border/40 cursor-pointer transition-colors group-data-[editing=true]:select-none',
         selected ? 'bg-accent/10' : 'hover:bg-accent/5',
       )}
     >
-      <td className={isEditing ? 'px-3 py-2' : 'p-0'}>
-        {isEditing && (
-          <div
-            className={cn(
-              'h-5 w-5 rounded border flex items-center justify-center transition-colors',
-              selected ? 'bg-accent border-accent text-accent-foreground' : 'bg-white border-input',
-            )}
-          >
-            {selected && <Check className="h-3.5 w-3.5" />}
-          </div>
-        )}
+      <td className="p-0 group-data-[editing=true]:px-3 group-data-[editing=true]:py-2">
+        <div
+          className={cn(
+            'h-5 w-5 rounded border items-center justify-center transition-colors hidden group-data-[editing=true]:flex',
+            selected ? 'bg-accent border-accent text-accent-foreground' : 'bg-white border-input',
+          )}
+        >
+          {selected && <Check className="h-3.5 w-3.5" />}
+        </div>
       </td>
       <td className="px-3 py-2 font-medium truncate">{row.ref_fini ?? '—'}</td>
       <td className="px-3 py-2 truncate">{row.coloris_reference ?? '—'}</td>
