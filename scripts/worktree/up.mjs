@@ -58,6 +58,15 @@ if (fs.existsSync(srcEnv)) {
 } else {
   console.warn('WARN: main checkout has no apps/api/.env.development to copy.')
 }
+// Label the web dev server's browser tab with the branch so parallel worktree
+// tabs are distinguishable. Vite reads .env.development.local (gitignored); the
+// app prefixes document.title from VITE_WORKTREE_LABEL in dev (see main.tsx).
+fs.writeFileSync(
+  path.join(wt, 'apps/web/.env.development.local'),
+  `VITE_WORKTREE_LABEL=${branch}\n`,
+)
+console.log(`Wrote apps/web/.env.development.local (tab label "${branch}").`)
+
 // Secrets (Google service-account key) for email/PDF — copy if present.
 const srcSecrets = path.join(main, 'apps/api/secrets')
 if (fs.existsSync(srcSecrets)) {
