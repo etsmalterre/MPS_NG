@@ -31,6 +31,12 @@ export const PERMISSION_KEYS = [
     description: 'Autorise la création de nouvelles entrées dans Fournisseurs > Stock.',
     category: 'Fournisseurs',
   },
+  {
+    key: 'cut_stock_fini',
+    label: 'Couper un rouleau',
+    description: 'Autorise la découpe d’un rouleau en plusieurs dans Finis > Stock.',
+    category: 'Finis',
+  },
 ] as const
 
 export type PermissionKey = (typeof PERMISSION_KEYS)[number]['key']

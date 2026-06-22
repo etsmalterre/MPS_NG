@@ -41,6 +41,7 @@ import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
 import { fmtNum } from '@/lib/format'
 import { apiFetch } from '@/lib/api'
+import { useHasPermission } from '@/contexts/PermissionsContext'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -185,6 +186,10 @@ export function FinisStock() {
   const [hideShipped, setHideShipped] = useState(true)
   const [sort, setSort] = useState<SortState>({ key: 'date_saisie', dir: 'desc' })
   const [selectedId, setSelectedId] = useState<number | null>(null)
+
+  // Permission gate — admins always pass; non-admins need cut_stock_fini to
+  // see/use the "Couper" action. The API enforces the same key independently.
+  const canCut = useHasPermission('cut_stock_fini')
 
   // Edit mode — multi-roll selection.
   const [isEditing, setIsEditing] = useState(false)
@@ -362,7 +367,7 @@ export function FinisStock() {
           </Button>
         ) : (
           <div className="flex items-center gap-2 flex-shrink-0">
-            {selectedRollIds.size === 1 && (
+            {canCut && selectedRollIds.size === 1 && (
               <Button
                 variant="outline"
                 size="icon"

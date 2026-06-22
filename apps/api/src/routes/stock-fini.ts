@@ -1,5 +1,7 @@
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
 import { query, fixEncoding } from '../lib/hfsql-auto.js'
+import { userHasPermission } from '../lib/permissions.js'
+import { isEffectiveAdmin } from '../lib/auth.js'
 
 export const stockFiniRouter: RouterType = Router()
 
@@ -285,6 +287,18 @@ stockFiniRouter.patch('/fini/:id', async (req: Request, res: Response) => {
 //   the SQL string, which keeps the Linux bridge happy.
 stockFiniRouter.post('/fini/:id/cut', async (req: Request, res: Response) => {
   try {
+    // Permission gate: must have cut_stock_fini (effective admins bypass; an
+    // admin impersonating another user sees exactly what that user sees).
+    if (req.userId === undefined) {
+      res.status(401).json({ error: 'not authenticated' })
+      return
+    }
+    const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'cut_stock_fini')
+    if (!allowed) {
+      res.status(403).json({ error: 'permission denied: cut_stock_fini' })
+      return
+    }
+
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) {
       res.status(400).json({ error: 'Invalid ID' })
