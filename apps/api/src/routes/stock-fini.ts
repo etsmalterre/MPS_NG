@@ -1,7 +1,10 @@
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
+import React from 'react'
+import { renderToBuffer } from '@react-pdf/renderer'
 import { query, fixEncoding } from '../lib/hfsql-auto.js'
 import { userHasPermission } from '../lib/permissions.js'
 import { isEffectiveAdmin } from '../lib/auth.js'
+import { StockFiniLabelPdf, type StockFiniLabelData } from '../lib/pdf/StockFiniLabelPdf.js'
 
 export const stockFiniRouter: RouterType = Router()
 
@@ -400,6 +403,56 @@ stockFiniRouter.get('/fini/:id', async (req: Request, res: Response) => {
     res.json(fixed[0])
   } catch (err) {
     console.error('Error fetching stock_fini detail:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/stock/fini/:id/label - Dymo étiquette PDF (89 × 36 mm) for one roll.
+// Read-only, not permission-gated. Reuses the same SELECT/JOINs/repair as the
+// detail endpoint so coloris_reference is resolved identically.
+stockFiniRouter.get('/fini/:id/label', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) {
+      res.status(400).json({ error: 'Invalid ID' })
+      return
+    }
+
+    const rows = await query<StockFini>(
+      `SELECT ${STOCK_FINI_SELECT} ${STOCK_FINI_JOINS} WHERE sf.IDstock_fini = ${id}`,
+    )
+    if (rows.length === 0) {
+      res.status(404).json({ error: 'Stock fini not found' })
+      return
+    }
+
+    let fixed = await fixEncoding(rows, 'stock_fini', 'IDstock_fini', TEXT_FIELDS)
+    fixed = await repairAllJoins(fixed)
+    const row = fixed[0] as Record<string, unknown>
+
+    const data: StockFiniLabelData = {
+      numero: (row.numero as string | null) ?? null,
+      ref_fini: (row.ref_fini as string | null) ?? null,
+      coloris_reference: (row.coloris_reference as string | null) ?? null,
+      poids: (row.poids as number | null) ?? null,
+      metrage: (row.metrage as number | null) ?? null,
+      lot: (row.lot as string | null) ?? null,
+    }
+
+    const buffer = await renderToBuffer(
+      React.createElement(StockFiniLabelPdf, { data }) as unknown as React.ReactElement<
+        import('@react-pdf/renderer').DocumentProps
+      >,
+    )
+
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `inline; filename="etiquette-${id}.pdf"`)
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.send(buffer)
+  } catch (err) {
+    console.error('Error rendering stock_fini label PDF:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

@@ -24,6 +24,7 @@ import {
   Gift,
   Trash2,
   Scissors,
+  Printer,
   Plus,
   Minus,
 } from 'lucide-react'
@@ -40,7 +41,7 @@ import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
 import { fmtNum } from '@/lib/format'
-import { apiFetch } from '@/lib/api'
+import { apiFetch, API_URL } from '@/lib/api'
 import { useHasPermission } from '@/contexts/PermissionsContext'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 
@@ -1371,10 +1372,23 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
                     </Button>
                   </>
                 ) : (
-                  <Button variant="gold" size="sm" onClick={startEdit}>
-                    <Pencil className="h-3.5 w-3.5 mr-1.5" />
-                    Modifier
-                  </Button>
+                  <>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-8 w-8 bg-white"
+                      title="Imprimer l'étiquette"
+                      onClick={() =>
+                        window.open(`${API_URL}/stock/fini/${detail.IDstock_fini}/label`, '_blank')
+                      }
+                    >
+                      <Printer className="h-4 w-4" />
+                    </Button>
+                    <Button variant="gold" size="sm" onClick={startEdit}>
+                      <Pencil className="h-3.5 w-3.5 mr-1.5" />
+                      Modifier
+                    </Button>
+                  </>
                 )}
               </div>
             )}
