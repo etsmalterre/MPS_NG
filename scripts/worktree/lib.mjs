@@ -37,6 +37,58 @@ export function writeRegistry(reg) {
   fs.writeFileSync(REGISTRY, JSON.stringify(reg, null, 2))
 }
 
+// ── Deferred directory removal ─────────────────────────────────────────────
+// /feature-complete runs INSIDE the feature worktree, so that session (and the
+// user's terminal) holds the dir as its cwd — Windows refuses to delete it. We
+// can't remove it from there no matter how many retries. Instead we queue it and
+// reap it later from the main checkout (where it's no longer locked), at the
+// start of any worktree skill.
+
+export function readPending() {
+  const reg = readRegistry()
+  return Array.isArray(reg.pendingRemovals) ? reg.pendingRemovals : []
+}
+
+export function addPending(entry) {
+  const reg = readRegistry()
+  const list = Array.isArray(reg.pendingRemovals) ? reg.pendingRemovals : []
+  if (!list.some((e) => e.worktree === entry.worktree)) list.push(entry)
+  reg.pendingRemovals = list
+  writeRegistry(reg)
+}
+
+/** Finish removing any worktrees whose directory was locked at completion time.
+ *  Local-only (no network) so it's cheap to call at the start of every skill.
+ *  Returns { reaped: [...], stillBlocked: [...] }. */
+export function reapPending() {
+  const list = readPending()
+  if (list.length === 0) return { reaped: [], stillBlocked: [] }
+  const main = mainCheckout()
+  const tryGit = (args) => { try { git(args, main) } catch {} }
+  const reaped = []
+  const stillBlocked = []
+  for (const e of list) {
+    if (fs.existsSync(e.worktree)) {
+      try {
+        fs.rmSync(e.worktree, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+      } catch {
+        // still locked (a terminal is cwd'd inside) — try again next time
+      }
+    }
+    if (!fs.existsSync(e.worktree)) {
+      tryGit(['worktree', 'prune'])
+      tryGit(['branch', '-D', e.branch]) // already merged by /feature-complete
+      reaped.push(e)
+    } else {
+      stillBlocked.push(e)
+    }
+  }
+  const reg = readRegistry()
+  reg.pendingRemovals = stillBlocked
+  writeRegistry(reg)
+  return { reaped, stillBlocked }
+}
+
 /** Absolute path of the main checkout (the worktree holding the shared .git).
  *  Works from any worktree: --git-common-dir points at <main>/.git. */
 export function mainCheckout(cwd = process.cwd()) {

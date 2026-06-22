@@ -70,5 +70,10 @@ git worktree list                                      # ground truth from git
 - Dev servers are launched **detached** so they outlive the Claude that started them; they're
   stopped by `/feature-complete` or `node down.mjs`. On Windows the whole `pnpm → vite/tsx`
   process tree is reaped via `taskkill /T /F`.
+- **Deferred dir removal:** `/feature-complete` runs *inside* the worktree, so Windows won't let
+  it delete that directory (the session/terminal holds the cwd). The merge + slot-free + branch
+  delete still happen; the leftover dir is queued (`pendingRemovals` in the registry) and reaped
+  automatically the next time any worktree skill runs from the main checkout — or manually via
+  `node scripts/worktree/reap.mjs`. `/worktree-status` shows anything still pending.
 - `apps/api/tsconfig.tsbuildinfo` and `.dev-logs/` are gitignored — the former so a build never
   dirties the main checkout (which would block the fast-forward merge).

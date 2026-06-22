@@ -3,14 +3,24 @@
 //   node scripts/worktree/status.mjs
 import fs from 'node:fs'
 import {
-  SLOTS, apiPort, webPort, readRegistry, isPortInUse, pidAlive, aheadBehind,
+  SLOTS, apiPort, webPort, readRegistry, isPortInUse, pidAlive, aheadBehind, reapPending,
 } from './lib.mjs'
+
+// Sweep any leftover dirs from earlier completions that are now unlocked.
+const swept = reapPending()
+if (swept.reaped.length) {
+  console.log(`Reaped leftover worktree dir(s): ${swept.reaped.map((e) => e.feature).join(', ')}\n`)
+}
 
 const reg = readRegistry()
 const keys = Object.keys(reg.slots).sort()
 
 if (keys.length === 0) {
   console.log('No active worktrees. All 6 slots free.')
+  if (swept.stillBlocked.length) {
+    console.log(`\n⏳ Pending removal (dir still open in a terminal — close it, then it auto-cleans):`)
+    for (const e of swept.stillBlocked) console.log(`  ${e.worktree}`)
+  }
   process.exit(0)
 }
 
@@ -37,4 +47,8 @@ console.log(`\nFree slots: ${free.length ? free.map((n) => `${n} (API ${apiPort(
 if (stale.length) {
   console.log(`\n⚠ Stale entries (servers dead or worktree gone): slot ${stale.join(', ')}.`)
   console.log(`  Clean each with:  node scripts/worktree/down.mjs <slot>`)
+}
+if (swept.stillBlocked.length) {
+  console.log(`\n⏳ Pending removal (dir still open in a terminal — close it, then it auto-cleans):`)
+  for (const e of swept.stillBlocked) console.log(`  ${e.worktree}`)
 }

@@ -9,8 +9,14 @@ import path from 'node:path'
 import fs from 'node:fs'
 import {
   allocateSlot, apiPort, webPort, mainCheckout, readRegistry, writeRegistry,
-  spawnDetached, isPortInUse, DEV_WEB_ORIGINS, git,
+  spawnDetached, isPortInUse, DEV_WEB_ORIGINS, git, reapPending,
 } from './lib.mjs'
+
+// Sweep any leftover dirs from earlier completions that are now unlocked.
+const swept = reapPending()
+if (swept.reaped.length) {
+  console.log(`Reaped leftover worktree dir(s): ${swept.reaped.map((e) => e.feature).join(', ')}`)
+}
 
 const feature = (process.argv[2] || '').trim()
 if (!/^[a-z0-9][a-z0-9-]*$/.test(feature)) {

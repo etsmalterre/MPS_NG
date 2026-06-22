@@ -70,14 +70,20 @@ HERE (you have the context), so `master` only ever sees a fast-forward.
      --force-with-lease`) then retry step 6. The `--ff-only` guard is intentional — it refuses
      to create a tangled merge.
 
-7. **Tear down — run this from the main checkout** (you cannot delete the worktree you're
-   standing in on Windows):
+7. **Tear down** — run from the main checkout dir:
    ```bash
    cd /c/dev/MPS_NG && node scripts/worktree/down.mjs <name> --remove
    ```
-   This kills the slot's API + web process trees, removes the worktree, deletes the local and
-   remote `feat/<name>` branch, and frees the slot.
+   This stops the slot's API + web process trees, frees the slot, and removes the worktree +
+   branch. **Expected on Windows:** because this very session (and your terminal) is still
+   cwd'd inside the worktree, the OS won't let the directory be deleted — so the script
+   **defers** the dir/branch removal to a pending queue and prints a NOTE. That's fine: the
+   merge is already done and the slot is freed. The leftover dir is reaped **automatically**
+   the next time any worktree skill runs from the main checkout (or `node
+   scripts/worktree/reap.mjs` there after you close this session).
 
-8. **Report.** Confirm: merged to `master` (show `git -C C:/dev/MPS_NG log --oneline -3`),
-   slot freed, worktree + branch removed. Tell the user this Claude session's worktree is gone
-   — they should close it — and that shipping is a separate `/mps_deploy` from the main checkout.
+8. **Report.** Confirm: merged to `master` (show `git -C C:/dev/MPS_NG log --oneline -3`) and
+   slot freed. State whether the worktree dir was removed now or deferred (per the script's
+   output). Tell the user to **close this Claude session / terminal** — the work is on `master`,
+   and any deferred dir cleans itself up on the next worktree skill. Shipping is a separate
+   `/mps_deploy` from the main checkout.
