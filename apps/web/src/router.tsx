@@ -11,7 +11,6 @@ import {
   Box,
   ShieldCheck,
   FileBarChart,
-  Tag,
   Palette,
   Euro,
   Droplet,
@@ -45,7 +44,7 @@ const FilsPrevisionsPage = createPlaceholder('Prévisions Fournisseurs', 'Prévi
 // Legacy-menu top-level placeholders
 const TransfertsPage = createPlaceholder('Transferts', 'Transferts de stock entre sites et sous-traitants', Truck)
 const TombeMetierPage = createPlaceholder('Tombé Métier', 'Suivi du tombé métier', PlaceholderIcon(KnitIcon))
-const FinisReferencesPage = createPlaceholder('Références Finis', 'Catalogue des références de produits finis', Tag)
+// Références Finis — real screen (not a placeholder anymore)
 // Études coloris — real screen (not a placeholder anymore)
 const FinisTarifsPage = createPlaceholder('Tarifs Finis', 'Tarifs des produits finis', Euro)
 const FinisColorisTeintPage = createPlaceholder('Coloris Teint', 'Coloris teints et ennoblissement', Droplet)
@@ -65,6 +64,7 @@ import { SousTraitantsCommandes } from '@/pages/SousTraitantsCommandes'
 import { SousTraitantsGestion } from '@/pages/SousTraitantsGestion'
 
 // Finis pages (real)
+import { FinisReferences } from '@/pages/FinisReferences'
 import { EtudesColoris } from '@/pages/EtudesColoris'
 import { FinisStock } from '@/pages/FinisStock'
 
@@ -117,7 +117,7 @@ export const router = createBrowserRouter([
 
       // Finis
       { path: 'finis', element: <Navigate to="/finis/references" replace /> },
-      { path: 'finis/references', element: <FinisReferencesPage /> },
+      { path: 'finis/references', element: <FinisReferences /> },
       { path: 'finis/stock', element: <FinisStock /> },
       { path: 'finis/etudes-coloris', element: <EtudesColoris /> },
       { path: 'finis/tarifs', element: <FinisTarifsPage /> },
