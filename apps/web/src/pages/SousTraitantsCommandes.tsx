@@ -699,6 +699,13 @@ export function SousTraitantsCommandes() {
     IDadresseLiv: number
   } | null>(null)
 
+  // The commande id the current draft was snapshotted from. A header save MUST
+  // target this id — never the live `selectedId` — so that if the selection
+  // drifts mid-edit (e.g. a list refetch / filter change) the draft can't be
+  // written onto a different commande. This is the guard against the
+  // sst-9 comment-leak bug (a note typed on one commande landing on another).
+  const editingIdRef = useRef<number | null>(null)
+
   const [linesDirty, setLinesDirty] = useState(false)
 
   // Keyset-paginated list. The first fetch returns the 100 most recent
@@ -832,11 +839,15 @@ export function SousTraitantsCommandes() {
   const lastAppliedListKey = useRef<string | undefined>(undefined)
   useEffect(() => {
     if (commandes === undefined) return
+    // Never yank the selection out from under an in-progress edit — that would
+    // leave isEditing=true with the draft pointing at a different row. Defer
+    // until edit mode ends (isEditing is in the dep list).
+    if (isEditing) return
     const key = `${statusFilter}|${debouncedSearch}`
     if (lastAppliedListKey.current === key) return
     lastAppliedListKey.current = key
     setSelectedId(commandes.length > 0 ? commandes[0].IDcommande_sous_traitant : null)
-  }, [commandes, statusFilter, debouncedSearch])
+  }, [commandes, statusFilter, debouncedSearch, isEditing])
 
   // Reset the pieces drawer when the active commande changes — avoids stale
   // drawer state leaking into the next commande's lines.
@@ -866,11 +877,26 @@ export function SousTraitantsCommandes() {
     setEditIDAdresseSousTraitant(snapshot.IDadresseSt)
     setEditIDAdresseLivraison(snapshot.IDadresseLiv)
     originalDraftRef.current = snapshot
+    editingIdRef.current = detail.IDcommande_sous_traitant
     setPiecesDrawerLineId(null)
     setIsEditing(true)
   }, [detail])
 
-  const cancelEdit = useCallback(() => setIsEditing(false), [])
+  // Clear all header-draft state when leaving edit mode. `editCommentaire` (and
+  // the rest) are sticky page state — without this they survive across
+  // commandes and can leak into the next save.
+  const resetEditDraft = useCallback(() => {
+    setEditDateCommande('')
+    setEditDateNotif('')
+    setEditCommentaire('')
+    setEditJournal('')
+    setEditIDAdresseSousTraitant(0)
+    setEditIDAdresseLivraison(0)
+    originalDraftRef.current = null
+    editingIdRef.current = null
+  }, [])
+
+  const cancelEdit = useCallback(() => { setIsEditing(false); resetEditDraft() }, [resetEditDraft])
 
   const isDirty = useMemo(() => {
     if (!isEditing) return false
@@ -887,7 +913,9 @@ export function SousTraitantsCommandes() {
   }, [isEditing, editDateCommande, editDateNotif, editCommentaire, editJournal, editIDAdresseSousTraitant, editIDAdresseLivraison, linesDirty])
 
   const saveHeaderMut = useMutation({
-    mutationFn: () => apiFetch(`/commandes-sous-traitant/${selectedId}`, {
+    // Target the pinned edited id, not the live selectedId — guards against a
+    // mid-edit selection drift writing this draft onto a different commande.
+    mutationFn: () => apiFetch(`/commandes-sous-traitant/${editingIdRef.current ?? selectedId}`, {
       method: 'PUT',
       body: JSON.stringify({
         date_commande: inputDateToHfsql(editDateCommande),
@@ -898,7 +926,7 @@ export function SousTraitantsCommandes() {
         IDadresse_livraison: editIDAdresseLivraison || 0,
       }),
     }),
-    onSuccess: () => { invalidateAll(); setIsEditing(false) },
+    onSuccess: () => { invalidateAll(); setIsEditing(false); resetEditDraft() },
   })
 
   const deleteMut = useMutation({
