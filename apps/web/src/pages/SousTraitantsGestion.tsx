@@ -23,14 +23,25 @@ import {
   Info,
   Tag,
   EyeOff,
+  Boxes,
+  ArrowUp,
+  ArrowDown,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { PopoverSelect } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { TmRollIcon } from '@/components/icons/TmRollIcon'
+import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
 import { cn } from '@/lib/utils'
 import { apiFetch } from '@/lib/api'
+import { fmtNum } from '@/lib/format'
+import { formatHfsqlDate } from '@/lib/dates'
+import { etatPillClass } from '@/lib/etat-stock-fini'
+
+// IDtype_sst value for "Ennoblisseur" (dyer/finisher) — see type_sst catalog.
+const ENNOBLISSEUR_TYPE = 2
 
 // ── Types ──────────────────────────────────────────────
 
@@ -86,6 +97,30 @@ interface Contact {
   envoi_soumission: boolean
 }
 
+// Rolls physically located at a sous-traitant's site (ennoblisseur view).
+type RollKind = 'ecru' | 'fini'
+
+interface RollRow {
+  id: number
+  reference: string | null
+  designation?: string | null
+  coloris: string | null
+  lot: string | null
+  numero: string | null
+  poids: number | null
+  metrage: number | null
+  date_saisie: string | null
+  second_choix: number
+  etat_libelle?: string | null
+}
+
+interface RollsPayload {
+  ecru: RollRow[]
+  fini: RollRow[]
+}
+
+type UnifiedRoll = RollRow & { kind: RollKind }
+
 // ── API helpers ────────────────────────────────────────
 // Shared apiFetch — see apps/web/src/lib/api.ts
 
@@ -99,6 +134,14 @@ function useSousTraitantDetail(id: number | null) {
 
 function useTypesSst() {
   return useQuery<TypeSst[]>({ queryKey: ['types-sst'], queryFn: () => apiFetch('/sous-traitants/type-sst') })
+}
+
+function useSousTraitantRolls(id: number | null, enabled: boolean) {
+  return useQuery<RollsPayload>({
+    queryKey: ['sous-traitant-rolls', id],
+    queryFn: () => apiFetch(`/sous-traitants/${id}/rolls`),
+    enabled: enabled && id !== null,
+  })
 }
 
 // ── Shared styling ─────────────────────────────────────
@@ -428,8 +471,9 @@ function DetailMain({ sousTraitant, isLoading, hasSelection, isEditing, editTel,
   if (isLoading) return <div className="flex-1 flex items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-accent" /></div>
   if (!sousTraitant) return null
 
-  return (
-    <div className="flex-1 min-h-0 overflow-auto space-y-4">
+  const isEnnoblisseur = Number(sousTraitant.IDtype_sst) === ENNOBLISSEUR_TYPE
+
+  const coordonneesCard = (
       <Card className={cn('card-premium', isEditing && editSectionClass)}>
         <CardHeader className="flex flex-row items-center gap-2 pb-2">
           <Info className="h-4 w-4 text-accent" />
@@ -482,7 +526,204 @@ function DetailMain({ sousTraitant, isLoading, hasSelection, isEditing, editTel,
           )}
         </CardContent>
       </Card>
+  )
+
+  // Non-ennoblisseur: just the coordonnées card in a scrollable column.
+  if (!isEnnoblisseur) {
+    return <div className="flex-1 min-h-0 overflow-auto space-y-4">{coordonneesCard}</div>
+  }
+
+  // Ennoblisseur: coordonnées (natural height) + the rolls-on-site table that
+  // fills the remaining height with its own internal scroll.
+  return (
+    <div className="flex-1 min-h-0 flex flex-col gap-4">
+      <div className="flex-shrink-0">{coordonneesCard}</div>
+      <RollsSection sousTraitantId={sousTraitant.IDsous_traitant} className="flex-1 min-h-0" />
     </div>
+  )
+}
+
+// ── Center: Rolls on site (ennoblisseur) ───────────────
+
+type RollSortKey = 'kind' | 'reference' | 'coloris' | 'lot' | 'numero' | 'etat_libelle' | 'poids' | 'metrage' | 'date_saisie'
+
+const ROLL_COLUMNS: { key: RollSortKey; label: string; width: string; align?: 'right' }[] = [
+  { key: 'kind', label: 'Type', width: '13%' },
+  { key: 'reference', label: 'Référence', width: '16%' },
+  { key: 'coloris', label: 'Coloris', width: '19%' },
+  { key: 'lot', label: 'Lot', width: '12%' },
+  { key: 'numero', label: 'N°', width: '10%' },
+  { key: 'etat_libelle', label: 'État', width: '12%' },
+  { key: 'poids', label: 'Poids', width: '9%', align: 'right' },
+  { key: 'date_saisie', label: 'Date', width: '9%', align: 'right' },
+]
+
+function RollSortHeader({ col, sort, onSort }: {
+  col: { key: RollSortKey; label: string; align?: 'right' }
+  sort: { key: RollSortKey; dir: 'asc' | 'desc' }; onSort: (k: RollSortKey) => void
+}) {
+  const active = sort.key === col.key
+  return (
+    <th onClick={() => onSort(col.key)}
+      className={cn('px-2.5 py-2 font-semibold cursor-pointer select-none whitespace-nowrap',
+        col.align === 'right' ? 'text-right' : 'text-left', active && 'text-accent')}>
+      <span className={cn('inline-flex items-center gap-1', col.align === 'right' && 'flex-row-reverse')}>
+        {col.label}
+        {active && (sort.dir === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
+      </span>
+    </th>
+  )
+}
+
+function RollKindPill({ kind }: { kind: RollKind }) {
+  return kind === 'ecru' ? (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-400/15 text-amber-700 whitespace-nowrap">
+      <TmRollIcon className="h-3 w-3" />Tombé métier
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-accent-blue/15 text-accent-blue whitespace-nowrap">
+      <FiniRollIcon className="h-3 w-3" />Fini
+    </span>
+  )
+}
+
+type RollTypeFilter = 'tous' | 'ecru' | 'fini'
+
+function RollsSection({ sousTraitantId, className }: { sousTraitantId: number; className?: string }) {
+  const { data, isLoading, isError, error } = useSousTraitantRolls(sousTraitantId, true)
+  const [search, setSearch] = useState('')
+  const [typeFilter, setTypeFilter] = useState<RollTypeFilter>('tous')
+  const [sort, setSort] = useState<{ key: RollSortKey; dir: 'asc' | 'desc' }>({ key: 'date_saisie', dir: 'desc' })
+
+  const handleSort = useCallback((k: RollSortKey) => {
+    setSort((prev) => prev.key === k ? { key: k, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key: k, dir: 'asc' })
+  }, [])
+
+  const allRolls: UnifiedRoll[] = useMemo(() => {
+    if (!data) return []
+    return [
+      ...data.ecru.map((r) => ({ ...r, kind: 'ecru' as const })),
+      ...data.fini.map((r) => ({ ...r, kind: 'fini' as const })),
+    ]
+  }, [data])
+
+  const ecruCount = data?.ecru.length ?? 0
+  const finiCount = data?.fini.length ?? 0
+
+  const filteredSorted = useMemo(() => {
+    let rows = allRolls
+    if (typeFilter !== 'tous') rows = rows.filter((r) => r.kind === typeFilter)
+    const q = search.trim().toLowerCase()
+    if (q) {
+      rows = rows.filter((r) =>
+        (r.reference ?? '').toLowerCase().includes(q)
+        || (r.coloris ?? '').toLowerCase().includes(q)
+        || (r.lot ?? '').toLowerCase().includes(q)
+        || (r.numero ?? '').toLowerCase().includes(q)
+        || (r.designation ?? '').toLowerCase().includes(q)
+      )
+    }
+    const dir = sort.dir === 'asc' ? 1 : -1
+    const key = sort.key
+    return [...rows].sort((a, b) => {
+      if (key === 'poids' || key === 'metrage') return ((Number(a[key]) || 0) - (Number(b[key]) || 0)) * dir
+      const av = (a[key as keyof UnifiedRoll] ?? '').toString().toLowerCase()
+      const bv = (b[key as keyof UnifiedRoll] ?? '').toString().toLowerCase()
+      return av.localeCompare(bv) * dir
+    })
+  }, [allRolls, typeFilter, search, sort])
+
+  const totalPoids = useMemo(() => filteredSorted.reduce((s, r) => s + (Number(r.poids) || 0), 0), [filteredSorted])
+
+  const typeOptions: { key: RollTypeFilter; label: string }[] = [
+    { key: 'tous', label: 'Tous' },
+    { key: 'ecru', label: 'Tombé métier' },
+    { key: 'fini', label: 'Finis' },
+  ]
+
+  return (
+    <Card className={cn('card-premium flex flex-col min-h-0 overflow-hidden', className)}>
+      <CardHeader className="flex-shrink-0 flex flex-row items-center gap-2 pb-2">
+        <Boxes className="h-4 w-4 text-accent" />
+        <CardTitle className="text-sm font-semibold">Rouleaux présents sur le site</CardTitle>
+        <Badge variant="secondary" className="text-xs ml-auto">{ecruCount} tombé métier · {finiCount} finis</Badge>
+      </CardHeader>
+      <CardContent className="flex-1 min-h-0 flex flex-col gap-2 pb-3">
+        {/* Toolbar: search + type filter */}
+        <div className="flex-shrink-0 flex items-center gap-2">
+          <div className="relative flex-1 min-w-0">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <input type="text" value={search} onChange={(e) => setSearch(e.target.value)} autoComplete="off"
+              placeholder="Rechercher (réf, coloris, lot, n°...)"
+              className="h-8 w-full pl-8 pr-3 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring" />
+          </div>
+          <div className="flex flex-wrap gap-1 flex-shrink-0">
+            {typeOptions.map((opt) => (
+              <button key={opt.key} type="button" onClick={() => setTypeFilter(opt.key)}
+                className={cn('px-2 py-1 text-xs rounded-md transition-colors',
+                  typeFilter === opt.key ? 'bg-accent text-accent-foreground shadow-sm font-medium' : 'text-muted-foreground hover:bg-accent/10')}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Table */}
+        {isLoading ? (
+          <div className="flex-1 flex items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>
+        ) : isError ? (
+          <div className="flex-1 flex flex-col items-center justify-center text-destructive"><AlertCircle className="h-6 w-6 mb-2" /><p className="text-sm">{(error as Error)?.message || 'Erreur'}</p></div>
+        ) : (
+          <div className="flex-1 min-h-0 flex flex-col rounded-lg border border-border/60 bg-white overflow-hidden">
+            <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
+              <colgroup>{ROLL_COLUMNS.map((c) => <col key={c.key} style={{ width: c.width }} />)}</colgroup>
+              <thead className="bg-zinc-200/60 border-b border-border/60">
+                <tr className="text-xs uppercase tracking-wide text-muted-foreground">
+                  {ROLL_COLUMNS.map((c) => <RollSortHeader key={c.key} col={c} sort={sort} onSort={handleSort} />)}
+                </tr>
+              </thead>
+            </table>
+            <div className="flex-1 min-h-0 overflow-auto scrollbar-transparent">
+              <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
+                <colgroup>{ROLL_COLUMNS.map((c) => <col key={c.key} style={{ width: c.width }} />)}</colgroup>
+                <tbody>
+                  {filteredSorted.length === 0 ? (
+                    <tr><td colSpan={ROLL_COLUMNS.length} className="px-3 py-10 text-center text-sm text-muted-foreground">Aucun rouleau sur le site</td></tr>
+                  ) : filteredSorted.map((r) => (
+                    <tr key={`${r.kind}-${r.id}`} className="border-b border-border/40 hover:bg-accent/5">
+                      <td className="px-2.5 py-1.5"><RollKindPill kind={r.kind} /></td>
+                      <td className="px-2.5 py-1.5 truncate" title={[r.reference, r.designation].filter(Boolean).join(' — ')}>
+                        <span className="font-medium">{r.reference || '—'}</span>
+                        {!!r.designation && <span className="text-muted-foreground"> · {r.designation}</span>}
+                      </td>
+                      <td className="px-2.5 py-1.5 truncate" title={r.coloris ?? ''}>{r.coloris || <span className="text-muted-foreground">—</span>}</td>
+                      <td className="px-2.5 py-1.5 truncate" title={r.lot ?? ''}>{r.lot || <span className="text-muted-foreground">—</span>}</td>
+                      <td className="px-2.5 py-1.5 truncate" title={r.numero ?? ''}>
+                        {r.numero || <span className="text-muted-foreground">—</span>}
+                        {!!r.second_choix && <span className="ml-1 text-[10px] text-amber-600">2e</span>}
+                      </td>
+                      <td className="px-2.5 py-1.5 truncate">
+                        {r.kind === 'fini' && r.etat_libelle ? (
+                          <span className={cn('inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border', etatPillClass(r.etat_libelle))}>
+                            {r.etat_libelle}
+                          </span>
+                        ) : <span className="text-muted-foreground">—</span>}
+                      </td>
+                      <td className="px-2.5 py-1.5 text-right tabular-nums whitespace-nowrap">{r.poids != null ? fmtNum(r.poids, 1) : '—'}</td>
+                      <td className="px-2.5 py-1.5 text-right tabular-nums whitespace-nowrap">{r.date_saisie ? formatHfsqlDate(r.date_saisie) : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex-shrink-0 border-t border-border/60 bg-zinc-200/50 px-3 py-1.5 text-xs text-muted-foreground flex items-center justify-between">
+              <span>{filteredSorted.length} rouleau{filteredSorted.length !== 1 ? 'x' : ''}</span>
+              <span className="tabular-nums">{fmtNum(totalPoids, 1)} kg</span>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 

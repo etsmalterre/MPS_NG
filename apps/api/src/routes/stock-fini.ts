@@ -71,7 +71,7 @@ const TEXT_FIELDS = ['lot', 'numero', 'observations', 'observation_sst', 'emplac
 // once with `WHERE keyCol IN (...)`. Only ids whose value actually has a U+FFFD
 // are requested, so empty values never enter the CONVERT (which would otherwise
 // collapse the result set — see CLAUDE.md).
-async function repairAliased<T extends Record<string, unknown>>(
+export async function repairAliased<T extends Record<string, unknown>>(
   rows: T[],
   table: string,
   idField: string,
@@ -149,7 +149,7 @@ async function repairAliased<T extends Record<string, unknown>>(
   })
 }
 
-async function repairAllJoins(rows: StockFini[]): Promise<StockFini[]> {
+export async function repairAllJoins(rows: StockFini[]): Promise<StockFini[]> {
   let fixed = rows
   fixed = await repairAliased(fixed, 'ref_fini', 'IDref_fini', { ref_fini: 'reference', designation: 'designation' })
   fixed = await repairAliased(fixed, 'ref_fini_colori', 'IDColoris', { coloris_dyed: 'reference' }, 'IDref_fini_colori')

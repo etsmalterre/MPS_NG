@@ -1,6 +1,7 @@
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
 import { z } from 'zod'
 import { query, fixEncoding } from '../lib/hfsql-auto.js'
+import { repairAliased, repairAllJoins } from './stock-fini.js'
 
 // Gestion route for the `sous_traitant` entity (subcontractor management).
 // Mirrors fournisseurs.ts (identical contacts/adresses sub-resource shape) with
@@ -129,6 +130,127 @@ sousTraitantsRouter.get('/:id', async (req: Request, res: Response) => {
     })
   } catch (err) {
     console.error('Error fetching sous-traitant:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/sous-traitants/:id/rolls — fabric rolls physically located at this
+// sous-traitant's site (its "magasin"). Used by the Gestion screen for
+// ennoblisseur ssts to show what's on site: "tombé métier" (écru) rolls awaiting
+// dyeing + finished (fini) rolls already produced and not yet shipped back.
+//
+// Location model: stock_ecru.IDmagasin / stock_fini.IDmagasin → sous_traitant.
+// IDsous_traitant (same id space). IDmagasin is updated on physical transfer, so
+// "= this sst" means "currently here".
+//
+//   - écru: stock_ecru.IDmagasin = sst, MINUS rolls already dyed into a fini (a
+//     dyed roll keeps its écru row but also spawns a stock_fini row at the same
+//     magasin — counting both would double-count it, so consumed écru are dropped).
+//   - fini: stock_fini.IDmagasin = sst, hiding rolls already shipped
+//     (IDligne_expedition set, or état 4 "Expédié").
+sousTraitantsRouter.get('/:id/rolls', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    // ── Écru ("tombé métier") rolls on site ──────────────
+    // Explicit columns only (never `se.*` — Windows ODBC returns 0 rows for
+    // alias.* in some shapes, and we keep all column names ASCII for the Linux
+    // bridge). ref_ecru/colori_ecru references resolve via separate flat
+    // queries + maps (avoids the JOIN+CONVERT result-set collapse footgun).
+    const ecruRows = await query<{
+      IDstock_ecru: number; numero: string | null; lot: string | null
+      poids: number | null; metrage: number | null
+      IDref_ecru: number | null; IDcolori_ecru: number | null
+      date_saisie: string | null; second_choix: number | null
+    }>(
+      `SELECT IDstock_ecru, numero, lot, poids, metrage, IDref_ecru, IDcolori_ecru, date_saisie, second_choix
+       FROM stock_ecru
+       WHERE IDmagasin = ${id}
+       ORDER BY date_saisie DESC, IDstock_ecru DESC`,
+    )
+    const ecruFixed = await fixEncoding(ecruRows, 'stock_ecru', 'IDstock_ecru', ['numero', 'lot'])
+
+    // Drop écru already consumed into a fini (dedup against the fini list).
+    const ecruIds = ecruFixed.map((r) => Number(r.IDstock_ecru)).filter((n) => n > 0)
+    const consumed = new Set<number>()
+    if (ecruIds.length > 0) {
+      const consumedRows = await query<{ IDstock_ecru: number }>(
+        `SELECT IDstock_ecru FROM stock_fini WHERE IDstock_ecru IN (${ecruIds.join(',')})`,
+      )
+      for (const r of consumedRows) consumed.add(Number(r.IDstock_ecru))
+    }
+    const ecruLive = ecruFixed.filter((r) => !consumed.has(Number(r.IDstock_ecru)))
+
+    // Resolve ref_ecru + colori_ecru labels (ASCII columns; batched lookups).
+    const refEcruIds = Array.from(new Set(ecruLive.map((r) => Number(r.IDref_ecru)).filter((n) => n > 0)))
+    const colEcruIds = Array.from(new Set(ecruLive.map((r) => Number(r.IDcolori_ecru)).filter((n) => n > 0)))
+    const refEcruMap = new Map<number, string>()
+    const colEcruMap = new Map<number, string>()
+    if (refEcruIds.length > 0) {
+      const r = await query<{ IDref_ecru: number; reference: string | null }>(
+        `SELECT IDref_ecru, reference FROM ref_ecru WHERE IDref_ecru IN (${refEcruIds.join(',')})`,
+      )
+      for (const x of await fixEncoding(r, 'ref_ecru', 'IDref_ecru', ['reference'])) refEcruMap.set(Number(x.IDref_ecru), (x.reference ?? '').toString().trim())
+    }
+    if (colEcruIds.length > 0) {
+      const r = await query<{ IDcolori_ecru: number; reference: string | null }>(
+        `SELECT IDcolori_ecru, reference FROM colori_ecru WHERE IDcolori_ecru IN (${colEcruIds.join(',')})`,
+      )
+      for (const x of await fixEncoding(r, 'colori_ecru', 'IDcolori_ecru', ['reference'])) colEcruMap.set(Number(x.IDcolori_ecru), (x.reference ?? '').toString().trim())
+    }
+
+    const ecru = ecruLive.map((r) => ({
+      id: Number(r.IDstock_ecru),
+      reference: refEcruMap.get(Number(r.IDref_ecru)) || null,
+      coloris: colEcruMap.get(Number(r.IDcolori_ecru)) || null,
+      lot: (r.lot ?? '').toString().trim() || null,
+      numero: (r.numero ?? '').toString().trim() || null,
+      poids: r.poids == null ? null : Number(r.poids),
+      metrage: r.metrage == null ? null : Number(r.metrage),
+      date_saisie: r.date_saisie ?? null,
+      second_choix: Number(r.second_choix) || 0,
+    }))
+
+    // ── Fini rolls on site (not shipped) ─────────────────
+    // Reuse the canonical stock_fini joins + accent repair so coloris obeys the
+    // ref_fini.avec_teinture rule (0 = wash colori_ecru / 1·2 = dyed ref_fini_colori).
+    const finiRows = await query<Record<string, unknown>>(
+      `SELECT sf.IDstock_fini, sf.poids, sf.metrage, sf.lot, sf.numero, sf.date_saisie, sf.second_choix,
+              sf.IDref_fini, sf.IDColoris, sf.IDetat_stock_fini,
+              rf.reference AS ref_fini, rf.designation, rf.avec_teinture,
+              rfc.reference AS coloris_dyed, ce.reference AS coloris_wash,
+              esf.libelle AS etat_libelle
+       FROM stock_fini sf
+       LEFT JOIN ref_fini rf ON sf.IDref_fini = rf.IDref_fini
+       LEFT JOIN ref_fini_colori rfc ON sf.IDColoris = rfc.IDref_fini_colori
+       LEFT JOIN colori_ecru ce ON sf.IDColoris = ce.IDcolori_ecru
+       LEFT JOIN etat_stock_fini esf ON sf.IDetat_stock_fini = esf.IDetat_stock_fini
+       WHERE sf.IDmagasin = ${id}
+         AND (sf.IDligne_expedition IS NULL OR sf.IDligne_expedition = 0)
+         AND (sf.IDetat_stock_fini IS NULL OR sf.IDetat_stock_fini <> 4)
+       ORDER BY sf.date_saisie DESC, sf.IDstock_fini DESC`,
+    )
+    let finiFixed = await repairAliased(finiRows, 'stock_fini', 'IDstock_fini', { lot: 'lot', numero: 'numero' })
+    finiFixed = await repairAllJoins(finiFixed)
+
+    const fini = finiFixed.map((r) => ({
+      id: Number(r.IDstock_fini),
+      reference: ((r as any).ref_fini ?? '').toString().trim() || null,
+      designation: ((r as any).designation ?? '').toString().trim() || null,
+      coloris: ((r as any).coloris_reference ?? '').toString().trim() || null,
+      lot: ((r as any).lot ?? '').toString().trim() || null,
+      numero: ((r as any).numero ?? '').toString().trim() || null,
+      poids: (r as any).poids == null ? null : Number((r as any).poids),
+      metrage: (r as any).metrage == null ? null : Number((r as any).metrage),
+      date_saisie: (r as any).date_saisie ?? null,
+      second_choix: Number((r as any).second_choix) || 0,
+      etat_libelle: ((r as any).etat_libelle ?? '').toString().trim() || null,
+    }))
+
+    res.json({ ecru, fini })
+  } catch (err) {
+    console.error('Error fetching sous-traitant rolls:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
