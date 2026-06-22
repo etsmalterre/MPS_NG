@@ -19,7 +19,7 @@ localStorage.removeItem('mps-panel-hf')
 installAutofillBlocker()
 
 // Dev-only: when running inside a feature worktree the tooling sets
-// VITE_WORKTREE_LABEL (e.g. "feat/stock-fini"); prefix the tab title so parallel
+// VITE_WORKTREE_LABEL (e.g. "stock-fini"); prefix the tab title so parallel
 // worktree dev tabs are distinguishable in the browser. No-op in prod builds.
 const worktreeLabel = import.meta.env.VITE_WORKTREE_LABEL
 if (import.meta.env.DEV && worktreeLabel) {

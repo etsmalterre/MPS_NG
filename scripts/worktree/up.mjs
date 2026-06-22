@@ -63,9 +63,9 @@ if (fs.existsSync(srcEnv)) {
 // app prefixes document.title from VITE_WORKTREE_LABEL in dev (see main.tsx).
 fs.writeFileSync(
   path.join(wt, 'apps/web/.env.development.local'),
-  `VITE_WORKTREE_LABEL=${branch}\n`,
+  `VITE_WORKTREE_LABEL=${feature}\n`,
 )
-console.log(`Wrote apps/web/.env.development.local (tab label "${branch}").`)
+console.log(`Wrote apps/web/.env.development.local (tab label "${feature}").`)
 
 // Secrets (Google service-account key) for email/PDF — copy if present.
 const srcSecrets = path.join(main, 'apps/api/secrets')
