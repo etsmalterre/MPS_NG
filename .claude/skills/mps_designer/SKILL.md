@@ -272,6 +272,47 @@ All panels (left list, right sidebar) and section item cards use **Zinc** backgr
 </div>
 ```
 
+### Left-list filter button group (segmented filter under the search bar)
+
+When the left list needs a quick status / category filter (actif / inactif / tous, en cours / terminées / toutes, etc.), render it as a **borderless segmented button row immediately under the search input, inside the same `bg-zinc-200/50` header band**. This is the canonical pattern — do NOT wrap the buttons in a bordered `border border-input` box, and do NOT build an iOS-style pill toggle. Reference: `SousTraitantsCommandes.tsx` list header.
+
+The header wrapper gets `space-y-2` so the search input and the filter row stack with consistent spacing:
+
+```tsx
+<div className="p-3 border-b rounded-t-lg bg-zinc-200/50 space-y-2">
+  <div className="relative">
+    <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+    <input className="w-full h-9 pl-9 pr-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring" />
+  </div>
+  <div className="flex flex-wrap gap-1">
+    {filterOptions.map((opt) => (
+      <button
+        key={opt.key}
+        type="button"
+        onClick={() => onFilterChange(opt.key)}
+        className={cn(
+          'px-2 py-1 text-xs rounded-md transition-colors flex-grow basis-[calc(33.333%-0.25rem)]',
+          filter === opt.key
+            ? 'bg-accent text-accent-foreground shadow-sm font-medium'
+            : 'text-muted-foreground hover:bg-accent/10',
+        )}
+      >
+        {opt.label}
+      </button>
+    ))}
+  </div>
+</div>
+```
+
+Conventions — do not deviate:
+- **Container**: `flex flex-wrap gap-1`. No border, no background box around the group. The buttons sit directly on the zinc header band.
+- **Button base**: `px-2 py-1 text-xs rounded-md transition-colors flex-grow basis-[calc(33.333%-0.25rem)]`. The `flex-grow basis-[calc(33.333%-0.25rem)]` makes 3 buttons split the row evenly while still wrapping gracefully if there are more.
+- **Active**: `bg-accent text-accent-foreground shadow-sm font-medium` (gold pill, `font-medium` ONLY on the active button).
+- **Inactive**: `text-muted-foreground hover:bg-accent/10`.
+- **Default selection**: pick the everyday working view (e.g. `actif` for a sous-traitant gestion list, `open`/`en cours` for an orders list), not `tous`. Drive the list's auto-select-first effect off the **filtered** array so it never lands on a row hidden by the active filter.
+
+This is the same gold-pill active state used by the sidebar tab bar (§8) and the orders status filter — keep all three visually identical.
+
 ### List Items (scrollable body, `p-3 space-y-2 scrollbar-transparent`)
 
 ```tsx

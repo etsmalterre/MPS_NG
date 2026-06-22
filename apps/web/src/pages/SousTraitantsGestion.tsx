@@ -34,6 +34,8 @@ import { apiFetch } from '@/lib/api'
 
 // ── Types ──────────────────────────────────────────────
 
+type StatusFilter = 'actif' | 'inactif' | 'tous'
+
 interface SousTraitant {
   IDsous_traitant: number
   nom: string
@@ -110,6 +112,7 @@ export function SousTraitantsGestion() {
   const queryClient = useQueryClient()
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('actif')
   const [isEditing, setIsEditing] = useState(false)
   const [editNom, setEditNom] = useState('')
   const [editTel, setEditTel] = useState('')
@@ -126,9 +129,25 @@ export function SousTraitantsGestion() {
   const { data: sousTraitants, isLoading, isError, error } = useSousTraitants()
   const { data: detail, isLoading: detailLoading } = useSousTraitantDetail(selectedId)
 
+  const filtered = useMemo(() => {
+    if (!sousTraitants) return []
+    let rows = sousTraitants
+    if (statusFilter === 'actif') rows = rows.filter((s) => !!s.est_visible)
+    else if (statusFilter === 'inactif') rows = rows.filter((s) => !s.est_visible)
+    const q = searchQuery.trim().toLowerCase()
+    if (q) {
+      rows = rows.filter((s) =>
+        s.nom.toLowerCase().includes(q)
+        || (s.type_label ?? '').toLowerCase().includes(q)
+        || (s.tel ?? '').toLowerCase().includes(q)
+      )
+    }
+    return rows
+  }, [sousTraitants, searchQuery, statusFilter])
+
   useEffect(() => {
-    if (sousTraitants && sousTraitants.length > 0 && selectedId === null) setSelectedId(sousTraitants[0].IDsous_traitant)
-  }, [sousTraitants, selectedId])
+    if (filtered.length > 0 && selectedId === null) setSelectedId(filtered[0].IDsous_traitant)
+  }, [filtered, selectedId])
 
   const startEdit = useCallback(() => {
     if (detail) {
@@ -204,22 +223,12 @@ export function SousTraitantsGestion() {
     })
   }, [guard])
 
-  const filtered = useMemo(() => {
-    if (!sousTraitants) return []
-    if (!searchQuery.trim()) return sousTraitants
-    const q = searchQuery.toLowerCase()
-    return sousTraitants.filter((s) =>
-      s.nom.toLowerCase().includes(q)
-      || (s.type_label ?? '').toLowerCase().includes(q)
-      || (s.tel ?? '').toLowerCase().includes(q)
-    )
-  }, [sousTraitants, searchQuery])
-
   return (
     <>
       <MasterDetailLayout
         list={<SousTraitantList sousTraitants={filtered} isLoading={isLoading} isError={isError} error={error as Error | null}
           selectedId={selectedId} onSelect={handleSelect} searchQuery={searchQuery} onSearchChange={setSearchQuery}
+          statusFilter={statusFilter} onStatusFilterChange={setStatusFilter}
           onNew={() => createMutation.mutate()} isCreating={createMutation.isPending} isEditing={isEditing} />}
         detailHeader={<DetailHeader sousTraitant={detail ?? null} isLoading={detailLoading && selectedId !== null}
           isEditing={isEditing} editNom={editNom} onEditNomChange={setEditNom}
@@ -248,18 +257,33 @@ export function SousTraitantsGestion() {
 
 // ── Left Panel: List ───────────────────────────────────
 
-function SousTraitantList({ sousTraitants, isLoading, isError, error, selectedId, onSelect, searchQuery, onSearchChange, onNew, isCreating, isEditing }: {
+function SousTraitantList({ sousTraitants, isLoading, isError, error, selectedId, onSelect, searchQuery, onSearchChange, statusFilter, onStatusFilterChange, onNew, isCreating, isEditing }: {
   sousTraitants: SousTraitant[]; isLoading: boolean; isError: boolean; error: Error | null
   selectedId: number | null; onSelect: (id: number) => void; searchQuery: string; onSearchChange: (q: string) => void
+  statusFilter: StatusFilter; onStatusFilterChange: (f: StatusFilter) => void
   onNew: () => void; isCreating: boolean; isEditing: boolean
 }) {
+  const filterOptions: { key: StatusFilter; label: string }[] = [
+    { key: 'actif', label: 'Actifs' },
+    { key: 'inactif', label: 'Inactifs' },
+    { key: 'tous', label: 'Tous' },
+  ]
   return (
     <div className="flex flex-col h-full rounded-lg border shadow-sm bg-zinc-100/80">
-      <div className="p-3 border-b rounded-t-lg bg-zinc-200/50">
+      <div className="p-3 border-b rounded-t-lg bg-zinc-200/50 space-y-2">
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <input type="text" placeholder="Rechercher..." value={searchQuery} onChange={(e) => onSearchChange(e.target.value)}
             autoComplete="off" className="w-full h-9 pl-9 pr-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring" />
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {filterOptions.map((opt) => (
+            <button key={opt.key} type="button" onClick={() => onStatusFilterChange(opt.key)}
+              className={cn('px-2 py-1 text-xs rounded-md transition-colors flex-grow basis-[calc(33.333%-0.25rem)]',
+                statusFilter === opt.key ? 'bg-accent text-accent-foreground shadow-sm font-medium' : 'text-muted-foreground hover:bg-accent/10')}>
+              {opt.label}
+            </button>
+          ))}
         </div>
       </div>
       <div className="flex-1 overflow-auto p-3 space-y-2 scrollbar-transparent">
@@ -268,16 +292,22 @@ function SousTraitantList({ sousTraitants, isLoading, isError, error, selectedId
         : sousTraitants.length === 0 ? <div className="flex flex-col items-center justify-center py-8 text-muted-foreground"><Building2 className="h-12 w-12 mb-3 opacity-50" /><p className="text-sm">Aucun sous-traitant</p></div>
         : sousTraitants.map((s) => (
           <div key={s.IDsous_traitant} onClick={() => onSelect(s.IDsous_traitant)}
-            className={cn('p-3 border rounded-lg cursor-pointer transition-all',
+            className={cn('relative p-3 border rounded-lg cursor-pointer transition-all',
               selectedId === s.IDsous_traitant ? 'border-accent bg-white ring-1 ring-accent' : 'border-border bg-white hover:border-accent/50')}>
-            <div className="flex items-center gap-2">
+            {!s.est_visible && (
+              <Badge variant="destructive" className="absolute top-2 right-2 text-[10px] py-0 gap-1">
+                <EyeOff className="h-2.5 w-2.5" />Inactif
+              </Badge>
+            )}
+            <div className="flex items-center gap-2 pr-16">
               <Building2 className={cn('h-4 w-4 flex-shrink-0', s.est_visible ? 'text-muted-foreground' : 'text-muted-foreground/40')} />
               <p className={cn('font-medium text-sm truncate', !s.est_visible && 'text-muted-foreground')}>{s.nom}</p>
             </div>
-            <div className="flex items-center gap-1.5 mt-1.5 ml-6 flex-wrap">
-              {s.type_label && <Badge variant="secondary" className="text-[10px] py-0 gap-1"><Tag className="h-2.5 w-2.5" />{s.type_label}</Badge>}
-              {!s.est_visible && <Badge variant="outline" className="text-[10px] py-0 gap-1 text-muted-foreground"><EyeOff className="h-2.5 w-2.5" />Inactif</Badge>}
-            </div>
+            {s.type_label && (
+              <div className="flex items-center gap-1.5 mt-1.5 ml-6 flex-wrap">
+                <Badge variant="secondary" className="text-[10px] py-0 gap-1"><Tag className="h-2.5 w-2.5" />{s.type_label}</Badge>
+              </div>
+            )}
           </div>
         ))}
       </div>
