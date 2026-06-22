@@ -37,6 +37,12 @@ export const PERMISSION_KEYS = [
     description: 'Autorise la découpe d’un rouleau en plusieurs dans Finis > Stock.',
     category: 'Finis',
   },
+  {
+    key: 'create_stock_fini',
+    label: 'Créer un rouleau',
+    description: 'Affiche le bouton « Nouveau » et autorise la création de rouleaux dans Finis > Stock.',
+    category: 'Finis',
+  },
 ] as const
 
 export type PermissionKey = (typeof PERMISSION_KEYS)[number]['key']

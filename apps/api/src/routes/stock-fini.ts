@@ -12,6 +12,37 @@ function esc(value: string): string {
   return value.replace(/'/g, "''")
 }
 
+const IS_WINDOWS = process.platform === 'win32'
+
+/** ref_fini.archivé is accented — on Linux SELECT * returns a mangled key. */
+function isArchive(row: Record<string, unknown>): boolean {
+  const v = row.archivé ?? row.archiv ?? 0
+  return Number(v) === 1
+}
+
+/** Emit a text value as a bridge-safe SQL literal: plain quoted for ASCII,
+ *  Latin-1 hex literal for accented text (raw multi-byte UTF-8 in a SQL
+ *  string corrupts the Linux bridge → [HY090]). Ported from
+ *  commandes-sous-traitant.ts. */
+function sqlText(value: string | null | undefined): string {
+  const v = (value ?? '').toString()
+  if (v === '') return "''"
+  if (/^[\x09\x0A\x0D\x20-\x7E]*$/.test(v)) return `'${esc(v)}'`
+  const ascii = v
+    .replace(/[‘’‚′]/g, "'")
+    .replace(/[“”„″]/g, '"')
+    .replace(/[–—−]/g, '-')
+    .replace(/…/g, '...')
+    .replace(/ /g, ' ')
+  const bytes = Buffer.from(
+    Array.from(ascii, (ch) => {
+      const c = ch.codePointAt(0) ?? 0x3f
+      return c <= 0xff ? c : 0x3f
+    }),
+  )
+  return `x'${bytes.toString('hex')}'`
+}
+
 // stock_fini and all the tables we join (ref_fini, ref_fini_colori,
 // etat_stock_fini, sous_traitant) have NO accented columns in the fields we
 // read, so the IS_WINDOWS branching dance from stock.ts is not needed here.
@@ -190,6 +221,158 @@ stockFiniRouter.get('/fini/lookups/etats', async (_req: Request, res: Response) 
     res.json(fixed)
   } catch (err) {
     console.error('Error fetching etat_stock_fini:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/stock/fini/lookups/refs - ref_fini list for the "Nouveau" form.
+//   Carries avec_teinture so the coloris lookup can pick the right catalog.
+stockFiniRouter.get('/fini/lookups/refs', async (_req: Request, res: Response) => {
+  try {
+    // ref_fini.archivé is accented: name it only on Windows; on Linux SELECT *
+    // and filter in JS (naming the accented column storms the bridge).
+    const sql = IS_WINDOWS
+      ? `SELECT IDref_fini, reference, designation, avec_teinture FROM ref_fini WHERE archivé = 0 ORDER BY reference`
+      : `SELECT * FROM ref_fini ORDER BY reference`
+    const rows = await query<Record<string, unknown>>(sql)
+    const visible = IS_WINDOWS ? rows : rows.filter((r) => !isArchive(r))
+    const shaped = visible.map((r) => ({
+      IDref_fini: Number(r.IDref_fini),
+      reference: (r.reference ?? null) as string | null,
+      designation: (r.designation ?? null) as string | null,
+      avec_teinture: Number(r.avec_teinture) || 0,
+    }))
+    const fixed = (await fixEncoding(shaped, 'ref_fini', 'IDref_fini', ['reference', 'designation'])) as any[]
+    res.json(fixed.filter((r) => r.reference && String(r.reference).trim().length > 0))
+  } catch (err) {
+    console.error('Error fetching refs-fini lookup:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/stock/fini/lookups/coloris?ref_fini=X - coloris options for a ref,
+//   polymorphic by ref_fini.avec_teinture (memory project_avec_teinture_coloris_rule):
+//     0 (wash)   → colori_ecru of the ref's écru base (IDref_ecru)
+//     1/2 (dyed) → ref_fini_colori of the ref. The returned `id` is the value
+//   to store in stock_fini.IDColoris (a colori_ecru id or a ref_fini_colori id).
+stockFiniRouter.get('/fini/lookups/coloris', async (req: Request, res: Response) => {
+  try {
+    const refFini = parseInt(String(req.query.ref_fini ?? ''), 10)
+    if (isNaN(refFini) || refFini <= 0) { res.json([]); return }
+    // avec_teinture and IDref_ecru are ASCII column names — safe to name on
+    // both platforms in a single-table SELECT.
+    const refRows = await query<{ avec_teinture: number | null; IDref_ecru: number | null }>(
+      `SELECT avec_teinture, IDref_ecru FROM ref_fini WHERE IDref_fini = ${refFini}`,
+    )
+    if (refRows.length === 0) { res.json([]); return }
+    const dyed = Number(refRows[0].avec_teinture) !== 0
+    let out: Array<{ id: number; reference: string | null }>
+    if (dyed) {
+      const rows = await query<{ IDref_fini_colori: number; reference: string | null }>(
+        `SELECT IDref_fini_colori, reference FROM ref_fini_colori WHERE IDref_fini = ${refFini} ORDER BY reference`,
+      )
+      const fixed = (await fixEncoding(rows, 'ref_fini_colori', 'IDref_fini_colori', ['reference'])) as any[]
+      out = fixed.map((r) => ({ id: Number(r.IDref_fini_colori), reference: r.reference }))
+    } else {
+      const idRefEcru = Number(refRows[0].IDref_ecru) || 0
+      if (idRefEcru <= 0) { res.json([]); return }
+      const rows = await query<{ IDcolori_ecru: number; reference: string | null }>(
+        `SELECT IDcolori_ecru, reference FROM colori_ecru WHERE IDref_ecru = ${idRefEcru} ORDER BY reference`,
+      )
+      const fixed = (await fixEncoding(rows, 'colori_ecru', 'IDcolori_ecru', ['reference'])) as any[]
+      out = fixed.map((r) => ({ id: Number(r.IDcolori_ecru), reference: r.reference }))
+    }
+    res.json(out.filter((r) => r.reference && String(r.reference).trim().length > 0))
+  } catch (err) {
+    console.error('Error fetching coloris lookup:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/stock/fini/lookups/magasins - sous_traitant rows used as depots for
+//   the "Nouveau" form's Magasin dropdown (stock_fini.IDmagasin → sous_traitant).
+stockFiniRouter.get('/fini/lookups/magasins', async (_req: Request, res: Response) => {
+  try {
+    const rows = await query<{ IDsous_traitant: number; nom: string | null }>(
+      `SELECT IDsous_traitant, nom FROM sous_traitant ORDER BY nom`,
+    )
+    const fixed = (await fixEncoding(rows, 'sous_traitant', 'IDsous_traitant', ['nom'])) as any[]
+    res.json(
+      fixed
+        .filter((r) => r.nom && String(r.nom).trim().length > 0)
+        .map((r) => ({ IDsous_traitant: Number(r.IDsous_traitant), nom: r.nom })),
+    )
+  } catch (err) {
+    console.error('Error fetching magasins lookup:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// POST /api/stock/fini - manually create a finished roll. Gated by the
+//   create_stock_fini permission (effective admins bypass; impersonation does
+//   not). All columns are ASCII; text values go through sqlText() for bridge
+//   safety. IDColoris must be the catalog id matching the ref's avec_teinture
+//   (the /lookups/coloris endpoint already returns the correct id space).
+stockFiniRouter.post('/fini', async (req: Request, res: Response) => {
+  try {
+    if (req.userId === undefined) {
+      res.status(401).json({ error: 'not authenticated' })
+      return
+    }
+    const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'create_stock_fini')
+    if (!allowed) {
+      res.status(403).json({ error: 'permission denied: create_stock_fini' })
+      return
+    }
+
+    const b = req.body ?? {}
+    const IDref_fini = parseInt(String(b.IDref_fini), 10)
+    const IDColoris = parseInt(String(b.IDColoris), 10)
+    const poids = Number(b.poids)
+    const metrage = Number(b.metrage)
+    if (!Number.isInteger(IDref_fini) || IDref_fini <= 0) {
+      res.status(400).json({ error: 'IDref_fini required' })
+      return
+    }
+    if (!Number.isInteger(IDColoris) || IDColoris <= 0) {
+      res.status(400).json({ error: 'IDColoris required' })
+      return
+    }
+    if (!Number.isFinite(poids) || poids < 0 || !Number.isFinite(metrage) || metrage < 0) {
+      res.status(400).json({ error: 'poids and metrage must be non-negative numbers' })
+      return
+    }
+    const r2 = (v: number) => Math.round(v * 100) / 100
+    const IDetat = Number.isInteger(parseInt(String(b.IDetat_stock_fini), 10))
+      ? parseInt(String(b.IDetat_stock_fini), 10)
+      : 1 // default "En Contrôle"
+    const IDmagasin = Number.isInteger(parseInt(String(b.IDmagasin), 10)) && parseInt(String(b.IDmagasin), 10) > 0
+      ? parseInt(String(b.IDmagasin), 10)
+      : 0
+    const secondChoix = b.second_choix ? 1 : 0
+    const lot = (b.lot ?? '').toString()
+    const numero = (b.numero ?? '').toString()
+    const emplacement = (b.emplacement ?? '').toString()
+    const observations = (b.observations ?? '').toString()
+    const now = new Date()
+    const dateSaisie = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`
+
+    await query(
+      `INSERT INTO stock_fini
+       (numero, lot, poids, metrage, IDref_fini, IDColoris, IDstock_ecru,
+        IDmagasin, IDref_commande_source, observations, observation_sst, emplacement, date_saisie,
+        second_choix, destockage, don, IDProprietaire, IDcommande_donation, IDligne_commande_client,
+        IDligne_expedition, IDetat_stock_fini)
+       VALUES (${sqlText(numero)}, ${sqlText(lot)}, ${r2(poids)}, ${r2(metrage)}, ${IDref_fini}, ${IDColoris}, 0,
+               ${IDmagasin}, 0, ${sqlText(observations)}, '', ${sqlText(emplacement)}, '${dateSaisie}',
+               ${secondChoix}, 0, 0, 0, 0, 0,
+               0, ${IDetat})`,
+    )
+    const idRows = await query<{ id: number }>(`SELECT MAX(IDstock_fini) AS id FROM stock_fini`)
+    const newId = Number(idRows[0]?.id) || null
+    res.status(201).json({ IDstock_fini: newId })
+  } catch (err) {
+    console.error('Error creating stock_fini:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

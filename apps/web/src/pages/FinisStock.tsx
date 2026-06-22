@@ -42,6 +42,7 @@ import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates
 import { fmtNum } from '@/lib/format'
 import { apiFetch } from '@/lib/api'
 import { useHasPermission } from '@/contexts/PermissionsContext'
+import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -187,9 +188,11 @@ export function FinisStock() {
   const [sort, setSort] = useState<SortState>({ key: 'date_saisie', dir: 'desc' })
   const [selectedId, setSelectedId] = useState<number | null>(null)
 
-  // Permission gate — admins always pass; non-admins need cut_stock_fini to
-  // see/use the "Couper" action. The API enforces the same key independently.
+  // Permission gates — admins always pass; non-admins need the matching key.
+  // The API enforces the same keys independently.
   const canCut = useHasPermission('cut_stock_fini')
+  const canCreate = useHasPermission('create_stock_fini')
+  const [createOpen, setCreateOpen] = useState(false)
 
   // Edit mode — multi-roll selection.
   const [isEditing, setIsEditing] = useState(false)
@@ -361,10 +364,18 @@ export function FinisStock() {
         </label>
 
         {!isEditing ? (
-          <Button variant="gold" size="sm" className="flex-shrink-0" onClick={enterEditMode}>
-            <Pencil className="h-3.5 w-3.5 mr-1.5" />
-            Modifier
-          </Button>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {canCreate && (
+              <Button size="sm" onClick={() => setCreateOpen(true)}>
+                <Plus className="h-3.5 w-3.5 mr-1" />
+                Nouveau
+              </Button>
+            )}
+            <Button variant="gold" size="sm" onClick={enterEditMode}>
+              <Pencil className="h-3.5 w-3.5 mr-1.5" />
+              Modifier
+            </Button>
+          </div>
         ) : (
           <div className="flex items-center gap-2 flex-shrink-0">
             {canCut && selectedRollIds.size === 1 && (
@@ -520,6 +531,16 @@ export function FinisStock() {
           setCutOpen(false)
           setSelectedRollIds(new Set())
           lastSelectedRollIdRef.current = null
+        }}
+      />
+
+      <CreateFiniRollDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        onCreated={(newId) => {
+          setCreateOpen(false)
+          onMutationSuccess()
+          if (newId && newId > 0) setSelectedId(newId)
         }}
       />
     </div>
@@ -756,6 +777,263 @@ function CutRollDialog({
               <Scissors className="h-4 w-4 mr-1.5" />
             )}
             Couper
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ── Create finished-roll dialog ────────────────────────
+// Manually register a new physical finished roll (Finis > Stock "Nouveau",
+// gated by the create_stock_fini permission). Référence + Coloris + Poids are
+// required; coloris options are polymorphic by the ref's avec_teinture and come
+// from /lookups/coloris (the returned id is already the right IDColoris).
+
+interface RefFiniOption {
+  IDref_fini: number
+  reference: string | null
+  designation: string | null
+  avec_teinture: number
+}
+interface ColorisOption {
+  id: number
+  reference: string | null
+}
+interface MagasinOption {
+  IDsous_traitant: number
+  nom: string | null
+}
+
+function CreateFiniRollDialog({
+  open,
+  onOpenChange,
+  onCreated,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onCreated: (newId: number | null) => void
+}) {
+  const [IDref_fini, setIDrefFini] = useState(0)
+  const [IDColoris, setIDColoris] = useState(0)
+  const [lot, setLot] = useState('')
+  const [numero, setNumero] = useState('')
+  const [poids, setPoids] = useState('')
+  const [metrage, setMetrage] = useState('')
+  const [IDetat, setIDetat] = useState(1) // default "En Contrôle"
+  const [IDmagasin, setIDmagasin] = useState(0)
+  const [emplacement, setEmplacement] = useState('')
+  const [observations, setObservations] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
+  const refsQuery = useQuery<RefFiniOption[]>({
+    queryKey: ['stock-fini', 'lookups', 'refs'],
+    queryFn: () => apiFetch<RefFiniOption[]>('/stock/fini/lookups/refs'),
+    enabled: open,
+  })
+  const colorisQuery = useQuery<ColorisOption[]>({
+    queryKey: ['stock-fini', 'lookups', 'coloris', IDref_fini],
+    queryFn: () => apiFetch<ColorisOption[]>(`/stock/fini/lookups/coloris?ref_fini=${IDref_fini}`),
+    enabled: open && IDref_fini > 0,
+  })
+  const { data: etats } = useEtatsLookup()
+  const magasinsQuery = useQuery<MagasinOption[]>({
+    queryKey: ['stock-fini', 'lookups', 'magasins'],
+    queryFn: () => apiFetch<MagasinOption[]>('/stock/fini/lookups/magasins'),
+    enabled: open,
+  })
+
+  // Reset every field when the dialog (re)opens.
+  useEffect(() => {
+    if (open) {
+      setIDrefFini(0)
+      setIDColoris(0)
+      setLot('')
+      setNumero('')
+      setPoids('')
+      setMetrage('')
+      setIDetat(1)
+      setIDmagasin(0)
+      setEmplacement('')
+      setObservations('')
+      setError(null)
+    }
+  }, [open])
+
+  // Coloris belongs to a ref — clear the pick when the ref changes.
+  useEffect(() => { setIDColoris(0) }, [IDref_fini])
+
+  const num = (s: string) => {
+    const v = Number(String(s).replace(',', '.'))
+    return Number.isFinite(v) ? v : NaN
+  }
+  const canSubmit =
+    IDref_fini > 0 && IDColoris > 0 && poids.trim() !== '' && !isNaN(num(poids)) && num(poids) >= 0
+
+  const createMutation = useMutation({
+    mutationFn: () =>
+      apiFetch<{ IDstock_fini: number | null }>('/stock/fini', {
+        method: 'POST',
+        body: JSON.stringify({
+          IDref_fini,
+          IDColoris,
+          lot,
+          numero,
+          poids: num(poids),
+          metrage: metrage.trim() === '' ? 0 : num(metrage),
+          IDetat_stock_fini: IDetat,
+          IDmagasin,
+          emplacement,
+          observations,
+        }),
+      }),
+    onSuccess: (res) => onCreated(res?.IDstock_fini ?? null),
+    onError: (err: Error) => setError(err.message || 'Erreur lors de la création'),
+  })
+
+  const inputClass =
+    'w-full h-9 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring'
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-xl" onClose={() => onOpenChange(false)}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <FiniRollIcon className="h-5 w-5 text-accent" />
+            Nouveau rouleau fini
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="grid grid-cols-2 gap-3 mt-4">
+          <div className="col-span-2">
+            <label className="text-xs text-muted-foreground mb-1 block">Référence *</label>
+            <SearchableCombobox<RefFiniOption>
+              options={refsQuery.data ?? []}
+              value={IDref_fini}
+              onChange={setIDrefFini}
+              getId={(r) => r.IDref_fini}
+              getPrimary={(r) => r.reference ?? ''}
+              getSecondary={(r) => r.designation ?? undefined}
+              placeholder="Rechercher une référence"
+              loading={refsQuery.isLoading}
+            />
+          </div>
+
+          <div className="col-span-2">
+            <label className="text-xs text-muted-foreground mb-1 block">Coloris *</label>
+            <PopoverSelect
+              options={(colorisQuery.data ?? []).map((c) => ({ id: c.id, primary: c.reference ?? '' }))}
+              value={IDColoris}
+              onChange={setIDColoris}
+              disabled={IDref_fini === 0}
+              emptyLabel={
+                IDref_fini === 0
+                  ? '— Choisir une référence —'
+                  : colorisQuery.isLoading
+                    ? 'Chargement…'
+                    : (colorisQuery.data ?? []).length === 0
+                      ? 'Aucun coloris'
+                      : '— Sélectionner —'
+              }
+            />
+          </div>
+
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Lot</label>
+            <input type="text" value={lot} onChange={(e) => setLot(e.target.value)} className={inputClass} />
+          </div>
+
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Numéro</label>
+            <input type="text" value={numero} onChange={(e) => setNumero(e.target.value)} className={inputClass} />
+          </div>
+
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Poids (kg) *</label>
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              value={poids}
+              onChange={(e) => setPoids(e.target.value)}
+              className={inputClass}
+            />
+          </div>
+
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Métrage (m)</label>
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              value={metrage}
+              onChange={(e) => setMetrage(e.target.value)}
+              className={inputClass}
+            />
+          </div>
+
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">État</label>
+            <PopoverSelect
+              options={(etats ?? []).map((e) => ({ id: e.IDetat_stock_fini, primary: e.libelle }))}
+              value={IDetat}
+              onChange={setIDetat}
+              hideEmpty
+            />
+          </div>
+
+          <div>
+            <label className="text-xs text-muted-foreground mb-1 block">Magasin</label>
+            <SearchableCombobox<MagasinOption>
+              options={magasinsQuery.data ?? []}
+              value={IDmagasin}
+              onChange={setIDmagasin}
+              getId={(m) => m.IDsous_traitant}
+              getPrimary={(m) => m.nom ?? ''}
+              placeholder="Rechercher un magasin"
+              loading={magasinsQuery.isLoading}
+            />
+          </div>
+
+          <div className="col-span-2">
+            <label className="text-xs text-muted-foreground mb-1 block">Emplacement</label>
+            <input
+              type="text"
+              value={emplacement}
+              onChange={(e) => setEmplacement(e.target.value)}
+              className={inputClass}
+            />
+          </div>
+
+          <div className="col-span-2">
+            <label className="text-xs text-muted-foreground mb-1 block">Observations</label>
+            <textarea
+              value={observations}
+              onChange={(e) => setObservations(e.target.value)}
+              rows={2}
+              className="w-full px-2.5 py-1.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring resize-none"
+            />
+          </div>
+        </div>
+
+        {error && (
+          <div className="mt-3 flex items-center gap-2 text-sm text-destructive">
+            <AlertCircle className="h-4 w-4" />
+            {error}
+          </div>
+        )}
+
+        <DialogFooter className="mt-4 gap-2">
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={createMutation.isPending}>
+            Annuler
+          </Button>
+          <Button onClick={() => createMutation.mutate()} disabled={!canSubmit || createMutation.isPending}>
+            {createMutation.isPending ? (
+              <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+            ) : (
+              <Save className="h-3.5 w-3.5 mr-1.5" />
+            )}
+            Créer
           </Button>
         </DialogFooter>
       </DialogContent>
