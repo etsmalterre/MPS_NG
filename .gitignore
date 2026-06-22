@@ -60,3 +60,10 @@ data_migration/logs/
 
 # API runtime data (permissions JSON, future config files, etc.)
 apps/api/data/
+
+# TypeScript incremental build cache — churns on every build, must not be tracked
+# (a dirty main checkout blocks the fast-forward merge in /feature-complete)
+apps/api/tsconfig.tsbuildinfo
+
+# Per-worktree dev server logs (see scripts/worktree/)
+.dev-logs/
