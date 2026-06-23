@@ -194,6 +194,11 @@ function isConnectionLostError(errMsg: string): boolean {
     || errMsg.includes('Unexpected word')
     || errMsg.includes('consistent with file description')
     || errMsg.includes('description of the data files')
+    // A NOT NULL / constraint violation is a fatal SQL error, not a lost
+    // connection. Respawning + retrying it wedges the bridge queue (it once
+    // took prod's DB layer down — empty stock_fini.pointage written as NULL).
+    || errMsg.includes('does not allow Null values')
+    || errMsg.includes('n\'autorise pas les valeurs Null')
   if (looksLikeSqlError) return false
   return errMsg.includes('[01000]')
     || errMsg.includes('Unable to establish communication')

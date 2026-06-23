@@ -525,7 +525,11 @@ stockFiniRouter.patch('/fini/:id', async (req: Request, res: Response) => {
     }
     if (typeof body.pointage === 'string') {
       const d = body.pointage
-      if (d === '') sets.push(`pointage = NULL`)
+      // stock_fini.pointage is a NOT NULL date column — an empty date must be
+      // written as '' (HFSQL's empty-date sentinel), never NULL. Writing NULL
+      // is rejected server-side ("item does not allow Null values"), which the
+      // bridge mis-reads as a lost connection and respawns, wedging the queue.
+      if (d === '') sets.push(`pointage = ''`)
       else sets.push(`pointage = '${esc(d)}'`)
     }
 
