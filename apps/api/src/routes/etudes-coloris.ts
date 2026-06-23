@@ -87,6 +87,32 @@ function esc(v: string): string {
   return v.replace(/'/g, "''")
 }
 
+/** Emit a text value as a SQL literal that survives the Linux HFSQL bridge.
+ *  Raw multi-byte UTF-8 in a SQL string desyncs the bridge pipeline → HFSQL
+ *  reports "string without end" / [HY090] / 500 (a commentaire with "validé"
+ *  did exactly this). HFSQL text columns are Latin-1, so accented values are
+ *  emitted as a hex literal of their Latin-1 bytes (pure ASCII in transit).
+ *  ASCII-only values keep the normal quoted literal. Mirrors sqlText() in
+ *  commandes-sous-traitant.ts. */
+function sqlText(value: string | null | undefined): string {
+  const v = (value ?? '').toString()
+  if (v === '') return "''"
+  if (/^[\x09\x0A\x0D\x20-\x7E]*$/.test(v)) return `'${esc(v)}'`
+  const ascii = v
+    .replace(/[‘’‚′]/g, "'")
+    .replace(/[“”„″]/g, '"')
+    .replace(/[–—−]/g, '-')
+    .replace(/…/g, '...')
+    .replace(/ /g, ' ')
+  const bytes = Buffer.from(
+    Array.from(ascii, (ch) => {
+      const c = ch.codePointAt(0) ?? 0x3F
+      return c <= 0xFF ? c : 0x3F
+    }),
+  )
+  return `x'${bytes.toString('hex')}'`
+}
+
 function n(v: unknown): number {
   if (v === null || v === undefined || v === '') return 0
   const p = Number(v)
@@ -1069,8 +1095,8 @@ etudesColorisRouter.post('/', async (req: Request, res: Response) => {
           statut_col, commentaire, date_derniere_action)
        VALUES
          (${d.IDclient}, ${d.IDref_fini}, ${d.IDref_fini_colori ?? 0}, ${d.IDsous_traitant ?? 0},
-          '${esc(d.libelle)}', '${esc(d.num_commande ?? '')}', '${esc(d.desig_client ?? '')}',
-          '${dateRecep}', 1, '${esc(d.commentaire ?? '')}', '${todayIso()}')`,
+          ${sqlText(d.libelle)}, ${sqlText(d.num_commande ?? '')}, ${sqlText(d.desig_client ?? '')},
+          '${dateRecep}', 1, ${sqlText(d.commentaire ?? '')}, '${todayIso()}')`,
     )
 
     // Find the newly-inserted row. Use the last ID that matches the creation signature.
@@ -1109,14 +1135,14 @@ etudesColorisRouter.put('/:id', async (req: Request, res: Response) => {
     if (d.IDref_fini !== undefined) sets.push(`IDref_fini = ${d.IDref_fini}`)
     if (d.IDref_fini_colori !== undefined) sets.push(`IDref_fini_colori = ${d.IDref_fini_colori}`)
     if (d.IDsous_traitant !== undefined) sets.push(`IDsous_traitant = ${d.IDsous_traitant}`)
-    if (d.libelle !== undefined) sets.push(`libelle = '${esc(d.libelle)}'`)
-    if (d.num_commande !== undefined) sets.push(`num_commande = '${esc(d.num_commande)}'`)
-    if (d.desig_client !== undefined) sets.push(`desig_client = '${esc(d.desig_client)}'`)
+    if (d.libelle !== undefined) sets.push(`libelle = ${sqlText(d.libelle)}`)
+    if (d.num_commande !== undefined) sets.push(`num_commande = ${sqlText(d.num_commande)}`)
+    if (d.desig_client !== undefined) sets.push(`desig_client = ${sqlText(d.desig_client)}`)
     if (d.date_reception_type !== undefined)
       sets.push(`date_reception_type = '${dateStr(d.date_reception_type)}'`)
     if (d.statut_col !== undefined) sets.push(`statut_col = ${d.statut_col}`)
-    if (d.commentaire !== undefined) sets.push(`commentaire = '${esc(d.commentaire)}'`)
-    if (d.journal !== undefined) sets.push(`journal = '${esc(d.journal)}'`)
+    if (d.commentaire !== undefined) sets.push(`commentaire = ${sqlText(d.commentaire)}`)
+    if (d.journal !== undefined) sets.push(`journal = ${sqlText(d.journal)}`)
 
     if (sets.length === 0) {
       res.status(400).json({ error: 'No fields to update' }); return
@@ -1183,7 +1209,7 @@ etudesColorisRouter.post('/:id/soumissions', async (req: Request, res: Response)
       `INSERT INTO soum_col
          (IDetude_col, date_soum, type_soum, observation, date_reponse, accepte)
        VALUES
-         (${id}, '${dateSoum}', '${esc(typeSoum)}', '${esc(d.observation ?? '')}', '', 0)`,
+         (${id}, '${dateSoum}', ${sqlText(typeSoum)}, ${sqlText(d.observation ?? '')}, '', 0)`,
     )
 
     // Hybrid auto-advance: if étude was "attente labo" (1), bump to "soumis au client" (2)
@@ -1216,8 +1242,8 @@ etudesColorisRouter.put('/soumissions/:soumId', async (req: Request, res: Respon
 
     const sets: string[] = []
     if (d.date_soum !== undefined) sets.push(`date_soum = '${dateStr(d.date_soum)}'`)
-    if (d.type_soum !== undefined) sets.push(`type_soum = '${esc(d.type_soum)}'`)
-    if (d.observation !== undefined) sets.push(`observation = '${esc(d.observation)}'`)
+    if (d.type_soum !== undefined) sets.push(`type_soum = ${sqlText(d.type_soum)}`)
+    if (d.observation !== undefined) sets.push(`observation = ${sqlText(d.observation)}`)
     if (sets.length === 0) { res.status(400).json({ error: 'No fields to update' }); return }
 
     // Look up parent étude to return a refreshed detail and touch its date
@@ -1340,12 +1366,12 @@ etudesColorisRouter.post('/soumissions/:soumId/respond', async (req: Request, re
           // orphan / default "Tricotage Malterre").
           await query(
             `INSERT INTO ref_fini_colori (IDref_fini, IDsous_traitant, IDteinture, reference, observations)
-             VALUES (${idRefFini}, ${idSousTraitant}, ${defaultTeinture}, '${esc(newLibelle)}', '')`,
+             VALUES (${idRefFini}, ${idSousTraitant}, ${defaultTeinture}, ${sqlText(newLibelle)}, '')`,
           )
           // Look up the new row's ID (HFSQL has no RETURNING).
           const inserted = await query<{ IDref_fini_colori: number }>(
             `SELECT TOP 1 IDref_fini_colori FROM ref_fini_colori
-             WHERE IDref_fini = ${idRefFini} AND reference = '${esc(newLibelle)}'
+             WHERE IDref_fini = ${idRefFini} AND reference = ${sqlText(newLibelle)}
              ORDER BY IDref_fini_colori DESC`,
           )
           if (inserted[0]?.IDref_fini_colori) {
@@ -1355,7 +1381,7 @@ etudesColorisRouter.post('/soumissions/:soumId/respond', async (req: Request, re
 
         await query(
           `UPDATE etude_col SET
-             libelle = '${esc(newLibelle)}',
+             libelle = ${sqlText(newLibelle)},
              IDref_fini_colori = ${newColoriId},
              statut_col = 3
            WHERE IDetude_col = ${etudeId}`,
