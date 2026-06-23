@@ -6,11 +6,12 @@
 //     lot sub-table (read-only, per-roll Rdt = metrage/poids + Moyenne footer)
 //   - right sidebar tabs: Contrôles (editable) / Documents / Défauts / Client
 //   - status footer pill = lot état (En contrôle / En reprise / Validé / Expédié
-//     / Attente), changed immediately; header lock button archives the lot
-//     (moves it between the En cours / Terminé filters).
+//     / Attente), changed immediately. The En cours / Terminé filters key off the
+//     état (Validé = Terminé), NOT fin_archivage.
 //
 // Edit mode (Modifier → Enregistrer) only touches the Contrôles measurements +
-// observations + emplacement + fin d'archivage. Plugged into the shared
+// observations + emplacement + fin d'archivage (the sample-disposal date — when
+// the physical swatch can be discarded; not a status). Plugged into the shared
 // unsaved-changes guard.
 
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
@@ -32,8 +33,6 @@ import {
   Truck,
   HelpCircle,
   ChevronUp,
-  Archive,
-  ArchiveRestore,
   Ruler,
   Package,
   FileText,
@@ -41,9 +40,11 @@ import {
   Building2,
   ClipboardCheck,
   Factory,
+  MessageSquare,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Tooltip } from '@/components/ui/tooltip'
 import {
   Dialog,
   DialogContent,
@@ -68,8 +69,13 @@ interface ListRow {
   sous_traitant_nom: string
   IDetatLot: number | null
   etat_libelle: string | null
-  archived: boolean
   date: string | null
+}
+
+interface QualityEntry {
+  source: string
+  author: string
+  text: string
 }
 
 interface PieceRow {
@@ -79,6 +85,8 @@ interface PieceRow {
   metrage: number
   magasin_nom: string
   rdt: number | null
+  valid: boolean | null
+  quality: QualityEntry[]
 }
 
 interface ClientInfo {
@@ -108,6 +116,7 @@ interface SuiviLotDetail {
   laize_sst: number
   poids_sst: number
   rendement_sst: number
+  freinte_sst: number
   stabH_sst: number
   stabL_sst: number
   laize_tirelle: number
@@ -120,10 +129,21 @@ interface SuiviLotDetail {
   fin_archivage: string
   IDetatLot: number | null
   etat_libelle: string | null
-  archived: boolean
   pieces: PieceRow[]
   moyenne_rdt: number | null
+  rendement_mini: number | null
+  rendement_maxi: number | null
+  ref_bounds: RefBounds
   client: ClientInfo | null
+}
+
+interface RefBounds {
+  laize_min: number
+  laize_max: number
+  poids_min: number
+  poids_max: number
+  stab_hauteur: number
+  stab_largeur: number
 }
 
 interface DefautRow {
@@ -157,7 +177,7 @@ const ETAT_META: Record<Etat, {
   2: { label: 'En reprise', icon: RotateCcw, solidBg: 'bg-orange-500 border-orange-500', iconColor: 'text-orange-600' },
   3: { label: 'Validé', icon: CheckCircle2, solidBg: 'bg-success border-success', iconColor: 'text-green-600' },
   4: { label: 'Expédié', icon: Truck, solidBg: 'bg-blue-500 border-blue-500', iconColor: 'text-blue-600' },
-  5: { label: 'Attente décision', icon: HelpCircle, solidBg: 'bg-zinc-500 border-zinc-500', iconColor: 'text-zinc-500' },
+  5: { label: 'Attente décision', icon: HelpCircle, solidBg: 'bg-violet-500 border-violet-500', iconColor: 'text-violet-600' },
 }
 const ETAT_ORDER: Etat[] = [1, 2, 3, 4, 5]
 
@@ -311,15 +331,6 @@ export function QualiteSuiviLots() {
     onSuccess: invalidateAll,
   })
 
-  const archiveMut = useMutation({
-    mutationFn: (archived: boolean) =>
-      apiFetch(`/suivi-lots/${selectedId}/archive`, {
-        method: 'POST',
-        body: JSON.stringify({ archived }),
-      }),
-    onSuccess: invalidateAll,
-  })
-
   // ── Guard ───────────────────────────────────────────────
   const guard = useUnsavedGuard({
     isDirty,
@@ -408,11 +419,9 @@ export function QualiteSuiviLots() {
               detail={detail}
               isEditing={isEditing}
               saving={saveMut.isPending}
-              archiving={archiveMut.isPending}
               onStartEdit={startEdit}
               onCancelEdit={cancelEdit}
               onSave={() => saveMut.mutate()}
-              onArchiveToggle={() => archiveMut.mutate(!detail.archived)}
               onPrint={() => setPrintOpen(true)}
               onEmail={() => setEmailOpen(true)}
             />
@@ -531,8 +540,8 @@ function LotList({
           rows.map((row) => {
             const isSelected = selectedId === row.IDsuivilot
             const meta = etatOf(row.IDetatLot)
-            const Icon = row.archived ? Archive : meta ? ETAT_META[meta].icon : Clock
-            const iconColor = row.archived ? 'text-muted-foreground' : meta ? ETAT_META[meta].iconColor : 'text-muted-foreground'
+            const Icon = meta ? ETAT_META[meta].icon : Clock
+            const iconColor = meta ? ETAT_META[meta].iconColor : 'text-muted-foreground'
             return (
               <div
                 key={row.IDsuivilot}
@@ -544,7 +553,7 @@ function LotList({
               >
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-sm truncate flex-1">{row.sous_traitant_nom || '—'}</span>
-                  <span className="flex-shrink-0" title={row.archived ? 'Archivé' : meta ? ETAT_META[meta].label : ''}>
+                  <span className="flex-shrink-0" title={meta ? ETAT_META[meta].label : ''}>
                     <Icon className={cn('h-4 w-4', iconColor)} />
                   </span>
                 </div>
@@ -570,22 +579,18 @@ function LotDetailHeader({
   detail,
   isEditing,
   saving,
-  archiving,
   onStartEdit,
   onCancelEdit,
   onSave,
-  onArchiveToggle,
   onPrint,
   onEmail,
 }: {
   detail: SuiviLotDetail
   isEditing: boolean
   saving: boolean
-  archiving: boolean
   onStartEdit: () => void
   onCancelEdit: () => void
   onSave: () => void
-  onArchiveToggle: () => void
   onPrint: () => void
   onEmail: () => void
 }) {
@@ -608,12 +613,6 @@ function LotDetailHeader({
           {!isEditing && (
             <div className="flex gap-1.5 mt-1 flex-wrap items-center text-sm text-muted-foreground">
               <span className="truncate">{detail.reference || '—'}</span>
-              {!!detail.archived && (
-                <Badge variant="secondary" className="text-[10px] py-0 gap-1">
-                  <Archive className="h-2.5 w-2.5" />
-                  Archivé
-                </Badge>
-              )}
             </div>
           )}
         </div>
@@ -631,16 +630,6 @@ function LotDetailHeader({
             </>
           ) : (
             <>
-              <Button
-                variant="outline"
-                size="icon"
-                className="h-9 w-9"
-                title={detail.archived ? 'Désarchiver' : 'Archiver'}
-                onClick={onArchiveToggle}
-                disabled={archiving}
-              >
-                {archiving ? <Loader2 className="h-4 w-4 animate-spin" /> : detail.archived ? <ArchiveRestore className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
-              </Button>
               <Button variant="outline" size="icon" className="h-9 w-9" title="Imprimer" onClick={onPrint}>
                 <Printer className="h-4 w-4" />
               </Button>
@@ -700,6 +689,11 @@ function RecapSection({ detail }: { detail: SuiviLotDetail }) {
         <div className="flex items-center gap-2 p-4 pb-2">
           <Package className="h-4 w-4 text-accent" />
           <h2 className="text-sm font-semibold">Pièces du lot</h2>
+          {detail.rendement_mini != null && detail.rendement_maxi != null && (
+            <span className="text-[11px] text-muted-foreground">
+              Rdt conforme : {fmtNum(detail.rendement_mini, 2)} – {fmtNum(detail.rendement_maxi, 2)}
+            </span>
+          )}
           <Badge variant="secondary" className="text-xs ml-auto">{detail.pieces.length}</Badge>
         </div>
         {detail.pieces.length === 0 ? (
@@ -708,11 +702,13 @@ function RecapSection({ detail }: { detail: SuiviLotDetail }) {
           <div className="px-2 pb-2">
             <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
               <colgroup>
+                <col style={{ width: '20%' }} />
+                <col style={{ width: '14%' }} />
+                <col style={{ width: '14%' }} />
                 <col style={{ width: '22%' }} />
-                <col style={{ width: '18%' }} />
-                <col style={{ width: '18%' }} />
-                <col style={{ width: '27%' }} />
-                <col style={{ width: '15%' }} />
+                <col style={{ width: '13%' }} />
+                <col style={{ width: '9%' }} />
+                <col style={{ width: '8%' }} />
               </colgroup>
               <thead>
                 <tr className="text-[11px] uppercase tracking-wide text-muted-foreground border-b border-border/60">
@@ -721,6 +717,8 @@ function RecapSection({ detail }: { detail: SuiviLotDetail }) {
                   <th className="px-2 py-2 text-right font-semibold">Métrage</th>
                   <th className="px-2 py-2 text-left font-semibold">Magasin</th>
                   <th className="px-2 py-2 text-right font-semibold">Rdt</th>
+                  <th className="px-2 py-2 text-center font-semibold">Conforme</th>
+                  <th className="px-2 py-2 text-center font-semibold">Qualité</th>
                 </tr>
               </thead>
               <tbody>
@@ -730,7 +728,27 @@ function RecapSection({ detail }: { detail: SuiviLotDetail }) {
                     <td className="px-2 py-1.5 text-right tabular-nums">{fmtNum(p.poids, 2)}</td>
                     <td className="px-2 py-1.5 text-right tabular-nums">{fmtNum(p.metrage, 2)}</td>
                     <td className="px-2 py-1.5 truncate text-muted-foreground" title={p.magasin_nom}>{p.magasin_nom || '—'}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums">{p.rdt != null ? fmtNum(p.rdt, 2) : '—'}</td>
+                    <td className={cn(
+                      'px-2 py-1.5 text-right tabular-nums',
+                      p.valid === true && 'text-green-600 font-medium',
+                      p.valid === false && 'text-destructive font-medium',
+                    )}>
+                      {p.rdt != null ? fmtNum(p.rdt, 2) : '—'}
+                    </td>
+                    <td className="px-2 py-1.5">
+                      {p.valid == null ? (
+                        <span className="block text-center text-muted-foreground">—</span>
+                      ) : p.valid ? (
+                        <CheckCircle2 className="h-4 w-4 text-green-600 mx-auto" aria-label="Conforme" />
+                      ) : (
+                        <AlertTriangle className="h-4 w-4 text-destructive mx-auto" aria-label="Non conforme" />
+                      )}
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <div className="flex justify-center">
+                        <QualityHistoryCell numero={p.numero} quality={p.quality} />
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -740,6 +758,8 @@ function RecapSection({ detail }: { detail: SuiviLotDetail }) {
                   <td className="px-2 py-2 text-right tabular-nums text-accent">
                     {detail.moyenne_rdt != null ? fmtNum(detail.moyenne_rdt, 2) : '—'}
                   </td>
+                  <td />
+                  <td />
                 </tr>
               </tfoot>
             </table>
@@ -857,6 +877,36 @@ function LotSidebar({
 
 const editCardClass = 'border-l-4 border-l-accent/70 bg-accent/[0.03]'
 
+type ConformKind = 'laize' | 'poids' | 'stabH' | 'stabL'
+
+// Conformité d'une mesure de contrôle vs les tolérances de ref_fini (ports the
+// legacy croix.png / terminer3.png logic). Returns null when there's no marker to
+// show: réf absente / borne(s) non définies, ou valeur non saisie (0).
+function checkConform(kind: ConformKind, val: number, b: RefBounds): boolean | null {
+  if (val === 0) return null
+  switch (kind) {
+    case 'laize':
+      if (b.laize_min <= 0 && b.laize_max <= 0) return null
+      return (b.laize_min <= 0 || val >= b.laize_min) && (b.laize_max <= 0 || val <= b.laize_max)
+    case 'poids':
+      if (b.poids_min <= 0 && b.poids_max <= 0) return null
+      return (b.poids_min <= 0 || val >= b.poids_min) && (b.poids_max <= 0 || val <= b.poids_max)
+    case 'stabH':
+      return val >= b.stab_hauteur
+    case 'stabL':
+      return val >= b.stab_largeur
+  }
+}
+
+function ConformMarker({ conform }: { conform: boolean | null }) {
+  if (conform == null) return null
+  return conform ? (
+    <CheckCircle2 className="h-4 w-4 text-green-600 flex-shrink-0" aria-label="Conforme" />
+  ) : (
+    <AlertTriangle className="h-4 w-4 text-destructive flex-shrink-0" aria-label="Non conforme" />
+  )
+}
+
 function ControlesTab({
   detail,
   isEditing,
@@ -868,26 +918,29 @@ function ControlesTab({
   edit: EditState | null
   onEditField: <K extends keyof EditState>(key: K, value: string) => void
 }) {
+  // Only flag conformity when a ref_fini is attached (otherwise there's nothing
+  // to compare against and stab would falsely flag any shrinkage as non-conforme).
+  const bounds = detail.reference ? detail.ref_bounds : undefined
   return (
     <>
       {/* Sous-Traitant */}
       <SidebarCard title="Sous-Traitant" icon={<Factory className="h-3.5 w-3.5 text-accent" />} highlight={isEditing}>
-        <KVNum label="Laize" field="laize_sst" detailVal={detail.laize_sst} isEditing={isEditing} edit={edit} onEditField={onEditField} />
-        <KVNum label="Poids" field="poids_sst" detailVal={detail.poids_sst} isEditing={isEditing} edit={edit} onEditField={onEditField} />
+        <KVNum label="Laize" field="laize_sst" detailVal={detail.laize_sst} conformKind="laize" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
+        <KVNum label="Poids" field="poids_sst" detailVal={detail.poids_sst} conformKind="poids" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
         <KVNum label="Rendement" field="rendement_sst" detailVal={detail.rendement_sst} dec={2} isEditing={isEditing} edit={edit} onEditField={onEditField} />
-        {/* No freinte_sst column exists in suivilot → show the demande value (read-only). */}
-        <KV label="Freinte" value={`${fmtNum(detail.freinte_demandee, 2)} %`} />
-        <KVNum label="Stab H" field="stabH_sst" detailVal={detail.stabH_sst} isEditing={isEditing} edit={edit} onEditField={onEditField} />
-        <KVNum label="Stab L" field="stabL_sst" detailVal={detail.stabL_sst} isEditing={isEditing} edit={edit} onEditField={onEditField} />
+        {/* Freinte is computed (legacy formula), not stored — see API. Read-only. */}
+        <KV label="Freinte" value={`${fmtNum(detail.freinte_sst * 100, 0)} %`} />
+        <KVNum label="Stab H" field="stabH_sst" detailVal={detail.stabH_sst} conformKind="stabH" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
+        <KVNum label="Stab L" field="stabL_sst" detailVal={detail.stabL_sst} conformKind="stabL" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
       </SidebarCard>
 
       {/* Tirelle */}
       <SidebarCard title="Tirelle" icon={<Ruler className="h-3.5 w-3.5 text-accent" />} highlight={isEditing}>
-        <KVNum label="Laize" field="laize_tirelle" detailVal={detail.laize_tirelle} isEditing={isEditing} edit={edit} onEditField={onEditField} />
-        <KVNum label="Poids" field="poids_tirelle" detailVal={detail.poids_tirelle} isEditing={isEditing} edit={edit} onEditField={onEditField} />
+        <KVNum label="Laize" field="laize_tirelle" detailVal={detail.laize_tirelle} conformKind="laize" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
+        <KVNum label="Poids" field="poids_tirelle" detailVal={detail.poids_tirelle} conformKind="poids" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
         <KVNum label="Rendement" field="rendement_tirelle" detailVal={detail.rendement_tirelle} dec={2} isEditing={isEditing} edit={edit} onEditField={onEditField} />
-        <KVNum label="Stab H" field="stabH_tirelle" detailVal={detail.stabH_tirelle} isEditing={isEditing} edit={edit} onEditField={onEditField} />
-        <KVNum label="Stab L" field="stabL_tirelle" detailVal={detail.stabL_tirelle} isEditing={isEditing} edit={edit} onEditField={onEditField} />
+        <KVNum label="Stab H" field="stabH_tirelle" detailVal={detail.stabH_tirelle} conformKind="stabH" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
+        <KVNum label="Stab L" field="stabL_tirelle" detailVal={detail.stabL_tirelle} conformKind="stabL" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
       </SidebarCard>
 
       {/* Observations + emplacement + archivage */}
@@ -972,6 +1025,8 @@ function KVNum({
   isEditing,
   edit,
   onEditField,
+  conformKind,
+  bounds,
 }: {
   label: string
   field: keyof EditState
@@ -980,22 +1035,32 @@ function KVNum({
   isEditing: boolean
   edit: EditState | null
   onEditField: <K extends keyof EditState>(key: K, value: string) => void
+  conformKind?: ConformKind
+  bounds?: RefBounds
 }) {
+  // Conformity is computed off the live value: the edited string while editing,
+  // the saved value otherwise — so the marker updates as the user types.
+  const currentVal = isEditing && edit ? Number(edit[field]) || 0 : detailVal
+  const conform =
+    conformKind && bounds ? checkConform(conformKind, currentVal, bounds) : null
   return (
     <KV
       label={label}
       value={
-        isEditing && edit ? (
-          <input
-            type="number"
-            step="any"
-            value={edit[field]}
-            onChange={(e) => onEditField(field, e.target.value)}
-            className="h-7 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring text-right w-[110px] tabular-nums"
-          />
-        ) : (
-          <span className="tabular-nums">{fmtNum(detailVal, dec)}</span>
-        )
+        <span className="inline-flex items-center justify-end gap-1.5">
+          <ConformMarker conform={conform} />
+          {isEditing && edit ? (
+            <input
+              type="number"
+              step="any"
+              value={edit[field]}
+              onChange={(e) => onEditField(field, e.target.value)}
+              className="h-7 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring text-right w-[110px] tabular-nums"
+            />
+          ) : (
+            <span className="tabular-nums">{fmtNum(detailVal, dec)}</span>
+          )}
+        </span>
       }
     />
   )
@@ -1072,6 +1137,52 @@ function DocViewDialog({ doc, commandeId, onClose }: { doc: DocRow | null; comma
         </DialogContent>
       )}
     </Dialog>
+  )
+}
+
+// ── Roll quality history (icon + hover tooltip on a piece row) ──────
+
+// One hue per quality stage so the user reads the source at a glance.
+const QUALITY_SOURCE_META: Record<string, { dot: string; text: string }> = {
+  Tricotage: { dot: 'bg-amber-500', text: 'text-amber-700' },
+  'Défaut tricotage': { dot: 'bg-amber-600', text: 'text-amber-800' },
+  Ennoblisseur: { dot: 'bg-sky-500', text: 'text-sky-700' },
+  'Contrôle fini': { dot: 'bg-teal-500', text: 'text-teal-700' },
+}
+
+function QualityHistoryCell({ numero, quality }: { numero: string; quality: QualityEntry[] }) {
+  if (quality.length === 0) return null
+  // Any "Défaut*" entry → flag the icon as a defect (amber triangle), else a comment bubble.
+  const hasDefaut = quality.some((q) => q.source.toLowerCase().startsWith('défaut'))
+  const Icon = hasDefaut ? AlertTriangle : MessageSquare
+  return (
+    <Tooltip
+      side="left"
+      content={
+        <div className="w-64 space-y-2 py-0.5">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Historique qualité — {numero}
+          </p>
+          <ul className="space-y-1.5">
+            {quality.map((q, i) => {
+              const meta = QUALITY_SOURCE_META[q.source] ?? { dot: 'bg-zinc-400', text: 'text-zinc-600' }
+              return (
+                <li key={i} className="flex gap-1.5">
+                  <span className={cn('mt-1 h-1.5 w-1.5 rounded-full flex-shrink-0', meta.dot)} />
+                  <div className="min-w-0">
+                    <span className={cn('text-[11px] font-semibold', meta.text)}>{q.source}</span>
+                    {!!q.author && <span className="text-[11px] text-muted-foreground"> · {q.author}</span>}
+                    <p className="text-xs text-foreground whitespace-pre-line break-words">{q.text}</p>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      }
+    >
+      <Icon className={cn('h-3.5 w-3.5 cursor-pointer', hasDefaut ? 'text-amber-600' : 'text-accent')} aria-label="Historique qualité" />
+    </Tooltip>
   )
 }
 

@@ -10,6 +10,34 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-23 — feat/suivilot
+Qualité › Suivi des lots — enhancements to the existing screen (`apps/web/src/pages/QualiteSuiviLots.tsx`
++ `apps/api/src/routes/suivi-lots.ts`). **(1) RTF commentaire**: the commande's `commentaire` (RTF in
+`commande_sous_traitant`) is now run through `stripRtf()` so the Récap shows plain text, not raw `{\rtf…}`.
+**(2) Pièces conformity**: each received roll (`stock_fini`) gets a rendement-validity flag via the legacy
+`gxRendementMini`/`gxRendementMaxi` model — bounds computed from `ref_fini.poids_Min/Max · laizeHT_Min/Max ·
+freinte · rendement` and `suivilot.rendement_demande`; a new **Conforme** column (far-left was moved to a
+dedicated far-right **Qualité** column) shows green check / red triangle, and the header shows the valid Rdt
+range. **(3) Per-roll quality history**: a new far-right **Qualité** column shows a comment/defect icon
+(MessageSquare, or amber AlertTriangle when a defect exists) with a hover tooltip aggregating each roll's
+quality stages — Tricotage (source `stock_ecru.observations` + `visiteur`), Défaut tricotage
+(`defaut_qualite` Type_Reference=2 keyed on écru + Type_Reference=1 keyed on the écru's `piece_production`),
+Ennoblisseur (`stock_fini.observation_sst`), Contrôle fini (`stock_fini.observations`); all accent-repaired,
+NUL-padding stripped via `cleanText`. **(4) Contrôle conformity markers**: Laize / Poids / Stab H / Stab L
+in both Sous-Traitant and Tirelle cards are flagged conforme/non-conforme live (view + edit) against
+`ref_fini` bounds shipped as `ref_bounds` — laize `min≤val≤max`, poids `min≤val≤max`, stab `val ≥
+stab_hauteur/largeur`; suppressed when no ref or value not measured. **(5) Freinte SST computed**: the
+Sous-Traitant Freinte is now the legacy computed value `1 − (poids_sst·laize_sst/100000)·moyenneRdt`
+(was wrongly showing `freinte_demandee`), displayed as a rounded percentage. **(6) En cours / Terminé
+filter fix**: the left-list status filter now keys off lot état (`IDetatLot = 3` "Validé" = Terminé),
+matching legacy (34 en cours / ~5114 terminé) — it previously keyed off `fin_archivage`, which is actually
+the sample-disposal date, not a status. **(7) Archive concept removed**: dropped the bogus "archived"
+status (card marker, header badge + toggle button, `POST /:id/archive`, `isArchived`) since `fin_archivage`
+is just the disposal date — it remains as the editable "Fin d'archivage" field in the Observations card.
+Also fixed a `fixEncoding` aliasing bug (the list selected `st.nom AS sous_traitant_nom` then repaired the
+non-existent aliased column, so `Société` rendered mangled — now selects real `nom` and renames in JS), and
+gave état 5 "Attente décision" a distinct violet hue so it no longer reads like the gray archived icon.
+
 ## 2026-06-23 — feat/ref-tm
 Tombé Métier › Références (`apps/web/src/pages/TombeMetierReferences.tsx` + `apps/api/src/routes/references-ecru.ts`) refinements + a new **Coût de tricotage** breakdown. **Jauge/Diamètre** are stored as 1-based ordinals indexing legacy combos (`gtaJauge`: 2→14, 3→18, 4→20, 5→28, no unit — needles/inch; `gtaDiametreMachine`: 2→26", 3→30") — both now display the real value and edit via dropdowns (the raw ordinal is never shown; ordinal 1/`-1`/0 = unset). **Search** is multi-criteria (space-separated AND across reference, désignation, contexture, jauge, diamètre — list endpoint now returns `Jauge`/`diametre`); the footer count tracks the filtered list. Identification header subtitle falls back to contexture when no désignation; Composition/Coloris cards collapse by default per selection. **"+ Nouveau"** auto-generates the next free 3-digit zero-padded reference server-side; duplicate references are rejected on rename (409); fixed the create-selection race (new card stays selected + scrolls into view) and stale-detail-after-delete. **Safeguards**: composition must total 100 % to leave edit mode (empty allowed); the composition AND five fabric-defining header fields (contexture, jauge, diamètre, bio, recyclé) are **frozen** once rolls (`stock_ecru`) or tricoteur orders (`ligne_commande_sous_traitant` type 0/1) exist — UI locks + backend 409/silent-keep; a coloris can't be deleted while affected to a roll, order, or its own composition (per-coloris in-use flags drive a greyed lock affordance + 409 guard). Statistiques gained "Rouleaux créés" + "Poids total" (Σ `stock_ecru.poids`); "Réglages par métier" "+" now opens a modal (`MachineFormDialog`); "Tombé du métier" is a Rouleaux/Plis dropdown. **Coût de tricotage**: refactored `apps/api/src/lib/pricing-trm.ts` to expose `prixDeRevientTRMDetail()` (full per-component breakdown — Frais de structure / Frais de production / Main d'œuvre — with `prixDeRevientTRM`/`trmLinePrix` as thin wrappers, line pricing byte-identical, regression `test-prix-revient-trm.ts` still 9/10); new `GET /api/references-ecru/:id/cout-tricotage?qty=` (default 1000) + a sidebar card and read-only modal with an editable debounced quantity, the three sections, subtotals, and the totals chain (coût → prix de vente ×1/0.7 → prix plancher → prix retenu).
 
