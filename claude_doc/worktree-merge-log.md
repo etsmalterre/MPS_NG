@@ -10,6 +10,24 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-23 — feat/rapport
+Rapports › Commandes sous-traitants — added a column-picker dialog to the Excel export on the
+table-centric `apps/web/src/pages/RapportCommandesSst.tsx` report (no API change). Clicking
+"Exporter Excel" now opens a modal (`mps_designer §18.A` basic-form Dialog: gold `Columns3`
+title icon, "Colonnes à exporter") instead of exporting immediately. The 18 export columns were
+extracted into a single `EXPORT_COLUMNS` catalog (stable `key`, label, value getter, Excel
+`wch` width); the export builds headers/rows/widths from whichever columns are selected, always
+in canonical order regardless of click order. The modal lists each column as a plain checkbox
+(multi-select, per `§35.4`) with a live count and "Tout sélectionner / Tout désélectionner"
+shortcuts, plus Annuler + a primary Exporter button (spinner while writing, disabled when no
+column is selected). The selection is persisted to `localStorage`
+(`mps:rapport-sst:export-columns`) on a successful export and restored on load — since user
+identity is station-based, per-browser localStorage is effectively per-user. The loader is
+defensive: drops unknown keys, preserves canonical order, and falls back to "all columns" on
+missing/corrupt data or privacy-mode errors. Export still operates on the currently visible
+(search-filtered + sorted) rows; quantity FP-noise rounding (`qty1`) was hoisted to module scope
+and reused.
+
 ## 2026-06-23 — feat/stock-fini
 Finis › Stock — enrichment pass on the existing table-centric stock_fini screen
 (`apps/web/src/pages/FinisStock.tsx` + `apps/api/src/routes/stock-fini.ts`). Five changes:

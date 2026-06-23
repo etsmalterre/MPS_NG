@@ -17,10 +17,18 @@ import {
   CheckCircle2,
   AlertTriangle,
   FileSpreadsheet,
+  Columns3,
   type LucideIcon,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate } from '@/lib/dates'
 import { apiFetch } from '@/lib/api'
@@ -111,6 +119,73 @@ function daysFmt(v: number | null): string {
 }
 function dateFmt(v: string | null): string {
   return v && /^\d{8}$/.test(v) ? formatHfsqlDate(v) : ''
+}
+
+// ── Excel export column catalog ─────────────────────────
+//
+// One entry per exportable column: a stable `key` (used to persist the user's
+// selection), the header label, the cell value getter, and the Excel column
+// width (`wch`). The user picks which of these go into the workbook via the
+// column-picker dialog; the choice is remembered in localStorage.
+//
+// Quantities arrive as floats with FP noise (e.g. 36.20000076). Round to 1
+// decimal but keep them as numbers so Excel can still sum the columns.
+const qty1 = (v: number) => Math.round(v * 10) / 10
+
+interface ExportColumn {
+  key: string
+  label: string
+  width: number
+  value: (r: RapportLine) => string | number
+}
+const EXPORT_COLUMNS: ExportColumn[] = [
+  { key: 'statut', label: 'Statut', width: 16, value: (r) => statutMeta(r.sstatut).label },
+  { key: 'numero', label: 'Numéro', width: 8, value: (r) => r.IDcommande_sous_traitant },
+  { key: 'sous_traitant', label: 'Sous-traitant', width: 22, value: (r) => r.sous_traitant_nom || '' },
+  { key: 'reference', label: 'Référence', width: 12, value: (r) => r.reference || '' },
+  { key: 'coloris', label: 'Coloris', width: 18, value: (r) => r.coloris || '' },
+  { key: 'qte_commandee', label: 'Qté commandée', width: 13, value: (r) => qty1(r.qte_commandee) },
+  { key: 'qte_affectee', label: 'Qté affectée', width: 12, value: (r) => qty1(r.qte_affectee) },
+  { key: 'qte_receptionnee', label: 'Qté réceptionnée', width: 14, value: (r) => qty1(r.qte_receptionnee) },
+  { key: 'unite', label: 'Unité', width: 7, value: (r) => r.unite_label },
+  { key: 'date_commande', label: 'Date commande', width: 13, value: (r) => dateFmt(r.date_commande) },
+  { key: 'delai_initial', label: 'Délai initial', width: 12, value: (r) => dateFmt(r.delai_initial) },
+  { key: 'delai_actuel', label: 'Délai actuel', width: 12, value: (r) => dateFmt(r.delai_actuel) },
+  { key: 'retard', label: 'Retard (j)', width: 9, value: (r) => r.retard_jours ?? '' },
+  { key: 'delai_client', label: 'Délai client', width: 12, value: (r) => dateFmt(r.delai_client) },
+  { key: 'marge', label: 'Marge (j)', width: 9, value: (r) => r.marge_jours ?? '' },
+  { key: 'client', label: 'Client', width: 22, value: (r) => r.client_nom || '' },
+  { key: 'relance', label: 'Relance', width: 12, value: (r) => dateFmt(r.date_relance) },
+  { key: 'commentaire', label: 'Commentaire', width: 40, value: (r) => r.commentaire || '' },
+]
+const EXPORT_COLUMN_KEYS = EXPORT_COLUMNS.map((c) => c.key)
+
+// Persisted per-user (per-browser) column selection. The station-based user
+// identity means localStorage is effectively per-user here.
+const EXPORT_PREF_KEY = 'mps:rapport-sst:export-columns'
+
+function loadExportSelection(): string[] {
+  try {
+    const raw = localStorage.getItem(EXPORT_PREF_KEY)
+    if (!raw) return EXPORT_COLUMN_KEYS
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return EXPORT_COLUMN_KEYS
+    // Keep only keys that still exist (and in canonical column order), so a
+    // stored selection survives future column additions/removals gracefully.
+    const stored = new Set(parsed.filter((k): k is string => typeof k === 'string'))
+    const kept = EXPORT_COLUMN_KEYS.filter((k) => stored.has(k))
+    return kept.length > 0 ? kept : EXPORT_COLUMN_KEYS
+  } catch {
+    return EXPORT_COLUMN_KEYS
+  }
+}
+
+function saveExportSelection(keys: string[]): void {
+  try {
+    localStorage.setItem(EXPORT_PREF_KEY, JSON.stringify(keys))
+  } catch {
+    /* ignore quota / privacy-mode errors */
+  }
 }
 
 // ── Sort handling ──────────────────────────────────────
@@ -229,62 +304,46 @@ export function RapportCommandesSst() {
   }, [])
 
   // Excel export of the currently visible (search-filtered + sorted) rows.
-  // SheetJS is lazy-loaded on click so it stays out of the main bundle.
+  // Clicking "Exporter Excel" opens a column-picker dialog; the actual export
+  // (SheetJS lazy-loaded so it stays out of the main bundle) runs on confirm,
+  // limited to the columns the user selected. The selection is remembered.
   const [exporting, setExporting] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const [exportCols, setExportCols] = useState<string[]>(() => loadExportSelection())
+
   const handleExport = useCallback(async () => {
     if (filteredSorted.length === 0) return
+    // Keep canonical column order regardless of click order, and never export
+    // an empty workbook (guarded again at the button, belt-and-suspenders).
+    const cols = EXPORT_COLUMNS.filter((c) => exportCols.includes(c.key))
+    if (cols.length === 0) return
     setExporting(true)
     try {
       const XLSX = await import('xlsx')
-      // Quantities arrive as floats with FP noise (e.g. 36.20000076). Round to
-      // 1 decimal but keep them as numbers so Excel can still sum the columns.
-      const qty1 = (v: number) => Math.round(v * 10) / 10
-      const headers = [
-        'Statut', 'Numéro', 'Sous-traitant', 'Référence', 'Coloris',
-        'Qté commandée', 'Qté affectée', 'Qté réceptionnée', 'Unité',
-        'Date commande', 'Délai initial', 'Délai actuel', 'Retard (j)',
-        'Délai client', 'Marge (j)', 'Client', 'Relance', 'Commentaire',
-      ]
       const aoa: (string | number)[][] = [
-        headers,
-        ...filteredSorted.map((r) => [
-          statutMeta(r.sstatut).label,
-          r.IDcommande_sous_traitant,
-          r.sous_traitant_nom || '',
-          r.reference || '',
-          r.coloris || '',
-          qty1(r.qte_commandee),
-          qty1(r.qte_affectee),
-          qty1(r.qte_receptionnee),
-          r.unite_label,
-          dateFmt(r.date_commande),
-          dateFmt(r.delai_initial),
-          dateFmt(r.delai_actuel),
-          r.retard_jours ?? '',
-          dateFmt(r.delai_client),
-          r.marge_jours ?? '',
-          r.client_nom || '',
-          dateFmt(r.date_relance),
-          r.commentaire || '',
-        ]),
+        cols.map((c) => c.label),
+        ...filteredSorted.map((r) => cols.map((c) => c.value(r))),
       ]
       const ws = XLSX.utils.aoa_to_sheet(aoa)
-      ws['!cols'] = [
-        { wch: 16 }, { wch: 8 }, { wch: 22 }, { wch: 12 }, { wch: 18 },
-        { wch: 13 }, { wch: 12 }, { wch: 14 }, { wch: 7 },
-        { wch: 13 }, { wch: 12 }, { wch: 12 }, { wch: 9 },
-        { wch: 12 }, { wch: 9 }, { wch: 22 }, { wch: 12 }, { wch: 40 },
-      ]
+      ws['!cols'] = cols.map((c) => ({ wch: c.width }))
       const wb = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(wb, ws, 'Commandes sous-traitants')
       const stamp = new Date().toISOString().slice(0, 10)
       XLSX.writeFile(wb, `Commandes_sous-traitants_${stamp}.xlsx`)
+      saveExportSelection(exportCols)
+      setExportOpen(false)
     } catch (err) {
       console.error('Export Excel échoué:', err)
     } finally {
       setExporting(false)
     }
-  }, [filteredSorted])
+  }, [filteredSorted, exportCols])
+
+  const toggleExportCol = useCallback((key: string) => {
+    setExportCols((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
+    )
+  }, [])
 
   // Totalizer over the visible (filtered) rows.
   const lineCount = filteredSorted.length
@@ -318,15 +377,11 @@ export function RapportCommandesSst() {
 
         <Button
           size="sm"
-          onClick={handleExport}
-          disabled={exporting || filteredSorted.length === 0}
+          onClick={() => setExportOpen(true)}
+          disabled={filteredSorted.length === 0}
           className="flex-shrink-0"
         >
-          {exporting ? (
-            <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-          ) : (
-            <FileSpreadsheet className="h-3.5 w-3.5 mr-1.5" />
-          )}
+          <FileSpreadsheet className="h-3.5 w-3.5 mr-1.5" />
           Exporter Excel
         </Button>
       </div>
@@ -459,6 +514,79 @@ export function RapportCommandesSst() {
           </div>
         </div>
       )}
+
+      {/* Column-picker dialog for the Excel export */}
+      <Dialog open={exportOpen} onOpenChange={setExportOpen}>
+        <DialogContent className="max-w-md" onClose={() => setExportOpen(false)}>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Columns3 className="h-5 w-5 text-accent" />
+              Colonnes à exporter
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="mt-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-muted-foreground">
+                {exportCols.length} colonne{exportCols.length > 1 ? 's' : ''} sélectionnée
+                {exportCols.length > 1 ? 's' : ''}
+              </p>
+              <div className="flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs text-accent hover:text-accent hover:bg-accent/10"
+                  onClick={() => setExportCols(EXPORT_COLUMN_KEYS)}
+                >
+                  Tout sélectionner
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs text-muted-foreground"
+                  onClick={() => setExportCols([])}
+                >
+                  Tout désélectionner
+                </Button>
+              </div>
+            </div>
+
+            <div className="max-h-[50vh] overflow-y-auto scrollbar-transparent rounded-md border border-border/60 divide-y divide-border/40">
+              {EXPORT_COLUMNS.map((c) => {
+                const checked = exportCols.includes(c.key)
+                return (
+                  <label
+                    key={c.key}
+                    className="flex items-center gap-2.5 px-3 py-2 text-sm cursor-pointer select-none hover:bg-accent/5 transition-colors"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleExportCol(c.key)}
+                      className="h-4 w-4 rounded border-input text-accent focus:ring-2 focus:ring-ring cursor-pointer"
+                    />
+                    <span>{c.label}</span>
+                  </label>
+                )
+              })}
+            </div>
+          </div>
+
+          <DialogFooter className="mt-4">
+            <Button variant="outline" onClick={() => setExportOpen(false)}>
+              Annuler
+            </Button>
+            <Button onClick={handleExport} disabled={exporting || exportCols.length === 0}>
+              {exporting ? (
+                <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              ) : (
+                <FileSpreadsheet className="h-3.5 w-3.5 mr-1.5" />
+              )}
+              Exporter
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
