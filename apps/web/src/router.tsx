@@ -19,11 +19,10 @@ import {
   BarChart3,
   type LucideIcon,
 } from 'lucide-react'
-import { KnitIcon } from '@/components/icons/KnitIcon'
 import { FabricRollIcon } from '@/components/icons/FabricRollIcon'
 
 // PagePlaceholder takes a LucideIcon — widen it locally so our custom
-// SVG components (KnitIcon, FabricRollIcon) are accepted too. They share
+// SVG components (FabricRollIcon, etc.) are accepted too. They share
 // the same React props shape.
 const PlaceholderIcon = (c: unknown) => c as LucideIcon
 
@@ -45,7 +44,7 @@ const FilsPrevisionsPage = createPlaceholder('Prévisions Fournisseurs', 'Prévi
 
 // Legacy-menu top-level placeholders
 const TransfertsPage = createPlaceholder('Transferts', 'Transferts de stock entre sites et sous-traitants', Truck)
-const TombeMetierPage = createPlaceholder('Tombé Métier', 'Suivi du tombé métier', PlaceholderIcon(KnitIcon))
+const TombeMetierStockPage = createPlaceholder('Stock Tombé Métier', 'Stock du tombé métier', PlaceholderIcon(FabricRollIcon))
 // Références Finis — real screen (not a placeholder anymore)
 // Études coloris — real screen (not a placeholder anymore)
 const FinisTarifsPage = createPlaceholder('Tarifs Finis', 'Tarifs des produits finis', Euro)
@@ -69,6 +68,9 @@ import { SousTraitantsGestion } from '@/pages/SousTraitantsGestion'
 
 // Qualité pages (real)
 import { QualiteSuiviLots } from '@/pages/QualiteSuiviLots'
+
+// Tombé Métier pages (real)
+import { TombeMetierReferences } from '@/pages/TombeMetierReferences'
 
 // Finis pages (real)
 import { FinisReferences } from '@/pages/FinisReferences'
@@ -120,7 +122,9 @@ export const router = createBrowserRouter([
       { path: 'fils/previsions', element: <FilsPrevisionsPage /> },
 
       // Tombé Métier
-      { path: 'tombe-metier', element: <TombeMetierPage /> },
+      { path: 'tombe-metier', element: <Navigate to="/tombe-metier/references" replace /> },
+      { path: 'tombe-metier/references', element: <TombeMetierReferences /> },
+      { path: 'tombe-metier/stock', element: <TombeMetierStockPage /> },
 
       // Finis
       { path: 'finis', element: <Navigate to="/finis/references" replace /> },

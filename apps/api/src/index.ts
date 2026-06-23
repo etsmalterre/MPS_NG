@@ -11,6 +11,7 @@ import { entreprisesRouter } from './routes/entreprises.js'
 import { fournisseursRouter } from './routes/fournisseurs.js'
 import { referencesFilRouter } from './routes/references-fil.js'
 import { referencesFiniRouter } from './routes/references-fini.js'
+import { referencesEcruRouter } from './routes/references-ecru.js'
 import { commandesFilRouter } from './routes/commandes-fil.js'
 import { commandesSousTraitantRouter } from './routes/commandes-sous-traitant.js'
 import { sousTraitantsRouter } from './routes/sous-traitants.js'
@@ -60,6 +61,7 @@ app.use('/api/entreprises', entreprisesRouter)
 app.use('/api/fournisseurs', fournisseursRouter)
 app.use('/api/references-fil', referencesFilRouter)
 app.use('/api/references-fini', referencesFiniRouter)
+app.use('/api/references-ecru', referencesEcruRouter)
 app.use('/api/commandes-fil', commandesFilRouter)
 app.use('/api/commandes-sous-traitant', commandesSousTraitantRouter)
 app.use('/api/sous-traitants', sousTraitantsRouter)

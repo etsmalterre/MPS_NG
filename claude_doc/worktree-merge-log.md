@@ -57,6 +57,32 @@ SELECT/JOIN/repair path so coloris labels match. Frontend is `SurteindreDialog` 
 `FinisStock.tsx`, following the existing `CutRollDialog`/`BatchEditDialog` pattern; on success
 invalidates `['stock-fini']` and exits edit mode.
 
+## 2026-06-23 — feat/stock-ecru
+Tombé Métier › Références screen — new master-detail screen for écru (loom-output) knitting-fabric
+references (`ref_ecru`), porting the legacy WinDev `FI_Ref_TombéMetier.wdw`. Also adds the two
+Tombé Métier submenus (Références + Stock placeholder) to the nav. New API router
+`apps/api/src/routes/references-ecru.ts` (`/api/references-ecru`): list (En cours / Archivé filter),
+full detail, create, update (auto-stamps `date_maj_ft`), archive/unarchive, deep **duplicate**
+(copies composition + coloris + machine grid + liage diagram with id remapping), guarded delete,
+plus sub-resource CRUD for composition (`composition_ecru`, base `IDcolori_ecru=0`), coloris
+(`colori_ecru`), the per-machine technical grid (`ref_ecru_machine`), and the binding diagram
+(`chute_liage` + `schema_liage`), and lookups (contextures, clients, refs-fil, machines, symboles).
+New page `apps/web/src/pages/TombeMetierReferences.tsx`: 3-panel `MasterDetailLayout` with header
+trio (Imprimer/Email placeholders + Dupliquer + Archiver + gold Modifier), editable Identification /
+Composition / Coloris cards, and a 3-tab technical area — **Données Technique** (LFA-tour, pignons,
+machine grid with computed Compteur Saisie/Calculé, écarteur/laize/rendement/vitesse/poids,
+maille-d'ouverture/ouvert-au-large/sonneter pills, observations), **Obs OF** (read-only
+`obs_ref_ecru`), and a paint-style **Schéma de liage** editor (chutes × symbol cells, custom inline
+SVG knit glyphs). Full unsaved-changes guard (header draft + per-key sub-form dirty registry) and
+ConfirmDialogs. Reverse-engineered formulas (memory `project_tombe_metier_references`):
+**Coût/kg** = `ref_ecru.prix` + Σ(`composition_ecru.pourcentage` × `ref_fil.prix_kg`)/100 over the
+base composition; **Compteur Saisie** = `round((trs_10kg_chute/nb_chutes) × (poids/20) / 10) × 10`
+(Compteur Calculé = 0, needs an OF). HFSQL footguns honoured: `ref_ecru` accented column names
+(`archivé`/`diamètre`/`recyclé`) read via `SELECT *`+`pickKey`, written named on Windows / archive via
+positional reinsert on Linux; `colori_ecru` explicit columns only; no `IDsociete` on `ref_ecru`;
+`client` has no `ville`. Out of scope this pass: permissions, Circulaire/Rectiligne filter,
+Print/Email (placeholders), Obs OF editing.
+
 ## 2026-06-23 — feat/etude-coloris
 Finis › Études coloris — search auto-select fix. The left-list auto-select effect only
 fired on first load (gated on `selectedId === null`), so narrowing the list via the search

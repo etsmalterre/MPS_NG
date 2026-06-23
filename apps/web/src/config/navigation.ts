@@ -119,7 +119,10 @@ export const mainNavigation: MainMenuItem[] = [
     title: 'Tombé Métier',
     icon: TmRollIcon,
     href: '/tombe-metier',
-    submenus: [],
+    submenus: [
+      { title: 'Références', href: '/tombe-metier/references' },
+      { title: 'Stock', href: '/tombe-metier/stock' },
+    ],
   },
   {
     id: 'finis',
@@ -215,6 +218,8 @@ export const routeTitles: Record<string, string> = {
   '/fils/previsions': 'Prévisions',
   // Tombé Métier
   '/tombe-metier': 'Tombé Métier',
+  '/tombe-metier/references': 'Références',
+  '/tombe-metier/stock': 'Stock',
   // Finis
   '/finis': 'Finis',
   '/finis/references': 'Références',
