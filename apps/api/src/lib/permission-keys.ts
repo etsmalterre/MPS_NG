@@ -44,6 +44,12 @@ export const PERMISSION_KEYS = [
     category: 'Finis',
   },
   {
+    key: 'edit_stock_fini',
+    label: 'Éditer un rouleau',
+    description: 'Affiche le bouton « Modifier » et autorise la modification d’un rouleau dans Finis > Stock.',
+    category: 'Finis',
+  },
+  {
     key: 'surteindre_stock_fini',
     label: 'Surteindre des rouleaux finis',
     description:

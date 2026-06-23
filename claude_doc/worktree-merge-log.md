@@ -10,6 +10,37 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-23 — feat/stock-fini
+Finis › Stock — enrichment pass on the existing table-centric stock_fini screen
+(`apps/web/src/pages/FinisStock.tsx` + `apps/api/src/routes/stock-fini.ts`). Five changes:
+(1) **New `edit_stock_fini` permission** — appended to `permission-keys.ts` (category Finis),
+gates the `PATCH /api/stock/fini/:id` route (401/403 like `create_stock_fini`) and hides the
+detail-drawer "Modifier" button via `useHasPermission`; effective admins bypass. (2) **État is
+now read-only** in the detail drawer — the Statut `<select>` was removed (always renders the
+read-only pill); dropped the now-dead `editEtat` state, the `etats` lookup in the drawer, and
+`IDetat_stock_fini` from the PATCH payload + dirty-check (table-level "Édition groupée" batch
+still edits emplacement/observations, unaffected). (3) **Drawer header + provenance rework** —
+the bold title is now the roll number (`numero`, e.g. 3465/99); ref/coloris/lot moved to the
+subtitle. New read-only endpoint `GET /api/stock/fini/:id/provenance` traces the origin chain:
+stock_fini.IDstock_ecru → stock_ecru.IDref_commande_source (tricoteur sst line) → its
+`asso_fil_lignecmdsst` yarn lots → stock_fil → ref_fil (designation) + fournisseur + commande_fil
+(order N°); stock_fini.IDref_commande_source = the dyeing (ennoblisseur) sst line. The Provenance
+card lists each fil (designation · supplier · Commande N°), the Tricotage origin (knitter ·
+Commande N°), and the Ennoblissement origin (dyer · Commande N°, hidden when same commande as
+tricotage). Removed the "Rouleau écru source" field; renamed "Date saisie" → "Date réception";
+replaced `#` id prefixes with `N°`. (4) **Legacy columns restored on the table** — added
+Contexture (ref_fini → ref_ecru → contexture.nom), Grammage (ref_fini.poids_Moy, g/m²), Client
+(IDligne_commande_client → commande_client → client.nom) and N° Cmd (commande_client.numero) via a
+new batched `enrichListExtras()` helper; columns reordered to mirror the legacy WinDev grid (kept
+the app's État column + existing totals footer). Contexture/Client also searchable. (5) **Denser
+table** — body text `text-sm`→`text-xs`, cell padding `px-3 py-2`→`px-2 py-1.5`, headers
+normal-case (no uppercase/tracking) that wrap at spaces (not mid-word), "N° Cmd" abbreviated to
+stay one line. HFSQL footguns honoured throughout: `STOCK_FINI_SELECT`/`JOINS` left untouched
+(shared with detail+label endpoints) — all new joins done as batched flat queries + JS merge with
+integer-only `IN` lists (no CONVERT-in-JOIN collapse, no bridge-storm risk); accented name columns
+(sous_traitant/fournisseur/contexture/client `.nom`, ref_fil.reference) read raw + repaired via
+`fixEncoding`, never named in a WHERE.
+
 ## 2026-06-23 — feat/rapport (refinements)
 Polish pass on Rapports › Commandes sous-traitants (`/rapports/commandes-sst`, screen base
 landed earlier same day). Changes: (1) removed the page-title `<h1>` — table-centric screens

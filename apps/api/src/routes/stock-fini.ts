@@ -171,6 +171,98 @@ export async function repairAllJoins(rows: StockFini[]): Promise<StockFini[]> {
   return fixed
 }
 
+// Enrich list rows with the extra legacy columns that aren't covered by the
+// shared SELECT/JOINS (those are reused by the detail + label endpoints, so we
+// keep them lean and enrich here only):
+//   • contexture_nom + grammage — ref_fini → ref_ecru → contexture, and
+//     ref_fini.poids_Moy (g/m²)
+//   • client_nom + commande_numero — IDligne_commande_client → ligne_commande_client
+//     → commande_client → client
+// Batched flat queries + JS merge: no CONVERT-in-JOIN collapse, no row
+// multiplication, every WHERE is an integer IN-list (bridge-storm safe). The
+// accented name columns (contexture.nom, client.nom) are repaired with
+// fixEncoding, never named in a WHERE.
+async function enrichListExtras(rows: StockFini[]): Promise<StockFini[]> {
+  if (rows.length === 0) return rows
+  const num = (v: unknown) => Number(v) || 0
+
+  // ── Contexture + grammage, keyed off IDref_fini ──
+  const refFiniIds = Array.from(new Set(rows.map((r) => num((r as any).IDref_fini)).filter((x) => x > 0)))
+  const grammageByRef = new Map<number, number | null>()
+  const ecruByRef = new Map<number, number>()
+  if (refFiniIds.length) {
+    const rf = await query<{ IDref_fini: number; IDref_ecru: number; poids_Moy: number | null }>(
+      `SELECT IDref_fini, IDref_ecru, poids_Moy FROM ref_fini WHERE IDref_fini IN (${refFiniIds.join(',')})`,
+    )
+    for (const r of rf) {
+      const g = r.poids_Moy == null ? null : Number(r.poids_Moy)
+      grammageByRef.set(num(r.IDref_fini), g && g > 0 ? g : null)
+      ecruByRef.set(num(r.IDref_fini), num(r.IDref_ecru))
+    }
+  }
+  const ecruIds = Array.from(new Set(Array.from(ecruByRef.values()).filter((x) => x > 0)))
+  const ctxByEcru = new Map<number, number>()
+  if (ecruIds.length) {
+    const re = await query<{ IDref_ecru: number; IDcontexture: number }>(
+      `SELECT IDref_ecru, IDcontexture FROM ref_ecru WHERE IDref_ecru IN (${ecruIds.join(',')})`,
+    )
+    for (const r of re) ctxByEcru.set(num(r.IDref_ecru), num(r.IDcontexture))
+  }
+  const ctxIds = Array.from(new Set(Array.from(ctxByEcru.values()).filter((x) => x > 0)))
+  const ctxNameById = new Map<number, string>()
+  if (ctxIds.length) {
+    const cx = await query<{ IDcontexture: number; nom: string | null }>(
+      `SELECT IDcontexture, nom FROM contexture WHERE IDcontexture IN (${ctxIds.join(',')})`,
+    )
+    for (const r of (await fixEncoding(cx as any[], 'contexture', 'IDcontexture', ['nom'])) as any[]) {
+      ctxNameById.set(num(r.IDcontexture), (r.nom ?? '').toString().trim())
+    }
+  }
+
+  // ── Client + commande N°, keyed off IDligne_commande_client ──
+  const lccIds = Array.from(new Set(rows.map((r) => num((r as any).IDligne_commande_client)).filter((x) => x > 0)))
+  const lccToCc = new Map<number, number>()
+  if (lccIds.length) {
+    const lcc = await query<{ IDligne_commande_client: number; IDcommande_client: number }>(
+      `SELECT IDligne_commande_client, IDcommande_client FROM ligne_commande_client WHERE IDligne_commande_client IN (${lccIds.join(',')})`,
+    )
+    for (const r of lcc) lccToCc.set(num(r.IDligne_commande_client), num(r.IDcommande_client))
+  }
+  const ccIds = Array.from(new Set(Array.from(lccToCc.values()).filter((x) => x > 0)))
+  const ccNumero = new Map<number, number>()
+  const ccToClient = new Map<number, number>()
+  if (ccIds.length) {
+    const cc = await query<{ IDcommande_client: number; numero: number | null; IDclient: number }>(
+      `SELECT IDcommande_client, numero, IDclient FROM commande_client WHERE IDcommande_client IN (${ccIds.join(',')})`,
+    )
+    for (const r of cc) {
+      ccNumero.set(num(r.IDcommande_client), num(r.numero))
+      ccToClient.set(num(r.IDcommande_client), num(r.IDclient))
+    }
+  }
+  const clientIds = Array.from(new Set(Array.from(ccToClient.values()).filter((x) => x > 0)))
+  const clientName = new Map<number, string>()
+  if (clientIds.length) {
+    const cl = await query<{ IDclient: number; nom: string | null }>(
+      `SELECT IDclient, nom FROM client WHERE IDclient IN (${clientIds.join(',')})`,
+    )
+    for (const r of (await fixEncoding(cl as any[], 'client', 'IDclient', ['nom'])) as any[]) {
+      clientName.set(num(r.IDclient), (r.nom ?? '').toString().trim())
+    }
+  }
+
+  for (const r of rows as any[]) {
+    const idRef = num(r.IDref_fini)
+    const ecru = ecruByRef.get(idRef) ?? 0
+    r.contexture_nom = ctxNameById.get(ctxByEcru.get(ecru) ?? 0) || null
+    r.grammage = grammageByRef.get(idRef) ?? null
+    const cc = lccToCc.get(num(r.IDligne_commande_client)) ?? 0
+    r.commande_numero = (ccNumero.get(cc) ?? 0) || null
+    r.client_nom = clientName.get(ccToClient.get(cc) ?? 0) || null
+  }
+  return rows
+}
+
 // GET /api/stock/fini - List stock_fini rows with joined display columns.
 //   ?q=<text>        — fuzzy search across ref/coloris/lot/numero/emplacement/observations/conteneur
 //   ?expedie=all     — include rolls already shipped (default hides them)
@@ -206,6 +298,7 @@ stockFiniRouter.get('/fini', async (req: Request, res: Response) => {
       conteneur: 'conteneur',
     })
     fixed = await repairAllJoins(fixed)
+    fixed = await enrichListExtras(fixed)
 
     res.json(fixed)
   } catch (err) {
@@ -407,6 +500,154 @@ stockFiniRouter.get('/fini/:id', async (req: Request, res: Response) => {
   }
 })
 
+// ── Provenance helpers ─────────────────────────────────
+// Resolve a sous-traitant commande LINE id to { sous-traitant name, commande
+// id }. The sst order "number" is the commande PK (commande_sous_traitant has
+// no numero column — matches the rest of the app). Flat queries + JS merge:
+// the sous_traitant.nom is accented, so it's read raw and repaired via
+// fixEncoding (never named in a WHERE — bridge-storm footgun). Integer-only
+// WHERE clauses throughout.
+async function resolveSstLine(
+  lineId: number,
+): Promise<{ sst_nom: string | null; IDcommande: number } | null> {
+  if (!(lineId > 0)) return null
+  const lineRows = await query<{ IDcommande_sous_traitant: number }>(
+    `SELECT IDcommande_sous_traitant FROM ligne_commande_sous_traitant WHERE IDligne_commande_sous_traitant = ${lineId}`,
+  )
+  const cmdId = Number(lineRows[0]?.IDcommande_sous_traitant) || 0
+  if (!cmdId) return null
+  const cmdRows = await query<{ IDsous_traitant: number }>(
+    `SELECT IDsous_traitant FROM commande_sous_traitant WHERE IDcommande_sous_traitant = ${cmdId}`,
+  )
+  const sstId = Number(cmdRows[0]?.IDsous_traitant) || 0
+  let sstNom: string | null = null
+  if (sstId > 0) {
+    const stRows = await query<{ IDsous_traitant: number; nom: string | null }>(
+      `SELECT IDsous_traitant, nom FROM sous_traitant WHERE IDsous_traitant = ${sstId}`,
+    )
+    const fixedSt = await fixEncoding(stRows as any[], 'sous_traitant', 'IDsous_traitant', ['nom'])
+    const n = (fixedSt[0] as any)?.nom
+    sstNom = n != null ? n.toString().trim() || null : null
+  }
+  return { sst_nom: sstNom, IDcommande: cmdId }
+}
+
+// Resolve the yarns (fils) affected to a tricoteur sst LINE via
+// asso_fil_lignecmdsst → stock_fil. Each fil carries its designation
+// (ref_fil.reference), its supplier (fournisseur.nom) and its fournisseur
+// order number (commande_fil id, via ref_fil_commande). Deduped per
+// (ref_fil, fournisseur, commande). All accented name columns repaired with
+// fixEncoding; every WHERE uses integer id lists only.
+async function resolveProvenanceFils(
+  tricoteurLineId: number,
+): Promise<Array<{ ref_fil: string | null; fournisseur: string | null; IDcommande_fil: number | null }>> {
+  if (!(tricoteurLineId > 0)) return []
+  const asso = await query<{ IDstock_fil: number }>(
+    `SELECT IDstock_fil FROM asso_fil_lignecmdsst WHERE IDligne_commande_sous_traitant = ${tricoteurLineId}`,
+  )
+  const stockFilIds = Array.from(new Set(asso.map((a) => Number(a.IDstock_fil)).filter((x) => x > 0)))
+  if (stockFilIds.length === 0) return []
+
+  const lots = await query<{
+    IDstock_fil: number
+    IDref_fil: number
+    IDfournisseur: number
+    IDref_fil_commande: number
+  }>(
+    `SELECT IDstock_fil, IDref_fil, IDfournisseur, IDref_fil_commande FROM stock_fil WHERE IDstock_fil IN (${stockFilIds.join(',')})`,
+  )
+
+  // ref_fil designation (accented → repair)
+  const refFilIds = Array.from(new Set(lots.map((l) => Number(l.IDref_fil)).filter((x) => x > 0)))
+  const refFilMap = new Map<number, string>()
+  if (refFilIds.length) {
+    const rf = await query<{ IDref_fil: number; reference: string | null }>(
+      `SELECT IDref_fil, reference FROM ref_fil WHERE IDref_fil IN (${refFilIds.join(',')})`,
+    )
+    for (const r of await fixEncoding(rf as any[], 'ref_fil', 'IDref_fil', ['reference'])) {
+      refFilMap.set(Number((r as any).IDref_fil), ((r as any).reference ?? '').toString().trim())
+    }
+  }
+
+  // fournisseur name (accented → repair)
+  const frsIds = Array.from(new Set(lots.map((l) => Number(l.IDfournisseur)).filter((x) => x > 0)))
+  const frsMap = new Map<number, string>()
+  if (frsIds.length) {
+    const fr = await query<{ IDfournisseur: number; nom: string | null }>(
+      `SELECT IDfournisseur, nom FROM fournisseur WHERE IDfournisseur IN (${frsIds.join(',')})`,
+    )
+    for (const f of await fixEncoding(fr as any[], 'fournisseur', 'IDfournisseur', ['nom'])) {
+      frsMap.set(Number((f as any).IDfournisseur), ((f as any).nom ?? '').toString().trim())
+    }
+  }
+
+  // ref_fil_commande line → commande_fil header id (the order N°)
+  const rfcIds = Array.from(new Set(lots.map((l) => Number(l.IDref_fil_commande)).filter((x) => x > 0)))
+  const cmdMap = new Map<number, number>()
+  if (rfcIds.length) {
+    const rfc = await query<{ IDref_fil_commande: number; IDcommande_fil: number }>(
+      `SELECT IDref_fil_commande, IDcommande_fil FROM ref_fil_commande WHERE IDref_fil_commande IN (${rfcIds.join(',')})`,
+    )
+    for (const r of rfc) cmdMap.set(Number(r.IDref_fil_commande), Number(r.IDcommande_fil) || 0)
+  }
+
+  const seen = new Set<string>()
+  const out: Array<{ ref_fil: string | null; fournisseur: string | null; IDcommande_fil: number | null }> = []
+  for (const lot of lots) {
+    const ref = refFilMap.get(Number(lot.IDref_fil)) || null
+    const frs = frsMap.get(Number(lot.IDfournisseur)) || null
+    const cmd = cmdMap.get(Number(lot.IDref_fil_commande)) || 0
+    const key = `${Number(lot.IDref_fil)}:${Number(lot.IDfournisseur)}:${cmd}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ ref_fil: ref, fournisseur: frs, IDcommande_fil: cmd || null })
+  }
+  return out
+}
+
+// GET /api/stock/fini/:id/provenance — yarn + order origins of one roll.
+//   Chain: stock_fini.IDref_commande_source → the dyeing (ennoblisseur) sst
+//   line; stock_fini.IDstock_ecru → stock_ecru.IDref_commande_source → the
+//   tricoteur sst line, whose asso_fil_lignecmdsst yarn lots resolve back to
+//   ref_fil + fournisseur + commande_fil. Read-only, not permission-gated.
+stockFiniRouter.get('/fini/:id/provenance', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) {
+      res.status(400).json({ error: 'Invalid ID' })
+      return
+    }
+    const rows = await query<{ IDstock_ecru: number; IDref_commande_source: number }>(
+      `SELECT IDstock_ecru, IDref_commande_source FROM stock_fini WHERE IDstock_fini = ${id}`,
+    )
+    if (rows.length === 0) {
+      res.status(404).json({ error: 'Stock fini not found' })
+      return
+    }
+    const ecruId = Number(rows[0].IDstock_ecru) || 0
+    const sourceLineId = Number(rows[0].IDref_commande_source) || 0
+
+    // Immediate source line = the dyeing (ennoblisseur) sst commande line.
+    const ennoblissement = await resolveSstLine(sourceLineId)
+
+    // Tricotage = the line that knit the source écru roll.
+    let tricoteurLineId = 0
+    if (ecruId > 0) {
+      const ecruRows = await query<{ IDref_commande_source: number }>(
+        `SELECT IDref_commande_source FROM stock_ecru WHERE IDstock_ecru = ${ecruId}`,
+      )
+      tricoteurLineId = Number(ecruRows[0]?.IDref_commande_source) || 0
+    }
+    const tricotage = await resolveSstLine(tricoteurLineId)
+    const fils = await resolveProvenanceFils(tricoteurLineId)
+
+    res.json({ tricotage, ennoblissement, fils })
+  } catch (err) {
+    console.error('Error fetching stock_fini provenance:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // GET /api/stock/fini/:id/label - Dymo étiquette PDF (89 × 36 mm) for one roll.
 // Read-only, not permission-gated. Reuses the same SELECT/JOINs/repair as the
 // detail endpoint so coloris_reference is resolved identically.
@@ -503,6 +744,16 @@ stockFiniRouter.patch('/fini/batch', async (req: Request, res: Response) => {
 //   belong to the sst reception / shipment flows.
 stockFiniRouter.patch('/fini/:id', async (req: Request, res: Response) => {
   try {
+    if (req.userId === undefined) {
+      res.status(401).json({ error: 'not authenticated' })
+      return
+    }
+    const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'edit_stock_fini')
+    if (!allowed) {
+      res.status(403).json({ error: 'permission denied: edit_stock_fini' })
+      return
+    }
+
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) {
       res.status(400).json({ error: 'Invalid ID' })

@@ -41,6 +41,8 @@ import {
 } from '@/components/ui/dialog'
 import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
 import { TmRollIcon } from '@/components/icons/TmRollIcon'
+import { BobineIcon } from '@/components/icons/BobineIcon'
+import { KnitIcon } from '@/components/icons/KnitIcon'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
 import { fmtNum } from '@/lib/format'
@@ -81,6 +83,10 @@ interface StockFiniRow {
   coloris_reference: string | null
   etat_libelle: string | null
   magasin_nom: string | null
+  contexture_nom: string | null
+  grammage: number | null
+  client_nom: string | null
+  commande_numero: number | null
 }
 
 interface EtatOption {
@@ -115,6 +121,31 @@ function useEtatsLookup() {
   })
 }
 
+interface ProvenanceFil {
+  ref_fil: string | null
+  fournisseur: string | null
+  IDcommande_fil: number | null
+}
+
+interface SstOrigin {
+  sst_nom: string | null
+  IDcommande: number
+}
+
+interface StockFiniProvenance {
+  tricotage: SstOrigin | null
+  ennoblissement: SstOrigin | null
+  fils: ProvenanceFil[]
+}
+
+function useStockFiniProvenance(id: number | null) {
+  return useQuery<StockFiniProvenance>({
+    queryKey: ['stock-fini', 'provenance', id],
+    queryFn: () => apiFetch<StockFiniProvenance>(`/stock/fini/${id}/provenance`),
+    enabled: id !== null,
+  })
+}
+
 // ── Helpers ────────────────────────────────────────────
 
 function formatKg(v: number | null): string {
@@ -127,18 +158,27 @@ function formatMeters(v: number | null): string {
   return `${v.toFixed(1)} m`
 }
 
+function formatGrammage(v: number | null): string {
+  if (v == null) return '—'
+  return `${fmtNum(v, 0)} g/m²`
+}
+
 // ── Sort handling ──────────────────────────────────────
 
 type SortKey =
   | 'ref_fini'
   | 'coloris_reference'
-  | 'lot'
+  | 'contexture_nom'
+  | 'grammage'
   | 'numero'
   | 'poids'
   | 'metrage'
+  | 'lot'
+  | 'client_nom'
+  | 'magasin_nom'
+  | 'commande_numero'
   | 'etat_libelle'
   | 'emplacement'
-  | 'magasin_nom'
   | 'date_saisie'
   | 'observations'
 
@@ -147,18 +187,25 @@ interface SortState {
   dir: 'asc' | 'desc'
 }
 
+// Column set mirrors the legacy WinDev stock fini grid (Référence → 2nd choix),
+// plus the État column the new app adds. Widths are proportional ratios —
+// table-layout: fixed normalizes them across the shared header/body colgroups.
 const COLUMNS: { key: SortKey; label: string; width: string; align?: 'left' | 'right' }[] = [
-  { key: 'ref_fini', label: 'Référence', width: '11%' },
-  { key: 'coloris_reference', label: 'Coloris', width: '13%' },
+  { key: 'ref_fini', label: 'Référence', width: '8%' },
+  { key: 'coloris_reference', label: 'Coloris', width: '11%' },
+  { key: 'contexture_nom', label: 'Contexture', width: '8%' },
+  { key: 'grammage', label: 'Grammage', width: '6%', align: 'right' },
+  { key: 'numero', label: 'Numéro', width: '6%' },
+  { key: 'poids', label: 'Poids', width: '6%', align: 'right' },
+  { key: 'metrage', label: 'Métrage', width: '6%', align: 'right' },
   { key: 'lot', label: 'Lot', width: '7%' },
-  { key: 'numero', label: 'Numéro', width: '7%' },
-  { key: 'poids', label: 'Poids', width: '7%', align: 'right' },
-  { key: 'metrage', label: 'Métrage', width: '7%', align: 'right' },
-  { key: 'etat_libelle', label: 'État', width: '11%' },
-  { key: 'emplacement', label: 'Emplacement', width: '8%' },
-  { key: 'magasin_nom', label: 'Magasin', width: '9%' },
-  { key: 'date_saisie', label: 'Date saisie', width: '8%' },
-  { key: 'observations', label: 'Observations', width: '9%' },
+  { key: 'client_nom', label: 'Client', width: '9%' },
+  { key: 'magasin_nom', label: 'Magasin', width: '7%' },
+  { key: 'commande_numero', label: 'N° Cmd', width: '6%', align: 'right' },
+  { key: 'etat_libelle', label: 'État', width: '9%' },
+  { key: 'emplacement', label: 'Emplacement', width: '7%' },
+  { key: 'date_saisie', label: 'Date saisie', width: '7%' },
+  { key: 'observations', label: 'Observations', width: '8%' },
 ]
 const ICON_COL_WIDTH = '3%'
 const SELECT_COL_WIDTH = '4%' // leading selection box column, edit mode only
@@ -224,10 +271,12 @@ export function FinisStock() {
         const haystacks = [
           r.ref_fini,
           r.coloris_reference,
+          r.contexture_nom,
           r.lot,
           r.numero,
           r.emplacement,
           r.conteneur,
+          r.client_nom,
           r.magasin_nom,
           r.observations,
           r.observation_sst,
@@ -391,7 +440,7 @@ export function FinisStock() {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Rechercher (réf, coloris, lot, numéro, emplacement, conteneur, observations…)"
+            placeholder="Rechercher (réf, coloris, contexture, lot, numéro, client, magasin, emplacement, observations…)"
             className="h-9 w-full pl-8 pr-3 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
           />
         </div>
@@ -481,7 +530,7 @@ export function FinisStock() {
         ) : (
           <>
             {/* Header table (non-scrolling) */}
-            <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
+            <table className="w-full text-xs" style={{ tableLayout: 'fixed' }}>
               <colgroup>
                 {/* Selection column: always present (kept structurally stable so
                     toggling edit mode doesn't mount/unmount a cell on every row),
@@ -493,7 +542,7 @@ export function FinisStock() {
                 <col style={{ width: ICON_COL_WIDTH }} />
               </colgroup>
               <thead className="bg-zinc-200/60 border-b border-border/60">
-                <tr className="text-xs uppercase tracking-wide text-muted-foreground">
+                <tr className="text-xs text-muted-foreground">
                   <th className={isEditing ? 'px-3 py-2.5' : 'p-0'}></th>
                   {COLUMNS.map((c) => (
                     <SortHeader
@@ -512,7 +561,7 @@ export function FinisStock() {
 
             {/* Body table (scrolling) */}
             <div className="flex-1 min-h-0 overflow-auto scrollbar-transparent">
-              <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
+              <table className="w-full text-xs" style={{ tableLayout: 'fixed' }}>
                 <colgroup>
                   <col style={{ width: isEditing ? SELECT_COL_WIDTH : '0' }} />
                   {COLUMNS.map((c) => (
@@ -1581,13 +1630,18 @@ const StockRow = memo(function StockRow({
           {selected && <Check className="h-3.5 w-3.5" />}
         </div>
       </td>
-      <td className="px-3 py-2 font-medium truncate">{row.ref_fini ?? '—'}</td>
-      <td className="px-3 py-2 truncate">{row.coloris_reference ?? '—'}</td>
-      <td className="px-3 py-2 tabular-nums truncate">{row.lot ?? '—'}</td>
-      <td className="px-3 py-2 tabular-nums truncate text-muted-foreground">{row.numero ?? '—'}</td>
-      <td className="px-3 py-2 text-right tabular-nums font-medium">{formatKg(row.poids)}</td>
-      <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{formatMeters(row.metrage)}</td>
-      <td className="px-3 py-2">
+      <td className="px-2 py-1.5 font-medium truncate">{row.ref_fini ?? '—'}</td>
+      <td className="px-2 py-1.5 truncate" title={row.coloris_reference ?? undefined}>{row.coloris_reference ?? '—'}</td>
+      <td className="px-2 py-1.5 truncate text-muted-foreground" title={row.contexture_nom ?? undefined}>{row.contexture_nom ?? '—'}</td>
+      <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">{formatGrammage(row.grammage)}</td>
+      <td className="px-2 py-1.5 tabular-nums truncate text-muted-foreground">{row.numero ?? '—'}</td>
+      <td className="px-2 py-1.5 text-right tabular-nums font-medium">{formatKg(row.poids)}</td>
+      <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">{formatMeters(row.metrage)}</td>
+      <td className="px-2 py-1.5 tabular-nums truncate">{row.lot ?? '—'}</td>
+      <td className="px-2 py-1.5 truncate" title={row.client_nom ?? undefined}>{row.client_nom ?? '—'}</td>
+      <td className="px-2 py-1.5 truncate text-muted-foreground">{row.magasin_nom ?? '—'}</td>
+      <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">{row.commande_numero ?? '—'}</td>
+      <td className="px-2 py-1.5">
         {row.etat_libelle ? (
           <span
             className={cn(
@@ -1601,15 +1655,14 @@ const StockRow = memo(function StockRow({
           <span className="text-muted-foreground">—</span>
         )}
       </td>
-      <td className="px-3 py-2 truncate">{row.emplacement ?? '—'}</td>
-      <td className="px-3 py-2 truncate text-muted-foreground">{row.magasin_nom ?? '—'}</td>
-      <td className="px-3 py-2 tabular-nums text-muted-foreground">
+      <td className="px-2 py-1.5 truncate">{row.emplacement ?? '—'}</td>
+      <td className="px-2 py-1.5 tabular-nums text-muted-foreground">
         {row.date_saisie ? formatHfsqlDate(row.date_saisie) : '—'}
       </td>
-      <td className="px-3 py-2 text-muted-foreground truncate" title={row.observations ?? undefined}>
+      <td className="px-2 py-1.5 text-muted-foreground truncate" title={row.observations ?? undefined}>
         {row.observations?.trim() || ''}
       </td>
-      <td className="px-3 py-2 text-right">
+      <td className="px-2 py-1.5 text-right">
         <div className="flex items-center justify-end gap-1">
           {!!row.second_choix && (
             <Badge variant="outline" className="text-[10px] py-0 border-red-300 text-red-700">2C</Badge>
@@ -1637,15 +1690,23 @@ function SortHeader({ label, sortKey, sort, onSort, align = 'left' }: SortHeader
     <th
       onClick={() => onSort(sortKey)}
       className={cn(
-        'px-3 py-2.5 font-semibold cursor-pointer select-none whitespace-nowrap',
+        // align-bottom + normal wrapping lets two-word labels (N° Commande,
+        // Date saisie) wrap at the space onto two lines instead of bleeding into
+        // the neighbour (table-layout: fixed clips column width, not text).
+        // Headers are normal-case (no uppercase/tracking) so single words stay
+        // narrow enough to fit on one line without ugly mid-word breaks.
+        'px-2 py-2 font-semibold cursor-pointer select-none align-bottom leading-tight',
         align === 'right' ? 'text-right' : 'text-left',
         active && 'text-accent',
       )}
     >
-      <span className="inline-flex items-center gap-1">
-        {label}
-        {active && (sort.dir === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
-      </span>
+      {label}
+      {active &&
+        (sort.dir === 'asc' ? (
+          <ArrowUp className="inline-block h-3 w-3 ml-1 align-middle" />
+        ) : (
+          <ArrowDown className="inline-block h-3 w-3 ml-1 align-middle" />
+        ))}
     </th>
   )
 }
@@ -1663,7 +1724,8 @@ interface DrawerProps {
 
 function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRef, discardRef }: DrawerProps) {
   const { data: detail, isLoading } = useStockFiniDetail(id)
-  const { data: etats } = useEtatsLookup()
+  const { data: provenance } = useStockFiniProvenance(id)
+  const canEdit = useHasPermission('edit_stock_fini')
   const drawerRef = useRef<HTMLDivElement>(null)
   const [searchParams] = useSearchParams()
   const embed = searchParams.get('embed') === 'true'
@@ -1674,7 +1736,6 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
   const [editEmplacement, setEditEmplacement] = useState('')
   const [editConteneur, setEditConteneur] = useState('')
   const [editPointage, setEditPointage] = useState('')
-  const [editEtat, setEditEtat] = useState<number | null>(null)
   const [editSecondChoix, setEditSecondChoix] = useState(false)
   const [editDestockage, setEditDestockage] = useState(false)
   const [editDon, setEditDon] = useState(false)
@@ -1685,7 +1746,6 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
     emplacement: string
     conteneur: string
     pointage: string
-    etat: number | null
     secondChoix: boolean
     destockage: boolean
     don: boolean
@@ -1716,7 +1776,6 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
       emplacement: detail.emplacement ?? '',
       conteneur: detail.conteneur ?? '',
       pointage: hfsqlDateToInput(detail.pointage),
-      etat: detail.IDetat_stock_fini,
       secondChoix: !!detail.second_choix,
       destockage: !!detail.destockage,
       don: !!detail.don,
@@ -1726,7 +1785,6 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
     setEditEmplacement(snapshot.emplacement)
     setEditConteneur(snapshot.conteneur)
     setEditPointage(snapshot.pointage)
-    setEditEtat(snapshot.etat)
     setEditSecondChoix(snapshot.secondChoix)
     setEditDestockage(snapshot.destockage)
     setEditDon(snapshot.don)
@@ -1744,7 +1802,6 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
           emplacement: editEmplacement,
           conteneur: editConteneur,
           pointage: editPointage ? inputDateToHfsql(editPointage) : '',
-          IDetat_stock_fini: editEtat,
           second_choix: editSecondChoix,
           destockage: editDestockage,
           don: editDon,
@@ -1765,7 +1822,6 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
     if (editEmplacement !== o.emplacement) return true
     if (editConteneur !== o.conteneur) return true
     if (editPointage !== o.pointage) return true
-    if (editEtat !== o.etat) return true
     if (editSecondChoix !== o.secondChoix) return true
     if (editDestockage !== o.destockage) return true
     if (editDon !== o.don) return true
@@ -1777,7 +1833,6 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
     editEmplacement,
     editConteneur,
     editPointage,
-    editEtat,
     editSecondChoix,
     editDestockage,
     editDon,
@@ -1822,7 +1877,7 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
               ) : (
                 <>
                   <div className="flex items-center gap-2 flex-wrap">
-                    <h2 className="text-base font-heading font-bold tracking-tight truncate">{detail.ref_fini ?? '—'}</h2>
+                    <h2 className="text-base font-heading font-bold tracking-tight truncate">{detail.numero ?? '—'}</h2>
                     {!!detail.second_choix && (
                       <Badge className="bg-red-100 text-red-700 border-red-200 gap-1 text-[10px] py-0">
                         2ᵉ choix
@@ -1842,9 +1897,13 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
                     )}
                   </div>
                   <p className="text-xs text-muted-foreground mt-0.5">
-                    {detail.coloris_reference ?? '—'}
-                    {detail.lot ? ` · Lot ${detail.lot}` : ''}
-                    {detail.numero ? ` · N° ${detail.numero}` : ''}
+                    {[
+                      detail.ref_fini,
+                      detail.coloris_reference,
+                      detail.lot ? `Lot ${detail.lot}` : null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ') || '—'}
                   </p>
                 </>
               )}
@@ -1879,10 +1938,12 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
                     >
                       <Printer className="h-4 w-4" />
                     </Button>
-                    <Button variant="gold" size="sm" onClick={startEdit}>
-                      <Pencil className="h-3.5 w-3.5 mr-1.5" />
-                      Modifier
-                    </Button>
+                    {canEdit && (
+                      <Button variant="gold" size="sm" onClick={startEdit}>
+                        <Pencil className="h-3.5 w-3.5 mr-1.5" />
+                        Modifier
+                      </Button>
+                    )}
                   </>
                 )}
               </div>
@@ -1915,20 +1976,7 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
                   <KV
                     label="Statut"
                     value={
-                      isEditing ? (
-                        <select
-                          value={editEtat ?? ''}
-                          onChange={(e) => setEditEtat(e.target.value === '' ? null : parseInt(e.target.value, 10))}
-                          className="h-7 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring max-w-[180px]"
-                        >
-                          <option value="">—</option>
-                          {(etats ?? []).map((opt) => (
-                            <option key={opt.IDetat_stock_fini} value={opt.IDetat_stock_fini}>
-                              {opt.libelle}
-                            </option>
-                          ))}
-                        </select>
-                      ) : detail.etat_libelle ? (
+                      detail.etat_libelle ? (
                         <span
                           className={cn(
                             'inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border',
@@ -1964,19 +2012,61 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
 
               {/* Provenance */}
               <DrawerCard icon={<Factory className="h-4 w-4 text-accent" />} title="Provenance">
-                <div className="space-y-1.5">
-                  <KV
-                    label="Commande sst source"
-                    value={detail.IDref_commande_source ? <span className="tabular-nums">#{detail.IDref_commande_source}</span> : '—'}
-                  />
-                  <KV
-                    label="Rouleau écru source"
-                    value={detail.IDstock_ecru ? <span className="tabular-nums">#{detail.IDstock_ecru}</span> : '—'}
-                  />
-                  <KV
-                    label="Date saisie"
-                    value={detail.date_saisie ? formatHfsqlDate(detail.date_saisie) : '—'}
-                  />
+                <div className="space-y-2.5">
+                  {/* Fils — yarns knit into this roll, with supplier + fil order N° */}
+                  {!!provenance && provenance.fils.length > 0 && (
+                    <div className="space-y-1.5">
+                      {provenance.fils.map((f, i) => (
+                        <ProvenanceRow
+                          key={i}
+                          icon={<BobineIcon className="h-3.5 w-3.5 text-accent" />}
+                          title={f.ref_fil || 'Fil'}
+                          detail={[
+                            f.fournisseur,
+                            f.IDcommande_fil ? `Commande N° ${f.IDcommande_fil}` : null,
+                          ]
+                            .filter(Boolean)
+                            .join(' · ')}
+                        />
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Tricotage — the knitting order that produced the écru base */}
+                  {!!provenance?.tricotage && (
+                    <ProvenanceRow
+                      icon={<KnitIcon className="h-3.5 w-3.5 text-accent" />}
+                      title="Tricotage"
+                      detail={[
+                        provenance.tricotage.sst_nom,
+                        `Commande N° ${provenance.tricotage.IDcommande}`,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    />
+                  )}
+
+                  {/* Ennoblissement — the dyeing order (hidden if same as tricotage) */}
+                  {!!provenance?.ennoblissement &&
+                    provenance.ennoblissement.IDcommande !== provenance?.tricotage?.IDcommande && (
+                      <ProvenanceRow
+                        icon={<Paintbrush className="h-3.5 w-3.5 text-accent" />}
+                        title="Ennoblissement"
+                        detail={[
+                          provenance.ennoblissement.sst_nom,
+                          `Commande N° ${provenance.ennoblissement.IDcommande}`,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      />
+                    )}
+
+                  <div className="space-y-1.5 pt-1.5 border-t border-border/40">
+                    <KV
+                      label="Date réception"
+                      value={detail.date_saisie ? formatHfsqlDate(detail.date_saisie) : '—'}
+                    />
+                  </div>
                 </div>
               </DrawerCard>
 
@@ -2167,6 +2257,29 @@ function KV({ label, value, mono }: { label: string; value: React.ReactNode; mon
     <div className="flex items-baseline justify-between gap-2">
       <span className="text-xs text-muted-foreground">{label}</span>
       <span className={cn('text-sm text-right truncate', mono && 'tabular-nums')}>{value}</span>
+    </div>
+  )
+}
+
+// One provenance origin: a leading icon, a primary label (yarn ref / step name)
+// and a muted detail line (supplier · order N°). Used in the drawer's
+// Provenance card.
+function ProvenanceRow({
+  icon,
+  title,
+  detail,
+}: {
+  icon: React.ReactNode
+  title: string
+  detail: string
+}) {
+  return (
+    <div className="flex items-start gap-2">
+      <span className="flex-shrink-0 mt-0.5">{icon}</span>
+      <div className="min-w-0">
+        <p className="text-sm font-medium truncate">{title}</p>
+        {!!detail && <p className="text-[11px] text-muted-foreground truncate">{detail}</p>}
+      </div>
     </div>
   )
 }
