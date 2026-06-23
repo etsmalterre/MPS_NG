@@ -30,6 +30,14 @@ The registry `~/.claude/mps-worktrees.json` maps slot → feature/branch/ports/P
 allocation picks the lowest slot that is free in the registry **and** whose ports are actually
 idle (a live probe), so a stale entry can't hand out a busy port.
 
+**Slot 0 is reserved for serving the main checkout (`master`) itself** — API `8080` / web `3000`,
+outside the 1–6 feature range so `allocateSlot()` never hands it out and a feature worktree can
+never collide with a running master. Defined as `MAIN_SLOT` in `scripts/worktree/lib.mjs`;
+`localhost:3000` is in `DEV_WEB_ORIGINS` (so every generated worktree env allows it too). Managed
+by `scripts/worktree/serve-main.mjs` behind the `/serve-main` + `/serve-main-down` skills; state
+lives under `reg.main` (separate from `reg.slots`, so status/allocation ignore it). Use it to
+click through the integrated app on `master` before deploying.
+
 ## The skills
 
 | Skill | Run from | What it does |
@@ -38,6 +46,8 @@ idle (a live probe), so a stale entry can't hand out a busy port.
 | `/feature-checkpoint [msg]` | the feature worktree | commit → push → rebase onto `origin/master` (resolve conflicts here). **No merge.** Servers stay up; keep working. |
 | `/feature-complete` | the feature worktree | commit + note → push → rebase → typecheck gate → fast-forward merge into `master` (from the main checkout) → push → stop servers, remove worktree, delete branch, free slot. **Deploy is separate.** |
 | `/worktree-status` | anywhere | per-slot health (servers alive? web serving? ahead/behind master), free slots, stale-entry cleanup. |
+| `/serve-main` | main checkout | serve `master` on reserved slot 0 (API 8080 / web 3000) detached + health-check — verify merged work before deploying. `serve-main.mjs status` reports without starting; refuses to double-spawn. |
+| `/serve-main-down` | main checkout | stop the slot-0 master server and free 8080/3000. |
 
 ## Merge discipline (why it stays clean)
 

@@ -81,7 +81,7 @@ Load these on demand when working on the matching topic:
 | `claude_doc/navigation_mapping.md` | Legacy windows → MPS_NG routes |
 | `claude_doc/business_glossary.md` | Domain vocabulary, production flow |
 | `claude_doc/sous_traitants_status_model.md` | Sst commandes computed-phase model, card urgency frames + pills, Soumission Lot Client flow, Historique tab, Reprise flow, type_doc codes |
-| `claude_doc/worktrees.md` | Parallel dev with git worktrees: slot model, the `/new-feature-worktree` · `/feature-checkpoint` · `/feature-complete` · `/worktree-status` skills, merge discipline |
+| `claude_doc/worktrees.md` | Parallel dev with git worktrees: slot model (incl. reserved **slot 0** = serve `master` via `/serve-main`), the `/new-feature-worktree` · `/feature-checkpoint` · `/feature-complete` · `/worktree-status` skills, merge discipline |
 
 ## HFSQL rules (footguns — always apply)
 
