@@ -1,6 +1,7 @@
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
 import { z } from 'zod'
 import { query, fixEncoding } from '../lib/hfsql-auto.js'
+import { calcTarifRefFini } from '../lib/pricing-fini-tarif.js'
 
 export const referencesFiniRouter: RouterType = Router()
 
@@ -384,6 +385,46 @@ referencesFiniRouter.get('/:id', async (req: Request, res: Response) => {
     })
   } catch (err) {
     console.error('Error fetching ref_fini detail:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/references-fini/:id/tarif?coloris=<id> — cost-price breakdown +
+// volume-tier grid for the reference and a chosen coloris (port of the legacy
+// FI_Tarifs / PrixDeVenteV4). When `coloris` is omitted we default to the ref's
+// first coloris (polymorphic by avec_teinture). Always 200 with tranches: []
+// rather than an error when nothing can be priced, so the UI shows empty state.
+referencesFiniRouter.get('/:id/tarif', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    let colorisId = parseInt(String(req.query.coloris ?? ''), 10)
+    if (isNaN(colorisId) || colorisId <= 0) {
+      // Default to the first coloris in the right catalog for this ref.
+      const refRows = await query<{ avec_teinture: number; IDref_ecru: number }>(
+        `SELECT avec_teinture, IDref_ecru FROM ref_fini WHERE IDref_fini = ${id}`,
+      )
+      colorisId = 0
+      if (refRows.length > 0) {
+        if (Number(refRows[0].avec_teinture) !== 0) {
+          const cr = await query<{ IDref_fini_colori: number }>(
+            `SELECT IDref_fini_colori FROM ref_fini_colori WHERE IDref_fini = ${id} ORDER BY reference`,
+          )
+          colorisId = Number(cr[0]?.IDref_fini_colori) || 0
+        } else if (Number(refRows[0].IDref_ecru) > 0) {
+          const cr = await query<{ IDcolori_ecru: number }>(
+            `SELECT IDcolori_ecru FROM colori_ecru WHERE IDref_ecru = ${Number(refRows[0].IDref_ecru)} ORDER BY reference`,
+          )
+          colorisId = Number(cr[0]?.IDcolori_ecru) || 0
+        }
+      }
+    }
+
+    const result = await calcTarifRefFini(id, colorisId)
+    res.json(result)
+  } catch (err) {
+    console.error('Error computing ref_fini tarif:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

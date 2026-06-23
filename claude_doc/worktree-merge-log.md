@@ -40,6 +40,33 @@ gave état 5 "Attente décision" a distinct violet hue so it no longer reads lik
 
 ## 2026-06-23 — feat/ref-tm
 Tombé Métier › Références (`apps/web/src/pages/TombeMetierReferences.tsx` + `apps/api/src/routes/references-ecru.ts`) refinements + a new **Coût de tricotage** breakdown. **Jauge/Diamètre** are stored as 1-based ordinals indexing legacy combos (`gtaJauge`: 2→14, 3→18, 4→20, 5→28, no unit — needles/inch; `gtaDiametreMachine`: 2→26", 3→30") — both now display the real value and edit via dropdowns (the raw ordinal is never shown; ordinal 1/`-1`/0 = unset). **Search** is multi-criteria (space-separated AND across reference, désignation, contexture, jauge, diamètre — list endpoint now returns `Jauge`/`diametre`); the footer count tracks the filtered list. Identification header subtitle falls back to contexture when no désignation; Composition/Coloris cards collapse by default per selection. **"+ Nouveau"** auto-generates the next free 3-digit zero-padded reference server-side; duplicate references are rejected on rename (409); fixed the create-selection race (new card stays selected + scrolls into view) and stale-detail-after-delete. **Safeguards**: composition must total 100 % to leave edit mode (empty allowed); the composition AND five fabric-defining header fields (contexture, jauge, diamètre, bio, recyclé) are **frozen** once rolls (`stock_ecru`) or tricoteur orders (`ligne_commande_sous_traitant` type 0/1) exist — UI locks + backend 409/silent-keep; a coloris can't be deleted while affected to a roll, order, or its own composition (per-coloris in-use flags drive a greyed lock affordance + 409 guard). Statistiques gained "Rouleaux créés" + "Poids total" (Σ `stock_ecru.poids`); "Réglages par métier" "+" now opens a modal (`MachineFormDialog`); "Tombé du métier" is a Rouleaux/Plis dropdown. **Coût de tricotage**: refactored `apps/api/src/lib/pricing-trm.ts` to expose `prixDeRevientTRMDetail()` (full per-component breakdown — Frais de structure / Frais de production / Main d'œuvre — with `prixDeRevientTRM`/`trmLinePrix` as thin wrappers, line pricing byte-identical, regression `test-prix-revient-trm.ts` still 9/10); new `GET /api/references-ecru/:id/cout-tricotage?qty=` (default 1000) + a sidebar card and read-only modal with an editable debounced quantity, the three sections, subtotals, and the totals chain (coût → prix de vente ×1/0.7 → prix plancher → prix retenu).
+## 2026-06-23 — feat/ref-fini
+Finis › Références — added a **Tarif** tab to the detail sidebar plus three small left-list/label
+refinements. **Tarif tab** ports the legacy `FI_Tarifs` / WLanguage `PrixDeVenteV4` cost-price
+algorithm (the `nType_Ref=2` finished-ref path). New `apps/api/src/lib/pricing-fini-tarif.ts` →
+`calcTarifRefFini(IDref_fini, IDcoloris)`, exposed via `GET /api/references-fini/:id/tarif?coloris=<id>`
+(added to `references-fini.ts`; defaults to the ref's first coloris when omitted; returns
+`tranches: []` rather than erroring when rendement=0 / no coloris / no écru). For a ref+coloris it
+builds 9 order-quantity tranches (`<1,1,2,3,4,5,10,15,30` rolls; `PoidsRef = ref_ecru.poids*rollMult+1`)
+each with the full breakdown: **fil** (`Σ pourcentage×yarn €/Kg`, preferring `colori_fil.prix_kg`),
+**tricotage** (`ref_ecru.prix`, −5%/−10% at 15/30 rolls), **traitement** (per `traitement_ref_fini`,
+band price ×1.05 packaging, ×`multiplicateurMatel` for IDtraitement∈{298,285,302}), **teinture**
+(dye band ×MATEL mult ×1.05 +GOTS, only `avec_teinture≠0`) → **revient** → vente Kg/Ml via
+`venteKg = round(revient/(1-CoefficientV2[i])/(1-tauxPort),2)` (port 5%, 3% at 30 rolls;
+`CoefficientV2=[0.60,0.50,0.45,0.40,0.35,0.30,0.27,0.22,0.17]`). All ennoblissement prices read
+`tranche_tarif_ennoblissement` rows with **`IDsous_traitant=0`** (the company's own copied-from-MATEL
+tariff — no supplier picker); reuses `multiplicateurMatel`/`MATEL_BANDS` from `pricing-sst.ts`. The
+legacy `.wdw` is a compressed binary (not extractable); the algorithm came from the WLanguage source
+the user supplied, with the output shape confirmed by the Android transpile (`STPrixDétaillé`). UI
+(`FinisReferences.tsx`): the single-button sidebar header became a 2-tab bar (Informations | **Tarif**,
+`BadgeEuro`); the Tarif tab has a coloris `SearchableCombobox`, a clickable volume-tier grid
+(Qté Rlx / Qté Ml / Prix/Ml) and a gold-banded cost breakdown for the selected tranche, all read-only.
+Bridge-safe throughout: flat queries + JS merge (no JOIN+CONVERT), `fixEncoding` for label text,
+integer-only filters, idField always selected (no `WHERE col=NaN` storm). **Also in this branch**:
+left-list search is now multi-criteria (space-separated terms AND-matched across reference+designation);
+the footer count reflects the filtered list; and the teinture indicator distinguishes **Simple teinture**
+(`avec_teinture=1`, one droplet) vs **Double teinture** (`=2`, two droplets) vs Écru/lavage. Full algo
++ reuse notes in memory `project_prixdevente_v4`.
 
 ## 2026-06-23 — feat/stock-ecru
 Tombé Métier › Stock — new table-centric screen (`apps/web/src/pages/TombeMetierStock.tsx` +

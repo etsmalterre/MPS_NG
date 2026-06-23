@@ -33,6 +33,7 @@ import {
   FlaskConical,
   Archive,
   Lock,
+  BadgeEuro,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -241,7 +242,9 @@ function MinMoyMax({
 }
 
 function teintureLabel(avec: number): string {
-  return avec !== 0 ? 'Avec teinture' : 'Écru / lavage'
+  if (avec === 1) return 'Simple teinture'
+  if (avec === 2) return 'Double teinture'
+  return 'Écru / lavage'
 }
 
 // ── API helpers ────────────────────────────────────────
@@ -568,12 +571,11 @@ export function FinisReferences() {
   const filtered = useMemo(() => {
     if (!refs) return []
     if (!searchQuery.trim()) return refs
-    const q = searchQuery.toLowerCase()
-    return refs.filter(
-      (r) =>
-        (r.reference ?? '').toLowerCase().includes(q) ||
-        (r.designation ?? '').toLowerCase().includes(q),
-    )
+    const terms = searchQuery.toLowerCase().split(/\s+/).filter(Boolean)
+    return refs.filter((r) => {
+      const haystack = `${r.reference ?? ''} ${r.designation ?? ''}`.toLowerCase()
+      return terms.every((t) => haystack.includes(t))
+    })
   }, [refs, searchQuery])
 
   return (
@@ -582,7 +584,7 @@ export function FinisReferences() {
         list={
           <RefFiniList
             refs={filtered}
-            totalCount={refs?.length ?? 0}
+            totalCount={filtered.length}
             isLoading={isLoading}
             isError={isError}
             error={error as Error | null}
@@ -753,7 +755,14 @@ function RefFiniList({
                 <FiniRollIcon className="h-4 w-4 text-muted-foreground flex-shrink-0" />
                 <p className="font-medium text-sm truncate flex-1">{r.reference || '—'}</p>
                 {r.avec_teinture !== 0 ? (
-                  <Droplet className="h-3.5 w-3.5 text-accent-blue flex-shrink-0" aria-label="Avec teinture" />
+                  <span
+                    className="flex items-center flex-shrink-0 text-accent-blue"
+                    aria-label={teintureLabel(r.avec_teinture)}
+                    title={teintureLabel(r.avec_teinture)}
+                  >
+                    <Droplet className="h-3.5 w-3.5" />
+                    {r.avec_teinture === 2 && <Droplet className="h-3.5 w-3.5 -ml-2" />}
+                  </span>
                 ) : null}
                 {!!r.en_developpement && (
                   <FlaskConical className="h-3.5 w-3.5 text-amber-600 flex-shrink-0" aria-label="En développement" />
@@ -1413,6 +1422,227 @@ function ObservationsCard({
 
 // ── Right Panel: Sidebar ───────────────────────────────
 
+type SidebarTab = 'informations' | 'tarif'
+
+// ── Tarif (cost-price) tab — port of the legacy FI_Tarifs / PrixDeVenteV4 ──
+
+interface TarifDetailLine {
+  label: string
+  valueKg: number
+}
+
+interface TarifTranche {
+  rolls: number
+  isMetrage: boolean
+  qte_ml: number
+  poids_ref: number
+  moFil: number
+  detailFil: TarifDetailLine[]
+  moTricotage: number
+  detailTricotage: TarifDetailLine | null
+  moTraitements: number
+  detailTraitement: TarifDetailLine[]
+  moTeinte: number
+  detailTeinture: TarifDetailLine | null
+  moRevient: number
+  rCoeff: number
+  tauxFraisDePort: number
+  moPortAuKg: number
+  moPortAuMl: number
+  moPrixDeVenteAuKg: number
+  moPrixDeVenteAuMl: number
+}
+
+interface TarifResult {
+  IDref_fini: number
+  IDcoloris: number
+  avec_teinture: number
+  rendement: number
+  ref_ecru: { IDref_ecru: number; reference: string | null; poids: number; prix: number } | null
+  tranches: TarifTranche[]
+}
+
+/** Gold-banded cost-component header with its €/Kg total, mirroring the legacy
+ *  orange section bars. */
+function CostSection({ title, total, children }: { title: string; total?: string; children?: React.ReactNode }) {
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-md bg-gold/15 border border-gold/25">
+        <span className="text-xs font-semibold uppercase tracking-wide text-accent">{title}</span>
+        {total != null && <span className="text-xs font-bold tabular-nums text-accent">{total}</span>}
+      </div>
+      {children && <div className="px-2.5 space-y-1">{children}</div>}
+    </div>
+  )
+}
+
+/** One sub-line under a cost section: descriptive label left, €/Kg value right. */
+function CostLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-start justify-between gap-2 text-[11px] leading-snug">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="tabular-nums text-foreground/80 flex-shrink-0 whitespace-nowrap">{value}</span>
+    </div>
+  )
+}
+
+/** Tarif tab: a coloris selector, a volume-tier grid (€/Ml per order quantity),
+ *  and the full cost-price breakdown for the selected tier. Read-only. */
+function TarifTab({ detail }: { detail: RefFiniDetail }) {
+  const [colorisId, setColorisId] = useState<number>(detail.coloris[0]?.id ?? 0)
+  const [selectedTranche, setSelectedTranche] = useState(0)
+
+  const { data, isLoading, isError } = useQuery<TarifResult>({
+    queryKey: ['ref-fini-tarif', detail.IDref_fini, colorisId],
+    queryFn: () => apiFetch(`/references-fini/${detail.IDref_fini}/tarif?coloris=${colorisId}`),
+    enabled: colorisId > 0,
+  })
+
+  const tranches = data?.tranches ?? []
+  const current = tranches[Math.min(selectedTranche, Math.max(tranches.length - 1, 0))] ?? null
+  const eurKg = (v: number) => `${fmtNum(v, 2)} €/Kg`
+
+  return (
+    <div className="space-y-3">
+      {/* Coloris selector */}
+      <div className="p-3 rounded-lg border bg-card shadow-sm space-y-2">
+        <p className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
+          <Palette className="h-3.5 w-3.5" />
+          Coloris
+        </p>
+        {detail.coloris.length > 0 ? (
+          <SearchableCombobox<Coloris>
+            options={detail.coloris}
+            value={colorisId}
+            onChange={(id) => {
+              setColorisId(id)
+              setSelectedTranche(0)
+            }}
+            getId={(c) => c.id}
+            getPrimary={(c) => c.reference ?? `#${c.id}`}
+            placeholder="Rechercher un coloris"
+          />
+        ) : (
+          <p className="text-sm text-muted-foreground italic">Aucun coloris</p>
+        )}
+      </div>
+
+      {colorisId <= 0 ? (
+        <p className="text-sm text-muted-foreground italic px-1">
+          Sélectionnez un coloris pour calculer le tarif.
+        </p>
+      ) : isLoading ? (
+        <div className="flex justify-center py-8">
+          <Loader2 className="h-6 w-6 animate-spin text-accent" />
+        </div>
+      ) : isError ? (
+        <p className="text-sm text-destructive px-1">Erreur lors du calcul du tarif.</p>
+      ) : tranches.length === 0 ? (
+        <p className="text-sm text-muted-foreground italic px-1">
+          {data && !(data.rendement > 0)
+            ? 'Rendement non défini sur la référence — tarif indisponible.'
+            : data && !data.ref_ecru
+              ? 'Aucune référence écru liée — tarif indisponible.'
+              : 'Tarif indisponible pour ce coloris.'}
+        </p>
+      ) : (
+        <>
+          {/* Volume-tier grid */}
+          <div className="rounded-lg border border-border/60 overflow-hidden bg-card shadow-sm">
+            <table className="w-full text-xs" style={{ tableLayout: 'fixed' }}>
+              <colgroup>
+                <col style={{ width: '26%' }} />
+                <col style={{ width: '34%' }} />
+                <col style={{ width: '40%' }} />
+              </colgroup>
+              <thead className="bg-zinc-100/80 border-b border-border/60 text-[10px] uppercase tracking-wide text-muted-foreground">
+                <tr>
+                  <th className="px-2 py-1.5 text-left font-semibold">Qté (Rlx)</th>
+                  <th className="px-2 py-1.5 text-right font-semibold">Qté (Ml)</th>
+                  <th className="px-2 py-1.5 text-right font-semibold">Prix / Ml</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tranches.map((t, i) => (
+                  <tr
+                    key={i}
+                    onClick={() => setSelectedTranche(i)}
+                    className={cn(
+                      'border-b border-border/40 last:border-b-0 cursor-pointer transition-colors',
+                      selectedTranche === i ? 'bg-accent/10' : 'hover:bg-accent/5',
+                    )}
+                  >
+                    <td className="px-2 py-1.5 tabular-nums">{t.isMetrage ? '< 1' : t.rolls}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">
+                      {t.isMetrage ? '< ' : ''}
+                      {fmtNum(t.qte_ml)}
+                    </td>
+                    <td className="px-2 py-1.5 text-right tabular-nums font-medium">
+                      {fmtNum(t.moPrixDeVenteAuMl, 2)} €
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Cost breakdown for the selected tranche */}
+          {current && (
+            <div className="p-3 rounded-lg border bg-card shadow-sm space-y-2.5">
+              <CostSection title="Fil" total={eurKg(current.moFil)}>
+                {current.detailFil.map((l, i) => (
+                  <CostLine key={i} label={l.label} value={eurKg(l.valueKg)} />
+                ))}
+              </CostSection>
+
+              <CostSection title="Tricotage" total={eurKg(current.moTricotage)}>
+                {current.detailTricotage && (
+                  <CostLine label={current.detailTricotage.label} value={eurKg(current.detailTricotage.valueKg)} />
+                )}
+              </CostSection>
+
+              <CostSection title="Traitement" total={eurKg(current.moTraitements)}>
+                {current.detailTraitement.length > 0 ? (
+                  current.detailTraitement.map((l, i) => (
+                    <CostLine key={i} label={l.label} value={eurKg(l.valueKg)} />
+                  ))
+                ) : (
+                  <p className="text-[11px] text-muted-foreground italic">Aucun traitement</p>
+                )}
+              </CostSection>
+
+              {detail.avec_teinture !== 0 && (
+                <CostSection title="Teinture" total={eurKg(current.moTeinte)}>
+                  {current.detailTeinture && (
+                    <CostLine label={current.detailTeinture.label} value={eurKg(current.detailTeinture.valueKg)} />
+                  )}
+                </CostSection>
+              )}
+
+              <CostSection title="Prix de vente">
+                <CostLine label="Prix de revient au Kg" value={eurKg(current.moRevient)} />
+                <CostLine label="Coefficient" value={String(Math.round(current.rCoeff * 100))} />
+                <CostLine
+                  label={`Prix de vente au Kg · ${fmtNum(current.moPortAuKg, 2)} € de frais (${Math.round(
+                    current.tauxFraisDePort * 100,
+                  )}%) de port inclus`}
+                  value={`${fmtNum(current.moPrixDeVenteAuKg, 2)} €/Kg`}
+                />
+                <CostLine
+                  label={`Prix de vente au Ml · ${fmtNum(current.moPortAuMl, 2)} € de frais (${Math.round(
+                    current.tauxFraisDePort * 100,
+                  )}%) de port inclus`}
+                  value={`${fmtNum(current.moPrixDeVenteAuMl, 2)} €/Ml`}
+                />
+              </CostSection>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 function DetailSidebar({
   detail,
   isEditing,
@@ -1426,6 +1656,7 @@ function DetailSidebar({
   onDraftChange: (d: HeaderDraft) => void
   ecruOptions: EcruRef[]
 }) {
+  const [activeTab, setActiveTab] = useState<SidebarTab>('informations')
   if (!detail) {
     return (
       <div className="w-96 flex-shrink-0 rounded-xl border flex items-center justify-center bg-zinc-100/80">
@@ -1436,15 +1667,33 @@ function DetailSidebar({
   return (
     <div className="w-96 flex-shrink-0 rounded-xl border flex flex-col overflow-hidden bg-zinc-100/80">
       <div className="flex border-b p-1 gap-1 rounded-t-xl bg-zinc-200/50">
-        <button
-          type="button"
-          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-md transition-colors bg-accent text-accent-foreground shadow-sm"
-        >
-          <Info className="h-3.5 w-3.5" />
-          Informations
-        </button>
+        {([
+          { key: 'informations', label: 'Informations', icon: Info },
+          { key: 'tarif', label: 'Tarif', icon: BadgeEuro },
+        ] as { key: SidebarTab; label: string; icon: React.ElementType }[]).map((tab) => {
+          const Icon = tab.icon
+          return (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setActiveTab(tab.key)}
+              className={cn(
+                'flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-md transition-colors',
+                activeTab === tab.key
+                  ? 'bg-accent text-accent-foreground shadow-sm'
+                  : 'text-muted-foreground hover:bg-accent/10',
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              {tab.label}
+            </button>
+          )
+        })}
       </div>
       <div className="flex-1 overflow-y-auto p-3 space-y-3 scrollbar-transparent">
+        {activeTab === 'tarif' && <TarifTab key={detail.IDref_fini} detail={detail} />}
+        {activeTab === 'informations' && (
+        <div className="space-y-3">
         {!isEditing && (
           <div className="p-3 rounded-lg border bg-card shadow-sm space-y-2">
             <p className="text-xs font-semibold text-muted-foreground">Statistiques</p>
@@ -1539,6 +1788,8 @@ function DetailSidebar({
             </div>
           )}
         </div>
+        </div>
+        )}
       </div>
     </div>
   )
