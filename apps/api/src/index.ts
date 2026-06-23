@@ -19,6 +19,7 @@ import { etudesColorisRouter } from './routes/etudes-coloris.js'
 import { prospectsRouter } from './routes/prospects.js'
 import { stockRouter } from './routes/stock.js'
 import { stockFiniRouter } from './routes/stock-fini.js'
+import { stockEcruRouter } from './routes/stock-ecru.js'
 import { suiviLotsRouter } from './routes/suivi-lots.js'
 import { rapportsRouter } from './routes/rapports.js'
 import { authRouter } from './routes/auth.js'
@@ -70,6 +71,7 @@ app.use('/api/etudes-coloris', etudesColorisRouter)
 app.use('/api/prospects', prospectsRouter)
 app.use('/api/stock', stockRouter)
 app.use('/api/stock', stockFiniRouter)
+app.use('/api/stock', stockEcruRouter)
 app.use('/api/suivi-lots', suiviLotsRouter)
 app.use('/api/rapports', rapportsRouter)
 

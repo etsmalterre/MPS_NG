@@ -56,6 +56,18 @@ export const PERMISSION_KEYS = [
       'Autorise la surteinture : supprime des rouleaux finis et renvoie leurs tombés de métier en teinture dans Finis > Stock.',
     category: 'Finis',
   },
+  {
+    key: 'create_stock_ecru',
+    label: 'Créer un rouleau écru',
+    description: 'Affiche le bouton « Nouveau » et autorise la création de rouleaux dans Tombé Métier > Stock.',
+    category: 'Tombé Métier',
+  },
+  {
+    key: 'cut_stock_ecru',
+    label: 'Couper un rouleau écru',
+    description: 'Autorise la découpe d’un rouleau en plusieurs dans Tombé Métier > Stock.',
+    category: 'Tombé Métier',
+  },
 ] as const
 
 export type PermissionKey = (typeof PERMISSION_KEYS)[number]['key']

@@ -19,7 +19,6 @@ import {
   BarChart3,
   type LucideIcon,
 } from 'lucide-react'
-import { FabricRollIcon } from '@/components/icons/FabricRollIcon'
 
 // PagePlaceholder takes a LucideIcon — widen it locally so our custom
 // SVG components (FabricRollIcon, etc.) are accepted too. They share
@@ -44,7 +43,6 @@ const FilsPrevisionsPage = createPlaceholder('Prévisions Fournisseurs', 'Prévi
 
 // Legacy-menu top-level placeholders
 const TransfertsPage = createPlaceholder('Transferts', 'Transferts de stock entre sites et sous-traitants', Truck)
-const TombeMetierStockPage = createPlaceholder('Stock Tombé Métier', 'Stock du tombé métier', PlaceholderIcon(FabricRollIcon))
 // Références Finis — real screen (not a placeholder anymore)
 // Études coloris — real screen (not a placeholder anymore)
 const FinisTarifsPage = createPlaceholder('Tarifs Finis', 'Tarifs des produits finis', Euro)
@@ -72,6 +70,7 @@ import { QualiteSuiviLots } from '@/pages/QualiteSuiviLots'
 
 // Tombé Métier pages (real)
 import { TombeMetierReferences } from '@/pages/TombeMetierReferences'
+import { TombeMetierStock } from '@/pages/TombeMetierStock'
 
 // Finis pages (real)
 import { FinisReferences } from '@/pages/FinisReferences'
@@ -128,7 +127,7 @@ export const router = createBrowserRouter([
       // Tombé Métier
       { path: 'tombe-metier', element: <Navigate to="/tombe-metier/references" replace /> },
       { path: 'tombe-metier/references', element: <TombeMetierReferences /> },
-      { path: 'tombe-metier/stock', element: <TombeMetierStockPage /> },
+      { path: 'tombe-metier/stock', element: <TombeMetierStock /> },
 
       // Finis
       { path: 'finis', element: <Navigate to="/finis/references" replace /> },
