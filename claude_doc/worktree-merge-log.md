@@ -10,6 +10,19 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-23 — feat/rapport (refinements)
+Polish pass on Rapports › Commandes sous-traitants (`/rapports/commandes-sst`, screen base
+landed earlier same day). Changes: (1) removed the page-title `<h1>` — table-centric screens
+take no screen-name heading (identity comes from the nav/submenu tab); codified this in
+`mps_designer` §27.1 + §27.7 checklist so it isn't re-added. (2) Dropped the "Actualiser"
+button; the report query now uses `staleTime: 0` so it refetches on every mount (each consult)
+with `refetchOnWindowFocus: false` to spare the shared HFSQL bridge. (3) Shrank the table body
+to `text-[13px]` with tighter cell padding (`px-2.5 py-2`) to fit more rows on screen. (4) Added
+an "Exporter Excel" button (top-right of the toolbar) that builds the `.xlsx` client-side via a
+lazy `await import('xlsx')` (keeps SheetJS out of the main bundle), exporting the currently
+visible (search-filtered + sorted, soldées-toggle-aware) rows across all 18 columns; quantities
+rounded to 1 decimal but kept numeric so Excel can sum them. Frontend-only — no API changes.
+
 ## 2026-06-23 — feat/suivilot
 Qualité › Suivi Lots — new quality-control lot-tracking screen (first real Qualité screen;
 the menu's other 3 submenus — Dossiers, Actions, Analyse — remain placeholders). Also adds the

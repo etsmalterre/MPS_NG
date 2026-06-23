@@ -1,12 +1,11 @@
 import { useState, useMemo, useCallback } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import {
   Search,
   Loader2,
   AlertCircle,
   ArrowUp,
   ArrowDown,
-  RefreshCw,
   BellRing,
   ClipboardList,
   Mail,
@@ -17,6 +16,7 @@ import {
   RotateCcw,
   CheckCircle2,
   AlertTriangle,
+  FileSpreadsheet,
   type LucideIcon,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -179,18 +179,24 @@ function useRapport(soldees: boolean) {
   return useQuery<RapportLine[]>({
     queryKey: ['rapport-commandes-sst', { soldees }],
     queryFn: () => apiFetch<RapportLine[]>(`/rapports/commandes-sst?soldees=${soldees ? '1' : '0'}`),
+    // Read-only report: refetch every time the screen is consulted (each mount)
+    // so the numbers are always live, with no manual "Actualiser" needed.
+    // staleTime 0 = always stale → refetchOnMount (default true) refetches.
+    // Disable window-focus refetch so alt-tabbing doesn't hammer the shared
+    // HFSQL bridge (this aggregate query is heavy).
+    staleTime: 0,
+    refetchOnWindowFocus: false,
   })
 }
 
 // ── Main Page ──────────────────────────────────────────
 
 export function RapportCommandesSst() {
-  const queryClient = useQueryClient()
   const [searchQuery, setSearchQuery] = useState('')
   const [showSoldees, setShowSoldees] = useState(false)
   const [sort, setSort] = useState<SortState>({ key: 'IDcommande_sous_traitant', dir: 'desc' })
 
-  const { data: rows, isLoading, isError, error, isFetching } = useRapport(showSoldees)
+  const { data: rows, isLoading, isError, error } = useRapport(showSoldees)
 
   const filteredSorted = useMemo(() => {
     let out = rows ?? []
@@ -222,9 +228,63 @@ export function RapportCommandesSst() {
     setSort((prev) => (prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }))
   }, [])
 
-  const handleRefresh = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['rapport-commandes-sst'] })
-  }, [queryClient])
+  // Excel export of the currently visible (search-filtered + sorted) rows.
+  // SheetJS is lazy-loaded on click so it stays out of the main bundle.
+  const [exporting, setExporting] = useState(false)
+  const handleExport = useCallback(async () => {
+    if (filteredSorted.length === 0) return
+    setExporting(true)
+    try {
+      const XLSX = await import('xlsx')
+      // Quantities arrive as floats with FP noise (e.g. 36.20000076). Round to
+      // 1 decimal but keep them as numbers so Excel can still sum the columns.
+      const qty1 = (v: number) => Math.round(v * 10) / 10
+      const headers = [
+        'Statut', 'Numéro', 'Sous-traitant', 'Référence', 'Coloris',
+        'Qté commandée', 'Qté affectée', 'Qté réceptionnée', 'Unité',
+        'Date commande', 'Délai initial', 'Délai actuel', 'Retard (j)',
+        'Délai client', 'Marge (j)', 'Client', 'Relance', 'Commentaire',
+      ]
+      const aoa: (string | number)[][] = [
+        headers,
+        ...filteredSorted.map((r) => [
+          statutMeta(r.sstatut).label,
+          r.IDcommande_sous_traitant,
+          r.sous_traitant_nom || '',
+          r.reference || '',
+          r.coloris || '',
+          qty1(r.qte_commandee),
+          qty1(r.qte_affectee),
+          qty1(r.qte_receptionnee),
+          r.unite_label,
+          dateFmt(r.date_commande),
+          dateFmt(r.delai_initial),
+          dateFmt(r.delai_actuel),
+          r.retard_jours ?? '',
+          dateFmt(r.delai_client),
+          r.marge_jours ?? '',
+          r.client_nom || '',
+          dateFmt(r.date_relance),
+          r.commentaire || '',
+        ]),
+      ]
+      const ws = XLSX.utils.aoa_to_sheet(aoa)
+      ws['!cols'] = [
+        { wch: 16 }, { wch: 8 }, { wch: 22 }, { wch: 12 }, { wch: 18 },
+        { wch: 13 }, { wch: 12 }, { wch: 14 }, { wch: 7 },
+        { wch: 13 }, { wch: 12 }, { wch: 12 }, { wch: 9 },
+        { wch: 12 }, { wch: 9 }, { wch: 22 }, { wch: 12 }, { wch: 40 },
+      ]
+      const wb = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb, ws, 'Commandes sous-traitants')
+      const stamp = new Date().toISOString().slice(0, 10)
+      XLSX.writeFile(wb, `Commandes_sous-traitants_${stamp}.xlsx`)
+    } catch (err) {
+      console.error('Export Excel échoué:', err)
+    } finally {
+      setExporting(false)
+    }
+  }, [filteredSorted])
 
   // Totalizer over the visible (filtered) rows.
   const lineCount = filteredSorted.length
@@ -233,12 +293,6 @@ export function RapportCommandesSst() {
 
   return (
     <div className="h-full flex flex-col gap-3 min-h-0">
-      {/* Page header */}
-      <div className="flex-shrink-0">
-        <h1 className="text-3xl font-heading font-bold tracking-tight">Commandes sous-traitants</h1>
-        <div className="h-1 w-24 mt-2 rounded-full bg-gradient-to-r from-accent via-accent to-accent/30" />
-      </div>
-
       {/* Toolbar */}
       <div className="flex-shrink-0 flex items-center gap-3">
         <div className="relative flex-1 min-w-0">
@@ -263,14 +317,17 @@ export function RapportCommandesSst() {
         </label>
 
         <Button
-          variant="outline"
           size="sm"
-          onClick={handleRefresh}
-          disabled={isFetching}
+          onClick={handleExport}
+          disabled={exporting || filteredSorted.length === 0}
           className="flex-shrink-0"
         >
-          <RefreshCw className={cn('h-3.5 w-3.5 mr-1.5', isFetching && 'animate-spin')} />
-          Actualiser
+          {exporting ? (
+            <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+          ) : (
+            <FileSpreadsheet className="h-3.5 w-3.5 mr-1.5" />
+          )}
+          Exporter Excel
         </Button>
       </div>
 
@@ -292,7 +349,7 @@ export function RapportCommandesSst() {
           </div>
         ) : (
           <div className="flex-1 min-h-0 overflow-auto scrollbar-transparent">
-            <table className="w-full text-sm" style={{ minWidth: TABLE_MIN_WIDTH, tableLayout: 'fixed' }}>
+            <table className="w-full text-[13px]" style={{ minWidth: TABLE_MIN_WIDTH, tableLayout: 'fixed' }}>
               <colgroup>
                 {COLUMNS.map((c) => (
                   <col key={c.key} style={{ width: c.width }} />
@@ -325,51 +382,51 @@ export function RapportCommandesSst() {
                           : 'hover:bg-accent/5',
                     )}
                   >
-                    <td className="px-3 py-2">
+                    <td className="px-2.5 py-2">
                       <StatutPill sstatut={r.sstatut} />
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums font-medium">{r.IDcommande_sous_traitant}</td>
-                    <td className="px-3 py-2 truncate" title={r.sous_traitant_nom || undefined}>
+                    <td className="px-2.5 py-2 text-right tabular-nums font-medium">{r.IDcommande_sous_traitant}</td>
+                    <td className="px-2.5 py-2 truncate" title={r.sous_traitant_nom || undefined}>
                       {r.sous_traitant_nom || '—'}
                     </td>
-                    <td className="px-3 py-2 truncate" title={r.reference || undefined}>
+                    <td className="px-2.5 py-2 truncate" title={r.reference || undefined}>
                       {r.reference || '—'}
                     </td>
-                    <td className="px-3 py-2 truncate" title={r.coloris || undefined}>
+                    <td className="px-2.5 py-2 truncate" title={r.coloris || undefined}>
                       {r.coloris || '—'}
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums">{qtyFmt(r.qte_commandee, r.unite_label)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                    <td className="px-2.5 py-2 text-right tabular-nums">{qtyFmt(r.qte_commandee, r.unite_label)}</td>
+                    <td className="px-2.5 py-2 text-right tabular-nums text-muted-foreground">
                       {qtyFmt(r.qte_affectee, r.unite_label)}
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                    <td className="px-2.5 py-2 text-right tabular-nums text-muted-foreground">
                       {qtyFmt(r.qte_receptionnee, r.unite_label)}
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{dateFmt(r.date_commande) || '—'}</td>
-                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{dateFmt(r.delai_initial) || '—'}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{dateFmt(r.delai_actuel) || '—'}</td>
+                    <td className="px-2.5 py-2 text-right tabular-nums text-muted-foreground">{dateFmt(r.date_commande) || '—'}</td>
+                    <td className="px-2.5 py-2 text-right tabular-nums text-muted-foreground">{dateFmt(r.delai_initial) || '—'}</td>
+                    <td className="px-2.5 py-2 text-right tabular-nums">{dateFmt(r.delai_actuel) || '—'}</td>
                     <td
                       className={cn(
-                        'px-3 py-2 text-right tabular-nums',
+                        'px-2.5 py-2 text-right tabular-nums',
                         r.retard_jours != null && r.retard_jours > 0 && 'text-red-600 font-medium',
                       )}
                     >
                       {r.retard_jours != null ? daysFmt(r.retard_jours) : ''}
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{dateFmt(r.delai_client) || '—'}</td>
+                    <td className="px-2.5 py-2 text-right tabular-nums text-muted-foreground">{dateFmt(r.delai_client) || '—'}</td>
                     <td
                       className={cn(
-                        'px-3 py-2 text-right tabular-nums',
+                        'px-2.5 py-2 text-right tabular-nums',
                         r.marge_jours != null && r.marge_jours < 0 && 'text-red-600 font-medium',
                       )}
                     >
                       {r.marge_jours != null ? daysFmt(r.marge_jours) : ''}
                     </td>
-                    <td className="px-3 py-2 truncate" title={r.client_nom || undefined}>
+                    <td className="px-2.5 py-2 truncate" title={r.client_nom || undefined}>
                       {r.client_nom || '—'}
                     </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{dateFmt(r.date_relance) || '—'}</td>
-                    <td className="px-3 py-2 text-muted-foreground truncate" title={r.commentaire || undefined}>
+                    <td className="px-2.5 py-2 text-right tabular-nums text-muted-foreground">{dateFmt(r.date_relance) || '—'}</td>
+                    <td className="px-2.5 py-2 text-muted-foreground truncate" title={r.commentaire || undefined}>
                       {r.commentaire || ''}
                     </td>
                   </tr>
@@ -421,7 +478,7 @@ function SortHeader({ label, sortKey, sort, onSort, align = 'left' }: SortHeader
     <th
       onClick={() => onSort(sortKey)}
       className={cn(
-        'px-3 py-2.5 font-semibold cursor-pointer select-none',
+        'px-2.5 py-2 font-semibold cursor-pointer select-none',
         align === 'right' ? 'text-right' : 'text-left',
         active && 'text-accent',
       )}

@@ -1776,6 +1776,7 @@ Use this pattern — never `MasterDetailLayout` — when the page is fundamental
 ```tsx
 return (
   <div className="h-full flex flex-col gap-3 min-h-0">
+    {/* NO page-title <h1> here — the toolbar is the first child */}
     {/* Toolbar */}             <-- §27.2
     {/* Table card */}          <-- §27.3
     <DetailDrawer ... />        <-- §27.5
@@ -1785,6 +1786,8 @@ return (
 ```
 
 `min-h-0` on the root is mandatory — without it the table body can't shrink to fit and the whole page scrolls instead of just the rows.
+
+**No page title `<h1>` on table-centric screens.** Do NOT add a heading row (`<h1 className="text-3xl font-heading…">Commandes sous-traitants</h1>` + gold accent line) above the toolbar. The screen's identity already comes from the sidebar nav / header submenu tab that routed here; a redundant title just eats the vertical space the table needs and is absent from every reference table-centric screen (`FournisseursStock`, `FilsStock`, `RapportCommandesSst`). The toolbar (search + filters + actions) is the **first** element under the page root. This is the opposite of master-detail screens (§6), which DO get the title in the detail header — but that title is the *selected entity's name*, not the screen name. A screen-name `<h1>` is never correct in this app.
 
 ### 27.2 Toolbar (top, full-width)
 
@@ -2045,6 +2048,7 @@ When a table column is a foreign-key ID (e.g. `stock_fil.IDMagasin → sous_trai
 When building a new screen of this type, the result must have:
 
 - [ ] Page root: `h-full flex flex-col gap-3 min-h-0`
+- [ ] **No page-title `<h1>`** — the toolbar is the first child of the page root (§27.1)
 - [ ] Toolbar with search left, filters middle, **default-variant** `<Button>` "Nouveau" right
 - [ ] Split table with shared `<colgroup>` between header and body, both `tableLayout: fixed`
 - [ ] Sortable headers via `SortHeader`, active column gets `text-accent` + arrow icon
