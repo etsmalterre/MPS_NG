@@ -11,7 +11,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import {
   Search,
   Loader2,
@@ -39,6 +39,7 @@ import {
   Layers,
   Calendar,
   Lock,
+  Calculator,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -82,6 +83,9 @@ interface ColorisRow {
   reference: string | null
   commentaire: string | null
   suivis: number
+  rolls: boolean
+  orders: boolean
+  has_specific_composition: boolean
 }
 
 interface MachineRow {
@@ -185,6 +189,21 @@ interface RefEcruDetail {
   rolls_poids_total: number
 }
 
+// Coût de tricotage (PrixDeRevientTRM) breakdown — mirror of the API shape.
+interface CoutRow { key: string; label: string; eurPerKg: number; info?: string }
+interface CoutSection { key: 'structure' | 'production' | 'main_oeuvre'; label: string; rows: CoutRow[]; subtotalPerKg: number }
+interface CoutTricotageBreakdown {
+  computable: boolean
+  IDref_ecru: number
+  qty: number
+  inputs: { gxNbToursKg: number; gxMinParKg: number; nbAiguilles: number; prodAnnuel: number; jaugeCode: number; diametreCode: number }
+  sections: CoutSection[]
+  costPerKg: number
+  salePrice: number
+  floor: number
+  retainedPrice: number
+}
+
 interface ContextureLookup { IDcontexture: number; nom: string | null }
 interface ClientLookup { IDclient: number; nom: string | null; ville: string | null }
 interface RefFilLookup { IDref_fil: number; reference: string | null; prix_kg: number | null }
@@ -286,6 +305,15 @@ const ordLabel = (options: { ord: number; label: string }[]) => (ord: number | n
 const jaugeLabel = ordLabel(JAUGE_OPTIONS)
 const diametreLabel = ordLabel(DIAM_OPTIONS)
 
+// "Tombé du métier" is a free-text column storing one of two fixed values
+// ("Rouleaux" / "Plis"); legacy junk ("-1", "") maps to the empty placeholder.
+const TOMBE_OPTIONS: { id: number; value: string; label: string }[] = [
+  { id: 1, value: 'Rouleaux', label: 'Rouleaux' },
+  { id: 2, value: 'Plis', label: 'Plis' },
+]
+const tombeId = (v: string | null | undefined): number => TOMBE_OPTIONS.find((o) => o.value === (v ?? '').trim())?.id ?? 0
+const tombeValue = (id: number): string => TOMBE_OPTIONS.find((o) => o.id === id)?.value ?? ''
+
 // ── API hooks ──────────────────────────────────────────
 
 function useRefsEcru(archived: boolean) {
@@ -300,6 +328,15 @@ function useRefEcruDetail(id: number | null) {
     queryKey: ['ref-ecru', id],
     queryFn: () => apiFetch(`/references-ecru/${id}`),
     enabled: id !== null,
+  })
+}
+
+function useCoutTricotage(id: number | null, qty: number, enabled: boolean) {
+  return useQuery<CoutTricotageBreakdown>({
+    queryKey: ['ref-ecru-cout-tricotage', id, qty],
+    queryFn: () => apiFetch(`/references-ecru/${id}/cout-tricotage?qty=${qty}`),
+    enabled: enabled && id !== null,
+    placeholderData: (prev) => prev, // keep last breakdown while qty changes → no flicker
   })
 }
 
@@ -479,6 +516,7 @@ export function TombeMetierReferences() {
   const [saveError, setSaveError] = useState<string | null>(null)
   const [printOpen, setPrintOpen] = useState(false)
   const [emailOpen, setEmailOpen] = useState(false)
+  const [coutDialogOpen, setCoutDialogOpen] = useState(false)
 
   const { data: refs, isLoading, isError, error } = useRefsEcru(archivedFilter)
   const { data: detail, isLoading: detailLoading } = useRefEcruDetail(selectedId)
@@ -759,7 +797,7 @@ export function TombeMetierReferences() {
             reportDirty={reportDirty}
           />
         }
-        sidebar={selectedId !== null ? <DetailSidebar detail={detail ?? null} /> : null}
+        sidebar={selectedId !== null ? <DetailSidebar detail={detail ?? null} refId={selectedId} onOpenCoutDetail={() => setCoutDialogOpen(true)} /> : null}
         sidebarTitle="Informations"
         hasSelection={selectedId !== null}
         onBack={() => guard.guardAction(() => { setIsEditing(false); setSelectedId(null) })}
@@ -826,6 +864,12 @@ export function TombeMetierReferences() {
 
       <PlaceholderDialog open={printOpen} onClose={() => setPrintOpen(false)} title="Imprimer" TriggerIcon={Printer} CenterIcon={Printer} />
       <PlaceholderDialog open={emailOpen} onClose={() => setEmailOpen(false)} title="Envoyer un email" TriggerIcon={AtSign} CenterIcon={Mail} />
+      <CoutTricotageDialog
+        open={coutDialogOpen}
+        onClose={() => setCoutDialogOpen(false)}
+        refId={selectedId}
+        refLabel={detail?.reference ?? null}
+      />
     </>
   )
 }
@@ -858,6 +902,124 @@ function PlaceholderDialog({
           <CenterIcon className="h-12 w-12 mb-3 opacity-40" />
           <p className="text-sm font-medium">En developpement</p>
           <p className="text-xs mt-1">Cette fonctionnalite sera disponible prochainement.</p>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ── Coût de tricotage breakdown dialog (read-only) ─────
+
+function CoutTricotageDialog({
+  open,
+  onClose,
+  refId,
+  refLabel,
+}: {
+  open: boolean
+  onClose: () => void
+  refId: number | null
+  refLabel: string | null
+}) {
+  const [qtyInput, setQtyInput] = useState('1000')
+  const [debouncedQty, setDebouncedQty] = useState(1000)
+
+  // Reset to the default quantity each time the dialog opens.
+  useEffect(() => { if (open) { setQtyInput('1000'); setDebouncedQty(1000) } }, [open])
+
+  // Debounce the qty input so we don't refetch on every keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const n = Number(qtyInput)
+      setDebouncedQty(Number.isFinite(n) && n >= 1 ? n : 1000)
+    }, 300)
+    return () => clearTimeout(t)
+  }, [qtyInput])
+
+  const { data: bd, isFetching } = useCoutTricotage(refId, debouncedQty, open)
+  const floorWins = bd ? bd.floor >= bd.salePrice : false
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent className="max-w-2xl" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <TmRollIcon className="h-5 w-5 text-accent" />
+            Coût de tricotage{refLabel ? ` — ${refLabel}` : ''}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="mt-4 space-y-3">
+          {/* Quantity */}
+          <div className="flex items-end gap-3">
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Quantité (kg)</label>
+              <input
+                type="number"
+                min={1}
+                step="1"
+                value={qtyInput}
+                onChange={(e) => setQtyInput(e.target.value)}
+                className={cn(inputClass, 'w-32 tabular-nums')}
+              />
+            </div>
+            {isFetching && <Loader2 className="h-4 w-4 animate-spin text-accent mb-2" />}
+            {!!bd?.computable && (
+              <p className="text-[11px] text-muted-foreground mb-1.5">
+                Métier : <span className="tabular-nums">{fmtNum(bd.inputs.gxNbToursKg, 2)}</span> trs/kg · <span className="tabular-nums">{bd.inputs.nbAiguilles}</span> aiguilles
+              </p>
+            )}
+          </div>
+
+          {!!bd && !bd.computable && (
+            <div className="rounded-md border border-border/60 bg-muted/40 px-3 py-2.5 text-xs text-muted-foreground">
+              Aucune donnée machine pour cette référence — le coût de tricotage ne peut pas être calculé. Le prix retenu est le prix plancher de la fiche.
+            </div>
+          )}
+
+          {!!bd?.computable && bd.sections.map((sec) => (
+            <div key={sec.key}>
+              <p className="text-xs font-semibold text-accent uppercase tracking-wide mb-1.5">{sec.label}</p>
+              <div className="space-y-1">
+                {sec.rows.map((r) => (
+                  <div key={r.key} className="flex items-baseline justify-between gap-3">
+                    <span className="text-sm text-muted-foreground min-w-0">
+                      {r.label}
+                      {r.info && <span className="block text-[10px] text-muted-foreground/70 truncate">{r.info}</span>}
+                    </span>
+                    <span className="text-sm tabular-nums flex-shrink-0">{fmtNum(r.eurPerKg, 4)} €/kg</span>
+                  </div>
+                ))}
+              </div>
+              <div className="flex items-baseline justify-between gap-2 mt-1.5 pt-1.5 border-t border-border/50">
+                <span className="text-xs font-semibold">Sous-total</span>
+                <span className="text-sm font-semibold tabular-nums">{fmtNum(sec.subtotalPerKg, 4)} €/kg</span>
+              </div>
+            </div>
+          ))}
+
+          {/* Totals */}
+          {!!bd && (
+            <div className="border-t pt-3 space-y-1">
+              <div className="flex items-baseline justify-between">
+                <span className="text-sm font-semibold">Coût total</span>
+                <span className="text-base font-bold tabular-nums text-accent">{fmtNum(bd.costPerKg, 2)} €/kg</span>
+              </div>
+              <div className="flex items-baseline justify-between text-sm text-muted-foreground">
+                <span>Prix de vente (marge 30 %)</span>
+                <span className="tabular-nums">{fmtNum(bd.salePrice, 2)} €/kg</span>
+              </div>
+              <div className="flex items-baseline justify-between text-sm text-muted-foreground">
+                <span>Prix plancher (fiche)</span>
+                <span className="tabular-nums">{fmtNum(bd.floor, 2)} €/kg</span>
+              </div>
+              <div className="flex items-baseline justify-between pt-1 mt-1 border-t border-border/50">
+                <span className="text-sm font-semibold">
+                  Prix retenu{floorWins && <span className="ml-1 text-[10px] font-normal text-muted-foreground">(plancher)</span>}
+                </span>
+                <span className="text-base font-bold tabular-nums">{fmtNum(bd.retainedPrice, 2)} €/kg</span>
+              </div>
+            </div>
+          )}
         </div>
       </DialogContent>
     </Dialog>
@@ -1206,6 +1368,9 @@ function IdentificationCard({
   clients: ClientLookup[]
   contextures: ContextureLookup[]
 }) {
+  // Fabric-defining fields are frozen once rolls or orders exist for this ref.
+  const fieldsLocked = !!detail.has_rolls || !!detail.has_orders
+  const lockTitle = 'Verrouillé : des rouleaux ou des commandes existent pour cette référence.'
   return (
     <Card className={cn('card-premium', isEditing && editSectionClass)}>
       <CardHeader className="flex flex-row items-center gap-2 p-4 space-y-0 pb-2">
@@ -1234,6 +1399,12 @@ function IdentificationCard({
               </div>
               <LabeledInput label="Référence client" value={draft.reference_client} onChange={(v) => onDraftChange({ ...draft, reference_client: v })} />
             </div>
+            {fieldsLocked && (
+              <div className="flex items-start gap-2 rounded-md border border-amber-400/40 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+                <Lock className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                <span>Contexture, jauge, diamètre, bio et recyclé sont verrouillés car des rouleaux ou des commandes existent pour cette référence.</span>
+              </div>
+            )}
             <div className="grid grid-cols-4 gap-2">
               <div className="space-y-1 col-span-2">
                 <label className="text-xs font-medium text-muted-foreground">Contexture</label>
@@ -1242,6 +1413,8 @@ function IdentificationCard({
                   value={draft.IDcontexture}
                   onChange={(id) => onDraftChange({ ...draft, IDcontexture: id })}
                   emptyLabel="— Choisir —"
+                  disabled={fieldsLocked}
+                  disabledTitle={lockTitle}
                 />
               </div>
               <div className="space-y-1">
@@ -1251,6 +1424,8 @@ function IdentificationCard({
                   value={Number(draft.Jauge) || 0}
                   onChange={(id) => onDraftChange({ ...draft, Jauge: id ? String(id) : '' })}
                   emptyLabel="— Choisir —"
+                  disabled={fieldsLocked}
+                  disabledTitle={lockTitle}
                 />
               </div>
               <div className="space-y-1">
@@ -1260,17 +1435,19 @@ function IdentificationCard({
                   value={Number(draft.diametre) || 0}
                   onChange={(id) => onDraftChange({ ...draft, diametre: id ? String(id) : '' })}
                   emptyLabel="— Choisir —"
+                  disabled={fieldsLocked}
+                  disabledTitle={lockTitle}
                 />
               </div>
             </div>
             <div className="grid grid-cols-4 gap-2 items-end">
               <LabeledInput label="Prix" suffix="€/kg" type="number" step="0.01" value={draft.prix} onChange={(v) => onDraftChange({ ...draft, prix: v })} />
-              <label className="flex items-center gap-2 text-xs font-medium h-8">
-                <Pill value={draft.bio} onChange={(v) => onDraftChange({ ...draft, bio: v })} />
+              <label className="flex items-center gap-2 text-xs font-medium h-8" title={fieldsLocked ? lockTitle : undefined}>
+                <Pill value={draft.bio} onChange={(v) => onDraftChange({ ...draft, bio: v })} disabled={fieldsLocked} />
                 <span className="flex items-center gap-1"><Leaf className="h-3 w-3 text-green-600" />Bio</span>
               </label>
-              <label className="flex items-center gap-2 text-xs font-medium h-8 col-span-2">
-                <Pill value={draft.recycle} onChange={(v) => onDraftChange({ ...draft, recycle: v })} />
+              <label className="flex items-center gap-2 text-xs font-medium h-8 col-span-2" title={fieldsLocked ? lockTitle : undefined}>
+                <Pill value={draft.recycle} onChange={(v) => onDraftChange({ ...draft, recycle: v })} disabled={fieldsLocked} />
                 <span className="flex items-center gap-1"><Recycle className="h-3 w-3 text-teal-600" />Recyclé</span>
               </label>
             </div>
@@ -1671,6 +1848,14 @@ function ColorisCard({
             )}
             {detail.coloris.map((c) => {
               const isRowEditing = editingId === c.IDcolori_ecru
+              const inUse = c.rolls || c.orders || c.has_specific_composition
+              const deleteTitle = !inUse
+                ? 'Supprimer'
+                : c.rolls
+                  ? 'Coloris utilisé par des rouleaux — suppression impossible'
+                  : c.orders
+                    ? 'Coloris utilisé par une commande — suppression impossible'
+                    : 'Coloris avec une composition spécifique — suppression impossible'
               return (
                 <div key={c.IDcolori_ecru}>
                   {isRowEditing && isEditing ? (
@@ -1692,8 +1877,16 @@ function ColorisCard({
                             <button onClick={() => startEditRow(c)} className="opacity-0 group-hover:opacity-100 p-0.5 text-muted-foreground hover:text-foreground transition-opacity" title="Modifier">
                               <Pencil className="h-3.5 w-3.5" />
                             </button>
-                            <button onClick={() => { setErrorMsg(null); setDeleteTarget(c) }} className="opacity-0 group-hover:opacity-100 p-0.5 text-destructive hover:text-destructive transition-opacity" title="Supprimer">
-                              <Trash2 className="h-3.5 w-3.5" />
+                            <button
+                              onClick={() => { if (!inUse) { setErrorMsg(null); setDeleteTarget(c) } }}
+                              aria-disabled={inUse}
+                              className={cn(
+                                'opacity-0 group-hover:opacity-100 p-0.5 transition-opacity',
+                                inUse ? 'text-muted-foreground/40 cursor-not-allowed' : 'text-destructive hover:text-destructive',
+                              )}
+                              title={deleteTitle}
+                            >
+                              {inUse ? <Lock className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
                             </button>
                           </div>
                         )}
@@ -1893,7 +2086,12 @@ function DonneesTechnique({
           <div className="grid grid-cols-2 gap-2">
             <div className="space-y-1">
               <label className="text-xs font-medium text-muted-foreground">Tombé du métier</label>
-              <input value={draft.tombe_metier} onChange={(e) => onDraftChange({ ...draft, tombe_metier: e.target.value })} className={inputClass} />
+              <PopoverSelect
+                options={TOMBE_OPTIONS.map((o) => ({ id: o.id, primary: o.label }))}
+                value={tombeId(draft.tombe_metier)}
+                onChange={(id) => onDraftChange({ ...draft, tombe_metier: tombeValue(id) })}
+                emptyLabel="— Choisir —"
+              />
             </div>
           </div>
           <div className="flex flex-wrap gap-x-8 gap-y-2 pt-1">
@@ -1919,7 +2117,7 @@ function DonneesTechnique({
           <div className="flex flex-wrap items-center gap-x-8 gap-y-2">
             <div className="flex items-baseline gap-2">
               <span className="text-xs text-muted-foreground">Tombé du métier</span>
-              <span className="text-sm">{detail.tombe_metier || '—'}</span>
+              <span className="text-sm">{tombeValue(tombeId(detail.tombe_metier)) || '—'}</span>
             </div>
             <div className="flex items-center gap-1.5">
               {!!detail.maille_ouverture && <Badge variant="secondary" className="text-[10px] py-0">Maille d'ouverture</Badge>}
@@ -2046,7 +2244,7 @@ function MachineGrid({
           )}
         </div>
 
-        {detail.machines.length === 0 && !showForm ? (
+        {detail.machines.length === 0 ? (
           <p className="text-sm text-muted-foreground italic">Aucun réglage machine</p>
         ) : (
           <div className="overflow-x-auto rounded-lg border border-border/60">
@@ -2089,17 +2287,16 @@ function MachineGrid({
           </div>
         )}
 
-        {(showForm || editingId !== null) && isEditing && (
-          <MachineFormView
-            form={form}
-            onFormChange={setForm}
-            machinesLk={machinesLk}
-            onCancel={resetForm}
-            onSave={() => (editingId !== null ? updateMut.mutate(editingId) : createMut.mutate())}
-            isSaving={createMut.isPending || updateMut.isPending}
-            title={editingId !== null ? 'Modifier le métier' : 'Ajouter un métier'}
-          />
-        )}
+        <MachineFormDialog
+          open={(showForm || editingId !== null) && isEditing}
+          form={form}
+          onFormChange={setForm}
+          machinesLk={machinesLk}
+          onCancel={resetForm}
+          onSave={() => (editingId !== null ? updateMut.mutate(editingId) : createMut.mutate())}
+          isSaving={createMut.isPending || updateMut.isPending}
+          title={editingId !== null ? 'Modifier le métier' : 'Ajouter un métier'}
+        />
       </div>
       <ConfirmDialog
         open={deleteTarget !== null}
@@ -2113,7 +2310,8 @@ function MachineGrid({
   )
 }
 
-function MachineFormView({
+function MachineFormDialog({
+  open,
   form,
   onFormChange,
   machinesLk,
@@ -2122,6 +2320,7 @@ function MachineFormView({
   isSaving,
   title,
 }: {
+  open: boolean
   form: MachineForm
   onFormChange: (f: MachineForm) => void
   machinesLk: MachineLookup[]
@@ -2132,41 +2331,47 @@ function MachineFormView({
 }) {
   const canSave = form.IDmachine > 0
   return (
-    <div className="rounded-lg border border-accent/25 bg-accent/[0.03] p-4 space-y-3">
-      <p className="text-xs font-semibold text-accent uppercase tracking-wide">{title}</p>
-      <div className="grid grid-cols-3 gap-2">
-        <div className="space-y-1 col-span-3">
-          <label className="text-xs font-medium text-muted-foreground">Métier</label>
-          <PopoverSelect
-            options={machinesLk.map((m) => ({ id: m.IDmachine, primary: m.nom ?? `#${m.IDmachine}`, secondary: m.Jauge != null ? `J${fmtNum(m.Jauge, 0)}` : undefined }))}
-            value={form.IDmachine}
-            onChange={(id) => onFormChange({ ...form, IDmachine: id })}
-            emptyLabel="— Choisir —"
-            size="sm"
-          />
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onCancel() }}>
+      <DialogContent className="max-w-2xl" onClose={onCancel}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Cog className="h-5 w-5 text-accent" />
+            {title}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="mt-4 space-y-3">
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Métier</label>
+            <PopoverSelect
+              options={machinesLk.map((m) => ({ id: m.IDmachine, primary: m.nom ?? `#${m.IDmachine}`, secondary: m.Jauge != null ? `J${fmtNum(m.Jauge, 0)}` : undefined }))}
+              value={form.IDmachine}
+              onChange={(id) => onFormChange({ ...form, IDmachine: id })}
+              emptyLabel="— Choisir —"
+            />
+          </div>
+          <div className="grid grid-cols-5 gap-2">
+            <LabeledInput label="Rep. 1" value={form.repere_1} onChange={(v) => onFormChange({ ...form, repere_1: v })} />
+            <LabeledInput label="Rep. 2" value={form.repere_2} onChange={(v) => onFormChange({ ...form, repere_2: v })} />
+            <LabeledInput label="Rep. 3" value={form.repere_3} onChange={(v) => onFormChange({ ...form, repere_3: v })} />
+            <LabeledInput label="Rep. 4" value={form.repere_4} onChange={(v) => onFormChange({ ...form, repere_4: v })} />
+            <LabeledInput label="Rep. 5" value={form.repere_5} onChange={(v) => onFormChange({ ...form, repere_5: v })} />
+          </div>
+          <div className="grid grid-cols-4 gap-2">
+            <LabeledInput label="Hauteur Pl" value={form.hauteur_pl} onChange={(v) => onFormChange({ ...form, hauteur_pl: v })} />
+            <LabeledInput label="Abattage" value={form.abattage} onChange={(v) => onFormChange({ ...form, abattage: v })} />
+            <LabeledInput label="Trs/10Kg/Ch." type="number" value={form.trs_10kg_chute} onChange={(v) => onFormChange({ ...form, trs_10kg_chute: v })} />
+            <LabeledInput label="Nb chutes" type="number" value={form.nb_chutes} onChange={(v) => onFormChange({ ...form, nb_chutes: v })} />
+          </div>
         </div>
-      </div>
-      <div className="grid grid-cols-5 gap-2">
-        <LabeledInput label="Rep. 1" value={form.repere_1} onChange={(v) => onFormChange({ ...form, repere_1: v })} />
-        <LabeledInput label="Rep. 2" value={form.repere_2} onChange={(v) => onFormChange({ ...form, repere_2: v })} />
-        <LabeledInput label="Rep. 3" value={form.repere_3} onChange={(v) => onFormChange({ ...form, repere_3: v })} />
-        <LabeledInput label="Rep. 4" value={form.repere_4} onChange={(v) => onFormChange({ ...form, repere_4: v })} />
-        <LabeledInput label="Rep. 5" value={form.repere_5} onChange={(v) => onFormChange({ ...form, repere_5: v })} />
-      </div>
-      <div className="grid grid-cols-4 gap-2">
-        <LabeledInput label="Hauteur Pl" value={form.hauteur_pl} onChange={(v) => onFormChange({ ...form, hauteur_pl: v })} />
-        <LabeledInput label="Abattage" value={form.abattage} onChange={(v) => onFormChange({ ...form, abattage: v })} />
-        <LabeledInput label="Trs/10Kg/Ch." type="number" value={form.trs_10kg_chute} onChange={(v) => onFormChange({ ...form, trs_10kg_chute: v })} />
-        <LabeledInput label="Nb chutes" type="number" value={form.nb_chutes} onChange={(v) => onFormChange({ ...form, nb_chutes: v })} />
-      </div>
-      <div className="flex justify-end gap-2 pt-1">
-        <Button variant="outline" size="sm" onClick={onCancel}>Annuler</Button>
-        <Button size="sm" onClick={onSave} disabled={!canSave || isSaving}>
-          {isSaving ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Save className="h-3.5 w-3.5 mr-1.5" />}
-          Enregistrer
-        </Button>
-      </div>
-    </div>
+        <DialogFooter className="mt-4">
+          <Button variant="outline" onClick={onCancel}>Annuler</Button>
+          <Button onClick={onSave} disabled={!canSave || isSaving}>
+            {isSaving ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Save className="h-3.5 w-3.5 mr-1.5" />}
+            Enregistrer
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -2452,7 +2657,18 @@ function SchemaLiageTab({
 
 // ── Right Panel: Sidebar ───────────────────────────────
 
-function DetailSidebar({ detail }: { detail: RefEcruDetail | null }) {
+function DetailSidebar({
+  detail,
+  refId,
+  onOpenCoutDetail,
+}: {
+  detail: RefEcruDetail | null
+  refId: number | null
+  onOpenCoutDetail: () => void
+}) {
+  // Knitting cost at the default 1000 kg for the card headline (the modal lets
+  // the user change the quantity). Hook before the early return (§28.6).
+  const { data: cout } = useCoutTricotage(refId, 1000, refId !== null)
   if (!detail) {
     return (
       <div className="w-96 flex-shrink-0 rounded-xl border flex items-center justify-center bg-zinc-100/80">
@@ -2479,6 +2695,26 @@ function DetailSidebar({ detail }: { detail: RefEcruDetail | null }) {
             <p className="text-[11px] text-muted-foreground mt-0.5">Matière + façon</p>
           </div>
         )}
+        <div className="p-3 rounded-lg border bg-card shadow-sm">
+          <p className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5 mb-1">
+            <TmRollIcon className="h-3.5 w-3.5" />
+            Coût de tricotage
+          </p>
+          {cout === undefined ? (
+            <div className="h-8 flex items-center"><Loader2 className="h-4 w-4 animate-spin text-accent" /></div>
+          ) : cout.computable ? (
+            <>
+              <p className="text-2xl font-bold tabular-nums text-accent">{fmtNum(cout.costPerKg, 2)} <span className="text-sm font-normal text-muted-foreground">€/kg</span></p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">Prix de vente : <span className="tabular-nums">{fmtNum(cout.salePrice, 2)}</span> €/kg · base 1000 kg</p>
+            </>
+          ) : (
+            <p className="text-sm text-muted-foreground italic mt-0.5">Non calculable (pas de données machine)</p>
+          )}
+          <Button variant="outline" size="sm" className="mt-2 w-full" onClick={onOpenCoutDetail}>
+            <Calculator className="h-3.5 w-3.5 mr-1.5" />
+            Détail du calcul
+          </Button>
+        </div>
         <div className="p-3 rounded-lg border bg-card shadow-sm space-y-2">
           <p className="text-xs font-semibold text-muted-foreground">Statistiques</p>
           <KV label="Rouleaux créés" value={<span className="tabular-nums">{detail.rolls_count}</span>} />

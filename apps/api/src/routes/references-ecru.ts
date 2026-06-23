@@ -1,6 +1,7 @@
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
 import { z } from 'zod'
 import { query, queryRaw, fixEncoding } from '../lib/hfsql-auto.js'
+import { prixDeRevientTRMDetail } from '../lib/pricing-trm.js'
 
 export const referencesEcruRouter: RouterType = Router()
 
@@ -436,6 +437,41 @@ referencesEcruRouter.get('/:id', async (req: Request, res: Response) => {
       suivis: Number(c.suivis) ? 1 : 0,
     }))
 
+    // Per-coloris usage flags → drive the delete affordance. A coloris can't be
+    // deleted if it has rolls (stock_ecru), tricoteur orders, or its own
+    // specific composition (composition_ecru row keyed to it). Batched, not N+1.
+    const coloriIds = coloris.map((c) => c.IDcolori_ecru).filter((n) => n > 0)
+    const usedRolls = new Set<number>()
+    const usedOrders = new Set<number>()
+    const usedCompo = new Set<number>()
+    if (coloriIds.length > 0) {
+      const inList = coloriIds.join(',')
+      try {
+        const r = await query<{ idc: number; n: number }>(
+          `SELECT IDcolori_ecru AS idc, COUNT(*) AS n FROM stock_ecru WHERE IDcolori_ecru IN (${inList}) GROUP BY IDcolori_ecru`,
+        )
+        for (const x of r) if (Number(x.n) > 0) usedRolls.add(Number(x.idc))
+      } catch { /* stock_ecru unreachable on some envs — tolerate */ }
+      try {
+        const o = await query<{ idc: number; n: number }>(
+          `SELECT IDColoris AS idc, COUNT(*) AS n FROM ligne_commande_sous_traitant WHERE IDColoris IN (${inList}) AND type IN (0, 1) GROUP BY IDColoris`,
+        )
+        for (const x of o) if (Number(x.n) > 0) usedOrders.add(Number(x.idc))
+      } catch { /* tolerate */ }
+      try {
+        const cc = await query<{ idc: number; n: number }>(
+          `SELECT IDcolori_ecru AS idc, COUNT(*) AS n FROM composition_ecru WHERE IDcolori_ecru IN (${inList}) GROUP BY IDcolori_ecru`,
+        )
+        for (const x of cc) if (Number(x.n) > 0) usedCompo.add(Number(x.idc))
+      } catch { /* tolerate */ }
+    }
+    const colorisOut = coloris.map((c) => ({
+      ...c,
+      rolls: usedRolls.has(c.IDcolori_ecru),
+      orders: usedOrders.has(c.IDcolori_ecru),
+      has_specific_composition: usedCompo.has(c.IDcolori_ecru),
+    }))
+
     // Machine grid (ref_ecru_machine — all ASCII) + Métier name + computed compteurs.
     const machRows = await query<{
       IDref_ecru_machine: number
@@ -528,7 +564,7 @@ referencesEcruRouter.get('/:id', async (req: Request, res: Response) => {
       client_nom,
       composition_lines: compositionLines,
       cout_kg,
-      coloris,
+      coloris: colorisOut,
       machines,
       ...liage,
       obs_of,
@@ -539,6 +575,23 @@ referencesEcruRouter.get('/:id', async (req: Request, res: Response) => {
     })
   } catch (err) {
     console.error('Error fetching ref_ecru detail:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/references-ecru/:id/cout-tricotage?qty=<number>
+// Detailed breakdown of the TRM knitting cost (PrixDeRevientTRM) for a ref at a
+// given quantity. Quantity-dependent (labor amortizes over kg); default 1000.
+referencesEcruRouter.get('/:id/cout-tricotage', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (!(await refEcruExists(id))) { res.status(404).json({ error: 'Ref ecru not found' }); return }
+    const raw = Number(req.query.qty)
+    const qty = Number.isFinite(raw) && raw >= 1 ? raw : 1000
+    res.json(await prixDeRevientTRMDetail(id, qty))
+  } catch (err) {
+    console.error('Error computing cout-tricotage:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -728,6 +781,22 @@ referencesEcruRouter.put('/:id', async (req: Request, res: Response) => {
     if (Number(dup[0]?.n ?? 0) > 0) {
       res.status(409).json({ error: 'Cette référence existe déjà.' })
       return
+    }
+    // Freeze the fabric-defining fields (contexture, jauge, diamètre, bio,
+    // recyclé) once rolls or orders exist — changing them would desync produced
+    // stock from its declared nature. Silently keep the stored values so a
+    // stale/tampering client can't change them (other header fields still save).
+    const lock = await refEcruLock(id)
+    if (lock.rolls || lock.orders) {
+      const curRows = await query<Record<string, unknown>>(`SELECT * FROM ref_ecru WHERE IDref_ecru = ${id}`)
+      if (curRows.length > 0) {
+        const cur = normalizeRefEcru(curRows[0])
+        parsed.data.IDcontexture = cur.IDcontexture
+        parsed.data.Jauge = cur.Jauge
+        parsed.data.diametre = cur.diametre
+        parsed.data.bio = !!cur.bio
+        parsed.data.recycle = !!cur.recycle
+      }
     }
     const sets = buildRefEcruSets(parsed.data)
     await query(`UPDATE ref_ecru SET ${sets.join(', ')} WHERE IDref_ecru = ${id}`)

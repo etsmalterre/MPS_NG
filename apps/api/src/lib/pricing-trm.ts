@@ -162,32 +162,153 @@ const NB_TOUR_ANNUEL = 5_276_160 // 20 trs/min × 229 days × 80% TRS
 const TARGET_SPEED_TRS_MIN = 20  // gxMinParKg = gxNbToursKg / 20
 const MACHINE_POWER_KW = 3       // ConsoElecParKg = gxMinParKg × 3 / 60
 
-/** Compute the production cost per kg of écru. Returns 0 if any required
- *  input is missing (no ref_ecru_machine rows, no quantity, etc.) so the
- *  caller can default to the ref_ecru.prix floor via `max()`. */
-export async function prixDeRevientTRM(
+/** Margin applied to the cost price to get the sale price. Legacy WLanguage:
+ *  `moPrixMargé = PrixDeRevientTRM(...) / 0.7` — 30 % markup. */
+export const TRM_MARGIN = 0.30
+
+// ── Breakdown (per-component detail, for the "Coût de tricotage" UI) ────────
+
+/** One displayed cost line within a section, with its €/kg contribution and a
+ *  short description of the inputs that produced it. */
+export interface CoutRow { key: string; label: string; eurPerKg: number; info?: string }
+
+/** A display group (Frais de structure / Frais de production / Main d'œuvre). */
+export interface CoutSection {
+  key: 'structure' | 'production' | 'main_oeuvre'
+  label: string
+  rows: CoutRow[]
+  subtotalPerKg: number
+}
+
+/** Full breakdown of `prixDeRevientTRM` for a ref at a given quantity. The
+ *  `costPerKg` equals the scalar `prixDeRevientTRM` and `retainedPrice` equals
+ *  `trmLinePrix`, so the displayed detail and the line price never diverge. */
+export interface CoutTricotageBreakdown {
+  computable: boolean // false when gxNbToursKg <= 0 (no ref_ecru_machine rows)
+  IDref_ecru: number
+  qty: number
+  inputs: {
+    gxNbToursKg: number
+    gxMinParKg: number
+    nbAiguilles: number
+    prodAnnuel: number
+    jaugeCode: number
+    diametreCode: number
+  }
+  sections: CoutSection[]
+  costPerKg: number
+  salePrice: number
+  floor: number
+  retainedPrice: number
+}
+
+/** Compact number formatter for the descriptive `info` strings (plain ASCII,
+ *  no locale separators so it stays stable across environments). */
+function num(n: number, dp = 2): string {
+  const r = Math.round(n * 10 ** dp) / 10 ** dp
+  return Number.isInteger(r) ? String(r) : r.toFixed(dp)
+}
+
+/** Run one labor block: sum `coutOperation` over its tasks (in order, so the
+ *  arithmetic is identical to the legacy inline accumulation), returning both
+ *  the € total over the line and the €/kg figure. */
+function laborBlock(
+  hourlyRate: number,
+  ops: Array<[tpsKey: string, freqKey: string]>,
+  xPoidsCommandé: number,
+  tarif: Map<string, number>,
+): { total: number; perKg: number } {
+  let total = 0
+  for (const [tpsKey, freqKey] of ops) {
+    total += coutOperation(tpsKey, freqKey, hourlyRate, xPoidsCommandé, tarif)
+  }
+  return { total, perKg: total / xPoidsCommandé }
+}
+
+/** Breakdown skeleton for the not-computable case (no machine data / bad
+ *  inputs). The floor still flows through to `retainedPrice` so the UI can show
+ *  the price that will actually be retained (= the floor). */
+function emptyBreakdown(
+  IDref_ecru: number,
+  qty: number,
+  floor: number,
+  inputs: CoutTricotageBreakdown['inputs'],
+): CoutTricotageBreakdown {
+  return {
+    computable: false,
+    IDref_ecru,
+    qty,
+    inputs,
+    sections: [
+      { key: 'structure', label: 'Frais de structure', rows: [], subtotalPerKg: 0 },
+      { key: 'production', label: 'Frais de production', rows: [], subtotalPerKg: 0 },
+      { key: 'main_oeuvre', label: "Main d'œuvre", rows: [], subtotalPerKg: 0 },
+    ],
+    costPerKg: 0,
+    salePrice: 0,
+    floor,
+    retainedPrice: Math.round(Math.max(0, floor) * 100) / 100,
+  }
+}
+
+/** Full per-component breakdown of the écru production cost per kg. The legacy
+ *  inline math is preserved EXACTLY (same operands, same accumulation order) so
+ *  `costPerKg` is bit-identical to the old scalar `prixDeRevientTRM` and
+ *  `retainedPrice` to `trmLinePrix`. The per-row `eurPerKg` values are computed
+ *  separately, for display only — section subtotals use the original aggregate
+ *  expressions, not a re-sum of the rows. */
+export async function prixDeRevientTRMDetail(
   IDref_ecru: number,
   xPoidsCommandé: number,
-): Promise<number> {
-  if (xPoidsCommandé <= 0 || IDref_ecru <= 0) return 0
+): Promise<CoutTricotageBreakdown> {
+  const zeroInputs = { gxNbToursKg: 0, gxMinParKg: 0, nbAiguilles: 0, prodAnnuel: 0, jaugeCode: 0, diametreCode: 0 }
 
-  const [tarif, gxNbToursKg, codes] = await Promise.all([
+  // Bad inputs — still surface the floor so retainedPrice is meaningful.
+  if (xPoidsCommandé <= 0 || IDref_ecru <= 0) {
+    const floor = await loadRefEcruPrixFloor(IDref_ecru)
+    return emptyBreakdown(IDref_ecru, xPoidsCommandé, floor, zeroInputs)
+  }
+
+  const [tarif, gxNbToursKg, codes, floor] = await Promise.all([
     loadTarifTrmConfig(),
     loadTrsParKg(IDref_ecru),
     loadRefEcruMachineCodes(IDref_ecru),
+    loadRefEcruPrixFloor(IDref_ecru),
   ])
 
+  const prodAnnuel = tarif.get('prod_annuel') ?? 0
+  const nbAiguilles = NbAiguilles(codes.Jauge, codes.diametre)
+
   // Without machine data we can't compute amortization or needle wear —
-  // bail to 0 so the floor wins.
-  if (gxNbToursKg <= 0) return 0
+  // not computable; the floor wins via retainedPrice.
+  if (gxNbToursKg <= 0) {
+    return emptyBreakdown(IDref_ecru, xPoidsCommandé, floor, {
+      gxNbToursKg: 0, gxMinParKg: 0, nbAiguilles, prodAnnuel, jaugeCode: codes.Jauge, diametreCode: codes.diametre,
+    })
+  }
 
   const gxMinParKg = gxNbToursKg / TARGET_SPEED_TRS_MIN
 
   // ── Frais de structure (annual fixed costs / annual production) ──
-  const xProdAnnuel = tarif.get('prod_annuel') ?? 0
+  const xProdAnnuel = prodAnnuel
   let xCoutAnnuelTotal = 0
-  for (const key of ['energie', 'maintenance', 'amortissement', 'abonnement', 'direction', 'autre_frais']) {
-    xCoutAnnuelTotal += tarif.get(key) ?? 0
+  const structureRows: CoutRow[] = []
+  const STRUCTURE_KEYS: Array<[string, string]> = [
+    ['energie', 'Énergie'],
+    ['maintenance', 'Maintenance'],
+    ['amortissement', 'Amortissement'],
+    ['abonnement', 'Abonnement'],
+    ['direction', 'Direction'],
+    ['autre_frais', 'Autres frais'],
+  ]
+  for (const [key, label] of STRUCTURE_KEYS) {
+    const annual = tarif.get(key) ?? 0
+    xCoutAnnuelTotal += annual // same order as legacy → identical FraisStructure
+    structureRows.push({
+      key, label,
+      eurPerKg: xProdAnnuel > 0 ? annual / xProdAnnuel : 0,
+      info: `${num(annual)} € / ${num(xProdAnnuel)} kg`,
+    })
   }
   const FraisStructure = xProdAnnuel > 0 ? xCoutAnnuelTotal / xProdAnnuel : 0
 
@@ -202,7 +323,6 @@ export async function prixDeRevientTRM(
 
   // Changement des aiguilles
   const xCout_aiguille = tarif.get('cout_aiguille') ?? 0
-  const nbAiguilles = NbAiguilles(codes.Jauge, codes.diametre)
   const xPrixJeuAiguille = nbAiguilles * xCout_aiguille
   const xDuréeDeVie = tarif.get('duree_vie_aiguille') ?? 0
   const xPrixParTour = xDuréeDeVie > 0 ? xPrixJeuAiguille / xDuréeDeVie : 0
@@ -213,72 +333,93 @@ export async function prixDeRevientTRM(
   const ConsoElecParKg = (gxMinParKg * MACHINE_POWER_KW) / 60
   const xCoutConsoElec = ConsoElecParKg * xPrixDuKWH
 
-  // ── Main d'œuvre ──
-  // Bonnetier
-  let xCoutHoraire = tarif.get('cout_horaire_bonnetier') ?? 0
-  let xCoutDeLaCommande = 0
-  xCoutDeLaCommande += coutOperation('tps_garniture', '', xCoutHoraire, xPoidsCommandé, tarif)
-  xCoutDeLaCommande += coutOperation('tps_preparation', 'freq_preparation', xCoutHoraire, xPoidsCommandé, tarif)
-  xCoutDeLaCommande += coutOperation('tps_doublage', 'freq_doublage', xCoutHoraire, xPoidsCommandé, tarif)
-  xCoutDeLaCommande += coutOperation('tps_redemarrage_machine', 'freq_redemarrage_machine', xCoutHoraire, xPoidsCommandé, tarif)
-  xCoutDeLaCommande += coutOperation('tps_nettoyage', 'freq_nettoyage', xCoutHoraire, xPoidsCommandé, tarif)
-  xCoutDeLaCommande += coutOperation('tps_fin_piece', 'freq_fin_piece', xCoutHoraire, xPoidsCommandé, tarif)
-  const CoutBonnetierParKg = xCoutDeLaCommande / xPoidsCommandé
+  const productionRows: CoutRow[] = [
+    {
+      key: 'amortissement_machine', label: 'Amortissement métier', eurPerKg: xCoutAmortissement,
+      info: `${num(xCout_metier)} € / (${num(NB_TOUR_ANNUEL)} trs/an × ${num(xDuréé_amortissement)} ans) × ${num(gxNbToursKg, 2)} trs/kg`,
+    },
+    {
+      key: 'changement_aiguilles', label: 'Changement aiguilles', eurPerKg: xCoutChangementAiguilles,
+      info: `${num(nbAiguilles)} aig. × ${num(xCout_aiguille)} € / ${num(xDuréeDeVie)} trs × ${num(gxNbToursKg, 2)} trs/kg`,
+    },
+    {
+      key: 'conso_elec', label: 'Consommation électrique', eurPerKg: xCoutConsoElec,
+      info: `${num(gxMinParKg, 3)} min/kg × ${MACHINE_POWER_KW} kW / 60 × ${num(xPrixDuKWH)} €/kWh`,
+    },
+  ]
 
-  // Régleur
-  xCoutHoraire = tarif.get('cout_horaire_regleur') ?? 0
-  xCoutDeLaCommande = 0
-  xCoutDeLaCommande += coutOperation('tps_reglage_machine', '', xCoutHoraire, xPoidsCommandé, tarif)
-  xCoutDeLaCommande += coutOperation('tps_controle_param', 'freq_controle_param', xCoutHoraire, xPoidsCommandé, tarif)
-  const xCoutRegleurParKg = xCoutDeLaCommande / xPoidsCommandé
+  // ── Main d'œuvre ── (legacy quirks preserved verbatim: Visiteur reads the
+  // bonnetier rate and re-counts tps_garniture; Magasinier re-counts
+  // tps_preparation. See header comment. Do NOT "fix".)
+  const rateBonnetier = tarif.get('cout_horaire_bonnetier') ?? 0
+  const bonnetier = laborBlock(rateBonnetier, [
+    ['tps_garniture', ''], ['tps_preparation', 'freq_preparation'], ['tps_doublage', 'freq_doublage'],
+    ['tps_redemarrage_machine', 'freq_redemarrage_machine'], ['tps_nettoyage', 'freq_nettoyage'], ['tps_fin_piece', 'freq_fin_piece'],
+  ], xPoidsCommandé, tarif)
+  const regleur = laborBlock(tarif.get('cout_horaire_regleur') ?? 0, [
+    ['tps_reglage_machine', ''], ['tps_controle_param', 'freq_controle_param'],
+  ], xPoidsCommandé, tarif)
+  const visiteur = laborBlock(rateBonnetier, [
+    ['tps_garniture', ''], ['tps_visitage', 'freq_visitage'], ['tps_saisie_piece', 'freq_saisie_piece'], ['tps_manutention', 'freq_manutention'],
+  ], xPoidsCommandé, tarif)
+  const magasinier = laborBlock(tarif.get('cout_horaire_magasinier') ?? 0, [
+    ['tps_reception_fil', 'freq_reception_fil'], ['tps_preparation', 'freq_preparation'], ['tps_conditionnement', 'freq_conditionnement'], ['tps_organisation_stock', ''],
+  ], xPoidsCommandé, tarif)
+  const administration = laborBlock(tarif.get('cout_horaire_administration') ?? 0, [
+    ['tps_traitement_of', ''], ['tps_gestion_commande', ''], ['tps_gestion_expedition', ''],
+  ], xPoidsCommandé, tarif)
 
-  // Visiteur — LEGACY QUIRK: reads cout_horaire_bonnetier (not _visiteur)
-  // AND re-counts tps_garniture (already in Bonnetier). Ported as-is so
-  // MPS_NG matches legacy outputs exactly. Both rates are 14 €/h today so
-  // the bug is invisible in current data.
-  xCoutHoraire = tarif.get('cout_horaire_bonnetier') ?? 0
-  xCoutDeLaCommande = 0
-  xCoutDeLaCommande += coutOperation('tps_garniture', '', xCoutHoraire, xPoidsCommandé, tarif)
-  xCoutDeLaCommande += coutOperation('tps_visitage', 'freq_visitage', xCoutHoraire, xPoidsCommandé, tarif)
-  xCoutDeLaCommande += coutOperation('tps_saisie_piece', 'freq_saisie_piece', xCoutHoraire, xPoidsCommandé, tarif)
-  xCoutDeLaCommande += coutOperation('tps_manutention', 'freq_manutention', xCoutHoraire, xPoidsCommandé, tarif)
-  const xCoutVisiteurParKg = xCoutDeLaCommande / xPoidsCommandé
+  const laborInfo = (b: { total: number }) => `${num(b.total)} € / ${num(xPoidsCommandé)} kg`
+  const mainOeuvreRows: CoutRow[] = [
+    { key: 'bonnetier', label: 'Bonnetier', eurPerKg: bonnetier.perKg, info: laborInfo(bonnetier) },
+    { key: 'regleur', label: 'Régleur', eurPerKg: regleur.perKg, info: laborInfo(regleur) },
+    { key: 'visiteur', label: 'Visiteur', eurPerKg: visiteur.perKg, info: laborInfo(visiteur) },
+    { key: 'magasinier', label: 'Magasinier', eurPerKg: magasinier.perKg, info: laborInfo(magasinier) },
+    { key: 'administration', label: 'Administration', eurPerKg: administration.perKg, info: laborInfo(administration) },
+  ]
 
-  // Magasinier — LEGACY QUIRK: re-counts tps_preparation (already in
-  // Bonnetier). Port matches.
-  xCoutHoraire = tarif.get('cout_horaire_magasinier') ?? 0
-  xCoutDeLaCommande = 0
-  xCoutDeLaCommande += coutOperation('tps_reception_fil', 'freq_reception_fil', xCoutHoraire, xPoidsCommandé, tarif)
-  xCoutDeLaCommande += coutOperation('tps_preparation', 'freq_preparation', xCoutHoraire, xPoidsCommandé, tarif)
-  xCoutDeLaCommande += coutOperation('tps_conditionnement', 'freq_conditionnement', xCoutHoraire, xPoidsCommandé, tarif)
-  xCoutDeLaCommande += coutOperation('tps_organisation_stock', '', xCoutHoraire, xPoidsCommandé, tarif)
-  const xCoutMagasinierParKg = xCoutDeLaCommande / xPoidsCommandé
-
-  // Administration
-  xCoutHoraire = tarif.get('cout_horaire_administration') ?? 0
-  xCoutDeLaCommande = 0
-  xCoutDeLaCommande += coutOperation('tps_traitement_of', '', xCoutHoraire, xPoidsCommandé, tarif)
-  xCoutDeLaCommande += coutOperation('tps_gestion_commande', '', xCoutHoraire, xPoidsCommandé, tarif)
-  xCoutDeLaCommande += coutOperation('tps_gestion_expedition', '', xCoutHoraire, xPoidsCommandé, tarif)
-  const xCoutAdministrationParKg = xCoutDeLaCommande / xPoidsCommandé
-
-  return (
+  // costPerKg — EXACT original return expression (same operands, same order)
+  // so the scalar/line price are bit-identical to the pre-refactor code.
+  const costPerKg = (
     FraisStructure
     + xCoutAmortissement
     + xCoutChangementAiguilles
     + xCoutConsoElec
-    + CoutBonnetierParKg
-    + xCoutRegleurParKg
-    + xCoutVisiteurParKg
-    + xCoutMagasinierParKg
-    + xCoutAdministrationParKg
+    + bonnetier.perKg
+    + regleur.perKg
+    + visiteur.perKg
+    + magasinier.perKg
+    + administration.perKg
   )
+  const salePrice = costPerKg > 0 ? costPerKg / (1 - TRM_MARGIN) : 0
+  const retainedPrice = Math.round(Math.max(salePrice, floor) * 100) / 100
+
+  return {
+    computable: true,
+    IDref_ecru,
+    qty: xPoidsCommandé,
+    inputs: { gxNbToursKg, gxMinParKg, nbAiguilles, prodAnnuel, jaugeCode: codes.Jauge, diametreCode: codes.diametre },
+    sections: [
+      { key: 'structure', label: 'Frais de structure', rows: structureRows, subtotalPerKg: FraisStructure },
+      { key: 'production', label: 'Frais de production', rows: productionRows, subtotalPerKg: xCoutAmortissement + xCoutChangementAiguilles + xCoutConsoElec },
+      { key: 'main_oeuvre', label: "Main d'œuvre", rows: mainOeuvreRows, subtotalPerKg: bonnetier.perKg + regleur.perKg + visiteur.perKg + magasinier.perKg + administration.perKg },
+    ],
+    costPerKg,
+    salePrice,
+    floor,
+    retainedPrice,
+  }
 }
 
-/** Margin applied to the cost price to get the sale price. Legacy
- *  WLanguage: `moPrixMargé = PrixDeRevientTRM(...) / 0.7` — 30 % markup.
- *  Centralised here so a future tarif adjustment is one-line. */
-export const TRM_MARGIN = 0.30
+/** Production cost per kg of écru (scalar). Thin wrapper over the breakdown so
+ *  the two can never diverge. Returns 0 when not computable (floor wins). */
+export async function prixDeRevientTRM(
+  IDref_ecru: number,
+  xPoidsCommandé: number,
+): Promise<number> {
+  const detail = await prixDeRevientTRMDetail(IDref_ecru, xPoidsCommandé)
+  return detail.costPerKg
+}
 
 /** Final tricoteur line prix per the legacy WLanguage at line-save time:
  *
@@ -289,16 +430,12 @@ export const TRM_MARGIN = 0.30
  *  knitter — the legacy gate is on the line's type, not the sous-traitant
  *  identity. External tricoteurs get TRM's cost model as a starting
  *  reference; the user can override manually after creation.
- *  Rounded to 2 decimals (Arrondi(moPrix, 2)). */
+ *  Rounded to 2 decimals (Arrondi(moPrix, 2)). Thin wrapper over the breakdown
+ *  (`retainedPrice` carries the same max/round/margin math). */
 export async function trmLinePrix(
   IDref_ecru: number,
   xPoidsCommandé: number,
 ): Promise<number> {
-  const [algoCost, floor] = await Promise.all([
-    prixDeRevientTRM(IDref_ecru, xPoidsCommandé),
-    loadRefEcruPrixFloor(IDref_ecru),
-  ])
-  const algoSale = algoCost > 0 ? algoCost / (1 - TRM_MARGIN) : 0
-  const best = Math.max(algoSale, floor)
-  return Math.round(best * 100) / 100
+  const detail = await prixDeRevientTRMDetail(IDref_ecru, xPoidsCommandé)
+  return detail.retainedPrice
 }
