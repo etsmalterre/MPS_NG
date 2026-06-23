@@ -68,6 +68,39 @@ the footer count reflects the filtered list; and the teinture indicator distingu
 (`avec_teinture=1`, one droplet) vs **Double teinture** (`=2`, two droplets) vs Écru/lavage. Full algo
 + reuse notes in memory `project_prixdevente_v4`.
 
+## 2026-06-23 — feat/cmd-client
+Clients › Commandes — new master-detail screen (`apps/web/src/pages/ClientsCommandes.tsx` +
+`apps/api/src/routes/commandes-client.ts` mounted at `/api/commandes-client` + PDF
+`apps/api/src/lib/pdf/CommandeClientPdf.tsx`; the `router.tsx` placeholder was replaced). First
+real Clients screen. Mirrors `FilsCommandes` (§28 unsaved guard, §29 binary status footer, §30
+deadline urgency, §31 in-screen drawer, §32 email, §34 ged docs) and the sous-traitant commande
+flow. **Data/semantics**: `commande_client` / `ligne_commande_client`. ETM scope on every
+read/write = `IDsociete=1 AND IDcommande_ETM=0` (IDsociete=2 rows are TRM mirrors owned by the
+sister company — this route is NOT the TRM-mirror writer, so none of that machinery is carried).
+numero allocator = `MAX(numero)+1 WHERE IDsociete=1` with retry. **Centerpiece = stock
+affectation**: each line reserves rolls via `stock_ecru.IDligne_commande_client` /
+`stock_fini.IDligne_commande_client` (distinct from the sst `IDref_commande_affectation`); the
+in-screen drawer shows "Stock affecté" ↔ "Stock disponible" with a unit-aware progress gauge.
+**Line polymorphism** (`ligne_commande_client.TYPE`, reserved word → `TYPE AS type_kind`, write
+uppercase; `IDcolori` is lowercase not IDColoris): 1=écru (`ref_ecru`+`colori_ecru`), 2=fini
+(`ref_fini`+coloris by `avec_teinture`), 3=divers (`ref_divers.designation`, display-only, no
+affectation). **`unite` enum** (hardcoded, verified empirically): 1=Kg→sum roll `poids`, 3=Ml→sum
+roll `metrage`, 4=U, 5=m² — écru rolls carry `metrage=0` so écru (unite=1) gauges on poids.
+Available fini = `IDref_fini` match, not reserved, not on a shipment (`IDligne_expedition` 0/NULL),
+`IDetat_stock_fini<>4` (Expédié); available écru = `IDref_ecru`, `IDsociete=1`, not shipped
+(`IDligne_expedition_ETM` 0/NULL), not reserved, not at a dyer (`IDref_commande_affectation` 0/NULL),
+not consumed into a stock_fini. **Real bon-de-commande PDF + Gmail email** (§32, `type_doc 7`
+"commande client" for the envoi_email log + ged discriminator `IDcommande_client=id AND
+IDcommande_sous_traitant=0`); TVA from the `IDsociete=1` default `tva` row (≈20%). Manual pricing
+(montant = quantite×prix; no auto-pricing — devis/facture cost-price lives elsewhere). Computed list
+phase = a_affecter / partielle / terminee. **HFSQL footguns honoured**: `SELECT * FROM client`
+returns 0 rows → explicit columns only, and clients are filtered by `est_visible=1` only (NOT
+IDsociete); accented cols never named (`archivé`/`expedié`/`envoyé_client`, line
+`delai_annoncé`/`déverrouiller`); accent-safe writes via `sqlText()` (Latin-1 hex); `echeance` /
+`mode_paiement` label col = `libelle`; flat-query resolution (no CONVERT-in-JOIN); batched
+`fixEncoding`. Verified end-to-end on local HFSQL (list/detail/CRUD/affectation link-unlink/PDF/
+email-defaults/historique).
+
 ## 2026-06-23 — feat/stock-ecru
 Tombé Métier › Stock — new table-centric screen (`apps/web/src/pages/TombeMetierStock.tsx` +
 `apps/api/src/routes/stock-ecru.ts`, mounted at `/api/stock`; the `router.tsx` placeholder was
