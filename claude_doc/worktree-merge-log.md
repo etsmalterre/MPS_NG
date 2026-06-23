@@ -10,6 +10,34 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-23 — feat/stock-ecru
+Tombé Métier › Stock — new table-centric screen (`apps/web/src/pages/TombeMetierStock.tsx` +
+`apps/api/src/routes/stock-ecru.ts`, mounted at `/api/stock`; the `router.tsx` placeholder was
+replaced). Mirrors finis/stock: split sortable table, single fuzzy search, status filter,
+multi-select edit mode, right slide-in drawer edit, batch edit ("Édition groupée"), cut-roll, and
+Nouveau create. **Data/semantics**: `stock_ecru` (écru/tombé-de-métier fabric rolls). The "in
+stock" base population every view operates on = `IDsociete=1` (ETM only — TRM rolls belong to the
+sister company) AND `IDligne_expedition_ETM=0` (not shipped out) AND no `stock_fini` child (not yet
+dyed/consumed into a finished roll) — this bounds ~52k historical rows to the ~1.5k live working
+set, without which "Tous" would time out hydrating. Status filter = Disponible
+(`IDref_commande_affectation=0`) / En teinture (`>0`) / Tous, plus a 2ᵉ-choix toggle.
+(`IDligne_expedition_TRM` records TRM→ETM provenance, NOT a stock signal — don't filter on it.)
+**Columns**: Référence (ref_ecru), Coloris (colori_ecru), Numéro, Poids (kg), Lot, Magasin
+(sous_traitant via IDmagasin), N° Cmd + Client (IDligne_commande_client → ligne_commande_client →
+commande_client → client, resolved as flat queries merged in JS), Date saisie, 2ᵉ choix, Visiteur
+(free-text column, not an FK), Observations, Défauts (defaut_qualite Type_Reference=2). Provenance
+drawer card reuses finis's resolvers — `resolveSstLine`/`resolveProvenanceFils` are now **exported**
+from `stock-fini.ts` — via `GET /api/stock/ecru/:id/provenance` → Fils (ref_fil · fournisseur ·
+Commande N°) + Tricotage (knitter · Commande N°); no ennoblissement row (dyeing is the écru's
+destination, not its origin). **Permissions** (`permission-keys.ts`, category Tombé Métier):
+`create_stock_ecru` (Nouveau), `cut_stock_ecru` (Couper), and `edit_stock_ecru` "Édition rouleau(x)"
+— the edit permission gates the drawer "Modifier" AND the "Édition groupée" batch button, plus the
+backend `PATCH /ecru/:id` and `PATCH /ecru/batch` (401/403, effective admins bypass); the top-right
+edit-mode "Modifier" shows only when the user can edit OR cut. HFSQL footguns honoured throughout:
+accent-safe reads (batched `repairAliased`/`fixEncoding`), writes via `sqlText()` (Latin-1 hex), no
+CONVERT-in-JOIN, integer-only `IN` lists, empty text → `''` not NULL, and every named column
+verified to exist (no bridge-storm risk).
+
 ## 2026-06-23 — feat/rapport
 Rapports › Commandes sous-traitants — added a column-picker dialog to the Excel export on the
 table-centric `apps/web/src/pages/RapportCommandesSst.tsx` report (no API change). Clicking

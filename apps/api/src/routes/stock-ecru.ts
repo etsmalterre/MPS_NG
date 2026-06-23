@@ -1,6 +1,6 @@
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
 import { query, fixEncoding } from '../lib/hfsql-auto.js'
-import { repairAliased } from './stock-fini.js'
+import { repairAliased, resolveSstLine, resolveProvenanceFils } from './stock-fini.js'
 import { userHasPermission } from '../lib/permissions.js'
 import { isEffectiveAdmin } from '../lib/auth.js'
 
@@ -407,12 +407,53 @@ stockEcruRouter.get('/ecru/:id', async (req: Request, res: Response) => {
   }
 })
 
+// GET /api/stock/ecru/:id/provenance — yarn + knitting origins of one écru roll.
+//   The écru roll IS the source écru, so its provenance is simpler than a fini's:
+//     stock_ecru.IDref_commande_source → the tricoteur sst line that knit it
+//       → resolveSstLine gives { sst_nom, IDcommande } (Tricotage)
+//       → resolveProvenanceFils gives the yarn lots affected to that line (Fils)
+//   There is no "ennoblissement" step — dyeing is the écru's destination
+//   (IDref_commande_affectation), not its origin. Read-only, not gated.
+//   Mirrors stock-fini.ts /provenance; reuses its exported resolvers.
+stockEcruRouter.get('/ecru/:id/provenance', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) {
+      res.status(400).json({ error: 'Invalid ID' })
+      return
+    }
+    const rows = await query<{ IDref_commande_source: number }>(
+      `SELECT IDref_commande_source FROM stock_ecru WHERE IDstock_ecru = ${id}`,
+    )
+    if (rows.length === 0) {
+      res.status(404).json({ error: 'Stock écru not found' })
+      return
+    }
+    const tricoteurLineId = Number(rows[0].IDref_commande_source) || 0
+    const tricotage = await resolveSstLine(tricoteurLineId)
+    const fils = await resolveProvenanceFils(tricoteurLineId)
+    res.json({ tricotage, fils })
+  } catch (err) {
+    console.error('Error fetching stock_ecru provenance:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // PATCH /api/stock/ecru/batch - "Édition groupée": apply observations / visiteur
 //   / magasin / second_choix to many rolls at once. Only the provided fields
 //   are written. Accented values via sqlText() for bridge safety.
 //   MUST be registered before PATCH /ecru/:id (else "batch" is parsed as :id).
 stockEcruRouter.patch('/ecru/batch', async (req: Request, res: Response) => {
   try {
+    if (req.userId === undefined) {
+      res.status(401).json({ error: 'not authenticated' })
+      return
+    }
+    const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'edit_stock_ecru')
+    if (!allowed) {
+      res.status(403).json({ error: 'permission denied: edit_stock_ecru' })
+      return
+    }
     const body = req.body ?? {}
     const ids = (Array.isArray(body.ids) ? body.ids : [])
       .map((x: unknown) => parseInt(String(x), 10))
@@ -452,6 +493,15 @@ stockEcruRouter.patch('/ecru/batch', async (req: Request, res: Response) => {
 //   to the reception & affectation flows, not this screen.
 stockEcruRouter.patch('/ecru/:id', async (req: Request, res: Response) => {
   try {
+    if (req.userId === undefined) {
+      res.status(401).json({ error: 'not authenticated' })
+      return
+    }
+    const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'edit_stock_ecru')
+    if (!allowed) {
+      res.status(403).json({ error: 'permission denied: edit_stock_ecru' })
+      return
+    }
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) {
       res.status(400).json({ error: 'Invalid ID' })

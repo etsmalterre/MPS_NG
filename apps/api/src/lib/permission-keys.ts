@@ -63,6 +63,12 @@ export const PERMISSION_KEYS = [
     category: 'Tombé Métier',
   },
   {
+    key: 'edit_stock_ecru',
+    label: 'Édition rouleau(x)',
+    description: 'Affiche le bouton « Modifier » (détail) et « Édition groupée » (mode édition), et autorise la modification d’un ou plusieurs rouleaux dans Tombé Métier > Stock.',
+    category: 'Tombé Métier',
+  },
+  {
     key: 'cut_stock_ecru',
     label: 'Couper un rouleau écru',
     description: 'Autorise la découpe d’un rouleau en plusieurs dans Tombé Métier > Stock.',

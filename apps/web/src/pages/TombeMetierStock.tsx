@@ -36,6 +36,8 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog'
 import { FabricRollIcon } from '@/components/icons/FabricRollIcon'
+import { BobineIcon } from '@/components/icons/BobineIcon'
+import { KnitIcon } from '@/components/icons/KnitIcon'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate } from '@/lib/dates'
 import { fmtNum } from '@/lib/format'
@@ -83,6 +85,24 @@ interface MagasinOption {
   nom: string | null
 }
 
+// Provenance (supply-chain origins of one écru roll) — mirrors finis/stock.
+interface ProvenanceFil {
+  ref_fil: string | null
+  fournisseur: string | null
+  IDcommande_fil: number | null
+}
+interface SstOrigin {
+  sst_nom: string | null
+  IDcommande: number
+}
+interface StockEcruProvenance {
+  // The tricoteur sst commande that knit this écru. (No "ennoblissement" step —
+  // dyeing is the écru's destination, not its origin.)
+  tricotage: SstOrigin | null
+  // Yarns affected to that tricoteur line, with supplier + fil order N°.
+  fils: ProvenanceFil[]
+}
+
 // Status filter codes — mapped to the API `statut` query param. Ids are 1-based
 // because PopoverSelect treats id 0 as the "none" sentinel (shows emptyLabel).
 type StatutCode = 1 | 2 | 3
@@ -122,6 +142,14 @@ function useMagasinsLookup(enabled: boolean) {
   })
 }
 
+function useStockEcruProvenance(id: number | null) {
+  return useQuery<StockEcruProvenance>({
+    queryKey: ['stock-ecru', 'provenance', id],
+    queryFn: () => apiFetch<StockEcruProvenance>(`/stock/ecru/${id}/provenance`),
+    enabled: id !== null,
+  })
+}
+
 // ── Helpers ────────────────────────────────────────────
 
 function formatKg(v: number | null): string {
@@ -157,19 +185,19 @@ interface SortState {
 }
 
 const COLUMNS: { key: SortKey; label: string; width: string; align?: 'left' | 'right' }[] = [
-  { key: 'ref_ecru', label: 'Référence', width: '9%' },
-  { key: 'coloris_reference', label: 'Coloris', width: '9%' },
-  { key: 'numero', label: 'Numéro', width: '7%' },
-  { key: 'poids', label: 'Poids', width: '6%', align: 'right' },
+  { key: 'ref_ecru', label: 'Référence', width: '7%' },
+  { key: 'coloris_reference', label: 'Coloris', width: '8%' },
+  { key: 'numero', label: 'Numéro', width: '6%' },
+  { key: 'poids', label: 'Poids', width: '5%', align: 'right' },
   { key: 'lot', label: 'Lot', width: '7%' },
-  { key: 'magasin_nom', label: 'Magasin', width: '9%' },
-  { key: 'commande_numero', label: 'N° Cmd', width: '6%' },
-  { key: 'client_nom', label: 'Client', width: '12%' },
-  { key: 'date_saisie', label: 'Date saisie', width: '8%' },
-  { key: 'second_choix', label: '2ᵉ', width: '4%' },
+  { key: 'magasin_nom', label: 'Magasin', width: '8%' },
+  { key: 'commande_numero', label: 'N° Cmd', width: '5%' },
+  { key: 'client_nom', label: 'Client', width: '10%' },
+  { key: 'date_saisie', label: 'Date saisie', width: '7%' },
+  { key: 'second_choix', label: '2ᵉ', width: '3%' },
   { key: 'visiteur', label: 'Visiteur', width: '8%' },
-  { key: 'observations', label: 'Observations', width: '8%' },
-  { key: 'defauts', label: 'Défauts', width: '7%' },
+  { key: 'observations', label: 'Observations', width: '13%' },
+  { key: 'defauts', label: 'Défauts', width: '13%' },
 ]
 const SELECT_COL_WIDTH = '4%' // leading selection box column, edit mode only
 
@@ -198,6 +226,7 @@ export function TombeMetierStock() {
   // Permission gates — admins always pass; the API enforces the same keys.
   const canCut = useHasPermission('cut_stock_ecru')
   const canCreate = useHasPermission('create_stock_ecru')
+  const canEdit = useHasPermission('edit_stock_ecru')
   const [createOpen, setCreateOpen] = useState(false)
 
   // Edit mode — multi-roll selection.
@@ -390,10 +419,15 @@ export function TombeMetierStock() {
                 Nouveau
               </Button>
             )}
-            <Button variant="gold" size="sm" onClick={enterEditMode}>
-              <Pencil className="h-3.5 w-3.5 mr-1.5" />
-              Modifier
-            </Button>
+            {/* Edit mode is the gateway to batch-edit (edit perm) AND cut (cut
+                perm) — show it if the user can do either; hide it entirely if
+                they can do neither. */}
+            {(canEdit || canCut) && (
+              <Button variant="gold" size="sm" onClick={enterEditMode}>
+                <Pencil className="h-3.5 w-3.5 mr-1.5" />
+                Modifier
+              </Button>
+            )}
           </div>
         ) : (
           <div className="flex items-center gap-2 flex-shrink-0">
@@ -408,7 +442,7 @@ export function TombeMetierStock() {
                 <Scissors className="h-4 w-4" />
               </Button>
             )}
-            {selectedRollIds.size > 1 && (
+            {canEdit && selectedRollIds.size > 1 && (
               <Button
                 variant="outline"
                 size="icon"
@@ -455,7 +489,7 @@ export function TombeMetierStock() {
               </colgroup>
               <thead className="bg-zinc-200/60 border-b border-border/60">
                 <tr className="text-xs uppercase tracking-wide text-muted-foreground">
-                  <th className={isEditing ? 'px-3 py-2.5' : 'p-0'}></th>
+                  <th className={isEditing ? 'px-2 py-2.5' : 'p-0'}></th>
                   {COLUMNS.map((c) => (
                     <SortHeader
                       key={c.key}
@@ -1285,7 +1319,7 @@ const StockRow = memo(function StockRow({
         selected ? 'bg-accent/10' : 'hover:bg-accent/5',
       )}
     >
-      <td className="p-0 group-data-[editing=true]:px-3 group-data-[editing=true]:py-2">
+      <td className="p-0 group-data-[editing=true]:px-2 group-data-[editing=true]:py-2">
         <div
           className={cn(
             'h-5 w-5 rounded border items-center justify-center transition-colors hidden group-data-[editing=true]:flex',
@@ -1295,29 +1329,29 @@ const StockRow = memo(function StockRow({
           {selected && <Check className="h-3.5 w-3.5" />}
         </div>
       </td>
-      <td className="px-3 py-2 font-medium truncate">{row.ref_ecru ?? '—'}</td>
-      <td className="px-3 py-2 truncate">{row.coloris_reference ?? '—'}</td>
-      <td className="px-3 py-2 tabular-nums truncate text-muted-foreground">{row.numero ?? '—'}</td>
-      <td className="px-3 py-2 text-right tabular-nums font-medium">{formatKg(row.poids)}</td>
-      <td className="px-3 py-2 tabular-nums truncate">{row.lot ?? '—'}</td>
-      <td className="px-3 py-2 truncate text-muted-foreground">{row.magasin_nom ?? '—'}</td>
-      <td className="px-3 py-2 tabular-nums truncate text-muted-foreground">{row.commande_numero ?? '—'}</td>
-      <td className="px-3 py-2 truncate">{row.client_nom ?? '—'}</td>
-      <td className="px-3 py-2 tabular-nums text-muted-foreground">
+      <td className="px-2 py-2 font-medium truncate">{row.ref_ecru ?? '—'}</td>
+      <td className="px-2 py-2 truncate">{row.coloris_reference ?? '—'}</td>
+      <td className="px-2 py-2 tabular-nums truncate text-muted-foreground">{row.numero ?? '—'}</td>
+      <td className="px-2 py-2 text-right tabular-nums font-medium">{formatKg(row.poids)}</td>
+      <td className="px-2 py-2 tabular-nums truncate">{row.lot ?? '—'}</td>
+      <td className="px-2 py-2 truncate text-muted-foreground">{row.magasin_nom ?? '—'}</td>
+      <td className="px-2 py-2 tabular-nums truncate text-muted-foreground">{row.commande_numero ?? '—'}</td>
+      <td className="px-2 py-2 truncate">{row.client_nom ?? '—'}</td>
+      <td className="px-2 py-2 tabular-nums text-muted-foreground">
         {row.date_saisie ? formatHfsqlDate(row.date_saisie) : '—'}
       </td>
-      <td className="px-3 py-2">
+      <td className="px-2 py-2">
         {!!row.second_choix && (
           <Badge variant="outline" className="text-[10px] py-0 border-red-300 text-red-700">2ᵉ</Badge>
         )}
       </td>
-      <td className="px-3 py-2 truncate text-muted-foreground" title={row.visiteur ?? undefined}>
+      <td className="px-2 py-2 truncate text-muted-foreground" title={row.visiteur ?? undefined}>
         {row.visiteur?.trim() || '—'}
       </td>
-      <td className="px-3 py-2 text-muted-foreground truncate" title={row.observations ?? undefined}>
+      <td className="px-2 py-2 text-muted-foreground truncate" title={row.observations ?? undefined}>
         {row.observations?.trim() || ''}
       </td>
-      <td className="px-3 py-2 text-muted-foreground truncate" title={row.defauts ?? undefined}>
+      <td className="px-2 py-2 text-muted-foreground truncate" title={row.defauts ?? undefined}>
         {row.defauts?.trim() ? <span className="text-red-700">{row.defauts.trim()}</span> : ''}
       </td>
     </tr>
@@ -1339,7 +1373,7 @@ function SortHeader({ label, sortKey, sort, onSort, align = 'left' }: SortHeader
     <th
       onClick={() => onSort(sortKey)}
       className={cn(
-        'px-3 py-2.5 font-semibold cursor-pointer select-none whitespace-nowrap',
+        'px-2 py-2.5 font-semibold cursor-pointer select-none whitespace-nowrap',
         align === 'right' ? 'text-right' : 'text-left',
         active && 'text-accent',
       )}
@@ -1365,6 +1399,8 @@ interface DrawerProps {
 
 function StockEcruDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRef, discardRef }: DrawerProps) {
   const { data: detail, isLoading } = useStockEcruDetail(id)
+  const { data: provenance } = useStockEcruProvenance(id)
+  const canEdit = useHasPermission('edit_stock_ecru')
   const drawerRef = useRef<HTMLDivElement>(null)
   const [searchParams] = useSearchParams()
   const embed = searchParams.get('embed') === 'true'
@@ -1522,10 +1558,12 @@ function StockEcruDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
                     </Button>
                   </>
                 ) : (
-                  <Button variant="gold" size="sm" onClick={startEdit}>
-                    <Pencil className="h-3.5 w-3.5 mr-1.5" />
-                    Modifier
-                  </Button>
+                  canEdit && (
+                    <Button variant="gold" size="sm" onClick={startEdit}>
+                      <Pencil className="h-3.5 w-3.5 mr-1.5" />
+                      Modifier
+                    </Button>
+                  )
                 )}
               </div>
             )}
@@ -1624,16 +1662,46 @@ function StockEcruDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
 
               {/* Provenance */}
               <DrawerCard icon={<Factory className="h-4 w-4 text-accent" />} title="Provenance">
-                <div className="space-y-1.5">
-                  <KV
-                    label="Commande sst source"
-                    value={detail.IDref_commande_source ? <span className="tabular-nums">#{detail.IDref_commande_source}</span> : '—'}
-                  />
-                  <KV
-                    label="Affectation teinture"
-                    value={detail.IDref_commande_affectation ? <span className="tabular-nums">#{detail.IDref_commande_affectation}</span> : '—'}
-                  />
-                  <KV label="Date saisie" value={detail.date_saisie ? formatHfsqlDate(detail.date_saisie) : '—'} />
+                <div className="space-y-2.5">
+                  {/* Fils — yarns knit into this écru roll, with supplier + fil order N° */}
+                  {!!provenance && provenance.fils.length > 0 && (
+                    <div className="space-y-1.5">
+                      {provenance.fils.map((f, i) => (
+                        <ProvenanceRow
+                          key={i}
+                          icon={<BobineIcon className="h-3.5 w-3.5 text-accent" />}
+                          title={f.ref_fil || 'Fil'}
+                          detail={[
+                            f.fournisseur,
+                            f.IDcommande_fil ? `Commande N° ${f.IDcommande_fil}` : null,
+                          ]
+                            .filter(Boolean)
+                            .join(' · ')}
+                        />
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Tricotage — the knitting (tricoteur) sst order that produced this écru */}
+                  {!!provenance?.tricotage && (
+                    <ProvenanceRow
+                      icon={<KnitIcon className="h-3.5 w-3.5 text-accent" />}
+                      title="Tricotage"
+                      detail={[
+                        provenance.tricotage.sst_nom,
+                        `Commande N° ${provenance.tricotage.IDcommande}`,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    />
+                  )}
+
+                  <div className="space-y-1.5 pt-1.5 border-t border-border/40">
+                    <KV
+                      label="Date saisie"
+                      value={detail.date_saisie ? formatHfsqlDate(detail.date_saisie) : '—'}
+                    />
+                  </div>
                 </div>
               </DrawerCard>
 
@@ -1722,6 +1790,29 @@ function KV({ label, value, mono }: { label: string; value: React.ReactNode; mon
     <div className="flex items-baseline justify-between gap-2">
       <span className="text-xs text-muted-foreground">{label}</span>
       <span className={cn('text-sm text-right truncate', mono && 'tabular-nums')}>{value}</span>
+    </div>
+  )
+}
+
+// One provenance origin: a leading icon, a primary label (yarn ref / step name)
+// and a muted detail line (supplier · order N°). Used in the drawer's Provenance
+// card. Mirrors the same component in FinisStock.tsx.
+function ProvenanceRow({
+  icon,
+  title,
+  detail,
+}: {
+  icon: React.ReactNode
+  title: string
+  detail: string
+}) {
+  return (
+    <div className="flex items-start gap-2">
+      <span className="flex-shrink-0 mt-0.5">{icon}</span>
+      <div className="min-w-0">
+        <p className="text-sm font-medium truncate">{title}</p>
+        {!!detail && <p className="text-[11px] text-muted-foreground truncate">{detail}</p>}
+      </div>
     </div>
   )
 }

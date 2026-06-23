@@ -507,7 +507,7 @@ stockFiniRouter.get('/fini/:id', async (req: Request, res: Response) => {
 // the sous_traitant.nom is accented, so it's read raw and repaired via
 // fixEncoding (never named in a WHERE — bridge-storm footgun). Integer-only
 // WHERE clauses throughout.
-async function resolveSstLine(
+export async function resolveSstLine(
   lineId: number,
 ): Promise<{ sst_nom: string | null; IDcommande: number } | null> {
   if (!(lineId > 0)) return null
@@ -538,7 +538,7 @@ async function resolveSstLine(
 // order number (commande_fil id, via ref_fil_commande). Deduped per
 // (ref_fil, fournisseur, commande). All accented name columns repaired with
 // fixEncoding; every WHERE uses integer id lists only.
-async function resolveProvenanceFils(
+export async function resolveProvenanceFils(
   tricoteurLineId: number,
 ): Promise<Array<{ ref_fil: string | null; fournisseur: string | null; IDcommande_fil: number | null }>> {
   if (!(tricoteurLineId > 0)) return []
