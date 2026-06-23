@@ -147,7 +147,12 @@ export const mainNavigation: MainMenuItem[] = [
     title: 'Qualité',
     icon: ShieldCheck,
     href: '/qualite',
-    submenus: [],
+    submenus: [
+      { title: 'Suivi lots', href: '/qualite/suivi-lots' },
+      { title: 'Dossiers', href: '/qualite/dossiers' },
+      { title: 'Actions', href: '/qualite/actions' },
+      { title: 'Analyse', href: '/qualite/analyse' },
+    ],
   },
   {
     id: 'rapports',
@@ -222,6 +227,10 @@ export const routeTitles: Record<string, string> = {
   '/divers': 'Divers',
   // Qualité
   '/qualite': 'Qualité',
+  '/qualite/suivi-lots': 'Suivi lots',
+  '/qualite/dossiers': 'Dossiers',
+  '/qualite/actions': 'Actions',
+  '/qualite/analyse': 'Analyse',
   // Rapports
   '/rapports': 'Rapports',
   // Réseau

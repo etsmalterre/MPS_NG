@@ -9,12 +9,14 @@ import {
   Receipt,
   Truck,
   Box,
-  ShieldCheck,
   FileBarChart,
   Palette,
   Euro,
   Droplet,
   TrendingUp,
+  FolderOpen,
+  ClipboardCheck,
+  BarChart3,
   type LucideIcon,
 } from 'lucide-react'
 import { KnitIcon } from '@/components/icons/KnitIcon'
@@ -50,7 +52,9 @@ const FinisTarifsPage = createPlaceholder('Tarifs Finis', 'Tarifs des produits f
 const FinisColorisTeintPage = createPlaceholder('Coloris Teint', 'Coloris teints et ennoblissement', Droplet)
 const FinisPrevisionsPage = createPlaceholder('Prévisions Finis', 'Prévisions des produits finis', TrendingUp)
 const DiversPage = createPlaceholder('Divers', 'Outils divers', Box)
-const QualitePage = createPlaceholder('Qualité', 'Contrôle qualité', ShieldCheck)
+const QualiteDossiersPage = createPlaceholder('Dossiers', 'Dossiers qualité', FolderOpen)
+const QualiteActionsPage = createPlaceholder('Actions', 'Actions qualité', ClipboardCheck)
+const QualiteAnalysePage = createPlaceholder('Analyse', 'Analyse qualité', BarChart3)
 const RapportsPage = createPlaceholder('Rapports', 'Rapports et exports', FileBarChart)
 
 // Fils pages (real)
@@ -62,6 +66,9 @@ import { FilsCommandes } from '@/pages/FilsCommandes'
 // Sous-traitants pages (real)
 import { SousTraitantsCommandes } from '@/pages/SousTraitantsCommandes'
 import { SousTraitantsGestion } from '@/pages/SousTraitantsGestion'
+
+// Qualité pages (real)
+import { QualiteSuiviLots } from '@/pages/QualiteSuiviLots'
 
 // Finis pages (real)
 import { FinisReferences } from '@/pages/FinisReferences'
@@ -128,7 +135,11 @@ export const router = createBrowserRouter([
       { path: 'divers', element: <DiversPage /> },
 
       // Qualité
-      { path: 'qualite', element: <QualitePage /> },
+      { path: 'qualite', element: <Navigate to="/qualite/suivi-lots" replace /> },
+      { path: 'qualite/suivi-lots', element: <QualiteSuiviLots /> },
+      { path: 'qualite/dossiers', element: <QualiteDossiersPage /> },
+      { path: 'qualite/actions', element: <QualiteActionsPage /> },
+      { path: 'qualite/analyse', element: <QualiteAnalysePage /> },
 
       // Rapports
       { path: 'rapports', element: <RapportsPage /> },

@@ -18,6 +18,7 @@ import { etudesColorisRouter } from './routes/etudes-coloris.js'
 import { prospectsRouter } from './routes/prospects.js'
 import { stockRouter } from './routes/stock.js'
 import { stockFiniRouter } from './routes/stock-fini.js'
+import { suiviLotsRouter } from './routes/suivi-lots.js'
 import { authRouter } from './routes/auth.js'
 import { permissionsRouter } from './routes/permissions.js'
 import { userEmailsRouter } from './routes/user-emails.js'
@@ -66,6 +67,7 @@ app.use('/api/etudes-coloris', etudesColorisRouter)
 app.use('/api/prospects', prospectsRouter)
 app.use('/api/stock', stockRouter)
 app.use('/api/stock', stockFiniRouter)
+app.use('/api/suivi-lots', suiviLotsRouter)
 
 app.listen(PORT, () => {
   console.log(`MPS API running on port ${PORT} [${env}]`)

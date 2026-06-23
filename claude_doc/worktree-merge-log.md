@@ -10,6 +10,30 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-23 — feat/suivilot
+Qualité › Suivi Lots — new quality-control lot-tracking screen (first real Qualité screen;
+the menu's other 3 submenus — Dossiers, Actions, Analyse — remain placeholders). Also adds the
+4 Qualité submenus to the sidebar + router (`/qualite/suivi-lots` real, the rest placeholders).
+Master-detail screen over the `suivilot` table (one row per (ligne_commande_sous_traitant, lot),
+created on reception by `upsertSuivilot()` in commandes-sous-traitant.ts): left list with search +
+En cours / Terminé / Tous filter (Terminé = archived via `fin_archivage`); center "Récapitulatif
+de la commande" (date commande, N°, référence, coloris via the `avec_teinture` wash/dye rule,
+spec banner Laize/Poids/Freinte/Rendement/Stab) + read-only "Pièces du lot" sub-table sourced from
+`stock_fini` with per-roll Rdt = metrage/poids and a Moyenne footer; right sidebar tabs Contrôles
+(editable SST + Tirelle measurements, observations, emplacement, fin d'archivage) / Documents
+(read-only, reuses the commande-sst `ged` endpoints) / Défauts (read-only, `defaut_qualite`
+aggregated over the lot's source écrus) / Client. A multi-state état footer pill (En contrôle /
+En reprise / Validé / Expédié / Attente, persisted immediately) and a header archive/lock button.
+Full Modifier→Enregistrer edit flow wired into the shared unsaved-changes guard. New API route
+`apps/api/src/routes/suivi-lots.ts` (`/api/suivi-lots`: list, detail, PUT controls, POST etat,
+POST archive, GET defauts). HFSQL footguns honoured: editable columns are all ASCII so writes are
+Linux-bridge-safe; the only accented write (`approuvé_qualité`) is gated on `IS_WINDOWS` with
+`IDetatLot` carrying validation state on the bridge; accented spec columns read via `SELECT *` +
+pickKey; magasin resolved without `alias.*`. Permissions deferred to a later session. Known
+flagged-but-deferred: SST "Freinte" shows `freinte_demandée` (no `freinte_sst` column exists); the
+legacy Tricotage/Ennoblissement/Visiteur bottom block was not ported (no backing `suivilot`
+columns — low-confidence mapping left for follow-up).
+
 ## 2026-06-23 — feat/stock-fini
 Finis › Stock — new "Surteinture" (over-dye) multi-select action, porting the legacy
 `FEN_Surteinture` window. In edit mode the user selects finished rolls of the **same ref +
