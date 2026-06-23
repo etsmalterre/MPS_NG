@@ -327,6 +327,8 @@ referencesEcruRouter.get('/', async (req: Request, res: Response) => {
       recycle: r.recycle,
       archive: r.archive,
       prix: r.prix,
+      Jauge: r.Jauge,
+      diametre: r.diametre,
       coloris_count: coloriCountByRef.get(r.IDref_ecru) ?? 0,
     }))
     res.json(out)
@@ -486,6 +488,20 @@ referencesEcruRouter.get('/:id', async (req: Request, res: Response) => {
       }
     })
 
+    // Composition lock: rolls (stock_ecru) or tricoteur orders for this ref.
+    const lock = await refEcruLock(id)
+
+    // Number of écru rolls (stock_ecru) created for this ref + their total weight.
+    let rolls_count = 0
+    let rolls_poids_total = 0
+    try {
+      const rc = await query<{ n: number; poids: number | null }>(
+        `SELECT COUNT(*) AS n, SUM(poids) AS poids FROM stock_ecru WHERE IDref_ecru = ${id}`,
+      )
+      rolls_count = Number(rc[0]?.n ?? 0)
+      rolls_poids_total = Number(rc[0]?.poids ?? 0) || 0
+    } catch { /* stock_ecru unreachable on some envs — leave 0 */ }
+
     // Schéma de liage — chutes (rows) + cells.
     const liage = await loadLiage(id)
 
@@ -516,6 +532,10 @@ referencesEcruRouter.get('/:id', async (req: Request, res: Response) => {
       machines,
       ...liage,
       obs_of,
+      has_rolls: lock.rolls,
+      has_orders: lock.orders,
+      rolls_count,
+      rolls_poids_total,
     })
   } catch (err) {
     console.error('Error fetching ref_ecru detail:', err)
@@ -648,12 +668,33 @@ function buildRefEcruSets(b: RefEcruBody): string[] {
   return sets
 }
 
-// POST /api/references-ecru — inline-create a placeholder row.
-referencesEcruRouter.post('/', async (req: Request, res: Response) => {
+/** Next free 3-digit zero-padded reference (001, 002, …). The sequence is the
+ *  zero-padded numeric scheme (`0NN`) only — independent of legacy non-padded
+ *  numbers (180, 2785) and alphanumeric codes (MADF, 228/122). Increments past
+ *  any collision so it never returns an existing reference. */
+function nextRefNumber(existing: string[]): string {
+  const used = new Set(existing.map((r) => r.trim().toLowerCase()).filter(Boolean))
+  let maxN = 0
+  for (const r of existing) {
+    const t = r.trim()
+    if (/^0\d\d$/.test(t)) maxN = Math.max(maxN, Number(t))
+  }
+  let n = maxN + 1
+  let candidate = String(n).padStart(3, '0')
+  while (used.has(candidate.toLowerCase())) {
+    n += 1
+    candidate = String(n).padStart(3, '0')
+  }
+  return candidate
+}
+
+// POST /api/references-ecru — inline-create a row, auto-named with the next
+// free 3-digit zero-padded reference (server-generated; client input ignored so
+// two concurrent creates can't collide on the same placeholder name).
+referencesEcruRouter.post('/', async (_req: Request, res: Response) => {
   try {
-    const reference = typeof req.body?.reference === 'string' && req.body.reference.trim()
-      ? String(req.body.reference).trim()
-      : 'Nouvelle référence'
+    const existingRows = await query<{ reference: string | null }>(`SELECT reference FROM ref_ecru`)
+    const reference = nextRefNumber(existingRows.map((r) => r.reference ?? ''))
     await query(
       `INSERT INTO ref_ecru (reference, designation, IDclient, IDcontexture, prix, bio, archivé, date_maj_ft)
        VALUES (${sqlText(reference)}, '', 0, 0, 0, 0, 0, '${todayHfsql()}')`,
@@ -677,6 +718,15 @@ referencesEcruRouter.put('/:id', async (req: Request, res: Response) => {
     const parsed = refEcruBody.safeParse(req.body)
     if (!parsed.success) {
       res.status(400).json({ error: 'Validation failed', details: parsed.error.issues })
+      return
+    }
+    // Reject a reference already used by another row (HFSQL `=` ignores case and
+    // trailing spaces, which matches how the user perceives a duplicate).
+    const dup = await query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM ref_ecru WHERE reference = ${sqlText(parsed.data.reference.trim())} AND IDref_ecru <> ${id}`,
+    )
+    if (Number(dup[0]?.n ?? 0) > 0) {
+      res.status(409).json({ error: 'Cette référence existe déjà.' })
       return
     }
     const sets = buildRefEcruSets(parsed.data)
@@ -930,6 +980,29 @@ async function refEcruExists(id: number): Promise<boolean> {
   return Number(r[0]?.n ?? 0) > 0
 }
 
+/** Whether a ref_ecru has rolls (stock_ecru) or tricoteur orders
+ *  (ligne_commande_sous_traitant, type 0/1 → IDreference is a ref_ecru). Used to
+ *  lock composition edits: changing the yarn mix after rolls/orders exist would
+ *  desync produced stock from its declared composition. */
+async function refEcruLock(id: number): Promise<{ rolls: boolean; orders: boolean }> {
+  let rolls = false
+  try {
+    const r = await query<{ n: number }>(`SELECT COUNT(*) AS n FROM stock_ecru WHERE IDref_ecru = ${id}`)
+    rolls = Number(r[0]?.n ?? 0) > 0
+  } catch { /* stock_ecru may be unreachable on some envs — treat as no rolls */ }
+  let orders = false
+  try {
+    const o = await query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM ligne_commande_sous_traitant WHERE IDreference = ${id} AND type IN (0, 1)`,
+    )
+    orders = Number(o[0]?.n ?? 0) > 0
+  } catch { /* tolerate */ }
+  return { rolls, orders }
+}
+
+const COMPO_LOCK_MSG =
+  'La composition ne peut pas être modifiée : des rouleaux ou des commandes existent déjà pour cette référence.'
+
 // POST /api/references-ecru/:id/compositions
 referencesEcruRouter.post('/:id/compositions', async (req: Request, res: Response) => {
   try {
@@ -938,6 +1011,8 @@ referencesEcruRouter.post('/:id/compositions', async (req: Request, res: Respons
     const parsed = compositionBody.safeParse(req.body)
     if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
     if (!(await refEcruExists(id))) { res.status(404).json({ error: 'Reference not found' }); return }
+    const lock = await refEcruLock(id)
+    if (lock.rolls || lock.orders) { res.status(409).json({ error: COMPO_LOCK_MSG }); return }
     const b = parsed.data
     await query(
       `INSERT INTO composition_ecru (IDref_ecru, IDcolori_ecru, IDref_fil, IDcolori_fil, pourcentage, commentaire)
@@ -965,6 +1040,8 @@ referencesEcruRouter.put('/:id/compositions/:compoId', async (req: Request, res:
       `SELECT COUNT(*) AS n FROM composition_ecru WHERE IDcomposition_ecru = ${compoId} AND IDref_ecru = ${id}`,
     )
     if (Number(scope[0]?.n ?? 0) === 0) { res.status(404).json({ error: 'Composition not found for this reference' }); return }
+    const lock = await refEcruLock(id)
+    if (lock.rolls || lock.orders) { res.status(409).json({ error: COMPO_LOCK_MSG }); return }
     const b = parsed.data
     await query(
       `UPDATE composition_ecru SET IDref_fil = ${b.IDref_fil}, IDcolori_fil = ${b.IDcolori_fil ?? 0}, pourcentage = ${b.pourcentage}, commentaire = ${sqlText(b.commentaire ?? '')} WHERE IDcomposition_ecru = ${compoId}`,
@@ -986,6 +1063,8 @@ referencesEcruRouter.delete('/:id/compositions/:compoId', async (req: Request, r
       `SELECT COUNT(*) AS n FROM composition_ecru WHERE IDcomposition_ecru = ${compoId} AND IDref_ecru = ${id}`,
     )
     if (Number(scope[0]?.n ?? 0) === 0) { res.status(404).json({ error: 'Composition not found for this reference' }); return }
+    const lock = await refEcruLock(id)
+    if (lock.rolls || lock.orders) { res.status(409).json({ error: COMPO_LOCK_MSG }); return }
     await query(`DELETE FROM composition_ecru WHERE IDcomposition_ecru = ${compoId}`)
     res.json({ ok: true })
   } catch (err) {
@@ -1064,6 +1143,24 @@ referencesEcruRouter.delete('/:id/coloris/:coloriId', async (req: Request, res: 
     )
     if (Number(used[0]?.n ?? 0) > 0) {
       res.status(409).json({ error: 'Ce coloris possède une composition spécifique.' })
+      return
+    }
+    // Can't delete a coloris affected to a roll (stock_ecru) or an order
+    // (ligne_commande_sous_traitant.IDColoris on tricoteur lines).
+    try {
+      const rollUse = await query<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM stock_ecru WHERE IDcolori_ecru = ${coloriId}`,
+      )
+      if (Number(rollUse[0]?.n ?? 0) > 0) {
+        res.status(409).json({ error: 'Ce coloris est utilisé par des rouleaux en stock.' })
+        return
+      }
+    } catch { /* stock_ecru unreachable on some envs — tolerate */ }
+    const orderUse = await query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM ligne_commande_sous_traitant WHERE IDColoris = ${coloriId} AND type IN (0, 1)`,
+    )
+    if (Number(orderUse[0]?.n ?? 0) > 0) {
+      res.status(409).json({ error: 'Ce coloris est utilisé par une commande.' })
       return
     }
     await query(`DELETE FROM colori_ecru WHERE IDcolori_ecru = ${coloriId}`)

@@ -38,6 +38,7 @@ import {
   ClipboardList,
   Layers,
   Calendar,
+  Lock,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -61,6 +62,8 @@ interface RefEcruListRow {
   recycle: number
   archive: number
   prix: number | null
+  Jauge: number | null
+  diametre: number | null
   coloris_count: number
 }
 
@@ -176,6 +179,10 @@ interface RefEcruDetail {
   cells: CellRow[]
   symboles: SymboleRow[]
   obs_of: ObsOfRow[]
+  has_rolls: boolean
+  has_orders: boolean
+  rolls_count: number
+  rolls_poids_total: number
 }
 
 interface ContextureLookup { IDcontexture: number; nom: string | null }
@@ -254,6 +261,30 @@ function KV({ label, value }: { label: string; value: React.ReactNode }) {
 
 const numStr = (n: number | null | undefined): string => (n == null ? '' : String(n))
 const fmtPct = (v: number | null | undefined) => (v == null ? '—' : `${fmtNum(v, Number.isInteger(v) ? 0 : 2)} %`)
+
+// Both Jauge and Diamètre are stored on ref_ecru as 1-based ordinals indexing
+// legacy combo lists, with index 1 = "_" placeholder and -1/0/null = unset.
+// Display the mapped value, never the raw ordinal.
+//
+// Jauge (gtaJauge) = needles-per-inch — a plain number, NO inch unit.
+const JAUGE_OPTIONS: { ord: number; label: string }[] = [
+  { ord: 2, label: '14' },
+  { ord: 3, label: '18' },
+  { ord: 4, label: '20' },
+  { ord: 5, label: '28' },
+]
+// Diamètre (gtaDiametreMachine) = machine diameter in inches (shown with ").
+const DIAM_OPTIONS: { ord: number; label: string }[] = [
+  { ord: 2, label: '26"' },
+  { ord: 3, label: '30"' },
+]
+const ordLabel = (options: { ord: number; label: string }[]) => (ord: number | null | undefined): string | null => {
+  if (ord == null) return null
+  if (ord === 1) return '_'
+  return options.find((o) => o.ord === ord)?.label ?? null
+}
+const jaugeLabel = ordLabel(JAUGE_OPTIONS)
+const diametreLabel = ordLabel(DIAM_OPTIONS)
 
 // ── API hooks ──────────────────────────────────────────
 
@@ -445,6 +476,7 @@ export function TombeMetierReferences() {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [createError, setCreateError] = useState<string | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
   const [printOpen, setPrintOpen] = useState(false)
   const [emailOpen, setEmailOpen] = useState(false)
 
@@ -457,22 +489,33 @@ export function TombeMetierReferences() {
 
   const filtered = useMemo(() => {
     if (!refs) return []
-    if (!searchQuery.trim()) return refs
-    const q = searchQuery.toLowerCase()
-    return refs.filter(
-      (r) =>
-        (r.reference ?? '').toLowerCase().includes(q) ||
-        (r.designation ?? '').toLowerCase().includes(q) ||
-        (r.contexture_nom ?? '').toLowerCase().includes(q),
-    )
+    const tokens = searchQuery.toLowerCase().split(/\s+/).filter(Boolean)
+    if (tokens.length === 0) return refs
+    // AND across space-separated tokens; each token must match somewhere in the
+    // row's searchable text (reference, designation, contexture, jauge, diamètre).
+    return refs.filter((r) => {
+      const haystack = [
+        r.reference,
+        r.designation,
+        r.contexture_nom,
+        jaugeLabel(r.Jauge),
+        diametreLabel(r.diametre),
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+      return tokens.every((t) => haystack.includes(t))
+    })
   }, [refs, searchQuery])
 
   // Auto-select first visible row; re-selects when the filter/search narrows the list.
+  // Skip while a just-created row is pending: its id is set before the list refetch
+  // lands, so it isn't in `filtered` yet and we'd otherwise clobber the selection.
   useEffect(() => {
-    if (isEditing || filtered.length === 0) return
+    if (isEditing || filtered.length === 0 || autoEditForId !== null) return
     const stillVisible = selectedId !== null && filtered.some((r) => r.IDref_ecru === selectedId)
     if (!stillVisible) setSelectedId(filtered[0].IDref_ecru)
-  }, [filtered, selectedId, isEditing])
+  }, [filtered, selectedId, isEditing, autoEditForId])
 
   const startEdit = useCallback(() => {
     if (!detail) return
@@ -497,6 +540,34 @@ export function TombeMetierReferences() {
     return false
   }, [isEditing, draft, subFormsDirty])
 
+  // Composition must total 100% (pourcentage stored 0..100). An empty
+  // composition is allowed (not yet entered); a non-empty one must be exactly
+  // 100. Editing is locked entirely once rolls/orders exist, so don't block
+  // exit in that case (the user can't fix the total anyway).
+  const compositionLocked = !!detail?.has_rolls || !!detail?.has_orders
+  const compositionTotalPct = useMemo(
+    () => (detail?.composition_lines ?? []).reduce((s, c) => s + (Number(c.pourcentage) || 0), 0),
+    [detail],
+  )
+  const compositionOk =
+    (detail?.composition_lines?.length ?? 0) === 0 || Math.abs(compositionTotalPct - 100) < 0.01
+
+  const [saveBlockedReason, setSaveBlockedReason] = useState<string | null>(null)
+  useEffect(() => {
+    if ((!isEditing || compositionOk) && saveBlockedReason) setSaveBlockedReason(null)
+  }, [compositionOk, isEditing, saveBlockedReason])
+
+  /** Guard for any action that exits edit mode (Enregistrer / Annuler). Returns
+   *  true when blocked — caller must not proceed. Surfaces the alert. */
+  const blockExitIfBadComposition = useCallback((): boolean => {
+    if (compositionOk || compositionLocked) return false
+    const fmt = Math.round(compositionTotalPct * 1000) / 1000
+    setSaveBlockedReason(
+      `La composition doit totaliser 100 % (actuellement ${fmt} %). Corrigez la composition avant de quitter le mode édition.`,
+    )
+    return true
+  }, [compositionOk, compositionLocked, compositionTotalPct])
+
   const invalidateDetail = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['ref-ecru', selectedId] })
     queryClient.invalidateQueries({ queryKey: ['refs-ecru'] })
@@ -510,13 +581,23 @@ export function TombeMetierReferences() {
       setIsEditing(false)
       originalDraftRef.current = null
     },
+    onError: (err: Error & { status?: number }) => {
+      setSaveError(
+        err.status === 409
+          ? 'Cette référence existe déjà. Choisissez un autre numéro.'
+          : err.status === 401
+            ? 'Votre session a expiré. Veuillez vous reconnecter, puis réessayer.'
+            : "L'enregistrement de la référence a échoué. Veuillez réessayer.",
+      )
+    },
   })
 
   const createMutation = useMutation({
     mutationFn: () =>
+      // Reference is auto-generated server-side (next free 3-digit number).
       apiFetch<{ IDref_ecru: number | null }>(`/references-ecru`, {
         method: 'POST',
-        body: JSON.stringify({ reference: 'Nouvelle référence' }),
+        body: JSON.stringify({}),
       }),
     onSuccess: (data) => {
       setCreateError(null)
@@ -537,20 +618,26 @@ export function TombeMetierReferences() {
   })
 
   const deleteMutation = useMutation({
-    mutationFn: () => apiFetch(`/references-ecru/${selectedId}`, { method: 'DELETE' }),
-    onSuccess: () => {
+    // Take the id as an arg (not from closure) so onSuccess can't drift if the
+    // selection changes mid-flight.
+    mutationFn: (id: number) => apiFetch(`/references-ecru/${id}`, { method: 'DELETE' }),
+    onSuccess: (_data, deletedId) => {
       setDeleteConfirmOpen(false)
       setDeleteError(null)
+      setIsEditing(false)
+      originalDraftRef.current = null
       const cached = queryClient.getQueryData<RefEcruListRow[]>(['refs-ecru', archivedFilter ? 'archive' : 'en_cours']) ?? []
-      const remaining = cached.filter((r) => r.IDref_ecru !== selectedId)
+      const remaining = cached.filter((r) => r.IDref_ecru !== deletedId)
+      // Purge the deleted ref's detail cache so its data can't linger on screen.
+      queryClient.removeQueries({ queryKey: ['ref-ecru', deletedId] })
       queryClient.invalidateQueries({ queryKey: ['refs-ecru'] })
       setSelectedId(remaining.length > 0 ? remaining[0].IDref_ecru : null)
     },
-    onError: async (err: Error & { status?: number }) => {
+    onError: async (err: Error & { status?: number }, deletedId) => {
       let msg = 'Suppression impossible.'
       try {
         const res = await fetch(
-          `${import.meta.env.VITE_API_URL || 'http://localhost:3002/api'}/references-ecru/${selectedId}`,
+          `${import.meta.env.VITE_API_URL || 'http://localhost:3002/api'}/references-ecru/${deletedId}`,
           { method: 'DELETE', credentials: 'include' },
         )
         if (!res.ok) {
@@ -600,6 +687,8 @@ export function TombeMetierReferences() {
     isDirty,
     save: async () => { await saveMutation.mutateAsync() },
     onDiscard: () => cancelEdit(),
+    shouldBlockExit: isEditing && !compositionOk && !compositionLocked,
+    onExitBlocked: () => { blockExitIfBadComposition() },
   })
 
   const handleSelect = useCallback(
@@ -619,7 +708,7 @@ export function TombeMetierReferences() {
         list={
           <RefEcruList
             refs={filtered}
-            totalCount={refs?.length ?? 0}
+            totalCount={filtered.length}
             isLoading={isLoading}
             isError={isError}
             error={error as Error | null}
@@ -642,8 +731,8 @@ export function TombeMetierReferences() {
             draft={draft}
             onDraftChange={setDraft}
             onStartEdit={startEdit}
-            onCancelEdit={cancelEdit}
-            onSave={() => saveMutation.mutate()}
+            onCancelEdit={() => { if (!blockExitIfBadComposition()) cancelEdit() }}
+            onSave={() => { if (!blockExitIfBadComposition()) saveMutation.mutate() }}
             isSaving={saveMutation.isPending}
             onDelete={() => { setDeleteError(null); setDeleteConfirmOpen(true) }}
             onArchive={() => archiveMutation.mutate(!detail?.archive)}
@@ -687,7 +776,7 @@ export function TombeMetierReferences() {
         }
         isPending={deleteMutation.isPending}
         onCancel={() => { setDeleteConfirmOpen(false); setDeleteError(null) }}
-        onConfirm={() => { setIsEditing(false); deleteMutation.mutate() }}
+        onConfirm={() => { if (selectedId !== null) { setIsEditing(false); deleteMutation.mutate(selectedId) } }}
       />
 
       <AlertDialog open={createError !== null} onOpenChange={(o) => { if (!o) setCreateError(null) }}>
@@ -701,6 +790,36 @@ export function TombeMetierReferences() {
           </AlertDialogHeader>
           <AlertDialogFooter className="gap-2 sm:gap-2 mt-4">
             <Button onClick={() => setCreateError(null)}>OK</Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={saveError !== null} onOpenChange={(o) => { if (!o) setSaveError(null) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertCircle className="h-5 w-5 text-destructive" />
+              Enregistrement impossible
+            </AlertDialogTitle>
+            <AlertDialogDescription>{saveError}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="gap-2 sm:gap-2 mt-4">
+            <Button onClick={() => setSaveError(null)}>OK</Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={saveBlockedReason !== null} onOpenChange={(o) => { if (!o) setSaveBlockedReason(null) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertCircle className="h-5 w-5 text-destructive" />
+              Composition incomplète
+            </AlertDialogTitle>
+            <AlertDialogDescription>{saveBlockedReason}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className="gap-2 sm:gap-2 mt-4">
+            <Button onClick={() => setSaveBlockedReason(null)}>OK</Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -783,6 +902,12 @@ function RefEcruList({
     { key: 'archive', label: 'Archivé' },
   ]
   const activeKey = archivedFilter ? 'archive' : 'en_cours'
+  // Keep the selected card visible — newly created refs sort into the middle of
+  // the list, so without this they'd be selected but off-screen.
+  const selectedRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    selectedRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [selectedId, refs])
   return (
     <div className="flex flex-col h-full rounded-lg border shadow-sm bg-zinc-100/80">
       <div className="p-3 border-b rounded-t-lg bg-zinc-200/50 space-y-2">
@@ -834,6 +959,7 @@ function RefEcruList({
           refs.map((r) => (
             <div
               key={r.IDref_ecru}
+              ref={selectedId === r.IDref_ecru ? selectedRef : undefined}
               onClick={() => onSelect(r.IDref_ecru)}
               className={cn(
                 'p-3 border rounded-lg cursor-pointer transition-all bg-white',
@@ -940,7 +1066,9 @@ function DetailHeader({
           ) : (
             <div>
               <h1 className="text-2xl font-heading font-bold tracking-tight truncate">{detail?.reference || '—'}</h1>
-              {detail?.designation && <p className="text-sm text-muted-foreground truncate mt-0.5">{detail.designation}</p>}
+              {(detail?.designation || detail?.contexture_nom) && (
+                <p className="text-sm text-muted-foreground truncate mt-0.5">{detail?.designation || detail?.contexture_nom}</p>
+              )}
             </div>
           )}
         </div>
@@ -1102,7 +1230,6 @@ function IdentificationCard({
                   getPrimary={(c) => c.nom ?? `#${c.IDclient}`}
                   getSecondary={(c) => c.ville ?? undefined}
                   placeholder="Rechercher un client"
-                  size="sm"
                 />
               </div>
               <LabeledInput label="Référence client" value={draft.reference_client} onChange={(v) => onDraftChange({ ...draft, reference_client: v })} />
@@ -1115,11 +1242,26 @@ function IdentificationCard({
                   value={draft.IDcontexture}
                   onChange={(id) => onDraftChange({ ...draft, IDcontexture: id })}
                   emptyLabel="— Choisir —"
-                  size="sm"
                 />
               </div>
-              <LabeledInput label="Jauge" type="number" step="0.1" value={draft.Jauge} onChange={(v) => onDraftChange({ ...draft, Jauge: v })} />
-              <LabeledInput label="Ø" type="number" step="0.1" value={draft.diametre} onChange={(v) => onDraftChange({ ...draft, diametre: v })} />
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-muted-foreground">Jauge</label>
+                <PopoverSelect
+                  options={JAUGE_OPTIONS.map((o) => ({ id: o.ord, primary: o.label }))}
+                  value={Number(draft.Jauge) || 0}
+                  onChange={(id) => onDraftChange({ ...draft, Jauge: id ? String(id) : '' })}
+                  emptyLabel="— Choisir —"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-muted-foreground">Ø</label>
+                <PopoverSelect
+                  options={DIAM_OPTIONS.map((o) => ({ id: o.ord, primary: o.label }))}
+                  value={Number(draft.diametre) || 0}
+                  onChange={(id) => onDraftChange({ ...draft, diametre: id ? String(id) : '' })}
+                  emptyLabel="— Choisir —"
+                />
+              </div>
             </div>
             <div className="grid grid-cols-4 gap-2 items-end">
               <LabeledInput label="Prix" suffix="€/kg" type="number" step="0.01" value={draft.prix} onChange={(v) => onDraftChange({ ...draft, prix: v })} />
@@ -1167,11 +1309,11 @@ function IdentificationCard({
               </div>
               <div className="flex items-baseline gap-2">
                 <span className="text-xs text-muted-foreground">Jauge</span>
-                <span className="text-sm tabular-nums">{detail.Jauge != null ? fmtNum(detail.Jauge, 0) : '—'}</span>
+                <span className="text-sm tabular-nums">{jaugeLabel(detail.Jauge) ?? '—'}</span>
               </div>
               <div className="flex items-baseline gap-2">
                 <span className="text-xs text-muted-foreground">Ø</span>
-                <span className="text-sm tabular-nums">{detail.diametre != null ? `${fmtNum(detail.diametre, 0)}"` : '—'}</span>
+                <span className="text-sm tabular-nums">{diametreLabel(detail.diametre) ?? '—'}</span>
               </div>
               {(!!detail.bio || !!detail.recycle) && (
                 <div className="flex items-center gap-1.5">
@@ -1209,18 +1351,36 @@ function CompositionCard({
   onMutationSuccess: () => void
   reportDirty: (key: string, dirty: boolean) => void
 }) {
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState<CompoForm>({ IDref_fil: 0, pourcentage: '', commentaire: '' })
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  // Collapse by default each time a different ref is selected.
+  useEffect(() => { setOpen(false) }, [refId])
   const [deleteTarget, setDeleteTarget] = useState<CompositionRow | null>(null)
+
+  // Locked once rolls (stock_ecru) or tricoteur orders exist — changing the yarn
+  // mix would desync produced stock from its declared composition.
+  const locked = !!detail.has_rolls || !!detail.has_orders
+  const canEdit = isEditing && !locked
+  const lockReason =
+    detail.has_rolls && detail.has_orders
+      ? 'des rouleaux et des commandes existent'
+      : detail.has_rolls
+        ? 'des rouleaux ont été créés'
+        : 'des commandes ont été créées'
 
   const reportDirtyRef = useRef(reportDirty)
   useEffect(() => { reportDirtyRef.current = reportDirty })
   useEffect(() => { reportDirtyRef.current('ecru-composition', showForm || editingId !== null) }, [showForm, editingId])
   useEffect(() => () => { reportDirtyRef.current('ecru-composition', false) }, [])
 
-  const resetForm = () => { setForm({ IDref_fil: 0, pourcentage: '', commentaire: '' }); setShowForm(false); setEditingId(null) }
+  const resetForm = () => { setForm({ IDref_fil: 0, pourcentage: '', commentaire: '' }); setShowForm(false); setEditingId(null); setErrorMsg(null) }
+  const onMutError = (err: Error & { status?: number }) =>
+    setErrorMsg(err.status === 409
+      ? 'La composition ne peut pas être modifiée : des rouleaux ou des commandes existent déjà pour cette référence.'
+      : "L'opération a échoué. Veuillez réessayer.")
 
   const createMut = useMutation({
     mutationFn: () => apiFetch(`/references-ecru/${refId}/compositions`, {
@@ -1228,6 +1388,7 @@ function CompositionCard({
       body: JSON.stringify({ IDref_fil: form.IDref_fil, pourcentage: Number(form.pourcentage) || 0, commentaire: form.commentaire }),
     }),
     onSuccess: () => { onMutationSuccess(); resetForm() },
+    onError: onMutError,
   })
   const updateMut = useMutation({
     mutationFn: (id: number) => apiFetch(`/references-ecru/${refId}/compositions/${id}`, {
@@ -1235,10 +1396,12 @@ function CompositionCard({
       body: JSON.stringify({ IDref_fil: form.IDref_fil, pourcentage: Number(form.pourcentage) || 0, commentaire: form.commentaire }),
     }),
     onSuccess: () => { onMutationSuccess(); resetForm() },
+    onError: onMutError,
   })
   const deleteMut = useMutation({
     mutationFn: (id: number) => apiFetch(`/references-ecru/${refId}/compositions/${id}`, { method: 'DELETE' }),
     onSuccess: () => { onMutationSuccess(); setDeleteTarget(null) },
+    onError: (err: Error & { status?: number }) => { setDeleteTarget(null); onMutError(err) },
   })
 
   const startEditRow = (c: CompositionRow) => {
@@ -1248,6 +1411,7 @@ function CompositionCard({
   }
 
   const total = detail.composition_lines.reduce((s, c) => s + (Number(c.pourcentage) || 0), 0)
+  const totalOk = detail.composition_lines.length === 0 || Math.abs(total - 100) < 0.01
 
   return (
     <>
@@ -1255,7 +1419,8 @@ function CompositionCard({
         <CardHeader className="flex flex-row items-center gap-2 p-4 space-y-0 pb-2 cursor-pointer select-none" onClick={() => setOpen(!open)}>
           <FlaskConical className="h-4 w-4 text-accent" />
           <CardTitle className="text-sm font-semibold">Composition</CardTitle>
-          {isEditing && (
+          {locked && isEditing && <Lock className="h-3.5 w-3.5 text-muted-foreground" aria-label="Verrouillée" />}
+          {canEdit && (
             <Button
               size="sm"
               variant="ghost"
@@ -1265,7 +1430,11 @@ function CompositionCard({
               <Plus className="h-3.5 w-3.5" />
             </Button>
           )}
-          <Badge variant="secondary" className={cn('text-xs ml-auto tabular-nums')} title="Total composition">
+          <Badge
+            variant="secondary"
+            className={cn('text-xs ml-auto tabular-nums', !totalOk && 'bg-destructive/10 text-destructive ring-1 ring-destructive/20')}
+            title={totalOk ? 'Total composition' : 'La composition doit totaliser 100 %'}
+          >
             {fmtNum(Math.round(total * 100) / 100, Number.isInteger(total) ? 0 : 2)}%
           </Badge>
           <Badge variant="secondary" className="text-xs">{detail.composition_lines.length}</Badge>
@@ -1273,6 +1442,18 @@ function CompositionCard({
         </CardHeader>
         {open && (
           <CardContent className="space-y-2 pb-3">
+            {isEditing && locked && (
+              <div className="flex items-start gap-2 rounded-md border border-amber-400/40 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+                <Lock className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                <span>Composition verrouillée car {lockReason} pour cette référence. Elle ne peut plus être modifiée.</span>
+              </div>
+            )}
+            {errorMsg && (
+              <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-[11px] text-destructive">
+                <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                <span>{errorMsg}</span>
+              </div>
+            )}
             {detail.composition_lines.length === 0 && !showForm && (
               <p className="text-sm text-muted-foreground italic">Aucun fil</p>
             )}
@@ -1280,7 +1461,7 @@ function CompositionCard({
               const isRowEditing = editingId === c.IDcomposition_ecru
               return (
                 <div key={c.IDcomposition_ecru}>
-                  {isRowEditing && isEditing ? (
+                  {isRowEditing && canEdit ? (
                     <CompoFormView
                       form={form}
                       onFormChange={setForm}
@@ -1302,7 +1483,7 @@ function CompositionCard({
                             <p className="text-[11px] text-muted-foreground truncate tabular-nums">{fmtPct(c.pourcentage)}</p>
                           </div>
                         </div>
-                        {isEditing && (
+                        {canEdit && (
                           <div className="flex items-center gap-1.5 flex-shrink-0">
                             <button onClick={() => startEditRow(c)} className="opacity-0 group-hover:opacity-100 p-0.5 text-muted-foreground hover:text-foreground transition-opacity" title="Modifier">
                               <Pencil className="h-3.5 w-3.5" />
@@ -1321,7 +1502,7 @@ function CompositionCard({
                 </div>
               )
             })}
-            {showForm && isEditing && (
+            {showForm && canEdit && (
               <CompoFormView
                 form={form}
                 onFormChange={setForm}
@@ -1413,10 +1594,12 @@ function ColorisCard({
   onMutationSuccess: () => void
   reportDirty: (key: string, dirty: boolean) => void
 }) {
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [form, setForm] = useState<ColorisForm>({ reference: '', commentaire: '', suivis: false })
+  // Collapse by default each time a different ref is selected.
+  useEffect(() => { setOpen(false) }, [refId])
   const [deleteTarget, setDeleteTarget] = useState<ColorisRow | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
@@ -2298,6 +2481,8 @@ function DetailSidebar({ detail }: { detail: RefEcruDetail | null }) {
         )}
         <div className="p-3 rounded-lg border bg-card shadow-sm space-y-2">
           <p className="text-xs font-semibold text-muted-foreground">Statistiques</p>
+          <KV label="Rouleaux créés" value={<span className="tabular-nums">{detail.rolls_count}</span>} />
+          <KV label="Poids total" value={<span className="tabular-nums">{fmtNum(detail.rolls_poids_total, 1)} kg</span>} />
           <KV label="Coloris" value={<span className="tabular-nums">{detail.coloris.length}</span>} />
           <KV label="Fils (composition)" value={<span className="tabular-nums">{detail.composition_lines.length}</span>} />
           <KV label="Réglages machine" value={<span className="tabular-nums">{detail.machines.length}</span>} />
