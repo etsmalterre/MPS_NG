@@ -54,7 +54,8 @@ const DiversPage = createPlaceholder('Divers', 'Outils divers', Box)
 const QualiteDossiersPage = createPlaceholder('Dossiers', 'Dossiers qualité', FolderOpen)
 const QualiteActionsPage = createPlaceholder('Actions', 'Actions qualité', ClipboardCheck)
 const QualiteAnalysePage = createPlaceholder('Analyse', 'Analyse qualité', BarChart3)
-const RapportsPage = createPlaceholder('Rapports', 'Rapports et exports', FileBarChart)
+const RapportsCommandesClientsPage = createPlaceholder('Commandes clients', 'Rapports sur les commandes clients', ShoppingCart)
+const RapportsCommandesFilsPage = createPlaceholder('Commandes fils', 'Rapports sur les commandes de fils', FileBarChart)
 
 // Fils pages (real)
 import { FilsGestion } from '@/pages/FilsGestion'
@@ -79,6 +80,9 @@ import { FinisStock } from '@/pages/FinisStock'
 
 // Prospects pages (real)
 import { ProspectsDemandes } from '@/pages/ProspectsDemandes'
+
+// Rapports pages (real)
+import { RapportCommandesSst } from '@/pages/RapportCommandesSst'
 
 // Réseau pages
 import { Entreprises } from '@/pages/Entreprises'
@@ -146,7 +150,10 @@ export const router = createBrowserRouter([
       { path: 'qualite/analyse', element: <QualiteAnalysePage /> },
 
       // Rapports
-      { path: 'rapports', element: <RapportsPage /> },
+      { path: 'rapports', element: <Navigate to="/rapports/commandes-clients" replace /> },
+      { path: 'rapports/commandes-clients', element: <RapportsCommandesClientsPage /> },
+      { path: 'rapports/commandes-sst', element: <RapportCommandesSst /> },
+      { path: 'rapports/commandes-fils', element: <RapportsCommandesFilsPage /> },
 
       // Réseau
       { path: 'reseau', element: <Navigate to="/reseau/entreprises" replace /> },

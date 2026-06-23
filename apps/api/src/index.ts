@@ -20,6 +20,7 @@ import { prospectsRouter } from './routes/prospects.js'
 import { stockRouter } from './routes/stock.js'
 import { stockFiniRouter } from './routes/stock-fini.js'
 import { suiviLotsRouter } from './routes/suivi-lots.js'
+import { rapportsRouter } from './routes/rapports.js'
 import { authRouter } from './routes/auth.js'
 import { permissionsRouter } from './routes/permissions.js'
 import { userEmailsRouter } from './routes/user-emails.js'
@@ -70,6 +71,7 @@ app.use('/api/prospects', prospectsRouter)
 app.use('/api/stock', stockRouter)
 app.use('/api/stock', stockFiniRouter)
 app.use('/api/suivi-lots', suiviLotsRouter)
+app.use('/api/rapports', rapportsRouter)
 
 app.listen(PORT, () => {
   console.log(`MPS API running on port ${PORT} [${env}]`)

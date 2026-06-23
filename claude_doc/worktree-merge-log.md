@@ -34,6 +34,38 @@ flagged-but-deferred: SST "Freinte" shows `freinte_demandée` (no `freinte_sst` 
 legacy Tricotage/Ennoblissement/Visiteur bottom block was not ported (no backing `suivilot`
 columns — low-confidence mapping left for follow-up).
 
+## 2026-06-23 — feat/rapport
+Rapports › Commandes sous-traitants — new read-only report screen at
+`/rapports/commandes-sst`, porting the legacy `FEN_Rapport_commandes_sous_traitants.wdw`
+(which is non-decompilable — WinDev stores WLanguage in a proprietary encrypted blob, so the
+screen was reconstructed from the production screenshot + the already-migrated MPS_NG
+sous-traitant domain model). Also adds the three Rapports submenus (Commandes clients,
+Commandes sst, Commandes fils) to the nav + router; clients/fils are placeholders for now.
+The screen is a flat, table-centric grid (FilsStock pattern, no master-detail/drawer): one
+row per `ligne_commande_sous_traitant`, with Statut, Numéro, Sous-traitant, Référence,
+Coloris, Qté commandée/affectée/réceptionnée, Date commande, Délai initial/actuel/client,
+Retard, Marge, Client, Relance, Commentaire. Sortable sticky-header columns (17, horizontal
+scroll), French search across statut/n°/sous-traitant/réf/coloris/client/commentaire, a "Voir
+les commandes soldées" toggle, an "Actualiser" button, and a totalizer (line count + late/
+soon counts). Statut renders as polished MPS_NG pills (`LINE_STATUT_META`, friendly labels +
+solid colors) from the per-line `sstatut`; rows tint red (late) / amber (soon) per MPS_NG
+urgency language (attente_delai anchors on `date_notif`, else on `date_livraison`). Key
+column derivations (verified against local HFSQL): **Marge = Délai Client − Délai Actuel in
+DAYS** (not €); Délai Actuel = `lcs.date_livraison`, Délai Initial = frozen `lcs.date_delai`;
+**Délai Client = `ligne_commande_client.date_livraison`** reached via
+`stock_fini.IDref_commande_source` / `stock_ecru.IDref_commande_affectation` →
+`IDligne_commande_client` → `commande_client` → `client.nom` (earliest valid lcc per line);
+the bell column = `commande_sous_traitant.date_notif` (relance); Qté affectée sums
+`stock_ecru.metrage` (ennoblisseur, Ml) or `poids` (tricoteur, Kg), Qté réceptionnée sums
+`stock_fini.metrage` (type 2) or produced `stock_ecru.poids` (type 1/0). Backend:
+`apps/api/src/routes/rapports.ts` (`GET /commandes-sst?soldees=0|1`) — entirely bulk,
+set-based, chunked `IN(...)` queries (CHUNK 400, cap 2000 commandes), bounded query count with
+no per-line fan-out (HFSQL bridge-storm safety). The reusable pure sst primitives (esc, n,
+dateDigits, addWorkingDays, lineStatutRank, STATUT_* constants, IS_WINDOWS) were extracted to
+`apps/api/src/lib/sst-shared.ts` and are now imported by both `rapports.ts` and
+`commandes-sous-traitant.ts` (no copy-paste drift). Registered in `index.ts`. Frontend:
+`apps/web/src/pages/RapportCommandesSst.tsx`. Permissions deferred (to be added later).
+
 ## 2026-06-23 — feat/stock-fini
 Finis › Stock — new "Surteinture" (over-dye) multi-select action, porting the legacy
 `FEN_Surteinture` window. In edit mode the user selects finished rolls of the **same ref +

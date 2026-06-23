@@ -162,7 +162,11 @@ export const mainNavigation: MainMenuItem[] = [
     title: 'Rapports',
     icon: FileBarChart,
     href: '/rapports',
-    submenus: [],
+    submenus: [
+      { title: 'Commandes clients', href: '/rapports/commandes-clients' },
+      { title: 'Commandes sst', href: '/rapports/commandes-sst' },
+      { title: 'Commandes fils', href: '/rapports/commandes-fils' },
+    ],
   },
   {
     id: 'reseau',
@@ -238,6 +242,9 @@ export const routeTitles: Record<string, string> = {
   '/qualite/analyse': 'Analyse',
   // Rapports
   '/rapports': 'Rapports',
+  '/rapports/commandes-clients': 'Commandes clients',
+  '/rapports/commandes-sst': 'Commandes sst',
+  '/rapports/commandes-fils': 'Commandes fils',
   // Réseau
   '/reseau': 'Réseau',
   '/reseau/entreprises': 'Entreprises',

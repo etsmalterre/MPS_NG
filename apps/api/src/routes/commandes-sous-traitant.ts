@@ -42,13 +42,20 @@ import { stripRtf, wrapRtf } from '../lib/rtf-utils.js'
 import { trmLinePrix } from '../lib/pricing-trm.js'
 import { recalcLignePrix, hasTariffData, calcTarifSSTBreakdown, type PrixBreakdown } from '../lib/pricing-sst.js'
 import { resolveSearch, type SearchHits } from '../lib/sst-search-cache.js'
+import {
+  IS_WINDOWS,
+  esc,
+  n,
+  dateDigits as dateStr,
+  addWorkingDays,
+  STATUT_OPEN,
+  STATUT_NON_ENVOYE,
+  STATUT_ATTENTE_DELAI,
+  isLineDone,
+  lineStatutRank,
+} from '../lib/sst-shared.js'
 
 const upload = multer({ storage: multer.memoryStorage() })
-
-// HFSQL ODBC bridge rejects accented identifiers on Linux but accepts
-// them on Windows. The suivilot helper (and any other write touching
-// columns like `stabL_demandée` / `freinte_demandée`) branches on this.
-const IS_WINDOWS = process.platform === 'win32'
 
 /** Soumis-detection predicate that's safe on both Windows ODBC (accepts
  *  the accented `invalidé` column) and the Linux iODBC bridge (rejects it
@@ -91,13 +98,10 @@ export const commandesSousTraitantRouter: RouterType = Router()
 // but never written from MPS_NG; phase computation treats them as the
 // generic "open / progressed" bucket alongside En_Cours.
 
-const STATUT_DONE = 'Terminé'
-const STATUT_OPEN = 'En_Cours'
-const STATUT_NON_ENVOYE = 'Non_Envoye'
-const STATUT_ATTENTE_DELAI = 'Attente_Delai'
-function isLineDone(sstatut: string | null | undefined): boolean {
-  return (sstatut ?? '').trim() === STATUT_DONE
-}
+// The `sstatut` state-machine constants (STATUT_*), `isLineDone`,
+// `lineStatutRank`, and the pure SQL/date helpers (esc, n, dateStr,
+// addWorkingDays, IS_WINDOWS) now live in `../lib/sst-shared.js` and are
+// imported above so the Rapports endpoints can reuse them.
 
 // ── Types ────────────────────────────────────────────────
 
@@ -117,10 +121,6 @@ interface CommandeSousTraitantHeader {
 }
 
 // ── Helpers ──────────────────────────────────────────────
-
-function esc(value: string): string {
-  return value.replace(/'/g, "''")
-}
 
 /** SQL literal for a user-supplied text value written to an HFSQL column.
  *
@@ -153,33 +153,6 @@ function sqlText(value: string | null | undefined): string {
     }),
   )
   return `x'${bytes.toString('hex')}'`
-}
-
-function n(value: unknown): number {
-  if (value === null || value === undefined || value === '') return 0
-  const parsed = Number(value)
-  return isNaN(parsed) ? 0 : parsed
-}
-
-/** Keep only digits from a YYYYMMDD-ish input. Accepts 'YYYY-MM-DD' or 'YYYYMMDD' or ''. */
-function dateStr(value: unknown): string {
-  if (value === null || value === undefined) return ''
-  const s = String(value).replace(/-/g, '')
-  return /^\d{8}$/.test(s) ? s : ''
-}
-
-/** A copy of `base` advanced by `n` working days (Sat/Sun skipped).
- *  French bank holidays are intentionally NOT considered — they vary per
- *  year and per company. Result is normalised to midnight. */
-function addWorkingDays(base: Date, n: number): Date {
-  const r = new Date(base.getFullYear(), base.getMonth(), base.getDate())
-  let added = 0
-  while (added < n) {
-    r.setDate(r.getDate() + 1)
-    const dow = r.getDay()
-    if (dow !== 0 && dow !== 6) added++
-  }
-  return r
 }
 
 /** Today + `n` working days, formatted as an HFSQL `YYYYMMDD` date string. */
@@ -2358,20 +2331,6 @@ export type SstPhase =
   | 'soumis'
   | 'en_reprise'
   | 'terminee'
-
-/** Map a stored line.sstatut value to a coarse progression rank used by
- *  the en_cours-bucket sub-classification.
- *    0 = Non_Envoye        (waiting for bon de commande to go out)
- *    1 = Attente_Delai     (sent, waiting on sst to confirm date)
- *    2 = En_Cours / any other legacy value (date confirmed / line moving)
- *  The commande-level phase within the en_cours bucket is MAX(rank) over
- *  its lines — a single confirmed line lifts the commande to en_cours. */
-function lineStatutRank(sstatut: string | null | undefined): 0 | 1 | 2 {
-  const s = (sstatut ?? '').trim()
-  if (s === STATUT_NON_ENVOYE) return 0
-  if (s === STATUT_ATTENTE_DELAI) return 1
-  return 2
-}
 
 /** Sub-classify the open commande (est_soldee=0, no reprise/soumis/en_controle
  *  signal) into non_envoye / attente_delai / en_cours by reading its lines. */
