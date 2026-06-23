@@ -74,6 +74,7 @@ import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates
 import { fmtNum } from '@/lib/format'
 import { apiFetch, API_URL } from '@/lib/api'
 import { postEmail } from '@/lib/email'
+import { sstTypeTagClasses } from '@/lib/sst-type'
 
 // ── Constants ──────────────────────────────────────────
 
@@ -625,22 +626,8 @@ function isEnnoblisseurType(type: string | null): boolean {
   return type.trim().toLowerCase() === TYPE_ENNOBLISSEUR.toLowerCase()
 }
 
-/** Tag classes for the sous-traitant type chip in the left-list commande
- *  cards. One distinct hue per type so the visual scan is fast (gold is
- *  reserved for the brand's CTA / active state — never reuse for tags). */
-function sstTypeTagClasses(type: string | null): string {
-  const t = (type ?? '').trim().toLowerCase()
-  // Ennoblisseur → sky (cool, dye/water association). Soft enough that the
-  // chip reads as a category, not an action.
-  if (t === 'ennoblisseur') return 'bg-sky-500/10 text-sky-700 border border-sky-500/25'
-  // Tricoteur → amber (warm, yarn association). The 10% bg + amber-800
-  // text keeps it readable and distinct from the brand's solid gold CTA.
-  if (t === 'tricoteur') return 'bg-amber-500/15 text-amber-800 border border-amber-500/30'
-  // Confectionneur → teal (clean cut-and-sew finishing).
-  if (t === 'confectionneur') return 'bg-teal-500/10 text-teal-700 border border-teal-500/25'
-  // "Autre" or unrecognised — muted stone fallback.
-  return 'bg-stone-500/10 text-stone-700 border border-stone-500/25'
-}
+// Sous-traitant type chip colours live in the shared module (see mps_designer
+// §36) so Commandes and Gestion stay visually identical.
 
 // Debounce a fast-changing value (typically a search input). Returns the
 // last value that has been stable for `delay` ms. Used to throttle the

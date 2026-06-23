@@ -255,6 +255,465 @@ sousTraitantsRouter.get('/:id/rolls', async (req: Request, res: Response) => {
   }
 })
 
+// GET /api/sous-traitants/:id/yarn-lots — yarn (fil) lots physically located at
+// this sous-traitant's site. Used by the Gestion screen for tricoteur ssts to
+// show what's on site: the yarn sent to them to knit, still holding stock.
+//
+// Location model: stock_fil.IDMagasin → sous_traitant.IDsous_traitant (same id
+// space as stock_ecru/stock_fini, but note the capital M in IDMagasin). Only
+// lots still holding stock (`stock > 0`) are "here" — a depleted lot is gone.
+//
+// Same Linux-bridge discipline as /rolls: explicit ASCII columns only (no
+// `sf.*`, no accented identifiers), and ref_fil/colori_fil/fournisseur labels
+// resolved via separate flat queries + maps (avoids the JOIN+CONVERT
+// result-set collapse footgun).
+sousTraitantsRouter.get('/:id/yarn-lots', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const lotRows = await query<{
+      IDstock_fil: number; lot: string | null; lot_frs: string | null
+      emplacement: string | null; stock: number | null; date_entree: string | null
+      IDref_fil: number | null; IDcolori_fil: number | null; IDfournisseur: number | null
+    }>(
+      `SELECT IDstock_fil, lot, lot_frs, emplacement, stock, date_entree, IDref_fil, IDcolori_fil, IDfournisseur
+       FROM stock_fil
+       WHERE IDMagasin = ${id} AND stock > 0
+       ORDER BY date_entree DESC, IDstock_fil DESC`,
+    )
+    const lotsFixed = await fixEncoding(lotRows, 'stock_fil', 'IDstock_fil', ['lot', 'lot_frs', 'emplacement'])
+
+    // Resolve ref_fil + colori_fil + fournisseur labels (ASCII columns; batched).
+    const refFilIds = Array.from(new Set(lotsFixed.map((r) => Number(r.IDref_fil)).filter((n) => n > 0)))
+    const colFilIds = Array.from(new Set(lotsFixed.map((r) => Number(r.IDcolori_fil)).filter((n) => n > 0)))
+    const frsIds = Array.from(new Set(lotsFixed.map((r) => Number(r.IDfournisseur)).filter((n) => n > 0)))
+    const refFilMap = new Map<number, string>()
+    const colFilMap = new Map<number, string>()
+    const frsMap = new Map<number, string>()
+    if (refFilIds.length > 0) {
+      const r = await query<{ IDref_fil: number; reference: string | null }>(
+        `SELECT IDref_fil, reference FROM ref_fil WHERE IDref_fil IN (${refFilIds.join(',')})`,
+      )
+      for (const x of await fixEncoding(r, 'ref_fil', 'IDref_fil', ['reference'])) refFilMap.set(Number(x.IDref_fil), (x.reference ?? '').toString().trim())
+    }
+    if (colFilIds.length > 0) {
+      const r = await query<{ IDcolori_fil: number; reference: string | null }>(
+        `SELECT IDcolori_fil, reference FROM colori_fil WHERE IDcolori_fil IN (${colFilIds.join(',')})`,
+      )
+      for (const x of await fixEncoding(r, 'colori_fil', 'IDcolori_fil', ['reference'])) colFilMap.set(Number(x.IDcolori_fil), (x.reference ?? '').toString().trim())
+    }
+    if (frsIds.length > 0) {
+      const r = await query<{ IDfournisseur: number; nom: string | null }>(
+        `SELECT IDfournisseur, nom FROM fournisseur WHERE IDfournisseur IN (${frsIds.join(',')})`,
+      )
+      for (const x of await fixEncoding(r, 'fournisseur', 'IDfournisseur', ['nom'])) frsMap.set(Number(x.IDfournisseur), (x.nom ?? '').toString().trim())
+    }
+
+    const lots = lotsFixed.map((r) => ({
+      id: Number(r.IDstock_fil),
+      reference: refFilMap.get(Number(r.IDref_fil)) || null,
+      coloris: colFilMap.get(Number(r.IDcolori_fil)) || null,
+      fournisseur: frsMap.get(Number(r.IDfournisseur)) || null,
+      lot: (r.lot ?? '').toString().trim() || null,
+      lot_frs: (r.lot_frs ?? '').toString().trim() || null,
+      emplacement: (r.emplacement ?? '').toString().trim() || null,
+      stock: r.stock == null ? null : Number(r.stock),
+      date_entree: r.date_entree ?? null,
+    }))
+
+    res.json({ lots })
+  } catch (err) {
+    console.error('Error fetching sous-traitant yarn lots:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ennoblisseur tariff catalog (`tranche_tarif_ennoblissement`)
+//
+// One row = one priced quantity band for one sous-traitant, discriminated into
+// three "subject" kinds by which columns are set:
+//   - dye base price      → IDteinture>0,  IDtraitement=0, ListeTraitements=''
+//   - single treatment    → IDtraitement>0, IDteinture=0,  ListeTraitements=''
+//   - combination bundle  → ListeTraitements='287,285', IDtraitement=0,
+//                            IDteinture = dye context (0 = no dye)
+//
+// This is the exact table `pricing-sst.ts` reads, so edits flow straight into
+// auto-pricing of NEW ennoblisseur order lines (existing lines are not
+// retro-repriced — matches legacy). Table is 8 ASCII columns, PK
+// auto-increments; combos are keyed on (IDteinture, sorted ListeTraitements)
+// — the SAME treatment list under two different dyes is two distinct subjects.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface TarifBand {
+  id: number
+  quantite_mini: number
+  quantite_maxi: number
+  prix: number
+}
+
+/** Normalize a treatment-id list into the canonical ascending CSV the legacy
+ *  stores (bare ids, no spaces). Dedupes and drops non-positive ids. */
+function canonicalListe(ids: number[]): string {
+  const set = new Set<number>()
+  for (const v of ids) {
+    const n = Math.trunc(Number(v))
+    if (Number.isFinite(n) && n > 0) set.add(n)
+  }
+  return Array.from(set).sort((a, b) => a - b).join(',')
+}
+
+/** SQL predicate fragment selecting all sibling bands of one subject (same sst
+ *  + same discriminator), so we can detect quantity-band overlaps. */
+function subjectWhere(kind: 'dye' | 'treatment' | 'combination', d: { IDteinture: number; IDtraitement: number; liste: string }): string {
+  if (kind === 'dye') return `IDteinture = ${d.IDteinture} AND IDtraitement = 0 AND ListeTraitements = ''`
+  if (kind === 'treatment') return `IDtraitement = ${d.IDtraitement} AND IDteinture = 0 AND ListeTraitements = ''`
+  return `IDteinture = ${d.IDteinture} AND IDtraitement = 0 AND ListeTraitements = '${esc(d.liste)}'`
+}
+
+/** True iff [aMin,aMax] and [bMin,bMax] intersect (inclusive). */
+function overlaps(aMin: number, aMax: number, bMin: number, bMax: number): boolean {
+  return aMin <= bMax && bMin <= aMax
+}
+
+const bandBody = z.object({
+  kind: z.enum(['dye', 'treatment', 'combination']),
+  IDteinture: z.number().int().optional(),
+  IDtraitement: z.number().int().optional(),
+  liste: z.array(z.number().int()).optional(),
+  quantite_mini: z.number(),
+  quantite_maxi: z.number(),
+  prix: z.number(),
+})
+
+/** Resolve + validate the discriminator for a band body. Returns null + an
+ *  error message when the body is inconsistent (e.g. combination with no
+ *  treatments). */
+function resolveDiscriminator(body: z.infer<typeof bandBody>):
+  | { ok: true; IDteinture: number; IDtraitement: number; liste: string }
+  | { ok: false; error: string } {
+  if (body.kind === 'dye') {
+    const t = Math.trunc(Number(body.IDteinture) || 0)
+    if (!(t > 0)) return { ok: false, error: 'IDteinture requis pour une teinture' }
+    return { ok: true, IDteinture: t, IDtraitement: 0, liste: '' }
+  }
+  if (body.kind === 'treatment') {
+    const t = Math.trunc(Number(body.IDtraitement) || 0)
+    if (!(t > 0)) return { ok: false, error: 'IDtraitement requis pour un traitement' }
+    return { ok: true, IDteinture: 0, IDtraitement: t, liste: '' }
+  }
+  // combination
+  const liste = canonicalListe(body.liste ?? [])
+  if (liste === '') return { ok: false, error: 'Au moins un traitement requis pour une combinaison' }
+  const t = Math.trunc(Number(body.IDteinture) || 0) // 0 = no dye context, allowed
+  return { ok: true, IDteinture: t, IDtraitement: 0, liste }
+}
+
+/** Validate the quantity band itself (range sanity), returning an error string
+ *  or null. */
+function validateBandRange(mini: number, maxi: number, prix: number): string | null {
+  if (!Number.isFinite(mini) || mini < 0) return 'Quantité minimum invalide'
+  if (!Number.isFinite(maxi) || maxi < mini) return 'La quantité maximum doit être ≥ la quantité minimum'
+  if (!Number.isFinite(prix) || prix < 0) return 'Prix invalide'
+  return null
+}
+
+// GET /api/sous-traitants/:id/tarifs-ennoblissement — full grouped catalog for
+// the sst: every dye + every treatment (with their bands, possibly empty) plus
+// the combinations that exist. Catalogs are returned in full so an empty
+// ennoblisseur can start building a tariff from scratch.
+sousTraitantsRouter.get('/:id/tarifs-ennoblissement', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    // 1) All tariff rows for this sst (8 ASCII columns, no accents → plain read).
+    const rows = await query<{
+      IDtranche_tarif_ennoblissement: number
+      quantite_mini: number; quantite_maxi: number; prix: number
+      IDtraitement: number; IDteinture: number; ListeTraitements: string | null
+    }>(
+      `SELECT IDtranche_tarif_ennoblissement, quantite_mini, quantite_maxi, prix, IDtraitement, IDteinture, ListeTraitements
+       FROM tranche_tarif_ennoblissement
+       WHERE IDsous_traitant = ${id}
+       ORDER BY quantite_mini, quantite_maxi`,
+    )
+
+    // 2) Dye catalog (4 rows). designation_externe is unique + descriptive
+    //    ("Coloration Double Teinture"); fall back to interne.
+    const teintRows = await query<{ IDteinture: number; designation_interne: string | null; designation_externe: string | null }>(
+      `SELECT IDteinture, designation_interne, designation_externe FROM teinture ORDER BY IDteinture`,
+    )
+    const teintFixed = await fixEncoding(teintRows, 'teinture', 'IDteinture', ['designation_interne', 'designation_externe'])
+    const teintName = new Map<number, string>()
+    for (const t of teintFixed) {
+      teintName.set(Number(t.IDteinture), ((t.designation_externe || t.designation_interne) ?? '').toString().trim())
+    }
+
+    // 3) Treatment catalog (non-deleted), ordered by legacy `ordre`.
+    const trtRows = await query<{ IDtraitement: number; designation: string | null; ordre: number | null }>(
+      `SELECT IDtraitement, designation, ordre FROM traitement WHERE is_deleted = 0 ORDER BY ordre, IDtraitement`,
+    )
+    const trtFixed = await fixEncoding(trtRows, 'traitement', 'IDtraitement', ['designation'])
+    const trtName = new Map<number, string>()
+    for (const t of trtFixed) trtName.set(Number(t.IDtraitement), (t.designation ?? '').toString().trim())
+
+    // 4) Partition rows by kind, grouping bands under each subject.
+    const dyeBands = new Map<number, TarifBand[]>()
+    const trtBands = new Map<number, TarifBand[]>()
+    const comboMap = new Map<string, { IDteinture: number; liste: string; bands: TarifBand[] }>()
+    for (const r of rows) {
+      const band: TarifBand = {
+        id: Number(r.IDtranche_tarif_ennoblissement),
+        quantite_mini: Number(r.quantite_mini) || 0,
+        quantite_maxi: Number(r.quantite_maxi) || 0,
+        prix: Number(r.prix) || 0,
+      }
+      const liste = (r.ListeTraitements ?? '').toString().trim()
+      const teint = Number(r.IDteinture) || 0
+      const trt = Number(r.IDtraitement) || 0
+      if (liste !== '') {
+        const canon = canonicalListe(liste.split(',').map((s) => Number(s)))
+        const key = `${teint}|${canon}`
+        const entry = comboMap.get(key) ?? { IDteinture: teint, liste: canon, bands: [] }
+        entry.bands.push(band)
+        comboMap.set(key, entry)
+      } else if (teint > 0 && trt === 0) {
+        const arr = dyeBands.get(teint) ?? []
+        arr.push(band)
+        dyeBands.set(teint, arr)
+      } else if (trt > 0) {
+        const arr = trtBands.get(trt) ?? []
+        arr.push(band)
+        trtBands.set(trt, arr)
+      }
+    }
+
+    const teintures = teintFixed.map((t) => ({
+      IDteinture: Number(t.IDteinture),
+      designation: teintName.get(Number(t.IDteinture)) || `Teinture #${t.IDteinture}`,
+      bands: dyeBands.get(Number(t.IDteinture)) ?? [],
+    }))
+
+    const traitements = trtFixed.map((t) => ({
+      IDtraitement: Number(t.IDtraitement),
+      designation: trtName.get(Number(t.IDtraitement)) || `Traitement #${t.IDtraitement}`,
+      ordre: Number(t.ordre) || 0,
+      bands: trtBands.get(Number(t.IDtraitement)) ?? [],
+    }))
+
+    const combinaisons = Array.from(comboMap.entries()).map(([key, c]) => ({
+      key,
+      IDteinture: c.IDteinture,
+      teinture_nom: c.IDteinture > 0 ? (teintName.get(c.IDteinture) || `Teinture #${c.IDteinture}`) : null,
+      liste: c.liste,
+      traitements: c.liste.split(',').filter(Boolean).map((s) => {
+        const tid = Number(s)
+        return { IDtraitement: tid, designation: trtName.get(tid) || `Traitement #${tid}` }
+      }),
+      bands: c.bands.sort((a, b) => a.quantite_mini - b.quantite_mini),
+    }))
+
+    res.json({ teintures, traitements, combinaisons })
+  } catch (err) {
+    console.error('Error fetching ennoblisseur tariffs:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// POST /api/sous-traitants/:id/tarifs-ennoblissement — create one quantity band
+// (also the way a new combination is born: kind='combination' + liste).
+sousTraitantsRouter.post('/:id/tarifs-ennoblissement', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id) || id <= 0) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const parsed = bandBody.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', issues: parsed.error.issues }); return }
+
+    const disc = resolveDiscriminator(parsed.data)
+    if (!disc.ok) { res.status(400).json({ error: disc.error }); return }
+    const mini = Math.trunc(parsed.data.quantite_mini)
+    const maxi = Math.trunc(parsed.data.quantite_maxi)
+    const prix = Number(parsed.data.prix)
+    const rangeErr = validateBandRange(mini, maxi, prix)
+    if (rangeErr) { res.status(400).json({ error: rangeErr }); return }
+
+    // Overlap guard within the subject.
+    const siblings = await query<{ quantite_mini: number; quantite_maxi: number }>(
+      `SELECT quantite_mini, quantite_maxi FROM tranche_tarif_ennoblissement
+       WHERE IDsous_traitant = ${id} AND ${subjectWhere(parsed.data.kind, disc)}`,
+    )
+    if (siblings.some((s) => overlaps(mini, maxi, Number(s.quantite_mini) || 0, Number(s.quantite_maxi) || 0))) {
+      res.status(409).json({ error: 'Cette tranche chevauche une tranche existante' }); return
+    }
+
+    await query(
+      `INSERT INTO tranche_tarif_ennoblissement (IDsous_traitant, IDteinture, IDtraitement, ListeTraitements, quantite_mini, quantite_maxi, prix)
+       VALUES (${id}, ${disc.IDteinture}, ${disc.IDtraitement}, '${esc(disc.liste)}', ${mini}, ${maxi}, ${prix})`,
+    )
+    res.status(201).json({ ok: true })
+  } catch (err) {
+    console.error('Error creating ennoblisseur tariff band:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// PUT /api/sous-traitants/:id/tarifs-ennoblissement/:trancheId — update a band's
+// quantity range / price (not its subject membership — that's the combinaison
+// endpoint below for combos).
+sousTraitantsRouter.put('/:id/tarifs-ennoblissement/:trancheId', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    const trancheId = parseInt(req.params.trancheId, 10)
+    if (isNaN(id) || isNaN(trancheId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const schema = z.object({ quantite_mini: z.number(), quantite_maxi: z.number(), prix: z.number() })
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', issues: parsed.error.issues }); return }
+    const mini = Math.trunc(parsed.data.quantite_mini)
+    const maxi = Math.trunc(parsed.data.quantite_maxi)
+    const prix = Number(parsed.data.prix)
+    const rangeErr = validateBandRange(mini, maxi, prix)
+    if (rangeErr) { res.status(400).json({ error: rangeErr }); return }
+
+    // Scope + read the band's own discriminator so we can find its siblings.
+    const owns = await query<{ IDteinture: number; IDtraitement: number; ListeTraitements: string | null }>(
+      `SELECT IDteinture, IDtraitement, ListeTraitements FROM tranche_tarif_ennoblissement
+       WHERE IDtranche_tarif_ennoblissement = ${trancheId} AND IDsous_traitant = ${id}`,
+    )
+    if (owns.length === 0) { res.status(404).json({ error: 'Tranche introuvable' }); return }
+    const row = owns[0]
+    const liste = (row.ListeTraitements ?? '').toString().trim()
+    const kind: 'dye' | 'treatment' | 'combination' = liste !== '' ? 'combination' : (Number(row.IDtraitement) > 0 ? 'treatment' : 'dye')
+    const disc = { IDteinture: Number(row.IDteinture) || 0, IDtraitement: Number(row.IDtraitement) || 0, liste }
+
+    const siblings = await query<{ quantite_mini: number; quantite_maxi: number }>(
+      `SELECT quantite_mini, quantite_maxi FROM tranche_tarif_ennoblissement
+       WHERE IDsous_traitant = ${id} AND ${subjectWhere(kind, disc)}
+         AND IDtranche_tarif_ennoblissement <> ${trancheId}`,
+    )
+    if (siblings.some((s) => overlaps(mini, maxi, Number(s.quantite_mini) || 0, Number(s.quantite_maxi) || 0))) {
+      res.status(409).json({ error: 'Cette tranche chevauche une tranche existante' }); return
+    }
+
+    await query(
+      `UPDATE tranche_tarif_ennoblissement SET quantite_mini = ${mini}, quantite_maxi = ${maxi}, prix = ${prix}
+       WHERE IDtranche_tarif_ennoblissement = ${trancheId} AND IDsous_traitant = ${id}`,
+    )
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error updating ennoblisseur tariff band:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// DELETE /api/sous-traitants/:id/tarifs-ennoblissement/:trancheId — remove a band.
+sousTraitantsRouter.delete('/:id/tarifs-ennoblissement/:trancheId', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    const trancheId = parseInt(req.params.trancheId, 10)
+    if (isNaN(id) || isNaN(trancheId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    await query(
+      `DELETE FROM tranche_tarif_ennoblissement
+       WHERE IDtranche_tarif_ennoblissement = ${trancheId} AND IDsous_traitant = ${id}`,
+    )
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error deleting ennoblisseur tariff band:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// PUT /api/sous-traitants/:id/tarifs-ennoblissement/combinaison — re-scope an
+// existing combination: rewrite IDteinture + ListeTraitements across ALL its
+// bands at once. Identified by its old (IDteinture, liste) discriminator.
+sousTraitantsRouter.put('/:id/tarifs-ennoblissement/combinaison/rescope', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id) || id <= 0) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const schema = z.object({
+      old_IDteinture: z.number().int(),
+      old_liste: z.array(z.number().int()),
+      new_IDteinture: z.number().int(),
+      new_liste: z.array(z.number().int()),
+    })
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', issues: parsed.error.issues }); return }
+    const oldListe = canonicalListe(parsed.data.old_liste)
+    const newListe = canonicalListe(parsed.data.new_liste)
+    if (newListe === '') { res.status(400).json({ error: 'Au moins un traitement requis' }); return }
+    const oldTeint = Math.trunc(parsed.data.old_IDteinture) || 0
+    const newTeint = Math.trunc(parsed.data.new_IDteinture) || 0
+
+    if (oldTeint === newTeint && oldListe === newListe) { res.json({ ok: true }); return }
+
+    // Prevent merging into another existing subject (would risk band overlaps).
+    const collision = await query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM tranche_tarif_ennoblissement
+       WHERE IDsous_traitant = ${id} AND IDtraitement = 0
+         AND IDteinture = ${newTeint} AND ListeTraitements = '${esc(newListe)}'`,
+    )
+    if (Number(collision[0]?.n) > 0) {
+      res.status(409).json({ error: 'Une combinaison identique existe déjà' }); return
+    }
+
+    await query(
+      `UPDATE tranche_tarif_ennoblissement
+       SET IDteinture = ${newTeint}, ListeTraitements = '${esc(newListe)}'
+       WHERE IDsous_traitant = ${id} AND IDtraitement = 0
+         AND IDteinture = ${oldTeint} AND ListeTraitements = '${esc(oldListe)}'`,
+    )
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error re-scoping ennoblisseur combination:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// POST /api/sous-traitants/:id/tarifs-ennoblissement/copier — seed this sst's
+// catalog from another sous-traitant (or the IDsous_traitant=0 default
+// catalog). Refuses if the target already has rows unless overwrite=true (which
+// clears the target first). Bootstraps the 9 ennoblisseurs that have no catalog.
+sousTraitantsRouter.post('/:id/tarifs-ennoblissement/copier', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id) || id <= 0) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const schema = z.object({ sourceId: z.number().int(), overwrite: z.boolean().optional() })
+    const parsed = schema.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', issues: parsed.error.issues }); return }
+    const sourceId = Math.trunc(parsed.data.sourceId)
+    if (sourceId === id) { res.status(400).json({ error: 'Source et destination identiques' }); return }
+
+    const existing = await query<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM tranche_tarif_ennoblissement WHERE IDsous_traitant = ${id}`,
+    )
+    if (Number(existing[0]?.n) > 0) {
+      if (!parsed.data.overwrite) { res.status(409).json({ error: 'Ce sous-traitant possède déjà des tarifs' }); return }
+      await query(`DELETE FROM tranche_tarif_ennoblissement WHERE IDsous_traitant = ${id}`)
+    }
+
+    const src = await query<{
+      quantite_mini: number; quantite_maxi: number; prix: number
+      IDtraitement: number; IDteinture: number; ListeTraitements: string | null
+    }>(
+      `SELECT quantite_mini, quantite_maxi, prix, IDtraitement, IDteinture, ListeTraitements
+       FROM tranche_tarif_ennoblissement WHERE IDsous_traitant = ${sourceId}`,
+    )
+    for (const r of src) {
+      const liste = (r.ListeTraitements ?? '').toString().trim()
+      await query(
+        `INSERT INTO tranche_tarif_ennoblissement (IDsous_traitant, IDteinture, IDtraitement, ListeTraitements, quantite_mini, quantite_maxi, prix)
+         VALUES (${id}, ${Number(r.IDteinture) || 0}, ${Number(r.IDtraitement) || 0}, '${esc(liste)}', ${Math.trunc(Number(r.quantite_mini)) || 0}, ${Math.trunc(Number(r.quantite_maxi)) || 0}, ${Number(r.prix) || 0})`,
+      )
+    }
+    res.json({ ok: true, copied: src.length })
+  } catch (err) {
+    console.error('Error copying ennoblisseur tariffs:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // POST /api/sous-traitants — create (placeholder row, then auto-edit on the client)
 sousTraitantsRouter.post('/', async (req: Request, res: Response) => {
   try {

@@ -21,7 +21,6 @@ import {
   Send,
   Phone,
   Info,
-  Tag,
   EyeOff,
   Boxes,
   ArrowUp,
@@ -34,6 +33,9 @@ import { PopoverSelect } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { TmRollIcon } from '@/components/icons/TmRollIcon'
 import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
+import { BobineIcon } from '@/components/icons/BobineIcon'
+import { TariffsSection } from './sous-traitants/TariffsSection'
+import { SstTypeTag } from '@/lib/sst-type'
 import { cn } from '@/lib/utils'
 import { apiFetch } from '@/lib/api'
 import { fmtNum } from '@/lib/format'
@@ -42,6 +44,8 @@ import { etatPillClass } from '@/lib/etat-stock-fini'
 
 // IDtype_sst value for "Ennoblisseur" (dyer/finisher) — see type_sst catalog.
 const ENNOBLISSEUR_TYPE = 2
+// IDtype_sst value for "Tricoteur" (knitter) — see type_sst catalog.
+const TRICOTEUR_TYPE = 1
 
 // ── Types ──────────────────────────────────────────────
 
@@ -121,6 +125,23 @@ interface RollsPayload {
 
 type UnifiedRoll = RollRow & { kind: RollKind }
 
+// Yarn (fil) lots physically located at a sous-traitant's site (tricoteur view).
+interface YarnLot {
+  id: number
+  reference: string | null
+  coloris: string | null
+  fournisseur: string | null
+  lot: string | null
+  lot_frs: string | null
+  emplacement: string | null
+  stock: number | null
+  date_entree: string | null
+}
+
+interface YarnLotsPayload {
+  lots: YarnLot[]
+}
+
 // ── API helpers ────────────────────────────────────────
 // Shared apiFetch — see apps/web/src/lib/api.ts
 
@@ -140,6 +161,14 @@ function useSousTraitantRolls(id: number | null, enabled: boolean) {
   return useQuery<RollsPayload>({
     queryKey: ['sous-traitant-rolls', id],
     queryFn: () => apiFetch(`/sous-traitants/${id}/rolls`),
+    enabled: enabled && id !== null,
+  })
+}
+
+function useSousTraitantYarnLots(id: number | null, enabled: boolean) {
+  return useQuery<YarnLotsPayload>({
+    queryKey: ['sous-traitant-yarn-lots', id],
+    queryFn: () => apiFetch(`/sous-traitants/${id}/yarn-lots`),
     enabled: enabled && id !== null,
   })
 }
@@ -277,13 +306,11 @@ export function SousTraitantsGestion() {
           isEditing={isEditing} editNom={editNom} onEditNomChange={setEditNom}
           onStartEdit={startEdit} onCancelEdit={cancelEdit} onSave={() => saveMutation.mutate()} isSaving={saveMutation.isPending} />}
         detail={<DetailMain sousTraitant={detail ?? null} isLoading={detailLoading && selectedId !== null}
-          hasSelection={selectedId !== null} isEditing={isEditing}
-          editTel={editTel} onEditTelChange={setEditTel}
-          editFax={editFax} onEditFaxChange={setEditFax}
-          editTypeSst={editTypeSst} onEditTypeSstChange={setEditTypeSst}
-          editVisible={editVisible} onEditVisibleChange={setEditVisible} />}
+          hasSelection={selectedId !== null} />}
         sidebar={selectedId !== null ? <DetailSidebar sousTraitant={detail ?? null} isLoading={detailLoading}
           isEditing={isEditing} sousTraitantId={selectedId} onMutationSuccess={invalidateAll}
+          editTypeSst={editTypeSst} onEditTypeSstChange={setEditTypeSst}
+          editVisible={editVisible} onEditVisibleChange={setEditVisible}
           editCommentaire={editCommentaire} onEditCommentaireChange={setEditCommentaire}
           onSubFormsDirtyChange={setSubFormsDirty} /> : null}
         sidebarTitle="Informations" hasSelection={selectedId !== null}
@@ -348,7 +375,7 @@ function SousTraitantList({ sousTraitants, isLoading, isError, error, selectedId
             </div>
             {s.type_label && (
               <div className="flex items-center gap-1.5 mt-1.5 ml-6 flex-wrap">
-                <Badge variant="secondary" className="text-[10px] py-0 gap-1"><Tag className="h-2.5 w-2.5" />{s.type_label}</Badge>
+                <SstTypeTag type={s.type_label} size="sm" />
               </div>
             )}
           </div>
@@ -395,7 +422,7 @@ function DetailHeader({ sousTraitant, isLoading, isEditing, editNom, onEditNomCh
               <h1 className="text-2xl font-heading font-bold tracking-tight truncate">{sousTraitant?.nom}</h1>
               {sousTraitant && (
                 <div className="flex gap-1.5 mt-1 flex-wrap">
-                  {sousTraitant.type_label && <Badge variant="secondary" className="text-xs gap-1"><Tag className="h-3 w-3" />{sousTraitant.type_label}</Badge>}
+                  {sousTraitant.type_label && <SstTypeTag type={sousTraitant.type_label} size="md" />}
                   {!sousTraitant.est_visible && <Badge variant="outline" className="text-xs gap-1 text-muted-foreground"><EyeOff className="h-3 w-3" />Inactif</Badge>}
                 </div>
               )}
@@ -451,15 +478,9 @@ function TogglePill({ value, onChange }: { value: boolean; onChange: (v: boolean
   )
 }
 
-function DetailMain({ sousTraitant, isLoading, hasSelection, isEditing, editTel, onEditTelChange, editFax, onEditFaxChange, editTypeSst, onEditTypeSstChange, editVisible, onEditVisibleChange }: {
-  sousTraitant: SousTraitantDetail | null; isLoading: boolean; hasSelection: boolean; isEditing: boolean
-  editTel: string; onEditTelChange: (v: string) => void
-  editFax: string; onEditFaxChange: (v: string) => void
-  editTypeSst: number; onEditTypeSstChange: (v: number) => void
-  editVisible: boolean; onEditVisibleChange: (v: boolean) => void
+function DetailMain({ sousTraitant, isLoading, hasSelection }: {
+  sousTraitant: SousTraitantDetail | null; isLoading: boolean; hasSelection: boolean
 }) {
-  const { data: types } = useTypesSst()
-
   if (!hasSelection) return (
     <div className="flex-1 flex items-center justify-center">
       <div className="text-center space-y-3">
@@ -472,73 +493,58 @@ function DetailMain({ sousTraitant, isLoading, hasSelection, isEditing, editTel,
   if (!sousTraitant) return null
 
   const isEnnoblisseur = Number(sousTraitant.IDtype_sst) === ENNOBLISSEUR_TYPE
+  const isTricoteur = Number(sousTraitant.IDtype_sst) === TRICOTEUR_TYPE
 
-  const coordonneesCard = (
-      <Card className={cn('card-premium', isEditing && editSectionClass)}>
-        <CardHeader className="flex flex-row items-center gap-2 pb-2">
-          <Info className="h-4 w-4 text-accent" />
-          <CardTitle className="text-sm font-semibold">Coordonnees</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {isEditing ? (
-            <div className="space-y-3">
-              <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">Type de sous-traitant</label>
-                <PopoverSelect
-                  options={(types ?? []).map((t) => ({ id: t.IDtype_sst, primary: t.type_label }))}
-                  value={editTypeSst}
-                  onChange={onEditTypeSstChange}
-                  emptyLabel="— Aucun —"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div className="space-y-1">
-                  <label className="text-xs font-medium text-muted-foreground">Telephone</label>
-                  <input value={editTel} onChange={(e) => onEditTelChange(e.target.value)} autoComplete="off" className={inputClass} />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs font-medium text-muted-foreground">Fax</label>
-                  <input value={editFax} onChange={(e) => onEditFaxChange(e.target.value)} autoComplete="off" className={inputClass} />
-                </div>
-              </div>
-              <div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-lg border border-border/60 bg-white shadow-sm">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5 text-xs font-semibold">
-                    <Building2 className="h-3.5 w-3.5 text-accent" />
-                    <span>Sous-traitant actif</span>
-                  </div>
-                  <p className="text-[10px] text-muted-foreground mt-0.5">
-                    {editVisible ? 'Visible dans les listes de selection' : 'Archive — masque des listes de selection'}
-                  </p>
-                </div>
-                <TogglePill value={editVisible} onChange={onEditVisibleChange} />
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-0">
-              <KVRow label="Type" value={sousTraitant.type_label ? <Badge variant="secondary" className="text-xs gap-1"><Tag className="h-3 w-3" />{sousTraitant.type_label}</Badge> : <span className="text-muted-foreground italic">Non defini</span>} />
-              <KVRow label="Telephone" value={sousTraitant.tel?.trim() ? sousTraitant.tel : <span className="text-muted-foreground italic">—</span>} />
-              <KVRow label="Fax" value={sousTraitant.fax?.trim() ? sousTraitant.fax : <span className="text-muted-foreground italic">—</span>} />
-              <KVRow label="Statut" value={sousTraitant.est_visible
-                ? <Badge className="badge-success text-[10px] py-0">Actif</Badge>
-                : <Badge variant="outline" className="text-[10px] py-0 text-muted-foreground gap-1"><EyeOff className="h-2.5 w-2.5" />Inactif</Badge>} />
-            </div>
-          )}
-        </CardContent>
-      </Card>
-  )
-
-  // Non-ennoblisseur: just the coordonnées card in a scrollable column.
-  if (!isEnnoblisseur) {
-    return <div className="flex-1 min-h-0 overflow-auto space-y-4">{coordonneesCard}</div>
+  // Tricoteur: yarn-lots-on-site table fills the column.
+  if (isTricoteur) {
+    return (
+      <div className="flex-1 min-h-0 flex flex-col">
+        <YarnLotsSection sousTraitantId={sousTraitant.IDsous_traitant} className="flex-1 min-h-0" />
+      </div>
+    )
   }
 
-  // Ennoblisseur: coordonnées (natural height) + the rolls-on-site table that
-  // fills the remaining height with its own internal scroll.
+  // Ennoblisseur: segmented toggle between the rolls-on-site table and the
+  // tariff editor.
+  if (isEnnoblisseur) {
+    return <EnnoblisseurCenter sousTraitantId={sousTraitant.IDsous_traitant} />
+  }
+
+  // Other types (Autre / Confectionneur / non défini) have no workshop view —
+  // all their data lives in the right panel.
+  return (
+    <div className="flex-1 flex items-center justify-center">
+      <div className="text-center space-y-3">
+        <div className="icon-box-gold h-16 w-16 mx-auto"><Building2 className="h-8 w-8" /></div>
+        <p className="text-muted-foreground text-sm max-w-xs">Les informations de ce sous-traitant sont disponibles dans le panneau de droite.</p>
+      </div>
+    </div>
+  )
+}
+
+// Ennoblisseur center column: [Rouleaux | Tarifs] toggle. Kept as its own
+// component so its tab-state hook stays valid w.r.t. DetailMain's early returns
+// (hooks-before-returns rule).
+function EnnoblisseurCenter({ sousTraitantId }: { sousTraitantId: number }) {
+  const [tab, setTab] = useState<'rolls' | 'tarifs'>('rolls')
+  const tabs: { key: 'rolls' | 'tarifs'; label: string }[] = [
+    { key: 'rolls', label: 'Rouleaux sur le site' },
+    { key: 'tarifs', label: 'Tarifs' },
+  ]
   return (
     <div className="flex-1 min-h-0 flex flex-col gap-4">
-      <div className="flex-shrink-0">{coordonneesCard}</div>
-      <RollsSection sousTraitantId={sousTraitant.IDsous_traitant} className="flex-1 min-h-0" />
+      <div className="flex-shrink-0 flex gap-1">
+        {tabs.map((t) => (
+          <button key={t.key} type="button" onClick={() => setTab(t.key)}
+            className={cn('px-3 py-1.5 text-sm font-medium rounded-md transition-colors',
+              tab === t.key ? 'bg-accent text-accent-foreground shadow-sm' : 'text-muted-foreground hover:bg-accent/10')}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {tab === 'rolls'
+        ? <RollsSection sousTraitantId={sousTraitantId} className="flex-1 min-h-0" />
+        : <TariffsSection sousTraitantId={sousTraitantId} className="flex-1 min-h-0" />}
     </div>
   )
 }
@@ -727,6 +733,136 @@ function RollsSection({ sousTraitantId, className }: { sousTraitantId: number; c
   )
 }
 
+// ── Center: Yarn lots on site (tricoteur) ──────────────
+
+type YarnSortKey = 'reference' | 'coloris' | 'fournisseur' | 'lot' | 'lot_frs' | 'stock' | 'date_entree'
+
+const YARN_COLUMNS: { key: YarnSortKey; label: string; width: string; align?: 'right' }[] = [
+  { key: 'reference', label: 'Référence', width: '18%' },
+  { key: 'coloris', label: 'Coloris', width: '17%' },
+  { key: 'fournisseur', label: 'Fournisseur', width: '18%' },
+  { key: 'lot', label: 'Lot', width: '12%' },
+  { key: 'lot_frs', label: 'Lot frs', width: '12%' },
+  { key: 'stock', label: 'Stock', width: '11%', align: 'right' },
+  { key: 'date_entree', label: 'Entrée', width: '12%', align: 'right' },
+]
+
+function YarnSortHeader({ col, sort, onSort }: {
+  col: { key: YarnSortKey; label: string; align?: 'right' }
+  sort: { key: YarnSortKey; dir: 'asc' | 'desc' }; onSort: (k: YarnSortKey) => void
+}) {
+  const active = sort.key === col.key
+  return (
+    <th onClick={() => onSort(col.key)}
+      className={cn('px-2.5 py-2 font-semibold cursor-pointer select-none whitespace-nowrap',
+        col.align === 'right' ? 'text-right' : 'text-left', active && 'text-accent')}>
+      <span className={cn('inline-flex items-center gap-1', col.align === 'right' && 'flex-row-reverse')}>
+        {col.label}
+        {active && (sort.dir === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
+      </span>
+    </th>
+  )
+}
+
+function YarnLotsSection({ sousTraitantId, className }: { sousTraitantId: number; className?: string }) {
+  const { data, isLoading, isError, error } = useSousTraitantYarnLots(sousTraitantId, true)
+  const [search, setSearch] = useState('')
+  const [sort, setSort] = useState<{ key: YarnSortKey; dir: 'asc' | 'desc' }>({ key: 'date_entree', dir: 'desc' })
+
+  const handleSort = useCallback((k: YarnSortKey) => {
+    setSort((prev) => prev.key === k ? { key: k, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key: k, dir: 'asc' })
+  }, [])
+
+  const lots = data?.lots ?? []
+
+  const filteredSorted = useMemo(() => {
+    let rows = lots
+    const q = search.trim().toLowerCase()
+    if (q) {
+      rows = rows.filter((r) =>
+        (r.reference ?? '').toLowerCase().includes(q)
+        || (r.coloris ?? '').toLowerCase().includes(q)
+        || (r.fournisseur ?? '').toLowerCase().includes(q)
+        || (r.lot ?? '').toLowerCase().includes(q)
+        || (r.lot_frs ?? '').toLowerCase().includes(q)
+      )
+    }
+    const dir = sort.dir === 'asc' ? 1 : -1
+    const key = sort.key
+    return [...rows].sort((a, b) => {
+      if (key === 'stock') return ((Number(a[key]) || 0) - (Number(b[key]) || 0)) * dir
+      const av = (a[key] ?? '').toString().toLowerCase()
+      const bv = (b[key] ?? '').toString().toLowerCase()
+      return av.localeCompare(bv) * dir
+    })
+  }, [lots, search, sort])
+
+  const totalStock = useMemo(() => filteredSorted.reduce((s, r) => s + (Number(r.stock) || 0), 0), [filteredSorted])
+
+  return (
+    <Card className={cn('card-premium flex flex-col min-h-0 overflow-hidden', className)}>
+      <CardHeader className="flex-shrink-0 flex flex-row items-center gap-2 pb-2">
+        <BobineIcon className="h-4 w-4 text-accent" />
+        <CardTitle className="text-sm font-semibold">Lots de fil présents sur le site</CardTitle>
+        <Badge variant="secondary" className="text-xs ml-auto">{lots.length} lot{lots.length !== 1 ? 's' : ''}</Badge>
+      </CardHeader>
+      <CardContent className="flex-1 min-h-0 flex flex-col gap-2 pb-3">
+        {/* Toolbar: search */}
+        <div className="flex-shrink-0 relative">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <input type="text" value={search} onChange={(e) => setSearch(e.target.value)} autoComplete="off"
+            placeholder="Rechercher (réf, coloris, fournisseur, lot...)"
+            className="h-8 w-full pl-8 pr-3 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring" />
+        </div>
+
+        {/* Table */}
+        {isLoading ? (
+          <div className="flex-1 flex items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>
+        ) : isError ? (
+          <div className="flex-1 flex flex-col items-center justify-center text-destructive"><AlertCircle className="h-6 w-6 mb-2" /><p className="text-sm">{(error as Error)?.message || 'Erreur'}</p></div>
+        ) : (
+          <div className="flex-1 min-h-0 flex flex-col rounded-lg border border-border/60 bg-white overflow-hidden">
+            <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
+              <colgroup>{YARN_COLUMNS.map((c) => <col key={c.key} style={{ width: c.width }} />)}</colgroup>
+              <thead className="bg-zinc-200/60 border-b border-border/60">
+                <tr className="text-xs uppercase tracking-wide text-muted-foreground">
+                  {YARN_COLUMNS.map((c) => <YarnSortHeader key={c.key} col={c} sort={sort} onSort={handleSort} />)}
+                </tr>
+              </thead>
+            </table>
+            <div className="flex-1 min-h-0 overflow-auto scrollbar-transparent">
+              <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
+                <colgroup>{YARN_COLUMNS.map((c) => <col key={c.key} style={{ width: c.width }} />)}</colgroup>
+                <tbody>
+                  {filteredSorted.length === 0 ? (
+                    <tr><td colSpan={YARN_COLUMNS.length} className="px-3 py-10 text-center text-sm text-muted-foreground">Aucun lot de fil sur le site</td></tr>
+                  ) : filteredSorted.map((r) => (
+                    <tr key={r.id} className="border-b border-border/40 hover:bg-accent/5">
+                      <td className="px-2.5 py-1.5 truncate" title={r.reference ?? ''}>
+                        <span className="font-medium">{r.reference || '—'}</span>
+                      </td>
+                      <td className="px-2.5 py-1.5 truncate" title={r.coloris ?? ''}>{r.coloris || <span className="text-muted-foreground">—</span>}</td>
+                      <td className="px-2.5 py-1.5 truncate" title={r.fournisseur ?? ''}>{r.fournisseur || <span className="text-muted-foreground">—</span>}</td>
+                      <td className="px-2.5 py-1.5 truncate" title={r.lot ?? ''}>{r.lot || <span className="text-muted-foreground">—</span>}</td>
+                      <td className="px-2.5 py-1.5 truncate" title={r.lot_frs ?? ''}>{r.lot_frs || <span className="text-muted-foreground">—</span>}</td>
+                      <td className="px-2.5 py-1.5 text-right tabular-nums whitespace-nowrap">{r.stock != null ? fmtNum(r.stock, 1) : '—'}</td>
+                      <td className="px-2.5 py-1.5 text-right tabular-nums whitespace-nowrap">{r.date_entree ? formatHfsqlDate(r.date_entree) : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex-shrink-0 border-t border-border/60 bg-zinc-200/50 px-3 py-1.5 text-xs text-muted-foreground flex items-center justify-between">
+              <span>{filteredSorted.length} lot{filteredSorted.length !== 1 ? 's' : ''}</span>
+              <span className="tabular-nums">{fmtNum(totalStock, 1)} kg</span>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 // ── Shared form components ─────────────────────────────
 
 function LabeledInput({ label, value, onChange, type = 'text', autoFocus }: {
@@ -760,8 +896,10 @@ function InlineForm({ title, children, onSave, onCancel, isSaving }: {
 
 type SidebarTab = 'info' | 'contacts' | 'adresses'
 
-function DetailSidebar({ sousTraitant, isLoading, isEditing, sousTraitantId, onMutationSuccess, editCommentaire, onEditCommentaireChange, onSubFormsDirtyChange }: {
+function DetailSidebar({ sousTraitant, isLoading, isEditing, sousTraitantId, onMutationSuccess, editTypeSst, onEditTypeSstChange, editVisible, onEditVisibleChange, editCommentaire, onEditCommentaireChange, onSubFormsDirtyChange }: {
   sousTraitant: SousTraitantDetail | null; isLoading: boolean; isEditing: boolean; sousTraitantId: number; onMutationSuccess: () => void
+  editTypeSst: number; onEditTypeSstChange: (v: number) => void
+  editVisible: boolean; onEditVisibleChange: (v: boolean) => void
   editCommentaire: string; onEditCommentaireChange: (v: string) => void
   onSubFormsDirtyChange: (dirty: boolean) => void
 }) {
@@ -795,7 +933,7 @@ function DetailSidebar({ sousTraitant, isLoading, isEditing, sousTraitantId, onM
         })}
       </div>
       <div className="flex-1 overflow-y-auto p-3 space-y-2">
-        {activeTab === 'info' && <InfoTab sousTraitant={sousTraitant} isEditing={isEditing} editCommentaire={editCommentaire} onEditCommentaireChange={onEditCommentaireChange} />}
+        {activeTab === 'info' && <InfoTab sousTraitant={sousTraitant} isEditing={isEditing} editTypeSst={editTypeSst} onEditTypeSstChange={onEditTypeSstChange} editVisible={editVisible} onEditVisibleChange={onEditVisibleChange} editCommentaire={editCommentaire} onEditCommentaireChange={onEditCommentaireChange} />}
         {activeTab === 'contacts' && <ContactsTab contacts={sousTraitant.contacts} isEditing={isEditing} sousTraitantId={sousTraitantId} onMutationSuccess={onMutationSuccess} onDirtyChange={onSubFormsDirtyChange} />}
         {activeTab === 'adresses' && <AdressesTab adresses={sousTraitant.adresses} isEditing={isEditing} sousTraitantId={sousTraitantId} onMutationSuccess={onMutationSuccess} onDirtyChange={onSubFormsDirtyChange} />}
       </div>
@@ -805,11 +943,50 @@ function DetailSidebar({ sousTraitant, isLoading, isEditing, sousTraitantId, onM
 
 // ── Sidebar Tab: Info ─────────────────────────────────
 
-function InfoTab({ sousTraitant, isEditing, editCommentaire, onEditCommentaireChange }: {
-  sousTraitant: SousTraitantDetail; isEditing: boolean; editCommentaire: string; onEditCommentaireChange: (v: string) => void
+function InfoTab({ sousTraitant, isEditing, editTypeSst, onEditTypeSstChange, editVisible, onEditVisibleChange, editCommentaire, onEditCommentaireChange }: {
+  sousTraitant: SousTraitantDetail; isEditing: boolean
+  editTypeSst: number; onEditTypeSstChange: (v: number) => void
+  editVisible: boolean; onEditVisibleChange: (v: boolean) => void
+  editCommentaire: string; onEditCommentaireChange: (v: string) => void
 }) {
+  const { data: types } = useTypesSst()
   return (
     <div className="space-y-3">
+      <div className={cn('p-3 rounded-lg border bg-card shadow-sm', isEditing && editSectionClass)}>
+        <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5"><Info className="h-3.5 w-3.5" />Informations</p>
+        {isEditing ? (
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Type de sous-traitant</label>
+              <PopoverSelect
+                options={(types ?? []).map((t) => ({ id: t.IDtype_sst, primary: t.type_label }))}
+                value={editTypeSst}
+                onChange={onEditTypeSstChange}
+                emptyLabel="— Aucun —"
+              />
+            </div>
+            <div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-lg border border-border/60 bg-white shadow-sm">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5 text-xs font-semibold">
+                  <Building2 className="h-3.5 w-3.5 text-accent" />
+                  <span>Sous-traitant actif</span>
+                </div>
+                <p className="text-[10px] text-muted-foreground mt-0.5">
+                  {editVisible ? 'Visible dans les listes de selection' : 'Archive — masque des listes de selection'}
+                </p>
+              </div>
+              <TogglePill value={editVisible} onChange={onEditVisibleChange} />
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-0">
+            <KVRow label="Type" value={sousTraitant.type_label ? <SstTypeTag type={sousTraitant.type_label} size="md" /> : <span className="text-muted-foreground italic">Non defini</span>} />
+            <KVRow label="Statut" value={sousTraitant.est_visible
+              ? <Badge className="badge-success text-[10px] py-0">Actif</Badge>
+              : <Badge variant="outline" className="text-[10px] py-0 text-muted-foreground gap-1"><EyeOff className="h-2.5 w-2.5" />Inactif</Badge>} />
+          </div>
+        )}
+      </div>
       <div className={cn('p-3 rounded-lg border bg-card shadow-sm', isEditing && editSectionClass)}>
         <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5"><FileText className="h-3.5 w-3.5" />Commentaire</p>
         {isEditing ? (

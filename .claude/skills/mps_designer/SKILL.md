@@ -3636,3 +3636,44 @@ The toggle itself is intentionally small; give it a descriptive row around it so
 
 Use the pill specifically for **inline single-boolean state that has meaningful UX consequences** (hides/shows a section, toggles a mode, clears/sets a relationship).
 
+---
+
+## 36. Sous-traitant type chip (hue-per-type category tag)
+
+Reference: **`apps/web/src/lib/sst-type.tsx`** — `sstTypeTagClasses(type)` + `<SstTypeTag>`. Used by `SousTraitantsCommandes.tsx` (left-list cards + detail header) and `SousTraitantsGestion.tsx` (left-list cards, detail header, Info-tab KV row).
+
+A sous-traitant's **type** (Tricoteur / Ennoblisseur / Confectionneur / Autre) is a *category*, not a status — so it gets its own **hue-per-type chip**, one stable colour per type, so the user can scan a list and tell knitters from dyers at a glance. This is **not** a `<Badge variant="secondary">` (that grey chip reads as generic metadata and is identical for every type) and **not** the §29 status footer (type isn't user-cycled state).
+
+### 36.1 The single source of truth
+
+Both Sous-traitants screens import from `@/lib/sst-type` — never re-define the colour map per page (the whole point is that Commandes and Gestion look identical).
+
+```tsx
+import { SstTypeTag, sstTypeTagClasses } from '@/lib/sst-type'
+
+// Component form (preferred): renders nothing for an empty type.
+<SstTypeTag type={sousTraitant.type_label} size="sm" />   // left-list cards
+<SstTypeTag type={commande.sous_traitant_type} size="md" /> // detail headers / KV rows
+
+// Class-only form, when you need the colours on your own element:
+<span className={cn('px-1.5 py-0.5 rounded text-[10px] font-medium', sstTypeTagClasses(type))}>{type}</span>
+```
+
+### 36.2 The palette — fixed, do not improvise
+
+| Type | Classes | Rationale |
+|---|---|---|
+| **Ennoblisseur** | `bg-sky-500/10 text-sky-700 border border-sky-500/25` | sky/blue — cool, dye/water association |
+| **Tricoteur** | `bg-amber-500/15 text-amber-800 border border-amber-500/30` | amber/orange — warm, yarn association |
+| **Confectionneur** | `bg-teal-500/10 text-teal-700 border border-teal-500/25` | teal — clean cut-and-sew finishing |
+| **Autre / unknown** | `bg-stone-500/10 text-stone-700 border border-stone-500/25` | muted stone fallback |
+
+The match is **case-insensitive on the French label** (`type.trim().toLowerCase()`), so it works whether the value comes from `type_label` (Gestion) or `sous_traitant_type` (Commandes).
+
+### 36.3 Conventions
+
+- **Never use gold/`bg-accent`** for a type chip — gold is reserved for the brand CTA / active state (§12). The amber tricoteur chip is deliberately `amber-500` (orange-leaning) + `amber-800` text so it stays distinct from the solid gold CTA.
+- **No icon** inside the chip — the colour + label carry the meaning; an extra `<Tag>` icon just adds noise.
+- **Two sizes only**: `size="sm"` (`px-1.5 py-0.5 text-[10px]`) for left-list cards, `size="md"` (`px-2 py-0.5 text-xs`) for detail headers and KV-row values.
+- When a new sous-traitant type is added to `type_sst`, add its hue to `sstTypeTagClasses` in the shared module — do not let it silently fall through to the stone fallback if it deserves its own colour.
+

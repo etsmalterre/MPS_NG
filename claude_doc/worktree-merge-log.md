@@ -45,6 +45,34 @@ documented this as a mandatory convention in the `mps_designer` skill's Search B
 (canonical effect snippet + the `selectedId === null` anti-pattern to avoid), since the bug was
 a missing cross-screen convention rather than a one-off.
 
+## 2026-06-23 — feat/gestion-sst
+Sous-traitants/Gestion: tricoteur yarn-lots, ennoblisseur tariff editor, info relayout, shared type chip.
+(1) **Tricoteur lots de fil** — new "Lots de fil présents sur le site" table shown for tricoteur
+sous-traitants (`IDtype_sst = 1`), mirroring the ennoblisseur rolls table: every `stock_fil` lot with
+`IDMagasin = sst AND stock > 0` (ref/coloris/fournisseur/lot/lot frs/stock kg/entrée), searchable +
+sortable with a count·total-kg footer. Backed by `GET /api/sous-traitants/:id/rolls`'s sibling
+`GET /:id/yarn-lots` (explicit ASCII columns, batched ref_fil/colori_fil/fournisseur label lookups, no
+JOIN+CONVERT collapse). (2) **Ennoblisseur tariff editor** — a center-panel segmented toggle
+"Rouleaux sur le site | Tarifs" (ennoblisseur only) reveals a two-pane editor over
+`tranche_tarif_ennoblissement` (`apps/web/src/pages/sous-traitants/TariffsSection.tsx`): left lists
+every dye (4) + treatment (20) + existing combinations; right edits that subject's quantity bands
+(min/max/prix €/Kg) with an "au-delà"=999999 toggle, inline add/edit, `ConfirmDialog` deletes, server-side
+overlap guard. Full combination support incl. a new-combination dialog (dye context + multi-treatment
+checklist) and re-scope; a "Copier" dialog seeds an empty ennoblisseur from another sst or the
+`IDsous_traitant=0` default catalog (9 of 12 ennoblisseurs start empty). New endpoints on
+`sous-traitants.ts`: GET (grouped catalog), POST band, PUT band, DELETE band, PUT `/combinaison/rescope`,
+POST `/copier`. This is the exact table `pricing-sst.ts` reads, so edits flow into auto-pricing of NEW
+order lines (existing lines not retro-repriced; matches legacy). Confirmed: table is 8 ASCII columns,
+PK auto-increments; combos keyed on `(IDteinture, sorted ListeTraitements)`. (3) **Info relayout** — the
+center "Coordonnées" card is gone; Type + Statut moved into the right sidebar's Info tab (a new
+"Informations" card above Commentaire); the zombie `tel`/`fax` fields are hidden in the UI but still
+round-tripped on save so existing values aren't blanked. Non-ennoblisseur/non-tricoteur types now show a
+"info is in the right panel" placeholder instead of a bare card. (4) **Shared type chip** — the
+hue-per-type sous-traitant chip (Ennoblisseur=sky, Tricoteur=amber, Confectionneur=teal, Autre=stone)
+was extracted from Commandes into `apps/web/src/lib/sst-type.tsx` (`sstTypeTagClasses` + `<SstTypeTag>`)
+and adopted in Gestion (list card, header, Info row), replacing the grey secondary Badge; documented as
+mps_designer §36.
+
 ## 2026-06-22 — feat/gestion-sst
 Sous-traitants/Gestion screen enhancements. (1) Left-list status filter: a 3-way
 segmented control (Actifs / Inactifs / Tous, default Actifs) under the search field,
