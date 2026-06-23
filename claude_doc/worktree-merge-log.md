@@ -10,6 +10,29 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-23 — feat/stock-fini
+Finis › Stock — new "Surteinture" (over-dye) multi-select action, porting the legacy
+`FEN_Surteinture` window. In edit mode the user selects finished rolls of the **same ref +
+coloris** (1 or more) and clicks the Paintbrush button; a wide two-table modal shows the
+finished pieces to delete (left, rendered struck-through in muted red) and their source
+tombé-de-métier écru rows to modify (right, read-only display of numéro/réf/coloris/poids/
+magasin + the auto-generated trace observation). Validating appends
+`"<lot> - <ref> - <coloris> a surteindre"` to each linked `stock_ecru.observations` and
+deletes the finished `stock_fini` rows, so the écru returns to available stock for a fresh
+dyeing cycle with a record of where it came from. The écru's coloris and magasin are left
+untouched (no editable fields — earlier iterations had pickers; removed per spec). New
+dedicated permission `surteindre_stock_fini` (added to `permission-keys.ts`, auto-surfaces in
+Paramètres › Utilisateurs and gates both the button and the API). Backend adds two endpoints
+to `stock-fini.ts`: `POST /fini/surteindre/preview` (drives the modal — resolves each roll's
+linked écru via `stock_fini.IDstock_ecru`, plus ref_ecru/colori_ecru/magasin/client labels via
+flat `IN(...)` queries + `fixEncoding`, never JOIN+CONVERT; builds the trace observation
+server-side so preview and write can't drift; flags rolls with no écru as `skipped`) and
+`POST /fini/surteindre` (gated; per valid non-shipped roll: appends the trace via `sqlText`,
+then deletes the fini). Shares a `loadSurteintFiniRows` helper that reuses the list's
+SELECT/JOIN/repair path so coloris labels match. Frontend is `SurteindreDialog` in
+`FinisStock.tsx`, following the existing `CutRollDialog`/`BatchEditDialog` pattern; on success
+invalidates `['stock-fini']` and exits edit mode.
+
 ## 2026-06-23 — feat/etude-coloris
 Finis › Études coloris — search auto-select fix. The left-list auto-select effect only
 fired on first load (gated on `selectedId === null`), so narrowing the list via the search

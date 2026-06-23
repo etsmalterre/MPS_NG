@@ -43,6 +43,13 @@ export const PERMISSION_KEYS = [
     description: 'Affiche le bouton « Nouveau » et autorise la création de rouleaux dans Finis > Stock.',
     category: 'Finis',
   },
+  {
+    key: 'surteindre_stock_fini',
+    label: 'Surteindre des rouleaux finis',
+    description:
+      'Autorise la surteinture : supprime des rouleaux finis et renvoie leurs tombés de métier en teinture dans Finis > Stock.',
+    category: 'Finis',
+  },
 ] as const
 
 export type PermissionKey = (typeof PERMISSION_KEYS)[number]['key']

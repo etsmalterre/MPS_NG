@@ -28,6 +28,7 @@ import {
   Layers,
   Plus,
   Minus,
+  Paintbrush,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -39,6 +40,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog'
 import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
+import { TmRollIcon } from '@/components/icons/TmRollIcon'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
 import { fmtNum } from '@/lib/format'
@@ -189,6 +191,7 @@ export function FinisStock() {
   // The API enforces the same keys independently.
   const canCut = useHasPermission('cut_stock_fini')
   const canCreate = useHasPermission('create_stock_fini')
+  const canSurteindre = useHasPermission('surteindre_stock_fini')
   const [createOpen, setCreateOpen] = useState(false)
 
   // Edit mode — multi-roll selection.
@@ -197,6 +200,7 @@ export function FinisStock() {
   const lastSelectedRollIdRef = useRef<number | null>(null)
   const [cutOpen, setCutOpen] = useState(false)
   const [batchOpen, setBatchOpen] = useState(false)
+  const [surteindreOpen, setSurteindreOpen] = useState(false)
   // The edit-mode toggle re-renders the whole (large) table; mark it as a
   // transition so the click stays responsive instead of freezing the UI.
   const [, startModeTransition] = useTransition()
@@ -361,6 +365,16 @@ export function FinisStock() {
   const selPoids = selectedRows.reduce((sum, r) => sum + (r.poids ?? 0), 0)
   const selMetrage = selectedRows.reduce((sum, r) => sum + (r.metrage ?? 0), 0)
 
+  // Surteinture acts on one ref/coloris batch at a time, so the selection must be
+  // homogeneous (same ref + coloris). A single roll is allowed, like the legacy app.
+  const selectionHomogeneous =
+    selCount >= 1 &&
+    selectedRows.every(
+      (r) =>
+        r.IDref_fini === selectedRows[0].IDref_fini &&
+        (r.coloris_reference ?? '') === (selectedRows[0].coloris_reference ?? ''),
+    )
+
   return (
     <div className="h-full flex flex-col gap-3 min-h-0">
       {/* Toolbar */}
@@ -427,6 +441,17 @@ export function FinisStock() {
                 onClick={() => setBatchOpen(true)}
               >
                 <Pencil className="h-4 w-4" />
+              </Button>
+            )}
+            {canSurteindre && selectionHomogeneous && (
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-8 w-8 flex-shrink-0"
+                title="Surteindre les rouleaux sélectionnés"
+                onClick={() => setSurteindreOpen(true)}
+              >
+                <Paintbrush className="h-4 w-4" />
               </Button>
             )}
             <Button size="sm" onClick={exitEditMode}>
@@ -581,6 +606,19 @@ export function FinisStock() {
           setBatchOpen(false)
           setSelectedRollIds(new Set())
           lastSelectedRollIdRef.current = null
+        }}
+      />
+
+      <SurteindreDialog
+        open={surteindreOpen}
+        ids={[...selectedRollIds]}
+        refLabel={selectedRows[0]?.ref_fini ?? null}
+        colorisLabel={selectedRows[0]?.coloris_reference ?? null}
+        onClose={() => setSurteindreOpen(false)}
+        onSuccess={() => {
+          onMutationSuccess()
+          setSurteindreOpen(false)
+          exitEditMode()
         }}
       />
 
@@ -1009,6 +1047,239 @@ function BatchEditDialog({
             )}
             Enregistrer
           </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ── Surteinture (over-dye) dialog ──────────────────────
+// Send finished rolls back to dyeing: the modal shows the finished pieces that
+// will be deleted (left) and their tombé-de-métier (écru) rows that will be
+// modified (right). Validating appends a trace observation to each écru, can
+// change its coloris + magasin, and deletes the finished rolls so the écru
+// returns to available stock for a fresh dyeing cycle. Mirrors the legacy
+// FEN_Surteinture window. Selection is constrained to one ref + coloris.
+interface SurteindrePreviewRow {
+  IDstock_fini: number
+  skipped: boolean
+  fini: { numero: string; poids: number; metrage: number; lot: string; client: string }
+  ecru: {
+    IDstock_ecru: number
+    numero: string
+    ref_ecru: string
+    coloris: string
+    poids: number
+    magasin_nom: string
+    client: string
+  } | null
+  computedObservation: string
+}
+interface SurteindrePreview {
+  rows: SurteindrePreviewRow[]
+}
+
+function SurteindreDialog({
+  open,
+  ids,
+  refLabel,
+  colorisLabel,
+  onClose,
+  onSuccess,
+}: {
+  open: boolean
+  ids: number[]
+  refLabel: string | null
+  colorisLabel: string | null
+  onClose: () => void
+  onSuccess: () => void
+}) {
+  const count = ids.length
+
+  const idsKey = ids.join(',')
+  const previewQuery = useQuery<SurteindrePreview>({
+    queryKey: ['stock-fini', 'surteindre-preview', idsKey],
+    queryFn: () =>
+      apiFetch<SurteindrePreview>('/stock/fini/surteindre/preview', {
+        method: 'POST',
+        body: JSON.stringify({ ids }),
+      }),
+    enabled: open && count > 0,
+  })
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      apiFetch('/stock/fini/surteindre', {
+        method: 'POST',
+        body: JSON.stringify({ ids }),
+      }),
+    onSuccess: () => onSuccess(),
+  })
+
+  const rows = previewQuery.data?.rows ?? []
+  const skippedCount = rows.filter((r) => r.skipped).length
+  const actionableCount = rows.length - skippedCount
+  const valid = actionableCount > 0 && !previewQuery.isLoading
+
+  return (
+    <Dialog open={open && count > 0} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-7xl w-[95vw]" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Paintbrush className="h-5 w-5 text-accent" />
+            Surteinture
+            {(refLabel || colorisLabel) && (
+              <span className="text-muted-foreground font-normal">
+                — {refLabel ?? ''}
+                {colorisLabel ? ` · ${colorisLabel}` : ''}
+              </span>
+            )}
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="mt-4">
+          {previewQuery.isLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="h-6 w-6 animate-spin text-accent" />
+            </div>
+          ) : previewQuery.isError ? (
+            <div className="flex flex-col items-center justify-center py-12 text-destructive gap-2">
+              <AlertCircle className="h-6 w-6" />
+              <p className="text-sm">
+                {(previewQuery.error as Error)?.message || 'Erreur de chargement'}
+              </p>
+            </div>
+          ) : (
+            <div className="flex gap-4">
+              {/* Left: finished pieces to delete */}
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-2">
+                  <FiniRollIcon className="h-4 w-4 text-accent" />
+                  <h3 className="text-sm font-semibold">Pièces fini à supprimer</h3>
+                </div>
+                <div className="rounded-lg border border-border/60 overflow-hidden">
+                  <div className="max-h-[60vh] overflow-auto scrollbar-transparent">
+                    <table className="w-full text-sm">
+                      <thead className="bg-zinc-200/60 text-xs uppercase tracking-wide text-muted-foreground">
+                        <tr>
+                          <th className="px-2.5 py-2 text-left font-semibold">Numéro</th>
+                          <th className="px-2.5 py-2 text-right font-semibold">Poids</th>
+                          <th className="px-2.5 py-2 text-right font-semibold">Métrage</th>
+                          <th className="px-2.5 py-2 text-left font-semibold">Lot</th>
+                          <th className="px-2.5 py-2 text-left font-semibold">Client</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.map((r) => (
+                          <tr
+                            key={r.IDstock_fini}
+                            className={cn(
+                              'border-b border-border/40 line-through text-destructive/70 decoration-destructive/60',
+                              r.skipped && 'opacity-40',
+                            )}
+                          >
+                            <td className="px-2.5 py-1.5 truncate">{r.fini.numero || '—'}</td>
+                            <td className="px-2.5 py-1.5 text-right tabular-nums">
+                              {fmtNum(r.fini.poids, 2)} kg
+                            </td>
+                            <td className="px-2.5 py-1.5 text-right tabular-nums">
+                              {fmtNum(r.fini.metrage, 2)} m
+                            </td>
+                            <td className="px-2.5 py-1.5 truncate">{r.fini.lot || '—'}</td>
+                            <td className="px-2.5 py-1.5 truncate">{r.fini.client || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              {/* Right: tombé-de-métier pieces to modify */}
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-2">
+                  <TmRollIcon className="h-4 w-4 text-accent" />
+                  <h3 className="text-sm font-semibold">Pièces tombé de métier à modifier</h3>
+                </div>
+                <div className="rounded-lg border border-border/60 overflow-hidden">
+                  <div className="max-h-[60vh] overflow-auto scrollbar-transparent">
+                    <table className="w-full text-sm">
+                      <thead className="bg-zinc-200/60 text-xs uppercase tracking-wide text-muted-foreground">
+                        <tr>
+                          <th className="px-2.5 py-2 text-left font-semibold">Numéro</th>
+                          <th className="px-2.5 py-2 text-left font-semibold">Réf</th>
+                          <th className="px-2.5 py-2 text-left font-semibold">Coloris</th>
+                          <th className="px-2.5 py-2 text-right font-semibold">Poids</th>
+                          <th className="px-2.5 py-2 text-left font-semibold">Magasin</th>
+                          <th className="px-2.5 py-2 text-left font-semibold">Observation</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.map((r) => (
+                          <tr key={r.IDstock_fini} className="border-b border-border/40">
+                            {r.ecru ? (
+                              <>
+                                <td className="px-2.5 py-1.5 truncate">{r.ecru.numero || '—'}</td>
+                                <td className="px-2.5 py-1.5 truncate">{r.ecru.ref_ecru || '—'}</td>
+                                <td className="px-2.5 py-1.5 truncate">{r.ecru.coloris || '—'}</td>
+                                <td className="px-2.5 py-1.5 text-right tabular-nums">
+                                  {fmtNum(r.ecru.poids, 2)} kg
+                                </td>
+                                <td className="px-2.5 py-1.5 truncate">{r.ecru.magasin_nom || '—'}</td>
+                                <td
+                                  className="px-2.5 py-1.5 truncate text-muted-foreground"
+                                  title={r.computedObservation}
+                                >
+                                  {r.computedObservation}
+                                </td>
+                              </>
+                            ) : (
+                              <td
+                                colSpan={6}
+                                className="px-2.5 py-1.5 text-destructive/70 italic"
+                              >
+                                Aucun tombé de métier lié — ignoré
+                              </td>
+                            )}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {skippedCount > 0 && !previewQuery.isLoading && (
+            <p className="mt-3 text-xs text-destructive/80 flex items-center gap-1.5">
+              <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
+              {skippedCount} rouleau{skippedCount > 1 ? 'x' : ''} sans tombé de métier lié
+              {skippedCount > 1 ? ' seront ignorés' : ' sera ignoré'}.
+            </p>
+          )}
+
+          {mutation.isError && (
+            <p className="mt-3 text-sm text-destructive">
+              {(mutation.error as Error)?.message || 'Erreur lors de la surteinture'}
+            </p>
+          )}
+        </div>
+
+        <DialogFooter className="mt-4">
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <Button variant="outline" onClick={onClose} disabled={mutation.isPending}>
+              Annuler
+            </Button>
+            <Button onClick={() => mutation.mutate()} disabled={!valid || mutation.isPending}>
+              {mutation.isPending ? (
+                <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              ) : (
+                <Check className="h-4 w-4 mr-1.5" />
+              )}
+              Valider
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

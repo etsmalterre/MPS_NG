@@ -550,6 +550,268 @@ stockFiniRouter.patch('/fini/:id', async (req: Request, res: Response) => {
   }
 })
 
+// Resolve a set of IDligne_commande_client → client display name, via the
+// flat chain ligne_commande_client → commande_client → client. Flat queries
+// only (a JOIN + CONVERT collapses the result set on the Linux bridge — see
+// CLAUDE.md). Returns a Map keyed by IDligne_commande_client; missing/empty
+// links are simply absent.
+async function resolveClientNames(lccIds: number[]): Promise<Map<number, string>> {
+  const out = new Map<number, string>()
+  const ids = Array.from(new Set(lccIds.filter((x) => Number.isInteger(x) && x > 0)))
+  if (ids.length === 0) return out
+  const lccRows = await query<{ IDligne_commande_client: number; IDcommande_client: number }>(
+    `SELECT IDligne_commande_client, IDcommande_client FROM ligne_commande_client WHERE IDligne_commande_client IN (${ids.join(',')})`,
+  )
+  const lccToCc = new Map<number, number>()
+  for (const r of lccRows) lccToCc.set(Number(r.IDligne_commande_client), Number(r.IDcommande_client) || 0)
+  const ccIds = Array.from(new Set(Array.from(lccToCc.values()))).filter((x) => x > 0)
+  const ccToClient = new Map<number, number>()
+  if (ccIds.length > 0) {
+    const ccRows = await query<{ IDcommande_client: number; IDclient: number }>(
+      `SELECT IDcommande_client, IDclient FROM commande_client WHERE IDcommande_client IN (${ccIds.join(',')})`,
+    )
+    for (const r of ccRows) ccToClient.set(Number(r.IDcommande_client), Number(r.IDclient) || 0)
+  }
+  const clientIds = Array.from(new Set(Array.from(ccToClient.values()))).filter((x) => x > 0)
+  const clientName = new Map<number, string>()
+  if (clientIds.length > 0) {
+    const cRows = await query<{ IDclient: number; nom: string | null }>(
+      `SELECT IDclient, nom FROM client WHERE IDclient IN (${clientIds.join(',')})`,
+    )
+    const fixedC = (await fixEncoding(cRows, 'client', 'IDclient', ['nom'])) as any[]
+    for (const r of fixedC) clientName.set(Number(r.IDclient), (r.nom ?? '').toString().trim())
+  }
+  for (const [lccId, ccId] of lccToCc) {
+    const name = clientName.get(ccToClient.get(ccId) ?? 0) ?? ''
+    if (name) out.set(lccId, name)
+  }
+  return out
+}
+
+// Build the surteinture trace observation for a finished roll being sent back
+// to dyeing: "<lot> - <ref> - <coloris> a surteindre". Built server-side so the
+// modal preview and the actual write can never drift.
+function surteintObservation(lot: string, ref: string, coloris: string): string {
+  return [lot, ref, coloris].map((s) => (s ?? '').toString().trim()).filter(Boolean).join(' - ') + ' a surteindre'
+}
+
+interface SurteintFiniRow {
+  IDstock_fini: number
+  IDstock_ecru: number
+  IDligne_expedition: number
+  lot: string
+  ref_fini: string
+  coloris_reference: string
+  numero: string
+  poids: number
+  metrage: number
+  IDligne_commande_client: number
+}
+
+// Load the selected finished rolls with the fields surteinture needs, resolving
+// coloris via the same SELECT/JOIN/repair path as the list so labels match.
+async function loadSurteintFiniRows(ids: number[]): Promise<SurteintFiniRow[]> {
+  const rows = await query<StockFini>(
+    `SELECT ${STOCK_FINI_SELECT} ${STOCK_FINI_JOINS} WHERE sf.IDstock_fini IN (${ids.join(',')})`,
+  )
+  let fixed = await fixEncoding(rows, 'stock_fini', 'IDstock_fini', TEXT_FIELDS)
+  fixed = await repairAllJoins(fixed)
+  return (fixed as any[]).map((r) => ({
+    IDstock_fini: Number(r.IDstock_fini),
+    IDstock_ecru: Number(r.IDstock_ecru) || 0,
+    IDligne_expedition: Number(r.IDligne_expedition) || 0,
+    lot: (r.lot ?? '').toString().trim(),
+    ref_fini: (r.ref_fini ?? '').toString().trim(),
+    coloris_reference: (r.coloris_reference ?? '').toString().trim(),
+    numero: (r.numero ?? '').toString().trim(),
+    poids: Number(r.poids) || 0,
+    metrage: Number(r.metrage) || 0,
+    IDligne_commande_client: Number(r.IDligne_commande_client) || 0,
+  }))
+}
+
+// POST /api/stock/fini/surteindre/preview - drive the Surteinture modal.
+//   Body: { ids: number[] }. Returns, per selected roll, the fini fields (left
+//   table) + the linked tombé-de-métier écru fields (right table) + the trace
+//   observation that will be written. Also returns the colori_ecru catalog for
+//   the rolls' écru base + the current (default) écru coloris. Rolls with no
+//   linked écru are flagged `skipped` so the UI can warn.
+//   MUST be registered before POST /fini/:id-style routes (none today, but keep
+//   it above /fini/:id/cut for clarity).
+stockFiniRouter.post('/fini/surteindre/preview', async (req: Request, res: Response) => {
+  try {
+    const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+      .map((x: unknown) => parseInt(String(x), 10))
+      .filter((n: number) => Number.isInteger(n) && n > 0)
+    if (ids.length === 0) {
+      res.status(400).json({ error: 'ids must be a non-empty array of roll ids' })
+      return
+    }
+    if (ids.length > 200) {
+      res.status(400).json({ error: 'too many ids (max 200)' })
+      return
+    }
+
+    const finiRows = await loadSurteintFiniRows(ids)
+
+    // Linked écru rows (skip rolls with no source écru).
+    const ecruIds = Array.from(new Set(finiRows.map((r) => r.IDstock_ecru).filter((x) => x > 0)))
+    const ecruById = new Map<number, any>()
+    if (ecruIds.length > 0) {
+      const ecruRows = await query<Record<string, unknown>>(
+        `SELECT IDstock_ecru, numero, IDref_ecru, IDcolori_ecru, poids, IDmagasin, observations, IDligne_commande_client
+         FROM stock_ecru WHERE IDstock_ecru IN (${ecruIds.join(',')})`,
+      )
+      const fixedEcru = await fixEncoding(ecruRows, 'stock_ecru', 'IDstock_ecru', ['numero', 'observations'])
+      for (const r of fixedEcru as any[]) ecruById.set(Number(r.IDstock_ecru), r)
+    }
+
+    // Resolve display lookups: ref_ecru.reference, colori_ecru.reference,
+    // magasin (sous_traitant.nom), and client names for both fini + écru lines.
+    const refEcruIds = Array.from(new Set(Array.from(ecruById.values()).map((r) => Number(r.IDref_ecru)).filter((x) => x > 0)))
+    const refEcruLabel = new Map<number, string>()
+    if (refEcruIds.length > 0) {
+      const rr = await query<{ IDref_ecru: number; reference: string | null }>(
+        `SELECT IDref_ecru, reference FROM ref_ecru WHERE IDref_ecru IN (${refEcruIds.join(',')})`,
+      )
+      for (const r of (await fixEncoding(rr, 'ref_ecru', 'IDref_ecru', ['reference'])) as any[])
+        refEcruLabel.set(Number(r.IDref_ecru), (r.reference ?? '').toString().trim())
+    }
+
+    // colori_ecru labels for the écru rows (read-only display in the right table).
+    const coloriLabel = new Map<number, string>()
+    if (refEcruIds.length > 0) {
+      const cr = await query<{ IDcolori_ecru: number; IDref_ecru: number; reference: string | null }>(
+        `SELECT IDcolori_ecru, IDref_ecru, reference FROM colori_ecru WHERE IDref_ecru IN (${refEcruIds.join(',')}) ORDER BY reference`,
+      )
+      for (const r of (await fixEncoding(cr, 'colori_ecru', 'IDcolori_ecru', ['reference'])) as any[]) {
+        coloriLabel.set(Number(r.IDcolori_ecru), (r.reference ?? '').toString().trim())
+      }
+    }
+
+    const magasinIds = Array.from(new Set(Array.from(ecruById.values()).map((r) => Number(r.IDmagasin)).filter((x) => x > 0)))
+    const magasinLabel = new Map<number, string>()
+    if (magasinIds.length > 0) {
+      const mr = await query<{ IDsous_traitant: number; nom: string | null }>(
+        `SELECT IDsous_traitant, nom FROM sous_traitant WHERE IDsous_traitant IN (${magasinIds.join(',')})`,
+      )
+      for (const r of (await fixEncoding(mr, 'sous_traitant', 'IDsous_traitant', ['nom'])) as any[])
+        magasinLabel.set(Number(r.IDsous_traitant), (r.nom ?? '').toString().trim())
+    }
+
+    const allLcc = [
+      ...finiRows.map((r) => r.IDligne_commande_client),
+      ...Array.from(ecruById.values()).map((r) => Number(r.IDligne_commande_client) || 0),
+    ]
+    const clientByLcc = await resolveClientNames(allLcc)
+
+    const rows = finiRows.map((f) => {
+      const ecru = f.IDstock_ecru > 0 ? ecruById.get(f.IDstock_ecru) : undefined
+      const ecruColoris = ecru ? coloriLabel.get(Number(ecru.IDcolori_ecru)) ?? '' : ''
+      return {
+        IDstock_fini: f.IDstock_fini,
+        skipped: !ecru,
+        fini: {
+          numero: f.numero,
+          poids: f.poids,
+          metrage: f.metrage,
+          lot: f.lot,
+          client: clientByLcc.get(f.IDligne_commande_client) ?? '',
+        },
+        ecru: ecru
+          ? {
+              IDstock_ecru: Number(ecru.IDstock_ecru),
+              numero: (ecru.numero ?? '').toString().trim(),
+              ref_ecru: refEcruLabel.get(Number(ecru.IDref_ecru)) ?? '',
+              coloris: ecruColoris,
+              poids: Number(ecru.poids) || 0,
+              magasin_nom: magasinLabel.get(Number(ecru.IDmagasin)) ?? '',
+              client: clientByLcc.get(Number(ecru.IDligne_commande_client) || 0) ?? '',
+            }
+          : null,
+        computedObservation: surteintObservation(f.lot, f.ref_fini, f.coloris_reference),
+      }
+    })
+
+    res.json({ rows })
+  } catch (err) {
+    console.error('Error building surteinture preview:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// POST /api/stock/fini/surteindre - execute the surteinture.
+//   Body: { ids: number[] }.
+//   Gated by surteindre_stock_fini. For each selected roll that has a linked
+//   écru and is not shipped: append the trace observation to its tombé-de-métier
+//   (stock_ecru) row, then DELETE the finished roll. The écru thus returns to
+//   available stock for a fresh dyeing cycle, keeping a record of where it came
+//   from. The écru's coloris and magasin are left untouched. Accented text via
+//   sqlText().
+stockFiniRouter.post('/fini/surteindre', async (req: Request, res: Response) => {
+  try {
+    if (req.userId === undefined) {
+      res.status(401).json({ error: 'not authenticated' })
+      return
+    }
+    const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'surteindre_stock_fini')
+    if (!allowed) {
+      res.status(403).json({ error: 'permission denied: surteindre_stock_fini' })
+      return
+    }
+
+    const b = req.body ?? {}
+    const ids = (Array.isArray(b.ids) ? b.ids : [])
+      .map((x: unknown) => parseInt(String(x), 10))
+      .filter((n: number) => Number.isInteger(n) && n > 0)
+    if (ids.length === 0) {
+      res.status(400).json({ error: 'ids must be a non-empty array of roll ids' })
+      return
+    }
+    if (ids.length > 200) {
+      res.status(400).json({ error: 'too many ids (max 200)' })
+      return
+    }
+
+    const finiRows = await loadSurteintFiniRows(ids)
+
+    // Existing écru observations (to append, not overwrite).
+    const ecruIds = Array.from(new Set(finiRows.map((r) => r.IDstock_ecru).filter((x) => x > 0)))
+    const ecruObs = new Map<number, string>()
+    if (ecruIds.length > 0) {
+      const ecruRows = await query<{ IDstock_ecru: number; observations: string | null }>(
+        `SELECT IDstock_ecru, observations FROM stock_ecru WHERE IDstock_ecru IN (${ecruIds.join(',')})`,
+      )
+      for (const r of (await fixEncoding(ecruRows, 'stock_ecru', 'IDstock_ecru', ['observations'])) as any[])
+        ecruObs.set(Number(r.IDstock_ecru), (r.observations ?? '').toString())
+    }
+
+    let deleted = 0
+    let updated = 0
+    let skipped = 0
+    for (const f of finiRows) {
+      // Skip rolls with no source écru or already shipped — nothing to send back.
+      if (f.IDstock_ecru <= 0 || f.IDligne_expedition > 0) {
+        skipped++
+        continue
+      }
+      const trace = surteintObservation(f.lot, f.ref_fini, f.coloris_reference)
+      const existing = (ecruObs.get(f.IDstock_ecru) ?? '').trim()
+      const obs = existing ? `${existing}\n${trace}` : trace
+
+      await query(`UPDATE stock_ecru SET observations = ${sqlText(obs)} WHERE IDstock_ecru = ${f.IDstock_ecru}`)
+      updated++
+      await query(`DELETE FROM stock_fini WHERE IDstock_fini = ${f.IDstock_fini}`)
+      deleted++
+    }
+
+    res.json({ deleted, updated, skipped })
+  } catch (err) {
+    console.error('Error executing surteinture:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // POST /api/stock/fini/:id/cut - cut one physical roll into N rolls.
 //   Body: { pieces: Array<{ poids: number; metrage: number }> } (length 2..10).
 //   Piece 0 is the original row (updated in place, numero kept); pieces 1..N-1
