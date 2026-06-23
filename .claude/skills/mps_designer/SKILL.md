@@ -272,6 +272,20 @@ All panels (left list, right sidebar) and section item cards use **Zinc** backgr
 </div>
 ```
 
+**Auto-select the first visible row** — the auto-select effect must run against the **filtered** (search + status-narrowed) list, not the raw list, and must re-select whenever the current selection drops out of the visible set. This means typing in the search bar until one row remains auto-selects it (the legacy WinDev behaviour users expect). Do NOT gate the effect on `selectedId === null` — that only fires on first load and leaves a narrowed search unselected. Canonical effect (`FilsCommandes.tsx`, `EtudesColoris.tsx`):
+
+```tsx
+// Keep the selection valid against the (possibly search-filtered) list: when
+// the selected row isn't among the current results, select the one at the top.
+// Covers both the initial load and search narrowing the list. Skip while
+// editing so we never discard unsaved changes out from under the user.
+useEffect(() => {
+  if (isEditing || filtered.length === 0) return
+  const stillVisible = selectedId !== null && filtered.some((r) => r.id === selectedId)
+  if (!stillVisible) setSelectedId(filtered[0].id)
+}, [filtered, selectedId, isEditing])
+```
+
 ### Left-list filter button group (segmented filter under the search bar)
 
 When the left list needs a quick status / category filter (actif / inactif / tous, en cours / terminées / toutes, etc.), render it as a **borderless segmented button row immediately under the search input, inside the same `bg-zinc-200/50` header band**. This is the canonical pattern — do NOT wrap the buttons in a bordered `border border-input` box, and do NOT build an iOS-style pill toggle. Reference: `SousTraitantsCommandes.tsx` list header.

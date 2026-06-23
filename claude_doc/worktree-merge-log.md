@@ -10,6 +10,18 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-23 — feat/etude-coloris
+Finis › Études coloris — search auto-select fix. The left-list auto-select effect only
+fired on first load (gated on `selectedId === null`), so narrowing the list via the search
+bar to a single result never selected it — unlike every other master-detail screen. Replaced
+it with the canonical pattern (from `FilsCommandes.tsx`): an effect driven off the
+search-filtered `filteredEtudes` array that re-selects the first visible row whenever the
+current selection drops out of the results, skipped while editing so unsaved changes are never
+discarded. Typing e.g. "2012 marin 63403" down to one match now auto-selects it. Also
+documented this as a mandatory convention in the `mps_designer` skill's Search Bar section
+(canonical effect snippet + the `selectedId === null` anti-pattern to avoid), since the bug was
+a missing cross-screen convention rather than a one-off.
+
 ## 2026-06-22 — feat/gestion-sst
 Sous-traitants/Gestion screen enhancements. (1) Left-list status filter: a 3-way
 segmented control (Actifs / Inactifs / Tous, default Actifs) under the search field,

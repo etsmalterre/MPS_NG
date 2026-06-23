@@ -305,11 +305,8 @@ export function EtudesColoris() {
     enabled: selectedId !== null,
   })
 
-  useEffect(() => {
-    if (etudes && etudes.length > 0 && selectedId === null) {
-      setSelectedId(etudes[0].IDetude_col)
-    }
-  }, [etudes, selectedId])
+  // Auto-select effect lives after `filteredEtudes` is defined (below) so it
+  // can keep the selection valid against the search-narrowed list.
 
   // Drawer closes whenever the active étude changes
   useEffect(() => {
@@ -515,6 +512,18 @@ export function EtudesColoris() {
       return hay.includes(q)
     })
   }, [etudes, searchQuery])
+
+  // Keep the selection valid against the (possibly search-filtered) list: when
+  // the selected étude isn't among the current results, select the one at the
+  // top. Covers both the initial load and search narrowing the list — so typing
+  // in the search bar auto-selects the first visible étude. Skip while editing
+  // so we never discard unsaved changes out from under the user.
+  useEffect(() => {
+    if (isEditing || filteredEtudes.length === 0) return
+    const stillVisible =
+      selectedId !== null && filteredEtudes.some((e) => e.IDetude_col === selectedId)
+    if (!stillVisible) setSelectedId(filteredEtudes[0].IDetude_col)
+  }, [filteredEtudes, selectedId, isEditing])
 
   // ── Render ──────────────────────────────────────────────
 
