@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "cross-env VITE_API_URL=http://localhost:3002/api vite",
+    "dev": "cross-env VITE_API_URL=http://localhost:8080/api vite --port 3000",
+    "dev:3000": "cross-env VITE_API_URL=http://localhost:8080/api vite --port 3000",
     "dev:3001": "cross-env VITE_API_URL=http://localhost:8081/api vite --port 3001",
     "dev:3002": "cross-env VITE_API_URL=http://localhost:8082/api vite --port 3002",
     "dev:3003": "cross-env VITE_API_URL=http://localhost:8083/api vite --port 3003",

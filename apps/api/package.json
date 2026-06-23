@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "cross-env NODE_ENV=development tsx watch src/index.ts",
+    "dev:8080": "cross-env PORT=8080 tsx watch src/index.ts",
     "dev:8081": "cross-env PORT=8081 tsx watch src/index.ts",
     "dev:8082": "cross-env PORT=8082 tsx watch src/index.ts",
     "dev:8083": "cross-env PORT=8083 tsx watch src/index.ts",

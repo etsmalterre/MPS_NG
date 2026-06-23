@@ -67,3 +67,13 @@ apps/api/tsconfig.tsbuildinfo
 
 # Per-worktree dev server logs (see scripts/worktree/)
 .dev-logs/
+
+# Per-user Claude Code local settings (machine-specific; skills/ stay tracked)
+.claude/settings.local.json
+
+# One-off operational backfill scripts + their rollback snapshots. These are
+# run-once data fixes against the live DB (kept on disk as recovery undo), not
+# application source — see memories project_*_backfill. Scoped to apps/api so
+# real source isn't caught.
+apps/api/backfill-*
+apps/api/*-rollback-*.json

@@ -16,9 +16,15 @@ export const apiPort = (n) => 8080 + n
 export const webPort = (n) => 3000 + n
 export const IS_WIN = process.platform === 'win32'
 
+// Slot 0 is RESERVED for serving the main checkout (master) itself: API 8080 /
+// web 3000. It sits outside the 1..6 feature range, so allocateSlot() never
+// hands it out and a feature worktree can never collide with the running master.
+// Managed by scripts/serve-main.mjs (skills /serve-main + /serve-main-down).
+export const MAIN_SLOT = 0
+
 // Every dev web origin that must be allowed by the API's CORS_ORIGIN so cookie
-// auth works from any slot (plus the two legacy defaults).
-export const DEV_WEB_ORIGINS = [5174, 5175, ...SLOTS.map(webPort)].map(
+// auth works from any slot (plus the two legacy defaults, and slot-0 master).
+export const DEV_WEB_ORIGINS = [5174, 5175, webPort(MAIN_SLOT), ...SLOTS.map(webPort)].map(
   (p) => `http://localhost:${p}`,
 )
 
