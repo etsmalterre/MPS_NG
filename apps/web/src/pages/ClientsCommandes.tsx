@@ -1,5 +1,5 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useState, useMemo, useEffect, useCallback, useRef, type ReactNode, type ComponentType } from 'react'
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { useUnsavedGuard } from '@/hooks/useUnsavedGuard'
@@ -27,7 +27,12 @@ import {
   FileText,
   Upload,
   Layers,
+  Lock,
+  LockOpen,
+  Sparkles,
+  Droplets,
 } from 'lucide-react'
+import { KnitIcon } from '@/components/icons/KnitIcon'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
@@ -104,6 +109,29 @@ interface AffectationPayload {
   available: RollLite[]
 }
 
+interface SupplyTricoRow {
+  id: number
+  sous_traitant_nom: string | null
+  date_livraison: string | null
+  etat_label: string
+  poids_disponible: number
+  poids_affecte: number
+  metrage_potentiel: number
+}
+interface SupplyEnnoRow {
+  id: number
+  sous_traitant_nom: string | null
+  date_livraison: string | null
+  etat_label: string
+  qte_disponible: number
+  qte_affecte: number
+}
+interface SupplyPayload {
+  applicable: boolean
+  tricotage: SupplyTricoRow[]
+  ennoblissement: SupplyEnnoRow[]
+}
+
 interface AdresseLite {
   IDadresse: number
   nom: string | null
@@ -119,6 +147,21 @@ interface AdresseLookup extends AdresseLite {
   est_defaut: number
   est_defaut_facturation: number
   est_defaut_livraison: number
+}
+
+// Canonical AdresseLookup → PopoverSelect option mapper (mps_designer §11bis).
+// `description` renders the full address (street · postal city · pays) under the
+// name on each popover row so the user can verify the pick at a glance.
+function adresseOption(a: AdresseLookup) {
+  const street = [a.adresse1, a.adresse2, a.adresse3].filter(Boolean).join(' · ')
+  const cityLine = [a.cp, a.ville].filter(Boolean).join(' ')
+  const descLines = [street, cityLine, a.pays || ''].filter((s) => s.trim().length > 0)
+  return {
+    id: a.IDadresse,
+    primary: a.nom || `Adresse #${a.IDadresse}`,
+    secondary: a.ville ?? undefined,
+    description: descLines.length > 0 ? descLines.join('\n') : undefined,
+  }
 }
 
 interface CommandeDetail {
@@ -145,13 +188,29 @@ interface CommandeDetail {
   phase: ClientPhase
 }
 
-interface ClientLite { IDclient: number; nom: string }
+interface ClientLite { IDclient: number; nom: string; IDmode_paiement?: number; IDecheance?: number }
 interface ModePaiement { IDmode_paiement: number; libelle: string }
 interface Echeance { IDecheance: number; libelle: string }
 interface RefEcru { IDref_ecru: number; reference: string }
 interface RefFini { IDref_fini: number; reference: string; designation: string; avec_teinture: number }
 interface RefDivers { IDref_divers: number; designation: string; unite: number }
 interface ColoriOption { id: number; reference: string }
+interface LinePriceInfo {
+  prix: number | null
+  unite: number
+  unite_label: string
+  rollSize: number
+  nRolls: number
+  cleanQty: number
+  exact: boolean
+  trancheRolls: number
+  nextTrancheRolls: number
+  nextTrancheQty: number
+  nextTrancheGapQty: number
+  nextTranchePrix: number | null
+  nearNextTranche: boolean
+  priceable: boolean
+}
 
 // ── Shared styling ─────────────────────────────────────
 
@@ -243,7 +302,7 @@ export function ClientsCommandes() {
     return () => clearTimeout(t)
   }, [searchQuery])
 
-  const { data: commandes, isLoading, isError, error } = useQuery<CommandeListRow[]>({
+  const { data: commandes, isLoading, isError, error, isFetching } = useQuery<CommandeListRow[]>({
     queryKey: ['commandes-client', statusFilter, debouncedQuery],
     queryFn: () => apiFetch(`/commandes-client?status=${statusFilter}&q=${encodeURIComponent(debouncedQuery)}&limit=200`),
   })
@@ -259,6 +318,13 @@ export function ClientsCommandes() {
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['commandes-client'] })
     queryClient.invalidateQueries({ queryKey: ['commande-client', selectedId] })
+    // Affectation drawers cache the available/linked rolls per line; editing a
+    // line (e.g. changing its coloris) changes which rolls are eligible, so the
+    // pieces query must be invalidated too or the drawer shows a stale list.
+    queryClient.invalidateQueries({ queryKey: ['commande-client-pieces'] })
+    // Supply (tricotage/ennoblissement) disponible/affecté depends on roll
+    // affectation, so refresh it after any line/affectation mutation too.
+    queryClient.invalidateQueries({ queryKey: ['commande-client-supply'] })
   }, [queryClient, selectedId])
 
   const startEdit = useCallback(() => {
@@ -373,12 +439,15 @@ export function ClientsCommandes() {
 
   const rows = commandes ?? []
 
-  // Keep the selection valid against the (server-filtered) list.
+  // Keep the selection valid against the (server-filtered) list. Skip while the
+  // list is refetching: after creating a commande we setSelectedId(newId) before
+  // the refetch settles, so the stale list wouldn't yet contain it — resetting
+  // here would clobber the new selection (and break the auto-enter-edit flow).
   useEffect(() => {
-    if (isEditing || rows.length === 0) return
+    if (isEditing || isFetching || rows.length === 0) return
     const stillVisible = selectedId !== null && rows.some((c) => c.IDcommande_client === selectedId)
     if (!stillVisible) setSelectedId(rows[0].IDcommande_client)
-  }, [rows, selectedId, isEditing])
+  }, [rows, selectedId, isEditing, isFetching])
 
   return (
     <>
@@ -832,6 +901,7 @@ function LignesSection({
         {drawerOpen && drawerLigne && (
           <div className="flex-1 min-h-0 flex flex-col mt-3 rounded-lg border border-border/60 overflow-hidden bg-zinc-50/80 animate-in slide-in-from-bottom-4 fade-in-0 duration-200">
             <AffectationDrawer
+              key={drawerLigne.IDligne_commande_client}
               commandeId={commande.IDcommande_client}
               ligne={drawerLigne}
               onClose={() => onOpenAffectation(null)}
@@ -992,6 +1062,22 @@ function AffectationDrawer({
     onSuccess: (payload: AffectationPayload) => { queryClient.setQueryData(queryKey, payload); onSuccess() },
   })
 
+  // Supply view: in-progress sous-traitant orders (tricotage / ennoblissement)
+  // feeding this line. Only meaningful for écru/fini lines.
+  const supplyEnabled = ligne.type === 1 || ligne.type === 2
+  const { data: supply, isLoading: supplyLoading } = useQuery<SupplyPayload>({
+    queryKey: ['commande-client-supply', commandeId, ligne.IDligne_commande_client],
+    queryFn: () => apiFetch(`/commandes-client/${commandeId}/lignes/${ligne.IDligne_commande_client}/supply`),
+    enabled: supplyEnabled,
+  })
+
+  const tabs: { key: SupplyTab; label: string; icon: ComponentType<{ className?: string }> }[] = [
+    { key: 'affectation', label: 'Affectation', icon: Package },
+    ...(ligne.type === 2 ? [{ key: 'enno' as const, label: 'Ennoblissement', icon: Droplets }] : []),
+    ...(supplyEnabled ? [{ key: 'trico' as const, label: 'Tricotage', icon: KnitIcon }] : []),
+  ]
+  const [tab, setTab] = useState<SupplyTab>('affectation')
+
   const linked = data?.linked ?? []
   const available = data?.available ?? []
   const dim = data?.dim ?? 'poids'
@@ -1002,75 +1088,193 @@ function AffectationDrawer({
 
   return (
     <div className="flex flex-col h-full min-h-0 overflow-hidden bg-zinc-100/80">
-      {/* Top strip: progress + close */}
-      <div className="flex-shrink-0 px-3 py-2 border-b bg-zinc-200/50 flex items-center gap-3">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center justify-between text-[11px] font-medium tabular-nums mb-1">
-            <span className="text-muted-foreground uppercase tracking-wide">Stock affecté</span>
-            <span className={cn(pct >= 99.9 ? 'text-green-600' : 'text-foreground')}>
-              {fmtNum(reserved, 1)} / {fmtNum(target, 1)} {uniteLabel}
-            </span>
-          </div>
-          <div className="h-1.5 rounded-full bg-white overflow-hidden">
-            <div className={cn('h-full rounded-full transition-all', pct >= 99.9 ? 'bg-green-500' : 'bg-accent')} style={{ width: `${pct}%` }} />
-          </div>
+      {/* Tab strip + close (mps_designer §31.4) */}
+      <div className="flex-shrink-0 flex items-center border-b bg-zinc-200/50 p-1 gap-1">
+        {tabs.map((t) => {
+          const Icon = t.icon
+          const active = tab === t.key
+          return (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => setTab(t.key)}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer',
+                active ? 'bg-accent text-accent-foreground shadow-sm' : 'text-muted-foreground hover:bg-accent/10',
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              <span>{t.label}</span>
+            </button>
+          )
+        })}
+        <div className="ml-auto flex items-center pr-1">
+          <Button variant="ghost" size="icon" onClick={onClose} className="h-7 w-7" title="Fermer">
+            <X className="h-3.5 w-3.5" />
+          </Button>
         </div>
-        <Button variant="ghost" size="icon" onClick={onClose} className="h-7 w-7 flex-shrink-0" title="Fermer">
-          <X className="h-3.5 w-3.5" />
-        </Button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-3 space-y-4 scrollbar-transparent">
-        {isLoading && (
-          <div className="space-y-2">{[1, 2, 3].map((i) => <div key={i} className="h-14 bg-muted animate-pulse rounded-lg" />)}</div>
-        )}
-        {isError && (
-          <div className="flex flex-col items-center justify-center py-6 text-destructive">
-            <AlertCircle className="h-6 w-6 mb-2" /><p className="text-sm">Erreur de chargement</p>
-          </div>
-        )}
-        {!isLoading && !isError && linked.length === 0 && available.length === 0 && (
-          <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-            <Package className="h-8 w-8 mb-2 opacity-50" />
-            <p className="text-sm font-medium">Aucun rouleau en stock</p>
-            <p className="text-xs mt-1">Aucun rouleau correspondant à cette référence n'est disponible.</p>
-          </div>
-        )}
-
-        {linked.length > 0 && (
-          <section>
-            <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
-              Affecté à la commande ({linked.length})
-            </h3>
-            <div className="space-y-1.5">
-              {linked.map((roll) => (
-                <RollRow key={roll.id} roll={roll} dim={dim} action="unlink"
-                  onAction={() => unlinkMut.mutate(roll.id)}
-                  isBusy={unlinkMut.isPending && unlinkMut.variables === roll.id} />
-              ))}
+      {tab === 'affectation' && (
+        <>
+          {/* Affectation progress */}
+          <div className="flex-shrink-0 px-3 py-2 border-b bg-zinc-200/30">
+            <div className="flex items-center justify-between text-[11px] font-medium tabular-nums mb-1">
+              <span className="text-muted-foreground uppercase tracking-wide">Stock affecté</span>
+              <span className={cn(pct >= 99.9 ? 'text-green-600' : 'text-foreground')}>
+                {fmtNum(reserved, 1)} / {fmtNum(target, 1)} {uniteLabel}
+              </span>
             </div>
-          </section>
-        )}
-
-        {available.length > 0 && (
-          <section>
-            <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
-              Stock disponible ({available.length})
-            </h3>
-            <div className="space-y-1.5">
-              {available.map((roll) => (
-                <RollRow key={roll.id} roll={roll} dim={dim} action="link"
-                  onAction={() => linkMut.mutate(roll.id)}
-                  isBusy={linkMut.isPending && linkMut.variables === roll.id} />
-              ))}
+            <div className="h-1.5 rounded-full bg-white overflow-hidden">
+              <div className={cn('h-full rounded-full transition-all', pct >= 99.9 ? 'bg-green-500' : 'bg-accent')} style={{ width: `${pct}%` }} />
             </div>
-          </section>
-        )}
+          </div>
 
-        {!isLoading && !isError && linked.length > 0 && available.length === 0 && (
-          <p className="text-xs text-muted-foreground italic text-center">Aucun rouleau supplémentaire disponible.</p>
-        )}
+          <div className="flex-1 overflow-y-auto p-3 space-y-4 scrollbar-transparent">
+            {isLoading && (
+              <div className="space-y-2">{[1, 2, 3].map((i) => <div key={i} className="h-14 bg-muted animate-pulse rounded-lg" />)}</div>
+            )}
+            {isError && (
+              <div className="flex flex-col items-center justify-center py-6 text-destructive">
+                <AlertCircle className="h-6 w-6 mb-2" /><p className="text-sm">Erreur de chargement</p>
+              </div>
+            )}
+            {!isLoading && !isError && linked.length === 0 && available.length === 0 && (
+              <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+                <Package className="h-8 w-8 mb-2 opacity-50" />
+                <p className="text-sm font-medium">Aucun rouleau en stock</p>
+                <p className="text-xs mt-1">Aucun rouleau correspondant à cette référence n'est disponible.</p>
+              </div>
+            )}
+
+            {linked.length > 0 && (
+              <section>
+                <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
+                  Affecté à la commande ({linked.length})
+                </h3>
+                <div className="space-y-1.5">
+                  {linked.map((roll) => (
+                    <RollRow key={roll.id} roll={roll} dim={dim} action="unlink"
+                      onAction={() => unlinkMut.mutate(roll.id)}
+                      isBusy={unlinkMut.isPending && unlinkMut.variables === roll.id} />
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {available.length > 0 && (
+              <section>
+                <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
+                  Stock disponible ({available.length})
+                </h3>
+                <div className="space-y-1.5">
+                  {available.map((roll) => (
+                    <RollRow key={roll.id} roll={roll} dim={dim} action="link"
+                      onAction={() => linkMut.mutate(roll.id)}
+                      isBusy={linkMut.isPending && linkMut.variables === roll.id} />
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {!isLoading && !isError && linked.length > 0 && available.length === 0 && (
+              <p className="text-xs text-muted-foreground italic text-center">Aucun rouleau supplémentaire disponible.</p>
+            )}
+          </div>
+        </>
+      )}
+
+      {tab === 'enno' && (
+        <div className="flex-1 overflow-y-auto p-3 scrollbar-transparent">
+          <SupplyTable
+            loading={supplyLoading}
+            rows={supply?.ennoblissement ?? []}
+            emptyLabel="Aucune commande ennoblisseur en cours"
+            emptyIcon={Droplets}
+            columns={[
+              { key: 'sst', label: 'Ennoblisseur', align: 'left', render: (r) => r.sous_traitant_nom || '—' },
+              { key: 'dl', label: 'Délai', align: 'left', render: (r) => fmtSupplyDate(r.date_livraison) },
+              { key: 'et', label: 'État', align: 'left', render: (r) => r.etat_label },
+              { key: 'di', label: 'Disponible', align: 'right', render: (r) => `${fmtNum(r.qte_disponible, 1)} ml` },
+              { key: 'af', label: 'Affecté', align: 'right', render: (r) => `${fmtNum(r.qte_affecte, 1)} ml` },
+            ]}
+          />
+        </div>
+      )}
+
+      {tab === 'trico' && (
+        <div className="flex-1 overflow-y-auto p-3 scrollbar-transparent">
+          <SupplyTable
+            loading={supplyLoading}
+            rows={supply?.tricotage ?? []}
+            emptyLabel="Aucune commande tricotage en cours"
+            emptyIcon={KnitIcon}
+            columns={[
+              { key: 'sst', label: 'Tricoteur', align: 'left', render: (r) => r.sous_traitant_nom || '—' },
+              { key: 'dl', label: 'Délai', align: 'left', render: (r) => fmtSupplyDate(r.date_livraison) },
+              { key: 'di', label: 'Poids dispo.', align: 'right', render: (r) => `${fmtNum(r.poids_disponible, 1)} Kg` },
+              { key: 'af', label: 'Poids affecté', align: 'right', render: (r) => `${fmtNum(r.poids_affecte, 1)} Kg` },
+              { key: 'mp', label: 'Métrage pot.', align: 'right', render: (r) => `${fmtNum(r.metrage_potentiel, 0)} ml` },
+            ]}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+type SupplyTab = 'affectation' | 'enno' | 'trico'
+
+function fmtSupplyDate(d: string | null): string {
+  return d && d.length === 8 && d !== '00000000' ? formatHfsqlDate(d) : '—'
+}
+
+// Compact table for the supply tabs (ennoblissement / tricotage). Generic over
+// the row shape; columns describe their own rendering + alignment.
+function SupplyTable<T extends { id: number }>({
+  loading, rows, columns, emptyLabel, emptyIcon: EmptyIcon,
+}: {
+  loading: boolean
+  rows: T[]
+  columns: { key: string; label: string; align: 'left' | 'right'; render: (r: T) => ReactNode }[]
+  emptyLabel: string
+  emptyIcon: ComponentType<{ className?: string }>
+}) {
+  if (loading) {
+    return <div className="space-y-2">{[1, 2, 3].map((i) => <div key={i} className="h-10 bg-muted animate-pulse rounded-md" />)}</div>
+  }
+  if (rows.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+        <EmptyIcon className="h-8 w-8 mb-2 opacity-50" />
+        <p className="text-sm font-medium">{emptyLabel}</p>
       </div>
+    )
+  }
+  return (
+    <div className="rounded-lg border border-border/60 bg-card shadow-sm overflow-hidden">
+      <table className="w-full text-xs">
+        <thead className="bg-zinc-200/60 border-b border-border/60">
+          <tr className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            {columns.map((c) => (
+              <th key={c.key} className={cn('px-2.5 py-2 font-semibold whitespace-nowrap', c.align === 'right' ? 'text-right' : 'text-left')}>
+                {c.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.id} className="border-b border-border/40 last:border-0 hover:bg-accent/5">
+              {columns.map((c) => (
+                <td key={c.key} className={cn('px-2.5 py-2 whitespace-nowrap', c.align === 'right' ? 'text-right tabular-nums' : 'text-left')}>
+                  {c.render(r)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }
@@ -1130,6 +1334,12 @@ function LineFormDialog({
   const isNew = line === null
   const [form, setForm] = useState<LineFormState>(emptyLineForm)
   const [error, setError] = useState<string | null>(null)
+  // Price lock: when locked, the price auto-fills from the tariff and the input
+  // is read-only (the legacy padlock). New lines start locked (auto); existing
+  // lines start unlocked so a previously-saved/overridden price is preserved.
+  const [priceLocked, setPriceLocked] = useState(true)
+  // Debounced quantity for the auto-price query (avoid a request per keystroke).
+  const [debouncedQuantite, setDebouncedQuantite] = useState('')
 
   useEffect(() => {
     if (!open) return
@@ -1144,15 +1354,54 @@ function LineFormDialog({
         date_livraison: hfsqlDateToInput(line.date_livraison),
         commentaire: line.commentaire ?? '',
       })
+      setPriceLocked(false) // preserve the saved price until the user re-locks
     } else {
       setForm(emptyLineForm)
+      setPriceLocked(true)
     }
     setError(null)
   }, [open, line])
 
-  // Reference lookups per type.
-  const { data: refsEcru } = useQuery<RefEcru[]>({ queryKey: ['cc-refs-ecru'], queryFn: () => apiFetch('/commandes-client/lookups/refs-ecru'), enabled: open && form.type === 1 })
-  const { data: refsFini } = useQuery<RefFini[]>({ queryKey: ['cc-refs-fini'], queryFn: () => apiFetch('/commandes-client/lookups/refs-fini'), enabled: open && form.type === 2 })
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuantite(form.quantite), 300)
+    return () => clearTimeout(t)
+  }, [form.quantite])
+
+  // Auto-price + roll-count note (PrixDeVenteV4 port). Écru/fini + Kg/Ml only.
+  const priceableType = form.type === 1 || form.type === 2
+  // Gate every price-derived note on the CURRENT form inputs (not just on the
+  // cached priceInfo) — keepPreviousData keeps the last result alive after the
+  // dialog is cancelled, so without this the note lingers on a fresh empty form.
+  const hasPriceInputs = priceableType && form.IDreference > 0 && Number(form.quantite) > 0
+  const { data: priceInfo } = useQuery<LinePriceInfo>({
+    queryKey: ['cc-line-price', form.type, form.IDreference, form.IDcolori, debouncedQuantite, form.unite],
+    queryFn: () => apiFetch(
+      `/commandes-client/lookups/line-price?type=${form.type}&ref=${form.IDreference}&coloris=${form.IDcolori}`
+      + `&quantite=${encodeURIComponent(debouncedQuantite)}&unite=${form.unite}`,
+    ),
+    enabled: open && priceableType && form.IDreference > 0 && Number(debouncedQuantite) > 0,
+    // Keep the previous note/price visible while the next quantity recomputes, so
+    // the dialog doesn't collapse-and-reflow vertically on every keystroke.
+    placeholderData: keepPreviousData,
+  })
+
+  // When locked and the tariff produced a price, push it into the form.
+  useEffect(() => {
+    if (!priceLocked) return
+    if (priceInfo?.priceable && priceInfo.prix != null) {
+      const next = String(priceInfo.prix)
+      setForm((f) => (f.prix === next ? f : { ...f, prix: next }))
+    }
+  }, [priceLocked, priceInfo])
+
+  // Price input is read-only only while the tariff is actively driving it.
+  const autoPriceActive = priceLocked && priceableType && !!priceInfo?.priceable && priceInfo.prix != null
+
+  // Reference lookups per type. Écru/fini are restricted to the references
+  // assigned to this client in designation_client (the buyable catalogue);
+  // divers are generic and stay unrestricted.
+  const { data: refsEcru } = useQuery<RefEcru[]>({ queryKey: ['cc-refs-ecru', commande.IDclient], queryFn: () => apiFetch(`/commandes-client/lookups/refs-ecru?client=${commande.IDclient}`), enabled: open && form.type === 1 })
+  const { data: refsFini } = useQuery<RefFini[]>({ queryKey: ['cc-refs-fini', commande.IDclient], queryFn: () => apiFetch(`/commandes-client/lookups/refs-fini?client=${commande.IDclient}`), enabled: open && form.type === 2 })
   const { data: refsDivers } = useQuery<RefDivers[]>({ queryKey: ['cc-refs-divers'], queryFn: () => apiFetch('/commandes-client/lookups/refs-divers'), enabled: open && form.type === 3 })
 
   // Coloris lookup for the selected ref (écru/fini only).
@@ -1263,8 +1512,7 @@ function LineFormDialog({
             <div className="col-span-1 space-y-1">
               <label className="text-xs font-medium text-muted-foreground">Unité</label>
               <PopoverSelect
-                size="sm"
-                options={[{ id: 1, primary: 'Kg' }, { id: 3, primary: 'Ml' }, { id: 4, primary: 'U' }, { id: 5, primary: 'm²' }]}
+                options={[{ id: 1, primary: 'Kg' }, { id: 3, primary: 'Ml' }, { id: 4, primary: 'unité' }, { id: 5, primary: 'm²' }]}
                 value={form.unite}
                 onChange={(id) => setForm({ ...form, unite: id })}
                 hideEmpty
@@ -1272,9 +1520,66 @@ function LineFormDialog({
             </div>
             <div className="col-span-1 space-y-1">
               <label className="text-xs font-medium text-muted-foreground">Prix (€)</label>
-              <input type="number" value={form.prix} onChange={(e) => setForm({ ...form, prix: e.target.value })} className={inputClass} />
+              <div className="flex items-center gap-1">
+                <input
+                  type="number"
+                  value={form.prix}
+                  onChange={(e) => setForm({ ...form, prix: e.target.value })}
+                  readOnly={autoPriceActive}
+                  className={cn(inputClass, autoPriceActive && 'bg-zinc-100 text-muted-foreground cursor-not-allowed')}
+                />
+                {priceableType && (
+                  <button
+                    type="button"
+                    onClick={() => setPriceLocked((v) => !v)}
+                    title={priceLocked ? 'Déverrouiller le prix (saisie manuelle)' : 'Verrouiller le prix (calcul automatique)'}
+                    className={cn(
+                      'flex-shrink-0 h-8 w-8 rounded-md border flex items-center justify-center transition-colors',
+                      priceLocked ? 'border-accent/40 text-accent bg-accent/5 hover:bg-accent/10' : 'border-input text-muted-foreground hover:bg-zinc-100',
+                    )}
+                  >
+                    {priceLocked ? <Lock className="h-3.5 w-3.5" /> : <LockOpen className="h-3.5 w-3.5" />}
+                  </button>
+                )}
+              </div>
             </div>
           </div>
+          {/* Roll-count note (green when the quantity is a whole-roll multiple,
+              amber when it overshoots a clean roll count). */}
+          {hasPriceInputs && priceInfo?.priceable && (() => {
+            const { nRolls, exact, cleanQty, unite_label } = priceInfo
+            if (nRolls < 1) {
+              return (
+                <p className="text-xs font-medium text-amber-600 -mt-1">
+                  Métrage — moins d’un rouleau
+                </p>
+              )
+            }
+            return (
+              <p className={cn('text-xs font-medium -mt-1', exact ? 'text-green-600' : 'text-amber-600')}>
+                {exact ? '' : '> '}{nRolls} Rouleau{nRolls > 1 ? 'x' : ''} ({fmtNum(cleanQty)} {unite_label})
+              </p>
+            )
+          })()}
+          {/* Commercial nudge: within 15% of the next (cheaper) tariff tranche —
+              suggest the employee propose the round-up to the customer. */}
+          {hasPriceInputs && priceInfo?.priceable && priceInfo.nearNextTranche && priceInfo.nextTranchePrix != null && (() => {
+            const saving = priceInfo.prix && priceInfo.prix > 0
+              ? Math.round(((priceInfo.prix - priceInfo.nextTranchePrix!) / priceInfo.prix) * 100)
+              : 0
+            return (
+              <div className="flex items-start gap-2 rounded-md border border-gold/50 bg-gold/10 px-2.5 py-2 -mt-1">
+                <Sparkles className="h-4 w-4 text-amber-600 mt-0.5 flex-shrink-0" />
+                <p className="text-xs text-amber-900 leading-snug">
+                  Plus que <b>{fmtNum(priceInfo.nextTrancheGapQty)} {priceInfo.unite_label}</b> pour atteindre{' '}
+                  <b>{priceInfo.nextTrancheRolls} rouleaux</b> et passer à{' '}
+                  <b>{fmtNum(priceInfo.nextTranchePrix!, 2)} €</b>/{priceInfo.unite_label}
+                  {saving > 0 ? <> (<b>−{saving}%</b>)</> : null}.{' '}
+                  <span className="text-amber-700">À proposer au client&nbsp;?</span>
+                </p>
+              </div>
+            )
+          })()}
           <LabeledInput label="Date livraison" type="date" value={form.date_livraison} onChange={(v) => setForm({ ...form, date_livraison: v })} />
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Commentaire</label>
@@ -1514,7 +1819,7 @@ function InfoTab({
 
       <div className={cn('p-3 rounded-lg border bg-card shadow-sm', isEditing && editSectionClass)}>
         <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
-          <MessageSquare className="h-3.5 w-3.5" />Note interne
+          <MessageSquare className="h-3.5 w-3.5" />Journal
         </p>
         {isEditing ? (
           <textarea value={editCommentaireInterne} onChange={(e) => onEditCommentaireInterneChange(e.target.value)} rows={3}
@@ -1522,7 +1827,7 @@ function InfoTab({
         ) : commande.commentaire_interne?.trim() ? (
           <p className="text-sm text-muted-foreground whitespace-pre-line">{commande.commentaire_interne.trim()}</p>
         ) : (
-          <p className="text-sm text-muted-foreground italic">Aucune note interne</p>
+          <p className="text-sm text-muted-foreground italic">Journal vide</p>
         )}
       </div>
     </div>
@@ -2002,6 +2307,16 @@ function CreateCommandeDialog({ open, onClose, onCreated }: { open: boolean; onC
     setAdresseLivId(defaultLiv?.IDadresse ?? 0)
   }, [adresses])
 
+  // Prefill payment fields from the selected client's sheet (client.IDmode_paiement
+  // / IDecheance). Keyed on clientId so re-picking a client re-applies its defaults.
+  useEffect(() => {
+    if (clientId <= 0 || !clients) return
+    const c = clients.find((x) => x.IDclient === clientId)
+    if (!c) return
+    setModePaiementId(c.IDmode_paiement ?? 0)
+    setEcheanceId(c.IDecheance ?? 0)
+  }, [clientId, clients])
+
   useEffect(() => {
     if (!open) {
       setClientId(0); setDateCommande(new Date().toISOString().slice(0, 10)); setRefClient('')
@@ -2066,11 +2381,11 @@ function CreateCommandeDialog({ open, onClose, onCreated }: { open: boolean; onC
             <div className="grid grid-cols-2 gap-2">
               <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">Adr. facturation</label>
-                <PopoverSelect options={(adresses ?? []).map((a) => ({ id: a.IDadresse, primary: a.nom || `Adresse #${a.IDadresse}`, secondary: a.ville ?? undefined }))} value={adresseFactId} onChange={setAdresseFactId} emptyLabel="—" />
+                <PopoverSelect options={(adresses ?? []).map(adresseOption)} value={adresseFactId} onChange={setAdresseFactId} emptyLabel="—" />
               </div>
               <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground">Adr. livraison</label>
-                <PopoverSelect options={(adresses ?? []).map((a) => ({ id: a.IDadresse, primary: a.nom || `Adresse #${a.IDadresse}`, secondary: a.ville ?? undefined }))} value={adresseLivId} onChange={setAdresseLivId} emptyLabel="—" />
+                <PopoverSelect options={(adresses ?? []).map(adresseOption)} value={adresseLivId} onChange={setAdresseLivId} emptyLabel="—" />
               </div>
             </div>
           )}

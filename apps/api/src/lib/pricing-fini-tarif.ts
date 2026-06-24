@@ -22,12 +22,14 @@ import { query, fixEncoding } from './hfsql-auto.js'
 import { multiplicateurMatel } from './pricing-sst.js'
 
 /** Per-tranche margin — legacy `CoefficientV2(i)`. Index = tranche i (0..8).
- *  Small quantities carry a higher margin; bulk a lower one. */
-const COEFFICIENT_V2 = [0.6, 0.5, 0.45, 0.4, 0.35, 0.3, 0.27, 0.22, 0.17]
+ *  Small quantities carry a higher margin; bulk a lower one. Exported so the
+ *  client-line pricer can reuse the same bands for the écru path. */
+export const COEFFICIENT_V2 = [0.6, 0.5, 0.45, 0.4, 0.35, 0.3, 0.27, 0.22, 0.17]
 
 /** Roll count used to size each tranche's weight. Tranche 0 ("métrage", the
- *  sub-roll row) shares tranche 1's weight; they differ only by CoefficientV2. */
-const ROLL_MULT = [1, 1, 2, 3, 4, 5, 10, 15, 30]
+ *  sub-roll row) shares tranche 1's weight; they differ only by CoefficientV2.
+ *  Index 0 = "< 1 roll" (métrage); indices 1..8 = 1,2,3,4,5,10,15,30 rolls. */
+export const ROLL_MULT = [1, 1, 2, 3, 4, 5, 10, 15, 30]
 
 /** Roll count shown in the table (tranche 0 is rendered as "< 1"). */
 const ROLL_LABEL = [1, 1, 2, 3, 4, 5, 10, 15, 30]
@@ -356,8 +358,10 @@ export async function calcTarifRefFini(
 /** Legacy `PrixFil()` — Σ(pourcentage × yarn €/Kg)/100 over the écru's
  *  composition, preferring the colori_fil price when set. Bridge-safe: flat
  *  queries + JS merge + `fixEncoding` (no JOIN+CONVERT). Falls back to the base
- *  composition (IDcolori_ecru = 0) when the chosen coloris has none of its own. */
-async function computePrixFil(
+ *  composition (IDcolori_ecru = 0) when the chosen coloris has none of its own.
+ *  Exported so the client-line pricer (pricing-ligne-client.ts) can reuse it for
+ *  the écru (nType_Ref = 1) path. */
+export async function computePrixFil(
   IDref_ecru: number,
   IDcolori_ecru: number,
 ): Promise<TarifDetailLine[]> {

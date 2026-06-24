@@ -108,6 +108,38 @@ shows the commande-level commentaire. Both note columns are now header-level (co
 report's per-commande mental model. Note: the export defaults to all-columns only for first-time users — anyone
 with a previously-saved selection ticks **Journal** once in the picker to include it.
 
+## 2026-06-24 — feat/cmd-client
+Clients › Commandes — line-item creation, pricing, and supply-chain visibility on the existing screen
+(`apps/web/src/pages/ClientsCommandes.tsx` + `apps/api/src/routes/commandes-client.ts`, new
+`apps/api/src/lib/pricing-ligne-client.ts`). **(1) Nouvelle commande modal**: address pickers now render the
+full address (street · CP ville · pays) under each name via `PopoverSelect`'s `description` (canonical
+`adresseOption` mapper, designer §11bis); selecting a client **prefills** Mode paiement + Échéance from the
+client sheet (`client.IDmode_paiement`/`IDecheance`, now returned by `/lookups/clients`) and the billing/
+delivery addresses from their `est_defaut_*` flags. **(2) Clients lookup scoping**: `/lookups/clients` now
+filters `IDsociete = 1` (was leaking 27 TRM + 4 Confection clients into the ETM picker). **(3) "Note interne"
+→ "Journal"** UI label rename (field `commentaire_interne` unchanged). **(4) Nouvelle ligne modal**: fixed the
+Unité dropdown overflowing the Prix input (dropped `size="sm"` → fills its grid cell); `unite=4` label "U" →
+"unité" (frontend + `uniteLabel`). **(5) Buyable-ref filter**: the line Référence dropdown is restricted to
+the refs assigned to the client in `designation_client` (`/lookups/refs-ecru|refs-fini?client=`, `assignedRefIds`
+prunes `archivé`/`caché` in JS via `pickKey` — never named in SQL). **(6) Auto-pricing + roll note** (PrixDeVenteV4
+port, `calcLignePriceClient` + `/lookups/line-price`): typing a quantity on an écru/fini line auto-fills the unit
+price (€/Ml or €/Kg) for the roll-count tariff tranche, with a padlock to override (session-only). A roll-count
+note shows green when the quantity is a whole-roll multiple, amber `>` when it overshoots (roll size =
+`poids × round2(rendement)`). A **commercial nudge** appears when the quantity is within 15% of the next cheaper
+tranche ("Plus que X Ml pour atteindre N rouleaux → Y €/Ml (−Z%)"). Fini path validated EXACT vs legacy
+(040A/beige2585 10 rolls → 10,43 €); écru path derived (fil + tricotage ÷ margin ÷ port), unvalidated. Used
+`keepPreviousData` to stop the note collapsing/reflowing on each keystroke, gated on current form inputs so it
+clears on a fresh dialog. **(7) Coloris-aware affectation**: the line affectation drawer's "stock disponible"
+and the link endpoints now filter/guard by the line's coloris (`stock_fini.IDColoris` / `stock_ecru.IDcolori_ecru`
+= line `IDcolori`), so e.g. a beige line no longer offers gris rolls. **(8) Supply tabs**: the affectation drawer
+became tabbed (designer §31.4) — Affectation + **Ennoblissement** (fini lines) + **Tricotage** (écru/fini),
+showing in-progress sous-traitant orders feeding the line via new `GET /:id/lignes/:ligneId/supply`. Ennoblissement
+disponible/affecté (ml) = input écru (`stock_ecru.IDref_commande_affectation`) split by client-affectation × raw
+fini rendement (validated EXACT: 240,60 kg × 3,548387 = 853,74 ml); Tricotage affecté/disponible (kg) = output écru
+committed to clients / `quantité − affecté` (validated 6388/4000 kg), métrage potentiel = dispo × rendement.
+`invalidateAll` now also refreshes the `commande-client-pieces` and `commande-client-supply` caches after line/
+affectation edits. The legacy right-side stock panels (écru-by-location, fil-by-tricoteur) were not built.
+
 ## 2026-06-23 — feat/suivilot
 Qualité › Suivi des lots — enhancements to the existing screen (`apps/web/src/pages/QualiteSuiviLots.tsx`
 + `apps/api/src/routes/suivi-lots.ts`). **(1) RTF commentaire**: the commande's `commentaire` (RTF in
