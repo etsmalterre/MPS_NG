@@ -73,6 +73,7 @@ import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
 import { fmtNum } from '@/lib/format'
 import { apiFetch, API_URL } from '@/lib/api'
+import { invalidateLotQualityCaches } from '@/lib/cache-sync'
 import { postEmail } from '@/lib/email'
 import { sstTypeTagClasses } from '@/lib/sst-type'
 
@@ -843,9 +844,10 @@ export function SousTraitantsCommandes() {
   }, [selectedId])
 
   const invalidateAll = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['commandes-sst'] })
-    queryClient.invalidateQueries({ queryKey: ['commande-sst', selectedId] })
-  }, [queryClient, selectedId])
+    // Réception creates a suivilot, reprise re-syncs its état — both surface on
+    // Qualité › Suivi des lots, so refresh both screens (not just this one).
+    invalidateLotQualityCaches(queryClient)
+  }, [queryClient])
 
   const startEdit = useCallback(() => {
     if (!detail) return
@@ -1178,12 +1180,11 @@ export function SousTraitantsCommandes() {
                 },
               },
             )
-            // Soumission send logs an envoi_email row (IDtype_doc=15)
-            // which the phase computation reads to flip the commande to
-            // 'soumis'. Refresh the same set of queries as the bon-de-
-            // commande send above.
-            queryClient.invalidateQueries({ queryKey: ['commande-sst', selectedId] })
-            queryClient.invalidateQueries({ queryKey: ['commandes-sst'] })
+            // Soumission send logs an envoi_email row (IDtype_doc=15) which the
+            // phase computation reads to flip the commande to 'soumis', AND
+            // sets the lot to "Attente Client" on Qualité › Suivi des lots.
+            // Refresh both screens + the historique tab.
+            invalidateLotQualityCaches(queryClient)
             queryClient.invalidateQueries({ queryKey: ['commande-sst-historique', selectedId] })
           }}
         />

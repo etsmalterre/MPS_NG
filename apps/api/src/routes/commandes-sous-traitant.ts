@@ -3371,6 +3371,30 @@ commandesSousTraitantRouter.post('/:id/soumission/email', async (req: Request, r
       lotParams.lot, // notes — lot identifier (legacy convention)
     )
 
+    // Auto-advance the lot's quality status to "Attente Client" (état 5): the
+    // soumission has been sent, so the lot now awaits the customer's decision.
+    // The Qualité screen reads suivilot.IDetatLot. Best-effort — a status sync
+    // failure must never block the email response (mirrors upsertSuivilot).
+    try {
+      const ligneRows = await query<{ IDligne_commande_sous_traitant: number }>(
+        `SELECT IDligne_commande_sous_traitant FROM ligne_commande_sous_traitant
+         WHERE IDcommande_sous_traitant = ${id}`,
+      )
+      const ligneIds = ligneRows
+        .map((r) => Number(r.IDligne_commande_sous_traitant))
+        .filter((v) => v > 0)
+      if (ligneIds.length > 0) {
+        await query(
+          `UPDATE suivilot SET IDetatLot = 5
+           WHERE lot = ${sqlText(lotParams.lot)}
+             AND IDref_fini = ${Number(lotParams.IDref_fini) || 0}
+             AND IDligne_commande_sous_traitant IN (${ligneIds.join(',')})`,
+        )
+      }
+    } catch (err) {
+      console.error(`Soumission status-sync (Attente Client) failed for commande=${id} lot=${lotParams.lot}:`, err)
+    }
+
     res.json({ ok: true, messageId })
   } catch (err) {
     console.error('Error sending soumission lot email:', err)

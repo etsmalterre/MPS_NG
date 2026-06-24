@@ -10,6 +10,30 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-24 — feat/suivilot
+Qualité › Suivi des lots — workflow reform + Contrôles UX, plus a cross-screen cache fix.
+**(1) Header cleanup**: removed the non-functional print + email (@) buttons (and their placeholder
+dialog) from the lot detail header. **(2) Tolerance gauges**: each Contrôles measurement (Laize, Poids,
+Stab H/L, in both Sous-Traitant and Tirelle cards) now renders a tolerance gauge under the value — a
+green min→max band with a colored needle at the measured value (green in-band, red out, hidden when not
+yet measured), with min/max labels under the band edges; **stab** is a 0-centered ±band (the ref_fini
+figure `-5` means ±5 %, mostly shrink) labelled `-5 · 0 · +5`. An unmeasured value renders blank (no "0").
+The Rendement row was dropped from both cards. **(3) Quality workflow reform** (see
+`project_quality_workflow_reform`): replaces the legacy two-role model with a single `responsable_qualite`
+permission (new catalog entry, category "Qualité", per-user in Paramètres › Utilisateurs; effective admin
+bypasses). Non-holders get the screen **read-only** (no Modifier, no status change). Backend gates
+`PUT /suivi-lots/:id` + `POST /suivi-lots/:id/etat` via `userHasPermission`. The footer is now a **two-verdict**
+control — **Valider** (→3) / **Reprendre** (→2) only; `POST /etat` rejects any état ≠ {2,3}; **Reprendre** also
+flags the lot's `stock_fini` rolls to `IDetat_stock_fini = 2` so they queue in the Sous-traitants reprise
+flow (2→1 happens via the existing re-réception sync). Sending a soumission on Sous-traitants › Commandes
+now **auto-sets** the matching `suivilot` to état **5**. État 5 renamed "Attente décision" → **"Attente Client"**
+(UI-only — HFSQL `etat_stock_fini` label untouched for legacy), recolored violet, icon changed from HelpCircle
+to **User** (person). **(4) Cross-screen cache sync** (see `project_react_query_stale_cross_screen`): new
+`apps/web/src/lib/cache-sync.ts` → `invalidateLotQualityCaches(qc)` invalidates both the Qualité and
+Sous-traitants query families; wired into `QualiteSuiviLots` `etatMut` and `SousTraitantsCommandes`
+`invalidateAll` + soumission-email success, so a change on either screen refreshes the other (the global
+5-min React Query `staleTime` previously served stale cache until a hard reload).
+
 ## 2026-06-24 — feat/rapport
 Rapports › Commandes sst (`apps/web/src/pages/RapportCommandesSst.tsx` + `apps/api/src/routes/rapports.ts`) —
 added a **Journal** column and corrected the **Commentaire** column source. **(1) Journal column**: surfaces

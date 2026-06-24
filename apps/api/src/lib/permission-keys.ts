@@ -74,6 +74,13 @@ export const PERMISSION_KEYS = [
     description: 'Autorise la découpe d’un rouleau en plusieurs dans Tombé Métier > Stock.',
     category: 'Tombé Métier',
   },
+  {
+    key: 'responsable_qualite',
+    label: 'Responsable qualité',
+    description:
+      'Autorise la validation / reprise des lots et la saisie des contrôles dans Qualité > Suivi des lots. Sans cette permission, l’écran est en lecture seule.',
+    category: 'Qualité',
+  },
 ] as const
 
 export type PermissionKey = (typeof PERMISSION_KEYS)[number]['key']

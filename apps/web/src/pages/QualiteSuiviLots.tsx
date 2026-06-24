@@ -24,14 +24,11 @@ import {
   Pencil,
   X,
   Save,
-  Printer,
-  AtSign,
-  Mail,
   Clock,
   RotateCcw,
   CheckCircle2,
   Truck,
-  HelpCircle,
+  User,
   ChevronUp,
   Ruler,
   Package,
@@ -55,6 +52,8 @@ import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
 import { useUnsavedGuard } from '@/hooks/useUnsavedGuard'
 import { apiFetch, API_URL } from '@/lib/api'
+import { invalidateLotQualityCaches } from '@/lib/cache-sync'
+import { useHasPermission } from '@/contexts/PermissionsContext'
 import { fmtNum } from '@/lib/format'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
 import { cn } from '@/lib/utils'
@@ -177,9 +176,13 @@ const ETAT_META: Record<Etat, {
   2: { label: 'En reprise', icon: RotateCcw, solidBg: 'bg-orange-500 border-orange-500', iconColor: 'text-orange-600' },
   3: { label: 'Validé', icon: CheckCircle2, solidBg: 'bg-success border-success', iconColor: 'text-green-600' },
   4: { label: 'Expédié', icon: Truck, solidBg: 'bg-blue-500 border-blue-500', iconColor: 'text-blue-600' },
-  5: { label: 'Attente décision', icon: HelpCircle, solidBg: 'bg-violet-500 border-violet-500', iconColor: 'text-violet-600' },
+  5: { label: 'Attente Client', icon: User, solidBg: 'bg-violet-500 border-violet-500', iconColor: 'text-violet-600' },
 }
 const ETAT_ORDER: Etat[] = [1, 2, 3, 4, 5]
+
+// The responsable qualité's only two manual verdicts. Other états are
+// system-driven (reception → 1, soumission → 5, rework re-reception → 1).
+const ETAT_ACTIONS: Etat[] = [3, 2] // Valider, Reprendre
 
 function etatOf(id: number | null | undefined): Etat | null {
   const v = Number(id)
@@ -235,14 +238,15 @@ function snapshotEdit(d: SuiviLotDetail): EditState {
 
 export function QualiteSuiviLots() {
   const queryClient = useQueryClient()
+  // Only the responsable qualité (and admins) can interact — everyone else
+  // sees the screen read-only (no Modifier, no status change).
+  const canManage = useHasPermission('responsable_qualite')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('en_cours')
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [isEditing, setIsEditing] = useState(false)
   const [activeTab, setActiveTab] = useState<'controles' | 'documents' | 'defauts' | 'client'>('controles')
   const [edit, setEdit] = useState<EditState | null>(null)
-  const [printOpen, setPrintOpen] = useState(false)
-  const [emailOpen, setEmailOpen] = useState(false)
   const originalRef = useRef<EditState | null>(null)
 
   // ── Queries ─────────────────────────────────────────────
@@ -328,7 +332,10 @@ export function QualiteSuiviLots() {
         method: 'POST',
         body: JSON.stringify({ etat }),
       }),
-    onSuccess: invalidateAll,
+    // Valider/Reprendre changes lot état and (on Reprendre) flags the lot's
+    // rolls — both surface on Sous-traitants › Commandes, so refresh both
+    // screens, not just this one.
+    onSuccess: () => invalidateLotQualityCaches(queryClient),
   })
 
   // ── Guard ───────────────────────────────────────────────
@@ -379,9 +386,14 @@ export function QualiteSuiviLots() {
     if (!lots) return []
     const q = searchQuery.trim().toLowerCase()
     if (!q) return lots
-    return lots.filter((l) =>
-      [l.lot, l.sous_traitant_nom, l.etat_libelle ?? ''].join(' ').toLowerCase().includes(q),
-    )
+    return lots.filter((l) => {
+      const e = etatOf(l.IDetatLot)
+      const uiLabel = e ? ETAT_META[e].label : '' // matches the renamed "Attente Client"
+      return [l.lot, l.sous_traitant_nom, l.etat_libelle ?? '', uiLabel]
+        .join(' ')
+        .toLowerCase()
+        .includes(q)
+    })
   }, [lots, searchQuery])
 
   // Keep the selection valid against the (search-filtered) list. Skip while
@@ -419,11 +431,10 @@ export function QualiteSuiviLots() {
               detail={detail}
               isEditing={isEditing}
               saving={saveMut.isPending}
+              canManage={canManage}
               onStartEdit={startEdit}
               onCancelEdit={cancelEdit}
               onSave={() => saveMut.mutate()}
-              onPrint={() => setPrintOpen(true)}
-              onEmail={() => setEmailOpen(true)}
             />
           ) : detailLoading ? (
             <div className="flex items-center justify-center h-24">
@@ -444,6 +455,7 @@ export function QualiteSuiviLots() {
               detail={detail}
               isEditing={isEditing}
               edit={edit}
+              canManage={canManage}
               onEditField={setEditField}
               activeTab={activeTab}
               onTabChange={setActiveTab}
@@ -453,9 +465,6 @@ export function QualiteSuiviLots() {
           ) : null
         }
       />
-
-      <PlaceholderDialog open={printOpen} onClose={() => setPrintOpen(false)} label="Imprimer" Icon={Printer} CenterIcon={Printer} />
-      <PlaceholderDialog open={emailOpen} onClose={() => setEmailOpen(false)} label="Envoyer un email" Icon={AtSign} CenterIcon={Mail} />
 
       <UnsavedChangesDialog open={guard.showDialog} onAction={guard.handleAction} isSaving={guard.isSaving} />
     </>
@@ -579,20 +588,18 @@ function LotDetailHeader({
   detail,
   isEditing,
   saving,
+  canManage,
   onStartEdit,
   onCancelEdit,
   onSave,
-  onPrint,
-  onEmail,
 }: {
   detail: SuiviLotDetail
   isEditing: boolean
   saving: boolean
+  canManage: boolean
   onStartEdit: () => void
   onCancelEdit: () => void
   onSave: () => void
-  onPrint: () => void
-  onEmail: () => void
 }) {
   return (
     <div className="flex-shrink-0 pt-0.5">
@@ -629,18 +636,12 @@ function LotDetailHeader({
               </Button>
             </>
           ) : (
-            <>
-              <Button variant="outline" size="icon" className="h-9 w-9" title="Imprimer" onClick={onPrint}>
-                <Printer className="h-4 w-4" />
-              </Button>
-              <Button variant="outline" size="icon" className="h-9 w-9" title="Envoyer un email" onClick={onEmail}>
-                <AtSign className="h-4 w-4" />
-              </Button>
+            canManage && (
               <Button variant="gold" size="sm" onClick={onStartEdit}>
                 <Pencil className="h-3.5 w-3.5 mr-1.5" />
                 Modifier
               </Button>
-            </>
+            )
           )}
         </div>
       </div>
@@ -807,6 +808,7 @@ function LotSidebar({
   detail,
   isEditing,
   edit,
+  canManage,
   onEditField,
   activeTab,
   onTabChange,
@@ -816,6 +818,7 @@ function LotSidebar({
   detail: SuiviLotDetail
   isEditing: boolean
   edit: EditState | null
+  canManage: boolean
   onEditField: <K extends keyof EditState>(key: K, value: string) => void
   activeTab: 'controles' | 'documents' | 'defauts' | 'client'
   onTabChange: (t: 'controles' | 'documents' | 'defauts' | 'client') => void
@@ -864,6 +867,7 @@ function LotSidebar({
       {currentEtat && (
         <EtatFooter
           current={currentEtat}
+          canManage={canManage}
           onChange={onEtatChange}
           isChanging={etatChanging}
           disabled={isEditing}
@@ -877,25 +881,48 @@ function LotSidebar({
 
 const editCardClass = 'border-l-4 border-l-accent/70 bg-accent/[0.03]'
 
-type ConformKind = 'laize' | 'poids' | 'stabH' | 'stabL'
+type ConformKind = 'laize' | 'poids' | 'stabH' | 'stabL' | 'rendement'
 
-// Conformité d'une mesure de contrôle vs les tolérances de ref_fini (ports the
-// legacy croix.png / terminer3.png logic). Returns null when there's no marker to
-// show: réf absente / borne(s) non définies, ou valeur non saisie (0).
-function checkConform(kind: ConformKind, val: number, b: RefBounds): boolean | null {
-  if (val === 0) return null
-  switch (kind) {
-    case 'laize':
-      if (b.laize_min <= 0 && b.laize_max <= 0) return null
-      return (b.laize_min <= 0 || val >= b.laize_min) && (b.laize_max <= 0 || val <= b.laize_max)
-    case 'poids':
-      if (b.poids_min <= 0 && b.poids_max <= 0) return null
-      return (b.poids_min <= 0 || val >= b.poids_min) && (b.poids_max <= 0 || val <= b.poids_max)
-    case 'stabH':
-      return val >= b.stab_hauteur
-    case 'stabL':
-      return val >= b.stab_largeur
+// A measurement's tolerance: a min/max band. `null` on a bound means "not
+// defined" (legacy stores 0 for undefined bounds — treat <=0 as absent). Stab
+// measurements only carry a lower bound (≥ min), so `max` stays null.
+interface Tolerance {
+  min: number | null
+  max: number | null
+}
+
+// Resolve the tolerance band for a measurement from the ref_fini bounds (laize/
+// poids/stab) or the per-lot rendement bounds. <=0 bounds are dropped to null.
+function resolveTolerance(kind: ConformKind, b: RefBounds | undefined, rdt: Tolerance | undefined): Tolerance {
+  const pos = (n: number | null | undefined): number | null => (n != null && n > 0 ? n : null)
+  // Symmetric band from a single ±figure: -5 → [-5, +5]. Returns the empty band
+  // when undefined (0).
+  const sym = (n: number | null | undefined): Tolerance => {
+    const a = n != null ? Math.abs(n) : 0
+    return a > 0 ? { min: -a, max: a } : { min: null, max: null }
   }
+  switch (kind) {
+    case 'laize': return { min: pos(b?.laize_min), max: pos(b?.laize_max) }
+    case 'poids': return { min: pos(b?.poids_min), max: pos(b?.poids_max) }
+    // Stab is a symmetric tolerance: the ref_fini stores a single figure (e.g.
+    // -5) meaning the fabric may move ±5% — mostly shrink, occasionally stretch.
+    // A measurement is conform when it lands in [-|x|, +|x|].
+    case 'stabH': return sym(b?.stab_hauteur)
+    case 'stabL': return sym(b?.stab_largeur)
+    case 'rendement': return { min: pos(rdt?.min), max: pos(rdt?.max) }
+  }
+}
+
+// Conformité d'une mesure vs sa tolérance. Returns null when there's nothing to
+// flag: no bound defined, or value not entered (0).
+function checkConform(val: number, t: Tolerance): boolean | null {
+  if (t.min == null && t.max == null) return null
+  // 0 = control not made yet (no marker). A real measurement is non-zero —
+  // including negative stab readings (shrinkage).
+  if (val === 0) return null
+  if (t.min != null && val < t.min) return false
+  if (t.max != null && val > t.max) return false
+  return true
 }
 
 function ConformMarker({ conform }: { conform: boolean | null }) {
@@ -904,6 +931,87 @@ function ConformMarker({ conform }: { conform: boolean | null }) {
     <CheckCircle2 className="h-4 w-4 text-green-600 flex-shrink-0" aria-label="Conforme" />
   ) : (
     <AlertTriangle className="h-4 w-4 text-destructive flex-shrink-0" aria-label="Non conforme" />
+  )
+}
+
+// Tolerance gauge: a track showing the acceptable band. Two-bound measurements
+// (laize, poids) show a min→max band; stab shows a 0-centered ±band. The
+// measured value is a needle — green inside tolerance, red outside, grey when
+// not yet measured. Bound labels sit under the band edges. Updates live as the
+// value is typed in edit mode. Returns null when no bound is defined.
+function ToleranceGauge({ value, tol, conform, dec }: { value: number; tol: Tolerance; conform: boolean | null; dec: number }) {
+  if (tol.min == null && tol.max == null) return null
+  const hasMax = tol.max != null
+  const lo = tol.min ?? 0
+  const hi = tol.max ?? lo
+
+  // Display domain pads the band so the needle stays visible on/just past an edge.
+  let domainLo: number
+  let domainHi: number
+  if (hasMax) {
+    const pad = Math.max((hi - lo) * 0.3, lo * 0.05, 1)
+    domainLo = lo - pad
+    domainHi = hi + pad
+  } else {
+    // ≥min threshold: keep the threshold around the lower third of the track.
+    const span = Math.max(Math.abs(value - lo), lo * 0.4, 1)
+    domainLo = Math.max(lo - span, 0)
+    domainHi = lo + span * 1.5
+  }
+  const range = Math.max(domainHi - domainLo, 1e-6)
+  const pct = (v: number) => Math.min(100, Math.max(0, ((v - domainLo) / range) * 100))
+
+  const bandStart = pct(lo)
+  const bandEnd = hasMax ? pct(hi) : 100
+  const valuePos = pct(value)
+  // 0 = control not made yet, so no needle. Any non-zero reading shows —
+  // including negative stab values (shrinkage).
+  const centered = hasMax && lo < 0 && hi > 0
+  const showNeedle = value !== 0
+  const needleColor = conform === false ? 'bg-destructive' : conform === true ? 'bg-green-600' : 'bg-zinc-400'
+
+  return (
+    <div className="mt-1.5">
+      <div className="relative h-1.5 rounded-full bg-zinc-200">
+        {/* Acceptable band */}
+        <div
+          className="absolute inset-y-0 rounded-full bg-green-500/30"
+          style={{ left: `${bandStart}%`, right: `${100 - bandEnd}%` }}
+        />
+        {/* Band-edge ticks */}
+        <div className="absolute top-1/2 h-2 w-px -translate-x-1/2 -translate-y-1/2 bg-green-600/40" style={{ left: `${bandStart}%` }} />
+        {hasMax && (
+          <div className="absolute top-1/2 h-2 w-px -translate-x-1/2 -translate-y-1/2 bg-green-600/40" style={{ left: `${bandEnd}%` }} />
+        )}
+        {/* Center (0) tick on symmetric bands — the neutral, no-deformation point */}
+        {centered && (
+          <div className="absolute top-1/2 h-1.5 w-px -translate-x-1/2 -translate-y-1/2 bg-zinc-400" style={{ left: `${pct(0)}%` }} />
+        )}
+        {/* Value needle */}
+        {showNeedle && (
+          <div
+            className={cn('absolute top-1/2 h-3 w-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full ring-2 ring-card', needleColor)}
+            style={{ left: `${valuePos}%` }}
+          />
+        )}
+      </div>
+      {/* Bound labels under the band edges */}
+      <div className="relative mt-1 h-3 text-[10px] tabular-nums text-muted-foreground">
+        {hasMax ? (
+          <>
+            <span className="absolute -translate-x-1/2 whitespace-nowrap" style={{ left: `${bandStart}%` }}>{fmtNum(lo, dec)}</span>
+            {centered && (
+              <span className="absolute -translate-x-1/2 whitespace-nowrap" style={{ left: `${pct(0)}%` }}>0</span>
+            )}
+            <span className="absolute -translate-x-1/2 whitespace-nowrap" style={{ left: `${bandEnd}%` }}>
+              {centered ? `+${fmtNum(hi, dec)}` : fmtNum(hi, dec)}
+            </span>
+          </>
+        ) : (
+          <span className="absolute -translate-x-1/2 whitespace-nowrap" style={{ left: `${bandStart}%` }}>≥ {fmtNum(lo, dec)}</span>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -927,7 +1035,6 @@ function ControlesTab({
       <SidebarCard title="Sous-Traitant" icon={<Factory className="h-3.5 w-3.5 text-accent" />} highlight={isEditing}>
         <KVNum label="Laize" field="laize_sst" detailVal={detail.laize_sst} conformKind="laize" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
         <KVNum label="Poids" field="poids_sst" detailVal={detail.poids_sst} conformKind="poids" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
-        <KVNum label="Rendement" field="rendement_sst" detailVal={detail.rendement_sst} dec={2} isEditing={isEditing} edit={edit} onEditField={onEditField} />
         {/* Freinte is computed (legacy formula), not stored — see API. Read-only. */}
         <KV label="Freinte" value={`${fmtNum(detail.freinte_sst * 100, 0)} %`} />
         <KVNum label="Stab H" field="stabH_sst" detailVal={detail.stabH_sst} conformKind="stabH" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
@@ -938,7 +1045,6 @@ function ControlesTab({
       <SidebarCard title="Tirelle" icon={<Ruler className="h-3.5 w-3.5 text-accent" />} highlight={isEditing}>
         <KVNum label="Laize" field="laize_tirelle" detailVal={detail.laize_tirelle} conformKind="laize" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
         <KVNum label="Poids" field="poids_tirelle" detailVal={detail.poids_tirelle} conformKind="poids" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
-        <KVNum label="Rendement" field="rendement_tirelle" detailVal={detail.rendement_tirelle} dec={2} isEditing={isEditing} edit={edit} onEditField={onEditField} />
         <KVNum label="Stab H" field="stabH_tirelle" detailVal={detail.stabH_tirelle} conformKind="stabH" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
         <KVNum label="Stab L" field="stabL_tirelle" detailVal={detail.stabL_tirelle} conformKind="stabL" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
       </SidebarCard>
@@ -1027,6 +1133,7 @@ function KVNum({
   onEditField,
   conformKind,
   bounds,
+  rdtBounds,
 }: {
   label: string
   field: keyof EditState
@@ -1037,16 +1144,17 @@ function KVNum({
   onEditField: <K extends keyof EditState>(key: K, value: string) => void
   conformKind?: ConformKind
   bounds?: RefBounds
+  rdtBounds?: Tolerance
 }) {
   // Conformity is computed off the live value: the edited string while editing,
-  // the saved value otherwise — so the marker updates as the user types.
+  // the saved value otherwise — so the marker + gauge update as the user types.
   const currentVal = isEditing && edit ? Number(edit[field]) || 0 : detailVal
-  const conform =
-    conformKind && bounds ? checkConform(conformKind, currentVal, bounds) : null
+  const tol = conformKind ? resolveTolerance(conformKind, bounds, rdtBounds) : null
+  const conform = tol ? checkConform(currentVal, tol) : null
   return (
-    <KV
-      label={label}
-      value={
+    <div className="min-h-[1.75rem]">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs text-muted-foreground">{label}</span>
         <span className="inline-flex items-center justify-end gap-1.5">
           <ConformMarker conform={conform} />
           {isEditing && edit ? (
@@ -1058,11 +1166,12 @@ function KVNum({
               className="h-7 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring text-right w-[110px] tabular-nums"
             />
           ) : (
-            <span className="tabular-nums">{fmtNum(detailVal, dec)}</span>
+            <span className="tabular-nums text-sm">{detailVal === 0 ? '' : fmtNum(detailVal, dec)}</span>
           )}
         </span>
-      }
-    />
+      </div>
+      {tol && <ToleranceGauge value={currentVal} tol={tol} conform={conform} dec={dec} />}
+    </div>
   )
 }
 
@@ -1249,13 +1358,18 @@ function ClientTab({ detail }: { detail: SuiviLotDetail }) {
 
 // ── Status footer (multi-state état pill) ────────────────
 
+// Action verbs for the two manual transitions (target état → verb).
+const ETAT_ACTION_LABEL: Record<3 | 2, string> = { 3: 'Valider', 2: 'Reprendre' }
+
 function EtatFooter({
   current,
+  canManage,
   onChange,
   isChanging,
   disabled,
 }: {
   current: Etat
+  canManage: boolean
   onChange: (next: Etat) => void
   isChanging: boolean
   disabled: boolean
@@ -1282,8 +1396,8 @@ function EtatFooter({
   }, [menuOpen])
 
   useEffect(() => {
-    if (disabled) setMenuOpen(false)
-  }, [disabled])
+    if (disabled || !canManage) setMenuOpen(false)
+  }, [disabled, canManage])
 
   return (
     <div ref={rootRef} className="flex-shrink-0 relative">
@@ -1292,27 +1406,31 @@ function EtatFooter({
           <Icon className="h-4 w-4 flex-shrink-0" />
           <span className="text-sm font-bold uppercase tracking-wide truncate">{meta.label}</span>
         </div>
-        <button
-          type="button"
-          onClick={() => setMenuOpen((v) => !v)}
-          disabled={disabled || isChanging}
-          title="Changer le statut"
-          className="px-3.5 bg-white/15 hover:bg-white/25 active:bg-white/30 disabled:bg-white/5 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-semibold border-l border-white/25 flex items-center gap-1.5 transition-colors"
-        >
-          {isChanging ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronUp className={cn('h-3.5 w-3.5 transition-transform', menuOpen && 'rotate-180')} />}
-          Changer
-        </button>
+        {/* Read-only for non-responsables: pill only, no verdict control. */}
+        {canManage && (
+          <button
+            type="button"
+            onClick={() => setMenuOpen((v) => !v)}
+            disabled={disabled || isChanging}
+            title="Changer le statut"
+            className="px-3.5 bg-white/15 hover:bg-white/25 active:bg-white/30 disabled:bg-white/5 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-semibold border-l border-white/25 flex items-center gap-1.5 transition-colors"
+          >
+            {isChanging ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronUp className={cn('h-3.5 w-3.5 transition-transform', menuOpen && 'rotate-180')} />}
+            Changer
+          </button>
+        )}
       </div>
-      {menuOpen && (
+      {canManage && menuOpen && (
         <div className="absolute bottom-full right-0 mb-1 w-full min-w-[220px] rounded-lg border bg-white shadow-lg overflow-hidden z-50">
-          {ETAT_ORDER.map((s) => {
+          {ETAT_ACTIONS.map((s) => {
             const m = ETAT_META[s]
-            const active = current === s
+            const active = current === s // already in this state → non-actionable
             const SIcon = m.icon
             return (
               <button
                 key={s}
                 type="button"
+                disabled={active}
                 onClick={() => {
                   if (!active) onChange(s)
                   setMenuOpen(false)
@@ -1323,7 +1441,7 @@ function EtatFooter({
                 )}
               >
                 <SIcon className={cn('h-4 w-4', active ? 'text-accent' : m.iconColor)} />
-                {m.label}
+                {ETAT_ACTION_LABEL[s as 3 | 2]}
                 {active && <CheckCircle2 className="h-4 w-4 ml-auto text-accent" />}
               </button>
             )
@@ -1331,39 +1449,5 @@ function EtatFooter({
         </div>
       )}
     </div>
-  )
-}
-
-// ── "En développement" placeholder dialog ────────────────
-
-function PlaceholderDialog({
-  open,
-  onClose,
-  label,
-  Icon,
-  CenterIcon,
-}: {
-  open: boolean
-  onClose: () => void
-  label: string
-  Icon: typeof Printer
-  CenterIcon: typeof Mail
-}) {
-  return (
-    <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent onClose={onClose}>
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Icon className="h-5 w-5 text-accent" />
-            {label}
-          </DialogTitle>
-        </DialogHeader>
-        <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-          <CenterIcon className="h-12 w-12 mb-3 opacity-40" />
-          <p className="text-sm font-medium">En developpement</p>
-          <p className="text-xs mt-1">Cette fonctionnalite sera disponible prochainement.</p>
-        </div>
-      </DialogContent>
-    </Dialog>
   )
 }
