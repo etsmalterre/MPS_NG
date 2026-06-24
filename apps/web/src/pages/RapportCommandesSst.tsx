@@ -57,6 +57,7 @@ interface RapportLine {
   marge_jours: number | null
   client_nom: string
   commentaire: string
+  journal: string
   urgency: 'late' | 'soon' | null
   est_soldee: number
 }
@@ -157,6 +158,7 @@ const EXPORT_COLUMNS: ExportColumn[] = [
   { key: 'client', label: 'Client', width: 22, value: (r) => r.client_nom || '' },
   { key: 'relance', label: 'Relance', width: 12, value: (r) => dateFmt(r.date_relance) },
   { key: 'commentaire', label: 'Commentaire', width: 40, value: (r) => r.commentaire || '' },
+  { key: 'journal', label: 'Journal', width: 40, value: (r) => r.journal || '' },
 ]
 const EXPORT_COLUMN_KEYS = EXPORT_COLUMNS.map((c) => c.key)
 
@@ -208,6 +210,7 @@ type SortKey =
   | 'client_nom'
   | 'date_relance'
   | 'commentaire'
+  | 'journal'
 
 interface SortState {
   key: SortKey
@@ -234,6 +237,7 @@ const COLUMNS: { key: SortKey; label: string; width: number; align?: 'left' | 'r
   { key: 'client_nom', label: 'Client', width: 130 },
   { key: 'date_relance', label: 'Relance', width: 96, align: 'right' },
   { key: 'commentaire', label: 'Commentaire', width: 200 },
+  { key: 'journal', label: 'Journal', width: 220 },
 ]
 const TABLE_MIN_WIDTH = COLUMNS.reduce((s, c) => s + c.width, 0)
 
@@ -286,6 +290,7 @@ export function RapportCommandesSst() {
           r.coloris,
           r.client_nom,
           r.commentaire,
+          r.journal,
         ]
           .filter((f): f is string => !!f)
           .map((f) => f.toLowerCase())
@@ -360,7 +365,7 @@ export function RapportCommandesSst() {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Rechercher (statut, n°, sous-traitant, réf, coloris, client, commentaire…)"
+            placeholder="Rechercher (statut, n°, sous-traitant, réf, coloris, client, commentaire, journal…)"
             className="h-9 w-full pl-8 pr-3 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
           />
         </div>
@@ -483,6 +488,9 @@ export function RapportCommandesSst() {
                     <td className="px-2.5 py-2 text-right tabular-nums text-muted-foreground">{dateFmt(r.date_relance) || '—'}</td>
                     <td className="px-2.5 py-2 text-muted-foreground truncate" title={r.commentaire || undefined}>
                       {r.commentaire || ''}
+                    </td>
+                    <td className="px-2.5 py-2 text-muted-foreground truncate" title={r.journal || undefined}>
+                      {r.journal || ''}
                     </td>
                   </tr>
                 ))}

@@ -10,6 +10,20 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-24 — feat/rapport
+Rapports › Commandes sst (`apps/web/src/pages/RapportCommandesSst.tsx` + `apps/api/src/routes/rapports.ts`) —
+added a **Journal** column and corrected the **Commentaire** column source. **(1) Journal column**: surfaces
+the commande sst header `journal` field (`commande_sous_traitant.journal`, plain text since the 2026-05-26 RTF
+migration; still `stripRtf()`'d defensively). Added to the report row payload (`journal: hdr?.journal || ''`),
+the sortable table (new `journal` SortKey + 220px column), the Excel export column catalog (so it appears as a
+toggle in the "Colonnes à exporter" picker), and the search haystack/placeholder. **(2) Commentaire column
+fix**: repointed it from the per-line `ligne_commande_sous_traitant.commentaire` (with header fallback) to the
+commande sst **header** `commentaire` only. Legacy stored unrelated notes on the line comment (e.g. the literal
+word "journal"), so a line comment was shadowing the order's real header note; the column now consistently
+shows the commande-level commentaire. Both note columns are now header-level (commande sst), matching the
+report's per-commande mental model. Note: the export defaults to all-columns only for first-time users — anyone
+with a previously-saved selection ticks **Journal** once in the picker to include it.
+
 ## 2026-06-23 — feat/suivilot
 Qualité › Suivi des lots — enhancements to the existing screen (`apps/web/src/pages/QualiteSuiviLots.tsx`
 + `apps/api/src/routes/suivi-lots.ts`). **(1) RTF commentaire**: the commande's `commentaire` (RTF in

@@ -75,6 +75,7 @@ interface RapportLineRow {
   marge_jours: number | null
   client_nom: string
   commentaire: string
+  journal: string
   urgency: 'late' | 'soon' | null
   est_soldee: number
 }
@@ -94,10 +95,11 @@ rapportsRouter.get('/commandes-sst', async (req: Request, res: Response) => {
       est_soldee: number | null
       date_notif: string | null
       commentaire: string | null
+      journal: string | null
     }>(
       `SELECT TOP ${MAX_COMMANDES}
               IDcommande_sous_traitant, IDsous_traitant, date_commande,
-              est_soldee, date_notif, commentaire
+              est_soldee, date_notif, commentaire, journal
        FROM commande_sous_traitant
        ${includeSoldees ? '' : 'WHERE est_soldee = 0'}
        ORDER BY IDcommande_sous_traitant DESC`,
@@ -111,6 +113,7 @@ rapportsRouter.get('/commandes-sst', async (req: Request, res: Response) => {
       est_soldee: number
       date_notif: string
       commentaire: string
+      journal: string
     }
     const hdrById = new Map<number, Hdr>()
     for (const h of headerRows) {
@@ -121,6 +124,9 @@ rapportsRouter.get('/commandes-sst', async (req: Request, res: Response) => {
         date_notif: dateDigits(h.date_notif),
         // Header commentaire is RTF (legacy still reads it); strip for fallback.
         commentaire: stripRtf((h.commentaire ?? '').toString()).trim(),
+        // Header journal is plain text (RTF rows migrated 2026-05-26); strip
+        // defensively in case any legacy RTF survives.
+        journal: stripRtf((h.journal ?? '').toString()).trim(),
       })
     }
 
@@ -408,8 +414,11 @@ rapportsRouter.get('/commandes-sst', async (req: Request, res: Response) => {
         }
       }
 
-      const lineComment = stripRtf((l.commentaire ?? '').toString()).trim()
-      const commentaire = lineComment || hdr?.commentaire || ''
+      // Commentaire column = the commande sst header commentaire (RTF), NOT
+      // the per-line lcsst.commentaire — legacy stored unrelated notes (e.g.
+      // the literal word "journal") on the line comment, so the header note
+      // is the one the user means by "the order's commentaire".
+      const commentaire = hdr?.commentaire || ''
 
       return {
         IDligne_commande_sous_traitant: lineId,
@@ -432,6 +441,7 @@ rapportsRouter.get('/commandes-sst', async (req: Request, res: Response) => {
         marge_jours: marge,
         client_nom: clientNom,
         commentaire,
+        journal: hdr?.journal || '',
         urgency,
         est_soldee: estSoldee,
       }
