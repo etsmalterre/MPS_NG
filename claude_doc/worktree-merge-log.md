@@ -10,6 +10,17 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-24 — feat/rapport
+Rapports › Commandes sous-traitants — Excel export date-sort fix (`apps/web/src/pages/RapportCommandesSst.tsx`).
+The five date columns (Date commande, Délai initial, Délai actuel, Délai client, Relance) were exported as
+French **text** strings (`"24/06/2026"`), so Excel sorted them lexically (by day-of-month) instead of
+chronologically. New `dateVal()` helper parses the HFSQL `YYYYMMDD` string into a real JS `Date` (local
+midnight; empty/invalid → `null` for a blank cell). Export columns gained a `kind?: 'date'` flag; the date
+columns now emit `Date` values and `handleExport` builds the sheet with `aoa_to_sheet(aoa, { cellDates: true })`
+so SheetJS writes true date cells (`t:'d'`). Each date cell then gets `z = 'dd/mm/yyyy'` so it still *displays*
+in French format while the underlying serial makes the column sortable/filterable in Excel. Quantity/day
+columns were already real numbers and unaffected.
+
 ## 2026-06-24 — feat/gestion-client
 Clients › Gestion (`apps/web/src/pages/ClientsGestion.tsx` + `apps/api/src/routes/clients.ts`, wired in
 `router.tsx` replacing the placeholder and `index.ts` under `/api/clients`) — the legacy "Gestion Client"

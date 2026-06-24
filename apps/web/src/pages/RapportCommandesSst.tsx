@@ -121,6 +121,16 @@ function daysFmt(v: number | null): string {
 function dateFmt(v: string | null): string {
   return v && /^\d{8}$/.test(v) ? formatHfsqlDate(v) : ''
 }
+/**
+ * Parse an HFSQL "YYYYMMDD" string into a real JS `Date` (local midnight) for
+ * Excel export. Returning a `Date` (rather than a formatted string) lets
+ * SheetJS write a true date cell, so Excel sorts the column chronologically
+ * instead of lexically. Empty/invalid values → `null` (blank cell).
+ */
+function dateVal(v: string | null): Date | null {
+  if (!v || !/^\d{8}$/.test(v)) return null
+  return new Date(Number(v.slice(0, 4)), Number(v.slice(4, 6)) - 1, Number(v.slice(6, 8)))
+}
 
 // ── Excel export column catalog ─────────────────────────
 //
@@ -137,7 +147,9 @@ interface ExportColumn {
   key: string
   label: string
   width: number
-  value: (r: RapportLine) => string | number
+  /** 'date' columns emit real `Date` cells so Excel sorts them chronologically. */
+  kind?: 'date'
+  value: (r: RapportLine) => string | number | Date | null
 }
 const EXPORT_COLUMNS: ExportColumn[] = [
   { key: 'statut', label: 'Statut', width: 16, value: (r) => statutMeta(r.sstatut).label },
@@ -149,14 +161,14 @@ const EXPORT_COLUMNS: ExportColumn[] = [
   { key: 'qte_affectee', label: 'Qté affectée', width: 12, value: (r) => qty1(r.qte_affectee) },
   { key: 'qte_receptionnee', label: 'Qté réceptionnée', width: 14, value: (r) => qty1(r.qte_receptionnee) },
   { key: 'unite', label: 'Unité', width: 7, value: (r) => r.unite_label },
-  { key: 'date_commande', label: 'Date commande', width: 13, value: (r) => dateFmt(r.date_commande) },
-  { key: 'delai_initial', label: 'Délai initial', width: 12, value: (r) => dateFmt(r.delai_initial) },
-  { key: 'delai_actuel', label: 'Délai actuel', width: 12, value: (r) => dateFmt(r.delai_actuel) },
+  { key: 'date_commande', label: 'Date commande', width: 13, kind: 'date', value: (r) => dateVal(r.date_commande) },
+  { key: 'delai_initial', label: 'Délai initial', width: 12, kind: 'date', value: (r) => dateVal(r.delai_initial) },
+  { key: 'delai_actuel', label: 'Délai actuel', width: 12, kind: 'date', value: (r) => dateVal(r.delai_actuel) },
   { key: 'retard', label: 'Retard (j)', width: 9, value: (r) => r.retard_jours ?? '' },
-  { key: 'delai_client', label: 'Délai client', width: 12, value: (r) => dateFmt(r.delai_client) },
+  { key: 'delai_client', label: 'Délai client', width: 12, kind: 'date', value: (r) => dateVal(r.delai_client) },
   { key: 'marge', label: 'Marge (j)', width: 9, value: (r) => r.marge_jours ?? '' },
   { key: 'client', label: 'Client', width: 22, value: (r) => r.client_nom || '' },
-  { key: 'relance', label: 'Relance', width: 12, value: (r) => dateFmt(r.date_relance) },
+  { key: 'relance', label: 'Relance', width: 12, kind: 'date', value: (r) => dateVal(r.date_relance) },
   { key: 'commentaire', label: 'Commentaire', width: 40, value: (r) => r.commentaire || '' },
   { key: 'journal', label: 'Journal', width: 40, value: (r) => r.journal || '' },
 ]
@@ -325,12 +337,24 @@ export function RapportCommandesSst() {
     setExporting(true)
     try {
       const XLSX = await import('xlsx')
-      const aoa: (string | number)[][] = [
+      const aoa: (string | number | Date | null)[][] = [
         cols.map((c) => c.label),
         ...filteredSorted.map((r) => cols.map((c) => c.value(r))),
       ]
-      const ws = XLSX.utils.aoa_to_sheet(aoa)
+      // cellDates → Date values become real date cells (t:'d'). Excel then sorts
+      // them chronologically; before this fix the column held French text strings
+      // ("24/06/2026") that Excel sorted lexically (by day-of-month).
+      const ws = XLSX.utils.aoa_to_sheet(aoa, { cellDates: true })
       ws['!cols'] = cols.map((c) => ({ wch: c.width }))
+      // Stamp the French display format on each date cell — the underlying
+      // serial number is what makes the column sortable.
+      cols.forEach((c, colIdx) => {
+        if (c.kind !== 'date') return
+        for (let rowIdx = 1; rowIdx <= filteredSorted.length; rowIdx++) {
+          const cell = ws[XLSX.utils.encode_cell({ r: rowIdx, c: colIdx })]
+          if (cell && cell.t === 'd') cell.z = 'dd/mm/yyyy'
+        }
+      })
       const wb = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(wb, ws, 'Commandes sous-traitants')
       const stamp = new Date().toISOString().slice(0, 10)
