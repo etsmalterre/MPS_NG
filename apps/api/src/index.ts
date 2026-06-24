@@ -15,6 +15,7 @@ import { referencesEcruRouter } from './routes/references-ecru.js'
 import { commandesFilRouter } from './routes/commandes-fil.js'
 import { commandesSousTraitantRouter } from './routes/commandes-sous-traitant.js'
 import { commandesClientRouter } from './routes/commandes-client.js'
+import { facturesRouter } from './routes/factures.js'
 import { sousTraitantsRouter } from './routes/sous-traitants.js'
 import { etudesColorisRouter } from './routes/etudes-coloris.js'
 import { prospectsRouter } from './routes/prospects.js'
@@ -68,6 +69,7 @@ app.use('/api/references-ecru', referencesEcruRouter)
 app.use('/api/commandes-fil', commandesFilRouter)
 app.use('/api/commandes-sous-traitant', commandesSousTraitantRouter)
 app.use('/api/commandes-client', commandesClientRouter)
+app.use('/api/factures', facturesRouter)
 app.use('/api/sous-traitants', sousTraitantsRouter)
 app.use('/api/etudes-coloris', etudesColorisRouter)
 app.use('/api/prospects', prospectsRouter)

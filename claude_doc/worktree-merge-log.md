@@ -34,6 +34,29 @@ Sous-traitants query families; wired into `QualiteSuiviLots` `etatMut` and `Sous
 `invalidateAll` + soumission-email success, so a change on either screen refreshes the other (the global
 5-min React Query `staleTime` previously served stale cache until a hard reload).
 
+## 2026-06-24 — feat/facturation
+Clients › Facturation (`apps/web/src/pages/ClientsFacturation.tsx` + `apps/api/src/routes/factures.ts` +
+`apps/api/src/lib/pdf/FacturePdf.tsx`, registered `/api/factures`, route wired in `router.tsx`) — the manual
+client-invoicing screen (legacy "Détail facture" / "Nouvelle facture"), mirroring Clients/Commandes
+(MasterDetailLayout, header Print/Email/Modifier trio, unsaved guard, auto-edit-after-create, SendEmailDialog,
+ConfirmDialog) **minus** stock affectation and the status footer (a facture has no lifecycle/paid flag).
+Browse/search/filter (Tous / Factures / Avoirs), view + create + edit + delete over `facture`/`ligne_facture`
+(ETM scope `IDsociete=1`), free-text line editor (`designation` / `quantite` / free-text `unite` / `prix`),
+and computed **HT / TVA / TTC** — no stored totals: HT = Σ(qty×prix), TVA = HT × `tva.valeur`, TTC = HT+TVA.
+**`type` 1=Facture / 2=Avoir** as a category chip; an Avoir reads negative in the list + footer (ledger sign),
+positive in the grid. `facture` has **no accented columns** (SELECT * safe) but `date`/`type` are reserved
+words → written uppercase `DATE`/`TYPE` (same trick as `envoi_email.DATE`). `numero = MAX+1 WHERE IDsociete=1`
+with a retry loop. **Create auto-fills billing defaults from the client row** (`num_tva`, `IDtva`,
+`IDmode_paiement`, `IDecheance`, `IDcode_comptable` + the `est_defaut_facturation` adresse). PDF (Facture/Avoir,
+Malterre frame) + Gmail send (`contact.envoi_facture`, type_doc 19, type-aware subject) + envoi historique.
+Sidebar tabs: Info (client, type toggle, date, mode, échéance, TVA select, N° TVA, billing-address picker) +
+Historique. **Deferred (Phase 2 — blocked on the not-yet-built Transport/Expéditions module):** legacy
+"Génération automatique" + "Factures provisoires" (`facture_prov`, empty in prod) which build invoices from
+un-invoiced `expedition` rows, plus the "Factures → Compta" export. No Docs tab (legacy facture detail has
+none; `ged` has no IDfacture FK). Verified end-to-end on local HFSQL (list / detail / create-autofill / lines
+CRUD / PDF / email-defaults / historique / delete + reserved DATE/TYPE + accent round-trip); web tsc + vite
+build clean.
+
 ## 2026-06-24 — feat/rapport
 Rapports › Commandes sst (`apps/web/src/pages/RapportCommandesSst.tsx` + `apps/api/src/routes/rapports.ts`) —
 added a **Journal** column and corrected the **Commentaire** column source. **(1) Journal column**: surfaces

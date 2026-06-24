@@ -6,7 +6,6 @@ import {
   Users,
   ShoppingCart,
   FileText,
-  Receipt,
   Truck,
   Box,
   FileBarChart,
@@ -34,7 +33,6 @@ function createPlaceholder(title: string, description: string, Icon: LucideIcon)
 
 // Client pages
 const ClientsDevisPage = createPlaceholder('Devis', 'Créez et gérez les devis clients', FileText)
-const ClientsFacturationPage = createPlaceholder('Facturation', 'Gérez la facturation clients', Receipt)
 const ClientsGestionPage = createPlaceholder('Gestion Clients', 'Gérez votre portefeuille clients', Users)
 
 // Fils placeholder (prévisions only — other Fils sub-screens are real)
@@ -60,6 +58,7 @@ import { FilsReferences } from '@/pages/FilsReferences'
 import { FilsStock } from '@/pages/FilsStock'
 import { FilsCommandes } from '@/pages/FilsCommandes'
 import { ClientsCommandes } from '@/pages/ClientsCommandes'
+import { ClientsFacturation } from '@/pages/ClientsFacturation'
 
 // Sous-traitants pages (real)
 import { SousTraitantsCommandes } from '@/pages/SousTraitantsCommandes'
@@ -105,7 +104,7 @@ export const router = createBrowserRouter([
       { path: 'clients', element: <Navigate to="/clients/commandes" replace /> },
       { path: 'clients/commandes', element: <ClientsCommandes /> },
       { path: 'clients/devis', element: <ClientsDevisPage /> },
-      { path: 'clients/facturation', element: <ClientsFacturationPage /> },
+      { path: 'clients/facturation', element: <ClientsFacturation /> },
       { path: 'clients/gestion', element: <ClientsGestionPage /> },
 
       // Sous-traitants
