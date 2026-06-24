@@ -15,7 +15,7 @@
 // unsaved-changes guard.
 
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import {
   ShieldCheck,
   Search,
@@ -38,6 +38,7 @@ import {
   ClipboardCheck,
   Factory,
   MessageSquare,
+  LineChart,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -48,6 +49,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { PopoverSelect } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
 import { useUnsavedGuard } from '@/hooks/useUnsavedGuard'
@@ -245,6 +247,7 @@ export function QualiteSuiviLots() {
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [isEditing, setIsEditing] = useState(false)
+  const [graphOpen, setGraphOpen] = useState(false)
   const [activeTab, setActiveTab] = useState<'controles' | 'documents' | 'defauts' | 'client'>('controles')
   const [edit, setEdit] = useState<EditState | null>(null)
   const originalRef = useRef<EditState | null>(null)
@@ -435,6 +438,7 @@ export function QualiteSuiviLots() {
               onStartEdit={startEdit}
               onCancelEdit={cancelEdit}
               onSave={() => saveMut.mutate()}
+              onOpenGraph={() => setGraphOpen(true)}
             />
           ) : detailLoading ? (
             <div className="flex items-center justify-center h-24">
@@ -467,6 +471,8 @@ export function QualiteSuiviLots() {
       />
 
       <UnsavedChangesDialog open={guard.showDialog} onAction={guard.handleAction} isSaving={guard.isSaving} />
+
+      <LotTrendDialog open={graphOpen} onClose={() => setGraphOpen(false)} lotId={selectedId} />
     </>
   )
 }
@@ -592,6 +598,7 @@ function LotDetailHeader({
   onStartEdit,
   onCancelEdit,
   onSave,
+  onOpenGraph,
 }: {
   detail: SuiviLotDetail
   isEditing: boolean
@@ -600,6 +607,7 @@ function LotDetailHeader({
   onStartEdit: () => void
   onCancelEdit: () => void
   onSave: () => void
+  onOpenGraph: () => void
 }) {
   return (
     <div className="flex-shrink-0 pt-0.5">
@@ -636,16 +644,512 @@ function LotDetailHeader({
               </Button>
             </>
           ) : (
-            canManage && (
-              <Button variant="gold" size="sm" onClick={onStartEdit}>
-                <Pencil className="h-3.5 w-3.5 mr-1.5" />
-                Modifier
+            <>
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-9 w-9"
+                title="Graphique d'évolution"
+                onClick={onOpenGraph}
+              >
+                <LineChart className="h-4 w-4" />
               </Button>
-            )
+              {canManage && (
+                <Button variant="gold" size="sm" onClick={onStartEdit}>
+                  <Pencil className="h-3.5 w-3.5 mr-1.5" />
+                  Modifier
+                </Button>
+              )}
+            </>
           )}
         </div>
       </div>
       <div className={cn('h-1 w-24 mt-3 rounded-full', isEditing ? 'bg-accent' : 'bg-gradient-to-r from-accent via-accent to-accent/30')} />
+    </div>
+  )
+}
+
+// ── Évolution (graphique) ────────────────────────────────
+//
+// "Graphique" modal: trend of the control measurements across every lot that
+// shares this lot's référence AND sous-traitant (so values stay comparable).
+// One point per lot, newest 200 (UI windows to 50/100/200). Self-contained SVG
+// line chart — no charting dependency.
+
+// Per-lot point (laize / poids / stab — measured once per lot).
+interface TrendPoint {
+  IDsuivilot: number
+  lot: string
+  date: string | null
+  laize_sst: number; poids_sst: number; stabH_sst: number; stabL_sst: number
+  laize_tirelle: number; poids_tirelle: number; stabH_tirelle: number; stabL_tirelle: number
+  laize_demandee: number; poids_demande: number; stabH_demandee: number; stabL_demandee: number
+}
+// Per-roll point (rendement = the roll's actual rdt = metrage/poids).
+interface TrendRoll {
+  IDstock_fini: number
+  IDsuivilot: number
+  numero: string
+  lot: string
+  date: string | null
+  rdt: number
+  rendement_demande: number
+}
+interface TrendSerie {
+  current_id: number
+  reference: string
+  sous_traitant_id: number
+  sous_traitant_nom: string
+  sous_traitants: { id: number; nom: string }[]
+  points: TrendPoint[]
+  rolls: TrendRoll[]
+}
+
+// Rendement is plotted per roll; laize / poids / stab per lot.
+type ParamKey = 'rendement' | 'laize' | 'poids' | 'stabH' | 'stabL'
+type SerieKey = 'roll' | 'sst' | 'tirelle' | 'cible'
+
+const LOT_PARAMS: {
+  key: Exclude<ParamKey, 'rendement'>; label: string; decimals: number
+  fields: { sst: keyof TrendPoint; tirelle: keyof TrendPoint; cible: keyof TrendPoint }
+}[] = [
+  { key: 'laize', label: 'Laize', decimals: 1, fields: { sst: 'laize_sst', tirelle: 'laize_tirelle', cible: 'laize_demandee' } },
+  { key: 'poids', label: 'Poids', decimals: 1, fields: { sst: 'poids_sst', tirelle: 'poids_tirelle', cible: 'poids_demande' } },
+  { key: 'stabH', label: 'Stab H', decimals: 1, fields: { sst: 'stabH_sst', tirelle: 'stabH_tirelle', cible: 'stabH_demandee' } },
+  { key: 'stabL', label: 'Stab L', decimals: 1, fields: { sst: 'stabL_sst', tirelle: 'stabL_tirelle', cible: 'stabL_demandee' } },
+]
+const PARAM_TABS: { key: ParamKey; label: string }[] = [
+  { key: 'rendement', label: 'Rendement' },
+  ...LOT_PARAMS.map((p) => ({ key: p.key as ParamKey, label: p.label })),
+]
+
+const SERIE_META: Record<SerieKey, { label: string; color: string; dashed?: boolean }> = {
+  roll: { label: 'Rendement (rouleau)', color: 'hsl(var(--accent))' },
+  sst: { label: 'Sous-traitant', color: 'hsl(var(--accent))' },
+  tirelle: { label: 'Tirelle', color: 'hsl(var(--accent-blue))' },
+  cible: { label: 'Demandé', color: 'hsl(var(--muted-foreground))', dashed: true },
+}
+const TREND_WINDOWS = [50, 100, 200] as const
+
+// One X-axis point — a roll (rendement) or a lot (the other params).
+interface ChartPoint {
+  id: number
+  primary: string
+  secondary?: string
+  date: string | null
+  isCurrent: boolean
+  values: Partial<Record<SerieKey, number | null>>
+}
+
+function trendDateLabel(d: string | null): string {
+  return d && /^\d{8}$/.test(d) ? formatHfsqlDate(d) : '—'
+}
+
+function LotTrendDialog({
+  open,
+  onClose,
+  lotId,
+}: {
+  open: boolean
+  onClose: () => void
+  lotId: number | null
+}) {
+  const [param, setParam] = useState<ParamKey>('rendement')
+  const [activeSeries, setActiveSeries] = useState<Record<SerieKey, boolean>>({ roll: true, sst: true, tirelle: true, cible: false })
+  const [windowSize, setWindowSize] = useState<(typeof TREND_WINDOWS)[number]>(50)
+  // null = plot the current lot's own sous-traitant (the API default).
+  const [selectedSstId, setSelectedSstId] = useState<number | null>(null)
+
+  // Reset the sous-traitant scope when switching lots — a sst valid for one
+  // référence may not exist for another.
+  useEffect(() => { setSelectedSstId(null) }, [lotId])
+
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['suivi-lot-serie', lotId, selectedSstId],
+    queryFn: () => apiFetch<TrendSerie>(`/suivi-lots/${lotId}/serie${selectedSstId != null ? `?sst=${selectedSstId}` : ''}`),
+    enabled: open && lotId !== null,
+    placeholderData: keepPreviousData,
+  })
+
+  const isRendement = param === 'rendement'
+  const sstOptions = data?.sous_traitants ?? []
+  const plottedSstId = selectedSstId ?? data?.sous_traitant_id ?? 0
+
+  // Chart model for the selected param: rendement → one point per roll;
+  // laize / poids / stab → one point per lot.
+  const model = useMemo(() => {
+    const curId = data?.current_id ?? -1
+    if (isRendement) {
+      const rolls = (data?.rolls ?? []).slice(-windowSize)
+      const points: ChartPoint[] = rolls.map((r) => ({
+        id: r.IDstock_fini,
+        primary: r.numero || `#${r.IDstock_fini}`,
+        secondary: r.lot || undefined,
+        date: r.date,
+        isCurrent: r.IDsuivilot === curId,
+        values: {
+          roll: r.rdt > 0 ? r.rdt : null,
+          cible: r.rendement_demande > 0 ? r.rendement_demande : null,
+        },
+      }))
+      return { unit: 'roll' as const, decimals: 2, seriesKeys: ['roll', 'cible'] as SerieKey[], points, total: data?.rolls.length ?? 0 }
+    }
+    const cfg = LOT_PARAMS.find((p) => p.key === param)!
+    const lots = (data?.points ?? []).slice(-windowSize)
+    const num = (l: TrendPoint, f: keyof TrendPoint) => {
+      const v = l[f] as number
+      return typeof v === 'number' && v > 0 ? v : null
+    }
+    const points: ChartPoint[] = lots.map((l) => ({
+      id: l.IDsuivilot,
+      primary: l.lot || `Lot #${l.IDsuivilot}`,
+      date: l.date,
+      isCurrent: l.IDsuivilot === curId,
+      values: { sst: num(l, cfg.fields.sst), tirelle: num(l, cfg.fields.tirelle), cible: num(l, cfg.fields.cible) },
+    }))
+    return { unit: 'lot' as const, decimals: cfg.decimals, seriesKeys: ['sst', 'tirelle', 'cible'] as SerieKey[], points, total: data?.points.length ?? 0 }
+  }, [data, param, windowSize, isRendement])
+
+  const visibleSeries = model.seriesKeys.filter((s) => activeSeries[s])
+  const hasAnyData = (data?.points.length ?? 0) > 0 || (data?.rolls.length ?? 0) > 0
+  const hasCurrent = model.points.some((p) => p.isCurrent)
+  const unitWord = (count: number) => (model.unit === 'roll' ? `rouleau${count > 1 ? 'x' : ''}` : `lot${count > 1 ? 's' : ''}`)
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent className="max-w-4xl w-[92vw] h-[82vh] flex flex-col" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 min-w-0">
+            <LineChart className="h-5 w-5 text-accent flex-shrink-0" />
+            <span>Évolution des contrôles</span>
+            {!!data && !!data.reference && (
+              <span className="text-sm font-normal text-muted-foreground truncate">— {data.reference}</span>
+            )}
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="mt-4 flex-1 min-h-0 flex flex-col gap-3">
+          {/* Sous-traitant scope — selectable when several worked on the réf */}
+          {sstOptions.length > 0 && (
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Sous-traitant</span>
+              {sstOptions.length > 1 ? (
+                <PopoverSelect
+                  size="sm"
+                  hideEmpty
+                  options={sstOptions.map((s) => ({ id: s.id, primary: s.nom }))}
+                  value={plottedSstId}
+                  onChange={(id) => setSelectedSstId(id)}
+                />
+              ) : (
+                <span className="text-sm font-medium">{sstOptions[0].nom}</span>
+              )}
+            </div>
+          )}
+
+          {/* Parameter selector */}
+          <div className="flex flex-wrap gap-1">
+            {PARAM_TABS.map((p) => (
+              <button
+                key={p.key}
+                type="button"
+                onClick={() => setParam(p.key)}
+                className={cn(
+                  'px-3 py-1.5 text-xs rounded-md transition-colors',
+                  param === p.key ? 'bg-accent text-accent-foreground shadow-sm font-medium' : 'text-muted-foreground hover:bg-accent/10',
+                )}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Window + series toggles */}
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Fenêtre</span>
+              <div className="flex gap-1">
+                {TREND_WINDOWS.map((w) => (
+                  <button
+                    key={w}
+                    type="button"
+                    onClick={() => setWindowSize(w)}
+                    className={cn(
+                      'px-2.5 py-1 text-xs rounded-md transition-colors tabular-nums',
+                      windowSize === w ? 'bg-accent text-accent-foreground shadow-sm font-medium' : 'text-muted-foreground hover:bg-accent/10',
+                    )}
+                  >
+                    {w}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="flex items-center gap-1">
+              {model.seriesKeys.map((s) => {
+                const meta = SERIE_META[s]
+                const active = activeSeries[s]
+                return (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => setActiveSeries((prev) => ({ ...prev, [s]: !prev[s] }))}
+                    className={cn(
+                      'px-2.5 py-1 text-xs rounded-md border flex items-center gap-1.5 transition-colors',
+                      active ? 'bg-white border-border shadow-sm' : 'border-transparent text-muted-foreground hover:bg-white/60',
+                    )}
+                  >
+                    <span className="h-2 w-2 rounded-full" style={{ background: meta.color, opacity: active ? 1 : 0.35 }} />
+                    {meta.label}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          {/* Chart */}
+          <div className="flex-1 min-h-0 rounded-lg border border-border/60 bg-white p-3 relative">
+            {isLoading ? (
+              <div className="absolute inset-0 flex items-center justify-center">
+                <Loader2 className="h-6 w-6 animate-spin text-accent" />
+              </div>
+            ) : isError ? (
+              <div className="absolute inset-0 flex items-center justify-center text-sm text-destructive">
+                Erreur de chargement
+              </div>
+            ) : !hasAnyData ? (
+              <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground italic px-6 text-center">
+                Aucun lot comparable (même référence et même sous-traitant).
+              </div>
+            ) : model.points.length === 0 ? (
+              <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground italic px-6 text-center">
+                {isRendement ? 'Aucun rouleau reçu pour ce paramètre.' : 'Aucune donnée disponible pour ce paramètre.'}
+              </div>
+            ) : visibleSeries.length === 0 ? (
+              <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground italic">
+                Sélectionnez au moins une série.
+              </div>
+            ) : (
+              <TrendChart points={model.points} seriesKeys={visibleSeries} decimals={model.decimals} />
+            )}
+          </div>
+
+          {hasAnyData && model.points.length > 0 && (
+            <p className="text-[11px] text-muted-foreground flex-shrink-0">
+              {model.points.length} {unitWord(model.points.length)} affiché{model.points.length > 1 ? 's' : ''}
+              {model.total > model.points.length ? ` (sur ${model.total})` : ''}
+              {hasCurrent ? ` · ${model.unit === 'roll' ? 'les rouleaux du lot courant sont cerclés' : 'le lot courant est cerclé'} en or` : ''} · 0 = non mesuré (omis)
+            </p>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function TrendChart({
+  points,
+  seriesKeys,
+  decimals,
+}: {
+  points: ChartPoint[]
+  seriesKeys: SerieKey[]
+  decimals: number
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const [width, setWidth] = useState(0)
+  const [height, setHeight] = useState(0)
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null)
+
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const measure = () => { setWidth(el.clientWidth); setHeight(el.clientHeight) }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  const valOf = (pt: ChartPoint, s: SerieKey): number | null => {
+    const v = pt.values[s]
+    return v != null && v > 0 ? v : null
+  }
+
+  const M = { top: 16, right: 16, bottom: 30, left: 48 }
+  const plotW = Math.max(0, width - M.left - M.right)
+  const plotH = Math.max(0, height - M.top - M.bottom)
+  const n = points.length
+
+  // Y domain across active series (treat 0 / negative as not measured).
+  const allVals: number[] = []
+  for (const pt of points) for (const s of seriesKeys) { const v = valOf(pt, s); if (v != null) allVals.push(v) }
+  const hasData = allVals.length > 0
+  let yMin = hasData ? Math.min(...allVals) : 0
+  let yMax = hasData ? Math.max(...allVals) : 1
+  if (yMin === yMax) { yMin -= 1; yMax += 1 }
+  const yPad = (yMax - yMin) * 0.1
+  yMin -= yPad; yMax += yPad
+
+  const xFor = (i: number) => M.left + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW)
+  const yFor = (v: number) => M.top + plotH - ((v - yMin) / (yMax - yMin)) * plotH
+
+  const pathFor = (s: SerieKey): string => {
+    let d = ''
+    let pen = false
+    points.forEach((pt, i) => {
+      const v = valOf(pt, s)
+      if (v == null) { pen = false; return }
+      d += `${pen ? 'L' : 'M'}${xFor(i).toFixed(1)} ${yFor(v).toFixed(1)} `
+      pen = true
+    })
+    return d.trim()
+  }
+
+  const yTicks = Array.from({ length: 5 }, (_, i) => yMin + (i / 4) * (yMax - yMin))
+  const xTickCount = Math.min(6, n)
+  const xTickIdx = Array.from(
+    new Set(
+      n <= 1 ? [0] : Array.from({ length: xTickCount }, (_, i) => Math.round((i / (xTickCount - 1)) * (n - 1))),
+    ),
+  )
+  // Indices belonging to the current lot (one in lot mode, several in roll mode).
+  const currentIdx: number[] = []
+  points.forEach((p, i) => { if (p.isCurrent) currentIdx.push(i) })
+
+  const handleMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!width || n === 0 || plotW <= 0) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const i = n <= 1 ? 0 : Math.round(((x - M.left) / plotW) * (n - 1))
+    setHoverIdx(Math.max(0, Math.min(n - 1, i)))
+  }
+
+  const muted = 'hsl(var(--muted-foreground))'
+  const border = 'hsl(var(--border))'
+  const accent = 'hsl(var(--accent))'
+  const ready = width > 0 && height > 0
+
+  return (
+    <div ref={wrapRef} className="relative h-full w-full">
+      {ready && (
+        <svg
+          width={width}
+          height={height}
+          onMouseMove={handleMove}
+          onMouseLeave={() => setHoverIdx(null)}
+        >
+          {/* Horizontal gridlines + Y labels */}
+          {yTicks.map((t, i) => {
+            const y = yFor(t)
+            return (
+              <g key={i}>
+                <line x1={M.left} y1={y} x2={M.left + plotW} y2={y} style={{ stroke: border }} strokeWidth={1} strokeDasharray={i === 0 ? undefined : '3 3'} />
+                <text x={M.left - 6} y={y + 3} textAnchor="end" fontSize={10} style={{ fill: muted }}>
+                  {fmtNum(t, decimals)}
+                </text>
+              </g>
+            )
+          })}
+
+          {/* X labels (dates) */}
+          {xTickIdx.map((idx, k) => {
+            const x = xFor(idx)
+            const anchor = k === 0 ? 'start' : k === xTickIdx.length - 1 ? 'end' : 'middle'
+            return (
+              <text key={idx} x={x} y={M.top + plotH + 16} textAnchor={anchor} fontSize={10} style={{ fill: muted }}>
+                {trendDateLabel(points[idx]?.date ?? null)}
+              </text>
+            )
+          })}
+
+          {/* Current-lot guide(s) */}
+          {currentIdx.map((i) => (
+            <line
+              key={`cur-${i}`}
+              x1={xFor(i)} y1={M.top} x2={xFor(i)} y2={M.top + plotH}
+              style={{ stroke: accent }} strokeWidth={1} strokeDasharray="4 3" opacity={0.35}
+            />
+          ))}
+
+          {/* Hover guide */}
+          {hoverIdx != null && (
+            <line x1={xFor(hoverIdx)} y1={M.top} x2={xFor(hoverIdx)} y2={M.top + plotH} style={{ stroke: muted }} strokeWidth={1} opacity={0.4} />
+          )}
+
+          {/* Series lines */}
+          {seriesKeys.map((s) => (
+            <path
+              key={s}
+              d={pathFor(s)}
+              fill="none"
+              style={{ stroke: SERIE_META[s].color }}
+              strokeWidth={1.75}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              strokeDasharray={SERIE_META[s].dashed ? '5 3' : undefined}
+            />
+          ))}
+
+          {/* Series points */}
+          {seriesKeys.map((s) =>
+            points.map((pt, i) => {
+              const v = valOf(pt, s)
+              if (v == null) return null
+              const isCur = pt.isCurrent
+              const isHover = i === hoverIdx
+              return (
+                <circle
+                  key={`${s}-${i}`}
+                  cx={xFor(i)}
+                  cy={yFor(v)}
+                  r={isHover ? 4 : isCur ? 3.5 : 2.25}
+                  style={{ fill: SERIE_META[s].color }}
+                  stroke={isCur ? accent : 'white'}
+                  strokeWidth={isCur ? 2 : isHover ? 1.5 : 0.75}
+                />
+              )
+            }),
+          )}
+        </svg>
+      )}
+
+      {/* Empty-data overlay (axes drawn, but no measured values) */}
+      {ready && !hasData && (
+        <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground italic px-6 text-center">
+          Aucune mesure disponible pour ce paramètre.
+        </div>
+      )}
+
+      {/* Tooltip */}
+      {ready && hasData && hoverIdx != null && (() => {
+        const pt = points[hoverIdx]
+        const x = xFor(hoverIdx)
+        const flip = x > width / 2
+        return (
+          <div
+            className="absolute z-10 pointer-events-none rounded-md border bg-white shadow-md px-2.5 py-1.5 text-xs min-w-[150px]"
+            style={{
+              top: M.top,
+              left: flip ? undefined : Math.min(x + 10, width - 8),
+              right: flip ? Math.min(width - x + 10, width - 8) : undefined,
+            }}
+          >
+            <div className="font-medium truncate">{pt.primary}</div>
+            {!!pt.secondary && <div className="text-[10px] text-muted-foreground truncate">{pt.secondary}</div>}
+            <div className="text-[10px] text-muted-foreground mb-1">{trendDateLabel(pt.date)}</div>
+            {seriesKeys.map((s) => {
+              const v = valOf(pt, s)
+              return (
+                <div key={s} className="flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full flex-shrink-0" style={{ background: SERIE_META[s].color }} />
+                  <span className="text-muted-foreground">{SERIE_META[s].label}</span>
+                  <span className="ml-auto tabular-nums font-medium">{v != null ? fmtNum(v, decimals) : '—'}</span>
+                </div>
+              )
+            })}
+          </div>
+        )
+      })()}
     </div>
   )
 }
@@ -667,6 +1171,7 @@ function RecapSection({ detail }: { detail: SuiviLotDetail }) {
           <RecapField label="Référence" value={detail.reference || '—'} />
           <RecapField label="Coloris" value={detail.coloris || '—'} />
           <RecapField label="Numéro de lot" value={detail.lot || '—'} />
+          {!!detail.client?.nom && <RecapField label="Client final" value={detail.client.nom} />}
         </div>
         {!!detail.commentaire?.trim() && (
           <div className="mt-3 pt-3 border-t border-border/50">
@@ -678,7 +1183,7 @@ function RecapSection({ detail }: { detail: SuiviLotDetail }) {
         <div className="mt-3 pt-3 border-t border-border/50 grid grid-cols-2 sm:grid-cols-6 gap-2">
           <SpecStat label="Laize" value={fmtNum(detail.laize_demandee)} />
           <SpecStat label="Poids" value={fmtNum(detail.poids_demande)} />
-          <SpecStat label="Freinte" value={fmtNum(detail.freinte_demandee, 2)} suffix="%" />
+          <SpecStat label="Freinte" value={fmtNum(detail.freinte_demandee * 100, 0)} suffix="%" />
           <SpecStat label="Rendement" value={fmtNum(detail.rendement_demande, 2)} highlight />
           <SpecStat label="Stab H" value={fmtNum(detail.stabH_demandee)} />
           <SpecStat label="Stab L" value={fmtNum(detail.stabL_demandee)} />
@@ -1035,8 +1540,6 @@ function ControlesTab({
       <SidebarCard title="Sous-Traitant" icon={<Factory className="h-3.5 w-3.5 text-accent" />} highlight={isEditing}>
         <KVNum label="Laize" field="laize_sst" detailVal={detail.laize_sst} conformKind="laize" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
         <KVNum label="Poids" field="poids_sst" detailVal={detail.poids_sst} conformKind="poids" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
-        {/* Freinte is computed (legacy formula), not stored — see API. Read-only. */}
-        <KV label="Freinte" value={`${fmtNum(detail.freinte_sst * 100, 0)} %`} />
         <KVNum label="Stab H" field="stabH_sst" detailVal={detail.stabH_sst} conformKind="stabH" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
         <KVNum label="Stab L" field="stabL_sst" detailVal={detail.stabL_sst} conformKind="stabL" bounds={bounds} isEditing={isEditing} edit={edit} onEditField={onEditField} />
       </SidebarCard>

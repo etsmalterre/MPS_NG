@@ -45,6 +45,30 @@ row. We NEVER name `archivé`/`bloqué` in a SELECT list. Accented text VALUES (
 designation_client / ref_client_colori columns were reconstructed from the legacy schema. (Memory:
 `project_clients_gestion_screen.md`.)
 
+## 2026-06-24 — feat/suivilot (graphique d'évolution + freinte)
+Qualité › Suivi des lots — freinte corrections, end-customer in the récap, and a new
+"Graphique" trend modal. **(1) Freinte fixes**: the main-area spec-banner *Freinte* showed
+`freinte_demandee` raw (`0,12 %`) — it's a stored fraction like `ref_fini.freinte`, now ×100
+(→ 12 %). The computed `freinte_sst` (`1 − (poids_sst·laize_sst/100000)·moyenne_rdt`) was
+**removed from the Sous-Traitant Contrôles panel** — it's only an internal-consistency check
+between three measurements of the same fabric (≈0 when measured correctly, ambiguous otherwise),
+not a real yield loss; the API still computes/returns it (unused by the UI — do not re-add). **(2)
+Récap**: *Récapitulatif de la commande* now shows **Client final** (end customer) when the sst
+order links to a `commande_client` → `client` (data already plumbed; no backend change). **(3)
+Graphique modal**: a `LineChart` icon button left of Modifier (view mode, visible to all — read-only,
+not gated on `responsable_qualite`) opens a self-contained SVG line chart (no charting dependency).
+New endpoint `GET /suivi-lots/:id/serie?sst=<id>` (suivi-lots.ts) scoped to **same `IDref_fini`** +
+a **selectable sous-traitant** (`?sst`, defaults to the lot's own); `SELECT TOP 200 * FROM suivilot
+… ORDER BY DATE DESC` reversed to oldest→newest, SELECT * + prefix-regex extraction (never names
+accented `*_demandée` cols). **Granularity differs by parameter**: *Rendement* is plotted **per roll**
+(each `stock_fini` rdt = metrage/poids, with the lot's target as a reference line), *Laize / Poids /
+Stab H / Stab L* **per lot** (SST + Tirelle + Demandé). Response returns `points[]` (per-lot),
+`rolls[]` (per-roll, capped 200), and `sous_traitants[]` (every sst that worked on the réf, for the
+selector — shown only when >1). Chart UI: param tabs × series toggles × window (50/100/200 = rolls
+for rendement, lots otherwise); `0 = non mesuré` omitted; current lot's point(s) cerclé(s) en or when
+viewing its own sst. `keepPreviousData` avoids flicker on sst switch. See memory
+`project_suivilot_graph_freinte`.
+
 ## 2026-06-24 — feat/suivilot
 Qualité › Suivi des lots — workflow reform + Contrôles UX, plus a cross-screen cache fix.
 **(1) Header cleanup**: removed the non-functional print + email (@) buttons (and their placeholder
