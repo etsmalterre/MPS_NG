@@ -1,8 +1,10 @@
 // PDF document for a client "Devis" (quotation). Renders inside the shared
-// MalterreDocument frame. Mirrors CommandeClientPdf: a header with the client +
-// billing/delivery addresses + payment terms (and the devis validity date), a
-// lines table (ref/coloris · qté+unité · prix u. · montant · livraison), and a
-// totals block (HT, remise, frais de port, TVA, TTC).
+// MalterreDocument frame. Mirrors CommandeClientPdf: a header with the client
+// (billing) address + payment terms (and the devis validity date), a lines
+// table (ref/coloris · qté+unité · prix u. · montant · livraison), the delivery
+// address as a box below the table, and a totals block (HT, remise, frais de
+// port, TVA, TTC). Keeping the delivery address out of the header keeps the
+// header compact.
 //
 // NOTE: devis_etm.remise is a FRACTION (0.05 = 5%), unlike commande_client where
 // it's a euro amount — so the remise line shows the percentage and its computed
@@ -12,12 +14,11 @@ import React from 'react'
 import { View, Text, StyleSheet } from '@react-pdf/renderer'
 import {
   MalterreDocument,
-  AddressCard,
   CreditCardIcon,
   CalendarIcon,
   TruckIcon,
   MessageSquareIcon,
-  type AddressBlockData,
+  UserIcon,
 } from './MalterreDocument.js'
 import { colors, sizes } from './theme.js'
 
@@ -70,9 +71,13 @@ function fmtNum(value: number | null | undefined, decimals = 0): string {
 }
 
 const styles = StyleSheet.create({
-  topRow: { flexDirection: 'row', gap: 14, marginBottom: 16, alignItems: 'stretch' },
+  // Two compact header cards side-by-side. Both share the same tight padding so
+  // the row stays short — the client address (left) drives the height, so it is
+  // rendered with a tight line-height; conditions (right) sit in a 2-column grid
+  // so they never push the row taller than the address.
+  topRow: { flexDirection: 'row', gap: 12, marginBottom: 14, alignItems: 'stretch' },
   topRowSlot: { flex: 1, flexDirection: 'column' },
-  comboCard: {
+  headerCard: {
     flexGrow: 1,
     backgroundColor: colors.bgCream,
     borderWidth: 0.75,
@@ -82,17 +87,20 @@ const styles = StyleSheet.create({
     borderLeftColor: colors.gold,
     borderLeftStyle: 'solid',
     borderRadius: 6,
-    padding: 14,
+    padding: 10,
   },
-  comboMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 3 },
-  comboMetaIconBox: { width: 14, height: 14, alignItems: 'center', justifyContent: 'center' },
-  comboMetaLabel: { fontSize: sizes.fontBase, color: colors.muted, fontWeight: 700, flex: 1 },
-  comboMetaValue: { fontSize: sizes.fontBase, color: colors.text, fontWeight: 700, textAlign: 'right' },
-  comboDivider: { height: 0.75, backgroundColor: colors.borderStrong, marginVertical: 10 },
-  comboCardHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
-  comboCardTitle: { fontSize: sizes.fontXs, color: colors.primary, fontWeight: 900, letterSpacing: 0.5 },
-  comboCardName: { fontSize: sizes.fontBase, fontWeight: 900, color: colors.text, marginBottom: 1 },
-  comboCardLine: { fontSize: sizes.fontBase, color: colors.text, lineHeight: 1.4 },
+  cardHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 4 },
+  cardTitle: { fontSize: sizes.fontXs, color: colors.primary, fontWeight: 900, letterSpacing: 0.5 },
+  cardName: { fontSize: sizes.fontBase, fontWeight: 900, color: colors.text, marginBottom: 1 },
+  cardLine: { fontSize: sizes.fontBase, color: colors.text, lineHeight: 1.25 },
+
+  // Conditions as a 2-column grid (label/value pairs), tighter than the old
+  // icon+row stack.
+  metaGrid: { flexDirection: 'row', flexWrap: 'wrap' },
+  metaCell: { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 2 },
+  metaIconBox: { width: 12, height: 12, alignItems: 'center', justifyContent: 'center' },
+  metaLabel: { fontSize: sizes.fontXs, color: colors.muted, fontWeight: 700, flex: 1 },
+  metaValue: { fontSize: sizes.fontXs, color: colors.text, fontWeight: 700, textAlign: 'right' },
 
   table: {
     marginBottom: 8,
@@ -156,6 +164,26 @@ const styles = StyleSheet.create({
   grandLabel: { fontSize: sizes.fontLg, color: colors.primary, fontWeight: 900, letterSpacing: 0.4 },
   grandValue: { fontSize: sizes.fontLg, color: colors.primary, fontWeight: 900, textAlign: 'right' },
 
+  // Grows to fill the empty vertical space, pushing the delivery address block
+  // down to sit just above the footer band.
+  bottomSpacer: { flexGrow: 1, minHeight: 16 },
+  livraisonBox: {
+    alignSelf: 'flex-start',
+    minWidth: '52%',
+    marginTop: 12,
+    padding: 12,
+    backgroundColor: colors.bgCream,
+    borderWidth: 0.75,
+    borderColor: colors.borderStrong,
+    borderStyle: 'solid',
+    borderLeftWidth: 2,
+    borderLeftColor: colors.gold,
+    borderLeftStyle: 'solid',
+    borderRadius: 6,
+  },
+  livraisonHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
+  livraisonTitle: { fontSize: sizes.fontXs, color: colors.primary, fontWeight: 900, letterSpacing: 0.5 },
+
   commentaireBottom: { marginTop: 24 },
   commentaireBox: {
     flexShrink: 0,
@@ -174,7 +202,7 @@ const styles = StyleSheet.create({
   commentaireText: { fontSize: sizes.fontBase, color: colors.text, lineHeight: 1.45 },
 })
 
-function buildClientAddress(data: DevisEtmPdfData): AddressBlockData {
+function buildClientAddress(data: DevisEtmPdfData): { name: string; lines: string[] } {
   const a = data.adresseFacturation
   const lines: string[] = []
   if (a) {
@@ -186,7 +214,7 @@ function buildClientAddress(data: DevisEtmPdfData): AddressBlockData {
     if (cityLine) lines.push(cityLine)
     if (a.pays) lines.push(a.pays)
   }
-  return { title: 'Client', name: data.clientNom, lines, icon: 'user' }
+  return { name: data.clientNom, lines }
 }
 
 function buildLivraisonLines(data: DevisEtmPdfData): { name: string; lines: string[] } {
@@ -227,51 +255,58 @@ export function DevisEtmPdf({ data }: { data: DevisEtmPdfData }) {
       documentDate={data.dateDevis || ''}
       title={`Devis ${data.numero}`}
     >
-      {/* Top row: client (billing) on the left; a combo card on the right with
-          payment terms + validity date + delivery address. */}
+      {/* Top row: client (billing) on the left; conditions on the right. The
+          delivery address moved to the bottom of the page (above the footer) so
+          these two cards stay short. */}
       <View style={styles.topRow}>
         <View style={styles.topRowSlot}>
-          <AddressCard data={clientAddress} stretch />
+          <View style={styles.headerCard}>
+            <View style={styles.cardHeaderRow}>
+              <UserIcon />
+              <Text style={styles.cardTitle}>CLIENT</Text>
+            </View>
+            {clientAddress.name ? <Text style={styles.cardName}>{clientAddress.name}</Text> : null}
+            {clientAddress.lines.map((l, i) => (
+              <Text key={i} style={styles.cardLine}>{l}</Text>
+            ))}
+          </View>
         </View>
         <View style={styles.topRowSlot}>
-          <View style={styles.comboCard}>
-            {data.refClient ? (
-              <View style={styles.comboMetaRow}>
-                <View style={styles.comboMetaIconBox}><MessageSquareIcon /></View>
-                <Text style={styles.comboMetaLabel}>Réf. client</Text>
-                <Text style={styles.comboMetaValue}>{data.refClient}</Text>
-              </View>
-            ) : null}
-            {data.dateExpiration ? (
-              <View style={styles.comboMetaRow}>
-                <View style={styles.comboMetaIconBox}><CalendarIcon /></View>
-                <Text style={styles.comboMetaLabel}>Validité jusqu'au</Text>
-                <Text style={styles.comboMetaValue}>{data.dateExpiration}</Text>
-              </View>
-            ) : null}
-            {data.modePaiement ? (
-              <View style={styles.comboMetaRow}>
-                <View style={styles.comboMetaIconBox}><CreditCardIcon /></View>
-                <Text style={styles.comboMetaLabel}>Mode de paiement</Text>
-                <Text style={styles.comboMetaValue}>{data.modePaiement}</Text>
-              </View>
-            ) : null}
-            {data.echeance ? (
-              <View style={styles.comboMetaRow}>
-                <View style={styles.comboMetaIconBox}><CalendarIcon /></View>
-                <Text style={styles.comboMetaLabel}>Échéance</Text>
-                <Text style={styles.comboMetaValue}>{data.echeance}</Text>
-              </View>
-            ) : null}
-            <View style={styles.comboDivider} />
-            <View style={styles.comboCardHeader}>
-              <TruckIcon />
-              <Text style={styles.comboCardTitle}>ADRESSE DE LIVRAISON</Text>
+          <View style={styles.headerCard}>
+            <View style={styles.cardHeaderRow}>
+              <CreditCardIcon />
+              <Text style={styles.cardTitle}>CONDITIONS</Text>
             </View>
-            {livraison.name ? <Text style={styles.comboCardName}>{livraison.name}</Text> : null}
-            {livraison.lines.map((l, i) => (
-              <Text key={i} style={styles.comboCardLine}>{l}</Text>
-            ))}
+            <View style={styles.metaGrid}>
+              {data.refClient ? (
+                <View style={styles.metaCell}>
+                  <View style={styles.metaIconBox}><MessageSquareIcon size={10} /></View>
+                  <Text style={styles.metaLabel}>Réf. client</Text>
+                  <Text style={styles.metaValue}>{data.refClient}</Text>
+                </View>
+              ) : null}
+              {data.dateExpiration ? (
+                <View style={styles.metaCell}>
+                  <View style={styles.metaIconBox}><CalendarIcon size={10} /></View>
+                  <Text style={styles.metaLabel}>Validité jusqu'au</Text>
+                  <Text style={styles.metaValue}>{data.dateExpiration}</Text>
+                </View>
+              ) : null}
+              {data.modePaiement ? (
+                <View style={styles.metaCell}>
+                  <View style={styles.metaIconBox}><CreditCardIcon size={10} /></View>
+                  <Text style={styles.metaLabel}>Mode de paiement</Text>
+                  <Text style={styles.metaValue}>{data.modePaiement}</Text>
+                </View>
+              ) : null}
+              {data.echeance ? (
+                <View style={styles.metaCell}>
+                  <View style={styles.metaIconBox}><CalendarIcon size={10} /></View>
+                  <Text style={styles.metaLabel}>Échéance</Text>
+                  <Text style={styles.metaValue}>{data.echeance}</Text>
+                </View>
+              ) : null}
+            </View>
           </View>
         </View>
       </View>
@@ -338,6 +373,21 @@ export function DevisEtmPdf({ data }: { data: DevisEtmPdfData }) {
           <Text style={styles.commentaireText}>{data.commentaire.trim()}</Text>
         </View>
       )}
+
+      {/* Spacer grows to push the delivery address to the bottom of the page,
+          just above the footer band. */}
+      <View style={styles.bottomSpacer} />
+
+      <View style={styles.livraisonBox} wrap={false}>
+        <View style={styles.livraisonHeaderRow}>
+          <TruckIcon />
+          <Text style={styles.livraisonTitle}>ADRESSE DE LIVRAISON</Text>
+        </View>
+        {livraison.name ? <Text style={styles.cardName}>{livraison.name}</Text> : null}
+        {livraison.lines.map((l, i) => (
+          <Text key={i} style={styles.cardLine}>{l}</Text>
+        ))}
+      </View>
     </MalterreDocument>
   )
 }

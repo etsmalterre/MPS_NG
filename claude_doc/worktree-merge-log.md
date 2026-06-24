@@ -10,7 +10,15 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
-## 2026-06-24 — feat/rapport
+## 2026-06-24 — feat/devis
+Clients › Devis PDF (`apps/api/src/lib/pdf/DevisEtmPdf.tsx`) — header height reduction + delivery-address
+relocation. The delivery address (`ADRESSE DE LIVRAISON`) was removed from the top-right combo card and now
+renders as its own gold-accent box pinned to the **bottom** of the page, just above the footer band — pushed
+down by a `flexGrow` `bottomSpacer`. The top row was reorganized into two tighter cards (`CLIENT` left,
+`CONDITIONS` right) sharing a compact `headerCard` style (padding 14→10, tighter line-height, conditions as
+a tight label/value grid with 10px icons) so the header band is noticeably shorter. The old `comboCard`/
+`AddressCard` usage was dropped in favor of local compact card markup; `buildClientAddress` now returns a
+plain `{ name, lines }` shape. No API/data changes — pure PDF layout.
 Rapports › Commandes sous-traitants — Excel export date-sort fix (`apps/web/src/pages/RapportCommandesSst.tsx`).
 The five date columns (Date commande, Délai initial, Délai actuel, Délai client, Relance) were exported as
 French **text** strings (`"24/06/2026"`), so Excel sorted them lexically (by day-of-month) instead of
