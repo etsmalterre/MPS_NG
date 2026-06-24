@@ -10,6 +10,22 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-24 — feat/gestion-client
+Clients › Gestion (`apps/web/src/pages/ClientsGestion.tsx` + `apps/api/src/routes/clients.ts`, wired in
+`router.tsx` replacing the placeholder and `index.ts` under `/api/clients`) — the legacy "Gestion Client"
+screen. Master-detail over the `client` table (32 cols) with an **Info / Contacts / Adresses** identity
+side and commercial sub-views **Références (catalogue) / Historique (commandes) / Marchandise (expéditions)
+/ Tarif (PrixDeVente)**. Contacts/adresses are the shared polymorphic tables keyed on `IDclient`. **HFSQL
+rules baked in**: `SELECT * FROM client` returns 0 rows on the Windows ODBC driver, so Windows names an
+explicit non-accented column list and reads the archive flag via a separate `WHERE archivé = 1` query
+(WHERE tolerates the accent); Linux uses `SELECT *` and reads the truncated key (`archiv`/`bloqu`) off the
+row. We NEVER name `archivé`/`bloqué` in a SELECT list. Accented text VALUES (client names like "Amalthée",
+"37 Degrés") are written as Latin-1 hex literals via `sqlText()`. INSERT sets `IDsociete = 1` (ETM);
+`archivé`/`bloqué` left to HFSQL defaults. Reused the proven client-read pattern from `etudes-coloris.ts` /
+`commandes-client.ts` and mirrored `fournisseurs.ts` for CRUD + contacts/adresses. The expedition /
+designation_client / ref_client_colori columns were reconstructed from the legacy schema. (Memory:
+`project_clients_gestion_screen.md`.)
+
 ## 2026-06-24 — feat/suivilot
 Qualité › Suivi des lots — workflow reform + Contrôles UX, plus a cross-screen cache fix.
 **(1) Header cleanup**: removed the non-functional print + email (@) buttons (and their placeholder
@@ -59,7 +75,6 @@ build clean.
 
 ## 2026-06-24 — feat/devis
 Clients › Devis (`apps/web/src/pages/ClientsDevis.tsx` + `apps/api/src/routes/devis.ts` + `apps/api/src/lib/pdf/DevisEtmPdf.tsx`, registered at `/api/devis`, route `/clients/devis`) — the ETM client quotations screen (`devis_etm`/`ligne_devis_etm`), ported from the legacy `FI_Devis_ETM`. Mirrors Clients › Commandes (master-detail, Info/Adresses/Docs/Historique tabs, En cours/Soldé footer pill, PDF, Gmail send, ged documents, unsaved-guard) but a devis never reserves stock, so there is **no affectation drawer**. Key model facts (verified against live HFSQL): scope is **`IDprospect = 0`** (client devis; `devis_etm` has **no `IDsociete`**); `numero` = global `MAX(numero)+1`; **`date` is a reserved column** (reads back as `DATE`, written bare) plus a real **`date_expiration`** (drives list urgency); **`remise` is a fraction** (0.05 = 5%), shown/edited as a % and applied as `Σ(qty×prix)×(1−remise)+frais_port`; lines are type 2=fini / 3=divers (with `IDref_ecru` resolved from the fini ref and stored so the legacy app still reads them); never name accented `archivé`/`delai_annoncé`/`déverrouiller`. **Pricing**: a `GET /devis/pricing/suggest` endpoint reuses the ported `PrixDeVenteV4` (`calcTarifRefFini`) to auto-fill an empty line price (editable hint, finished refs only); the client-contract `contrat_tarif`/`tranche_tarifaire` layer is deferred. **Passer en commande**: `POST /devis/:id/convert` creates a `commande_client` + lines, marks the devis soldé, and back-links `devis_etm.IDcommande_ETM` (re-convert blocked). Documents/historique/email key on **`type_doc = 28`** ("devis"); ged docs discriminate on `IDreference=devisId AND IDtype_doc=28` (collision-free, no devis FK on `ged`); email "selected" bucket = `contact.envoi_soumission`. Deferred: read-only "Stock disponible" panel and the full contract-pricing layer. Verified end-to-end (list matches the legacy 7 open devis exactly, N°178 total 803.04 € identical, full create→line→convert→delete round-trip cleaned up). New file `apps/web/src/pages/ClientsDevis.tsx`; replaced the `ClientsDevisPage` placeholder in `router.tsx`.
-
 ## 2026-06-24 — feat/rapport
 Rapports › Commandes sst (`apps/web/src/pages/RapportCommandesSst.tsx` + `apps/api/src/routes/rapports.ts`) —
 added a **Journal** column and corrected the **Commentaire** column source. **(1) Journal column**: surfaces

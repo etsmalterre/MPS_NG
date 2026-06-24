@@ -3,7 +3,6 @@ import { AppShell } from '@/components/layout/AppShell'
 import { PagePlaceholder } from '@/components/shared/PagePlaceholder'
 import { Dashboard } from '@/pages/Dashboard'
 import {
-  Users,
   ShoppingCart,
   FileText,
   Truck,
@@ -31,8 +30,7 @@ function createPlaceholder(title: string, description: string, Icon: LucideIcon)
   }
 }
 
-// Client pages
-const ClientsGestionPage = createPlaceholder('Gestion Clients', 'Gérez votre portefeuille clients', Users)
+// Client pages — all real now (Commandes, Devis, Facturation, Gestion)
 
 // Fils placeholder (prévisions only — other Fils sub-screens are real)
 const FilsPrevisionsPage = createPlaceholder('Prévisions Fournisseurs', 'Prévisions d\'approvisionnement fournisseurs', FileText)
@@ -59,6 +57,7 @@ import { FilsCommandes } from '@/pages/FilsCommandes'
 import { ClientsCommandes } from '@/pages/ClientsCommandes'
 import { ClientsFacturation } from '@/pages/ClientsFacturation'
 import { ClientsDevis } from '@/pages/ClientsDevis'
+import { ClientsGestion } from '@/pages/ClientsGestion'
 
 // Sous-traitants pages (real)
 import { SousTraitantsCommandes } from '@/pages/SousTraitantsCommandes'
@@ -105,7 +104,7 @@ export const router = createBrowserRouter([
       { path: 'clients/commandes', element: <ClientsCommandes /> },
       { path: 'clients/devis', element: <ClientsDevis /> },
       { path: 'clients/facturation', element: <ClientsFacturation /> },
-      { path: 'clients/gestion', element: <ClientsGestionPage /> },
+      { path: 'clients/gestion', element: <ClientsGestion /> },
 
       // Sous-traitants
       { path: 'sous-traitants', element: <Navigate to="/sous-traitants/commandes" replace /> },

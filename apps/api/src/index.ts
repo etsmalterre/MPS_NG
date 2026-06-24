@@ -17,6 +17,7 @@ import { commandesSousTraitantRouter } from './routes/commandes-sous-traitant.js
 import { commandesClientRouter } from './routes/commandes-client.js'
 import { facturesRouter } from './routes/factures.js'
 import { devisRouter } from './routes/devis.js'
+import { clientsRouter } from './routes/clients.js'
 import { sousTraitantsRouter } from './routes/sous-traitants.js'
 import { etudesColorisRouter } from './routes/etudes-coloris.js'
 import { prospectsRouter } from './routes/prospects.js'
@@ -72,6 +73,7 @@ app.use('/api/commandes-sous-traitant', commandesSousTraitantRouter)
 app.use('/api/commandes-client', commandesClientRouter)
 app.use('/api/factures', facturesRouter)
 app.use('/api/devis', devisRouter)
+app.use('/api/clients', clientsRouter)
 app.use('/api/sous-traitants', sousTraitantsRouter)
 app.use('/api/etudes-coloris', etudesColorisRouter)
 app.use('/api/prospects', prospectsRouter)
