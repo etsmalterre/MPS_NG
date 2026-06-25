@@ -885,10 +885,35 @@ function LignesSection({
     ? commande.lignes.find((l) => l.IDligne_commande_client === affectationLineId) ?? null
     : null
 
+  // When a line's drawer opens, collapse the list to that line's height and slide it
+  // up to the top so the drawer claims all the space below it; closing restores the
+  // full list and scrolls back to the original top.
+  const listScrollRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const container = listScrollRef.current
+    if (!container) return
+    if (affectationLineId !== null && !isEditing) {
+      const raf = requestAnimationFrame(() => {
+        const el = container.querySelector(`[data-line-id="${affectationLineId}"]`) as HTMLElement | null
+        if (!el) return
+        const cs = getComputedStyle(container)
+        const padTop = parseFloat(cs.paddingTop) || 0
+        const padBottom = parseFloat(cs.paddingBottom) || 0
+        // Shrink the viewport to one line so the chosen line can pin to the very top.
+        container.style.maxHeight = `${el.offsetHeight + padTop + padBottom}px`
+        const delta = el.getBoundingClientRect().top - container.getBoundingClientRect().top - padTop
+        container.scrollBy({ top: delta, behavior: 'smooth' })
+      })
+      return () => cancelAnimationFrame(raf)
+    }
+    container.style.maxHeight = ''
+    container.scrollTo({ top: 0, behavior: 'smooth' })
+  }, [affectationLineId, isEditing])
+
   return (
     <>
       <div className="flex-1 min-h-0 flex flex-col">
-        <div className={cn('overflow-auto space-y-2 p-1 scrollbar-transparent', drawerOpen ? 'flex-shrink-0 max-h-[40%]' : 'flex-1 min-h-0')}>
+        <div ref={listScrollRef} className={cn('overflow-auto space-y-2 p-1 scrollbar-transparent transition-[max-height] duration-200', drawerOpen ? 'flex-shrink-0 max-h-[40%]' : 'flex-1 min-h-0')}>
           {commande.lignes.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
               <Layers className="h-12 w-12 mb-3 opacity-40" />
@@ -993,6 +1018,7 @@ function LineCard({
 
   return (
     <div
+      data-line-id={line.IDligne_commande_client}
       className={cn(
         'group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3',
         border,
