@@ -10,6 +10,11 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-25 — feat/stock-finis
+Finis › Stock table (`apps/web/src/pages/FinisStock.tsx`) — cosmetic weight fix. The Poids column cell in
+`StockRow` carried a `font-medium` class that bolded every weight value relative to the surrounding columns.
+Removed it so the Poids values render at normal weight, consistent with the rest of the table row.
+
 ## 2026-06-24 — feat/devis
 Clients › Devis PDF (`apps/api/src/lib/pdf/DevisEtmPdf.tsx`) — header height reduction + delivery-address
 relocation. The delivery address (`ADRESSE DE LIVRAISON`) was removed from the top-right combo card and now

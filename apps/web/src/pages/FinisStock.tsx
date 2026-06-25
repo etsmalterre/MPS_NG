@@ -1635,7 +1635,7 @@ const StockRow = memo(function StockRow({
       <td className="px-2 py-1.5 truncate text-muted-foreground" title={row.contexture_nom ?? undefined}>{row.contexture_nom ?? '—'}</td>
       <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">{formatGrammage(row.grammage)}</td>
       <td className="px-2 py-1.5 tabular-nums truncate text-muted-foreground">{row.numero ?? '—'}</td>
-      <td className="px-2 py-1.5 text-right tabular-nums font-medium">{formatKg(row.poids)}</td>
+      <td className="px-2 py-1.5 text-right tabular-nums">{formatKg(row.poids)}</td>
       <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">{formatMeters(row.metrage)}</td>
       <td className="px-2 py-1.5 tabular-nums truncate">{row.lot ?? '—'}</td>
       <td className="px-2 py-1.5 truncate" title={row.client_nom ?? undefined}>{row.client_nom ?? '—'}</td>
