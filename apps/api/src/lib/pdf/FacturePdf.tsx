@@ -33,6 +33,9 @@ export interface FacturePdfData {
   numero: string
   /** 1 = Facture, 2 = Avoir. */
   type: number
+  /** When true, render as a proforma (draft): "Facture proforma" title + a
+   *  non-contractual mention. The numero is the proforma sequence number. */
+  isProforma?: boolean
   /** "25 mars 2026" — long-form French. */
   dateFacture: string
   clientNom: string
@@ -139,6 +142,8 @@ const styles = StyleSheet.create({
   },
   grandLabel: { fontSize: sizes.fontLg, color: colors.primary, fontWeight: 900, letterSpacing: 0.4 },
   grandValue: { fontSize: sizes.fontLg, color: colors.primary, fontWeight: 900, textAlign: 'right' },
+
+  proformaMention: { marginTop: 10, fontSize: sizes.fontSm, color: colors.muted, fontWeight: 700, letterSpacing: 0.3 },
 })
 
 function buildClientAddress(data: FacturePdfData): AddressBlockData {
@@ -158,7 +163,9 @@ function buildClientAddress(data: FacturePdfData): AddressBlockData {
 
 export function FacturePdf({ data }: { data: FacturePdfData }) {
   const isAvoir = Number(data.type) === 2
-  const docWord = isAvoir ? 'Avoir' : 'Facture'
+  const isProforma = data.isProforma === true
+  const baseWord = isAvoir ? 'Avoir' : 'Facture'
+  const docWord = isProforma ? `${baseWord} proforma` : baseWord
   const clientAddress = buildClientAddress(data)
 
   const totalHT = data.lignes.reduce((s, l) => s + (Number(l.montant) || 0), 0)
@@ -248,6 +255,12 @@ export function FacturePdf({ data }: { data: FacturePdfData }) {
           </View>
         </View>
       </View>
+
+      {isProforma ? (
+        <Text style={styles.proformaMention}>
+          Document non contractuel — ne tient pas lieu de facture.
+        </Text>
+      ) : null}
     </MalterreDocument>
   )
 }

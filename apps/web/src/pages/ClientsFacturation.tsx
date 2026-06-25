@@ -16,12 +16,14 @@ import {
   X,
   Save,
   Trash2,
-  MessageSquare,
   AtSign,
   Printer,
-  FileText,
   Layers,
   CheckCircle2,
+  FileCheck,
+  Lock,
+  FileText,
+  ArrowRight,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -37,8 +39,14 @@ import { postEmail } from '@/lib/email'
 
 // ── Types ──────────────────────────────────────────────
 
+// 'prov' = proforma (editable draft, facture_prov) · 'def' = definitive
+// (locked, facture). The list shows one bucket at a time; selection lives
+// within the current bucket, so kind === bucket everywhere.
+type Kind = 'prov' | 'def'
+
 interface FactureListRow {
-  IDfacture: number
+  id: number
+  kind: Kind
   numero: number | null
   date: string | null
   IDclient: number
@@ -49,6 +57,9 @@ interface FactureListRow {
   total_tva: number
   total_ttc: number
   nb_lignes: number
+  converted: boolean
+  IDfacture_def: number
+  numero_def: number | null
 }
 
 interface LigneFacture {
@@ -78,7 +89,11 @@ interface AdresseLookup extends AdresseLite {
 }
 
 interface FactureDetail {
-  IDfacture: number
+  id: number
+  kind: Kind
+  converted: boolean
+  IDfacture_def: number
+  numero_def: number | null
   IDclient: number
   client_nom: string
   numero: number | null
@@ -138,6 +153,7 @@ function formatDateTime(raw: string): string {
 
 export function ClientsFacturation() {
   const queryClient = useQueryClient()
+  const [bucket, setBucket] = useState<Kind>('def')
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [debouncedQuery, setDebouncedQuery] = useState('')
@@ -147,6 +163,8 @@ export function ClientsFacturation() {
   const [emailModalOpen, setEmailModalOpen] = useState(false)
   const [autoEditForId, setAutoEditForId] = useState<number | null>(null)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+  const [convertConfirmOpen, setConvertConfirmOpen] = useState(false)
+  const [convertResult, setConvertResult] = useState<{ numero: number } | null>(null)
 
   // Edit-mode header draft.
   const [editDate, setEditDate] = useState('')
@@ -166,23 +184,26 @@ export function ClientsFacturation() {
   }, [searchQuery])
 
   const { data: factures, isLoading, isError, error } = useQuery<FactureListRow[]>({
-    queryKey: ['factures', typeFilter, debouncedQuery],
-    queryFn: () => apiFetch(`/factures?type=${typeFilter}&q=${encodeURIComponent(debouncedQuery)}&limit=200`),
+    queryKey: ['factures', bucket, typeFilter, debouncedQuery],
+    queryFn: () => apiFetch(`/factures?status=${bucket}&type=${typeFilter}&q=${encodeURIComponent(debouncedQuery)}&limit=200`),
   })
 
   const { data: detail, isLoading: detailLoading } = useQuery<FactureDetail>({
-    queryKey: ['facture', selectedId],
-    queryFn: () => apiFetch(`/factures/${selectedId}`),
+    queryKey: ['facture', bucket, selectedId],
+    queryFn: () => apiFetch(`/factures/${bucket}/${selectedId}`),
     enabled: selectedId !== null,
   })
 
+  // A proforma is editable only while it is still open (not converted).
+  const editable = !!detail && detail.kind === 'prov' && !detail.converted
+
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['factures'] })
-    queryClient.invalidateQueries({ queryKey: ['facture', selectedId] })
-  }, [queryClient, selectedId])
+    queryClient.invalidateQueries({ queryKey: ['facture', bucket, selectedId] })
+  }, [queryClient, bucket, selectedId])
 
   const startEdit = useCallback(() => {
-    if (!detail) return
+    if (!detail || detail.kind !== 'prov' || detail.converted) return
     const snapshot = {
       date: hfsqlDateToInput(detail.date),
       type: detail.type ?? 1,
@@ -221,7 +242,7 @@ export function ClientsFacturation() {
   }, [isEditing, editDate, editType, editIDModePaiement, editIDEcheance, editIDTva, editNumTva, editIDAdresse, linesDirty])
 
   const saveHeaderMut = useMutation({
-    mutationFn: () => apiFetch(`/factures/${selectedId}`, {
+    mutationFn: () => apiFetch(`/factures/${bucket}/${selectedId}`, {
       method: 'PUT',
       body: JSON.stringify({
         date: inputDateToHfsql(editDate),
@@ -237,19 +258,31 @@ export function ClientsFacturation() {
   })
 
   const deleteMut = useMutation({
-    mutationFn: (id: number) => apiFetch(`/factures/${id}`, { method: 'DELETE' }),
+    mutationFn: (id: number) => apiFetch(`/factures/${bucket}/${id}`, { method: 'DELETE' }),
     onSuccess: (_data, deletedId) => {
-      const cached = queryClient.getQueryData<FactureListRow[]>(['factures', typeFilter, debouncedQuery]) ?? []
-      const remaining = cached.filter((f) => f.IDfacture !== deletedId)
+      const cached = queryClient.getQueryData<FactureListRow[]>(['factures', bucket, typeFilter, debouncedQuery]) ?? []
+      const remaining = cached.filter((f) => f.id !== deletedId)
       queryClient.invalidateQueries({ queryKey: ['factures'] })
       setIsEditing(false)
       setDeleteConfirmOpen(false)
-      setSelectedId(remaining.length > 0 ? remaining[0].IDfacture : null)
+      setSelectedId(remaining.length > 0 ? remaining[0].id : null)
+    },
+  })
+
+  const convertMut = useMutation({
+    mutationFn: (provId: number) => apiFetch(`/factures/prov/${provId}/convert`, { method: 'POST' }),
+    onSuccess: (data: { IDfacture: number; numero: number }) => {
+      queryClient.invalidateQueries({ queryKey: ['factures'] })
+      setConvertConfirmOpen(false)
+      setIsEditing(false)
+      setConvertResult({ numero: data.numero })
+      setBucket('def')
+      setSelectedId(data.IDfacture)
     },
   })
 
   useEffect(() => {
-    if (autoEditForId !== null && detail?.IDfacture === autoEditForId) {
+    if (autoEditForId !== null && detail?.id === autoEditForId && detail.kind === 'prov' && !detail.converted) {
       startEdit()
       setAutoEditForId(null)
     }
@@ -266,16 +299,26 @@ export function ClientsFacturation() {
     guard.guardAction(() => { setIsEditing(false); setSelectedId(id) })
   }, [guard])
 
+  const handleBucketChange = useCallback((b: Kind) => {
+    if (b === bucket) return
+    guard.guardAction(() => { setIsEditing(false); setBucket(b); setSelectedId(null) })
+  }, [guard, bucket])
+
   const handleTypeFilterChange = useCallback((t: 'all' | 'facture' | 'avoir') => {
     guard.guardAction(() => { setIsEditing(false); setTypeFilter(t); setSelectedId(null) })
+  }, [guard])
+
+  // Jump to a definitive facture from a converted proforma's link.
+  const handleViewDefinitive = useCallback((defId: number) => {
+    guard.guardAction(() => { setIsEditing(false); setBucket('def'); setSelectedId(defId) })
   }, [guard])
 
   const rows = factures ?? []
 
   useEffect(() => {
     if (isEditing || rows.length === 0) return
-    const stillVisible = selectedId !== null && rows.some((f) => f.IDfacture === selectedId)
-    if (!stillVisible) setSelectedId(rows[0].IDfacture)
+    const stillVisible = selectedId !== null && rows.some((f) => f.id === selectedId)
+    if (!stillVisible) setSelectedId(rows[0].id)
   }, [rows, selectedId, isEditing])
 
   return (
@@ -291,6 +334,8 @@ export function ClientsFacturation() {
             onSelect={handleSelect}
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
+            bucket={bucket}
+            onBucketChange={handleBucketChange}
             typeFilter={typeFilter}
             onTypeFilterChange={handleTypeFilterChange}
             onNew={() => setCreateOpen(true)}
@@ -302,13 +347,16 @@ export function ClientsFacturation() {
             facture={detail ?? null}
             isLoading={detailLoading && selectedId !== null}
             isEditing={isEditing}
+            editable={editable}
             onStartEdit={startEdit}
             onCancelEdit={cancelEdit}
             onSave={() => saveHeaderMut.mutate()}
             isSaving={saveHeaderMut.isPending}
             onDelete={() => setDeleteConfirmOpen(true)}
-            onPrintClick={() => { if (selectedId !== null) window.open(`${API_URL}/factures/${selectedId}/pdf`, '_blank') }}
+            onPrintClick={() => { if (selectedId !== null) window.open(`${API_URL}/factures/${bucket}/${selectedId}/pdf`, '_blank') }}
             onEmailClick={() => setEmailModalOpen(true)}
+            onConvertClick={() => setConvertConfirmOpen(true)}
+            onViewDefinitive={handleViewDefinitive}
           />
         }
         detail={
@@ -345,34 +393,62 @@ export function ClientsFacturation() {
       <CreateFactureDialog
         open={createOpen}
         onClose={() => setCreateOpen(false)}
-        onCreated={(newId) => {
+        onCreated={(newId, newKind) => {
           setCreateOpen(false)
           queryClient.invalidateQueries({ queryKey: ['factures'] })
+          setBucket(newKind)
           setSelectedId(newId)
-          setAutoEditForId(newId)
+          // Definitive opens read-only; proforma auto-enters edit mode.
+          if (newKind === 'prov') setAutoEditForId(newId)
         }}
       />
 
       <ConfirmDialog
         open={deleteConfirmOpen}
-        title={detail?.type === 2 ? "Supprimer l'avoir" : 'Supprimer la facture'}
-        description="Cette action supprimera le document et toutes ses lignes. Elle est irréversible."
+        title={detail?.type === 2 ? "Supprimer l'avoir proforma" : 'Supprimer le proforma'}
+        description="Ce proforma et toutes ses lignes seront supprimés. Cette action est irréversible."
         confirmLabel="Supprimer"
         isPending={deleteMut.isPending}
         onCancel={() => setDeleteConfirmOpen(false)}
         onConfirm={() => { if (selectedId !== null) deleteMut.mutate(selectedId) }}
       />
 
-      {selectedId !== null && (
+      <ConfirmDialog
+        open={convertConfirmOpen}
+        variant="default"
+        title="Convertir en facture"
+        description="Une facture définitive sera créée à partir de ce proforma, avec un numéro de facture officiel. Le proforma sera conservé en lecture seule."
+        confirmLabel="Convertir"
+        isPending={convertMut.isPending}
+        onCancel={() => setConvertConfirmOpen(false)}
+        onConfirm={() => { if (selectedId !== null) convertMut.mutate(selectedId) }}
+      />
+
+      <Dialog open={convertResult !== null} onOpenChange={(o) => { if (!o) setConvertResult(null) }}>
+        <DialogContent className="max-w-sm" onClose={() => setConvertResult(null)}>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FileCheck className="h-5 w-5 text-accent" />Facture créée
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col items-center justify-center py-6 text-center mt-4">
+            <div className="icon-box-gold h-14 w-14 mb-3 flex items-center justify-center"><CheckCircle2 className="h-7 w-7" /></div>
+            <p className="text-sm text-muted-foreground">Le proforma a été converti en facture définitive.</p>
+            {convertResult && <p className="text-lg font-heading font-bold mt-1">N° {convertResult.numero}</p>}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {selectedId !== null && bucket === 'def' && (
         <SendEmailDialog
           open={emailModalOpen}
           onClose={() => setEmailModalOpen(false)}
           contextLabel={detail?.client_nom ?? undefined}
           queryKey={['facture-email-defaults', selectedId]}
-          loadDefaults={() => apiFetch(`/factures/${selectedId}/email-defaults`)}
-          pdfUrl={`${API_URL}/factures/${selectedId}/pdf`}
+          loadDefaults={() => apiFetch(`/factures/def/${selectedId}/email-defaults`)}
+          pdfUrl={`${API_URL}/factures/def/${selectedId}/pdf`}
           pdfAttachmentLabel={`${detail?.type === 2 ? 'avoir' : 'facture'}-${detail?.numero ?? selectedId}.pdf`}
-          onSend={(p) => postEmail(`${API_URL}/factures/${selectedId}/email`, p, { includeAttachPdf: true })}
+          onSend={(p) => postEmail(`${API_URL}/factures/def/${selectedId}/email`, p, { includeAttachPdf: true })}
         />
       )}
     </>
@@ -385,6 +461,7 @@ function FactureList({
   rows, isLoading, isError, error,
   selectedId, onSelect,
   searchQuery, onSearchChange,
+  bucket, onBucketChange,
   typeFilter, onTypeFilterChange,
   onNew, isEditing,
 }: {
@@ -396,6 +473,8 @@ function FactureList({
   onSelect: (id: number) => void
   searchQuery: string
   onSearchChange: (q: string) => void
+  bucket: Kind
+  onBucketChange: (b: Kind) => void
   typeFilter: 'all' | 'facture' | 'avoir'
   onTypeFilterChange: (t: 'all' | 'facture' | 'avoir') => void
   onNew: () => void
@@ -415,7 +494,31 @@ function FactureList({
             className="w-full h-9 pl-9 pr-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
           />
         </div>
-        <div className="flex gap-1">
+        {/* Category switch — proforma drafts vs issued (definitive) invoices.
+            Prominent bordered segmented control: this picks which set of
+            documents you're looking at, so it reads as the dominant control. */}
+        <div className="flex gap-1 p-1 rounded-lg border border-border bg-background shadow-sm">
+          {([
+            { key: 'prov', label: 'Proforma' },
+            { key: 'def', label: 'Définitives' },
+          ] as const).map((opt) => (
+            <button
+              key={opt.key}
+              onClick={() => onBucketChange(opt.key)}
+              className={cn(
+                'flex-1 px-3 py-2 text-sm rounded-md transition-colors font-semibold',
+                bucket === opt.key
+                  ? 'bg-accent text-accent-foreground shadow-sm'
+                  : 'text-muted-foreground hover:bg-accent/10',
+              )}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        {/* Type filter within the current category — standard left-list
+            filter button group (matches every other screen). */}
+        <div className="flex flex-wrap gap-1">
           {([
             { key: 'all', label: 'Tous' },
             { key: 'facture', label: 'Factures' },
@@ -423,9 +526,10 @@ function FactureList({
           ] as const).map((opt) => (
             <button
               key={opt.key}
+              type="button"
               onClick={() => onTypeFilterChange(opt.key)}
               className={cn(
-                'flex-1 px-2 py-1 text-xs rounded-md transition-colors',
+                'px-2 py-1 text-xs rounded-md transition-colors flex-grow basis-[calc(33.333%-0.25rem)]',
                 typeFilter === opt.key
                   ? 'bg-accent text-accent-foreground shadow-sm font-medium'
                   : 'text-muted-foreground hover:bg-accent/10',
@@ -448,29 +552,39 @@ function FactureList({
         ) : rows.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
             <Receipt className="h-12 w-12 mb-3 opacity-50" />
-            <p className="text-sm">Aucune facture</p>
+            <p className="text-sm">{bucket === 'prov' ? 'Aucun proforma' : 'Aucune facture'}</p>
           </div>
         ) : rows.map((row) => {
-          const isSelected = selectedId === row.IDfacture
+          const isSelected = selectedId === row.id
           const chip = typeChip(row.type)
           const ttc = signed(row.total_ttc, row.type)
+          const isConverted = row.kind === 'prov' && row.converted
           return (
             <div
-              key={row.IDfacture}
-              onClick={() => onSelect(row.IDfacture)}
+              key={row.id}
+              onClick={() => onSelect(row.id)}
               className={cn(
                 'p-3 border rounded-lg cursor-pointer transition-all bg-white',
                 isSelected ? 'border-accent ring-1 ring-accent' : 'border-border hover:border-accent/50',
+                isConverted && !isSelected && 'opacity-70',
               )}
             >
               <div className="flex items-center gap-2">
-                <Receipt className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-                <span className="font-medium text-sm">N° {row.numero ?? row.IDfacture}</span>
+                <Receipt className={cn('h-4 w-4 flex-shrink-0', row.kind === 'prov' ? 'text-amber-500' : 'text-muted-foreground')} />
+                <span className="font-medium text-sm">
+                  {row.kind === 'prov' ? 'Proforma ' : ''}N° {row.numero ?? row.id}
+                </span>
                 <span className={cn('ml-auto px-1.5 py-0.5 rounded text-[10px] font-medium', chip.classes)}>{chip.label}</span>
               </div>
               <p className="text-xs text-muted-foreground mt-1 truncate">{row.client_nom || '—'}</p>
               <div className="flex items-center gap-2 mt-1 text-[11px] text-muted-foreground">
                 {row.date && <span>{formatHfsqlDate(row.date)}</span>}
+                {isConverted && (
+                  <span className="px-1.5 py-0.5 rounded bg-zinc-200 text-zinc-600 font-medium inline-flex items-center gap-1">
+                    <FileCheck className="h-2.5 w-2.5" />
+                    Converti{row.numero_def ? ` → N° ${row.numero_def}` : ''}
+                  </span>
+                )}
                 <span className="ml-auto text-muted-foreground/70">{row.nb_lignes} ligne{row.nb_lignes > 1 ? 's' : ''}</span>
                 <span className={cn('px-1.5 py-0.5 rounded bg-accent/10 font-medium tabular-nums', row.type === 2 ? 'text-red-600' : 'text-foreground')}>
                   {fmtNum(ttc, 2)} €
@@ -485,7 +599,7 @@ function FactureList({
         <span>{rows.length} document{rows.length !== 1 ? 's' : ''}</span>
         {!isEditing && (
           <Button size="sm" variant="ghost" onClick={onNew} className="text-accent hover:text-accent hover:bg-accent/10">
-            <Plus className="h-3.5 w-3.5 mr-1" />Nouvelle
+            <Plus className="h-3.5 w-3.5 mr-1" />Nouveau
           </Button>
         )}
       </div>
@@ -496,13 +610,14 @@ function FactureList({
 // ── Center: Detail Header ──────────────────────────────
 
 function DetailHeader({
-  facture, isLoading, isEditing,
+  facture, isLoading, isEditing, editable,
   onStartEdit, onCancelEdit, onSave, isSaving,
-  onDelete, onPrintClick, onEmailClick,
+  onDelete, onPrintClick, onEmailClick, onConvertClick, onViewDefinitive,
 }: {
   facture: FactureDetail | null
   isLoading: boolean
   isEditing: boolean
+  editable: boolean
   onStartEdit: () => void
   onCancelEdit: () => void
   onSave: () => void
@@ -510,9 +625,13 @@ function DetailHeader({
   onDelete: () => void
   onPrintClick: () => void
   onEmailClick: () => void
+  onConvertClick: () => void
+  onViewDefinitive: (defId: number) => void
 }) {
   if (!facture && !isLoading) return null
   const chip = facture ? typeChip(facture.type) : null
+  const isProforma = facture?.kind === 'prov'
+  const isConverted = !!facture?.converted
   return (
     <div className="flex-shrink-0 pt-0.5">
       <div className="flex items-center gap-3">
@@ -525,11 +644,20 @@ function DetailHeader({
           ) : (
             <div className="flex items-center gap-3">
               <h1 className="text-2xl font-heading font-bold tracking-tight truncate">
-                N° {facture?.numero ?? facture?.IDfacture}
+                {isProforma ? 'Proforma ' : ''}N° {facture?.numero ?? facture?.id}
                 <span className="text-muted-foreground font-normal"> · {facture?.client_nom || '—'}</span>
               </h1>
               <div className="flex items-center gap-2 flex-shrink-0">
                 {chip && <span className={cn('px-2 py-0.5 rounded text-xs font-medium', chip.classes)}>{chip.label}</span>}
+                {isProforma ? (
+                  isConverted ? (
+                    <Badge variant="secondary" className="text-xs gap-1"><FileCheck className="h-3 w-3" />Proforma · converti</Badge>
+                  ) : (
+                    <Badge className="bg-amber-400/15 text-amber-700 border border-amber-500/30 text-xs gap-1"><FileText className="h-3 w-3" />Proforma</Badge>
+                  )
+                ) : (
+                  <Badge variant="secondary" className="text-xs gap-1"><Lock className="h-3 w-3" />Définitive</Badge>
+                )}
                 {facture?.date && (
                   <Badge variant="secondary" className="text-xs">{formatHfsqlDate(facture.date)}</Badge>
                 )}
@@ -559,15 +687,34 @@ function DetailHeader({
               </>
             ) : (
               <>
+                {/* Converted proforma: jump to its definitive facture */}
+                {isProforma && isConverted && facture.IDfacture_def > 0 && (
+                  <Button variant="outline" size="sm" onClick={() => onViewDefinitive(facture.IDfacture_def)} title="Voir la facture définitive">
+                    Voir la facture{facture.numero_def ? ` N° ${facture.numero_def}` : ''}
+                    <ArrowRight className="h-3.5 w-3.5 ml-1.5" />
+                  </Button>
+                )}
                 <Button variant="outline" size="icon" className="h-9 w-9" title="Imprimer" onClick={onPrintClick}>
                   <Printer className="h-4 w-4" />
                 </Button>
-                <Button variant="outline" size="icon" className="h-9 w-9" title="Envoyer un email" onClick={onEmailClick}>
-                  <AtSign className="h-4 w-4" />
-                </Button>
-                <Button variant="gold" size="sm" onClick={onStartEdit}>
-                  <Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier
-                </Button>
+                {/* Email is definitive-only */}
+                {!isProforma && (
+                  <Button variant="outline" size="icon" className="h-9 w-9" title="Envoyer un email" onClick={onEmailClick}>
+                    <AtSign className="h-4 w-4" />
+                  </Button>
+                )}
+                {/* Convert proforma → definitive */}
+                {editable && (
+                  <Button variant="outline" size="sm" onClick={onConvertClick} title="Convertir le proforma en facture définitive">
+                    <FileCheck className="h-3.5 w-3.5 mr-1.5" />Convertir en facture
+                  </Button>
+                )}
+                {/* Modifier — only an open proforma is editable */}
+                {editable && (
+                  <Button variant="gold" size="sm" onClick={onStartEdit}>
+                    <Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier
+                  </Button>
+                )}
               </>
             )}
           </div>
@@ -594,7 +741,7 @@ function DetailMain({
     <div className="flex-1 flex items-center justify-center">
       <div className="text-center space-y-3">
         <div className="icon-box-gold h-16 w-16 mx-auto"><Receipt className="h-8 w-8" /></div>
-        <p className="text-muted-foreground text-sm">Sélectionnez une facture dans la liste</p>
+        <p className="text-muted-foreground text-sm">Sélectionnez un document dans la liste</p>
       </div>
     </div>
   )
@@ -637,7 +784,7 @@ function LignesSection({
   }, [lineDialogOpen, onLinesDirtyChange])
 
   const deleteLineMut = useMutation({
-    mutationFn: (lineId: number) => apiFetch(`/factures/lignes/${lineId}`, { method: 'DELETE' }),
+    mutationFn: (lineId: number) => apiFetch(`/factures/${facture.kind}/lignes/${lineId}`, { method: 'DELETE' }),
     onSuccess: onMutationSuccess,
   })
 
@@ -814,8 +961,8 @@ function LineFormDialog({
         prix: Number(form.prix) || 0,
       })
       return isNew
-        ? apiFetch(`/factures/${facture.IDfacture}/lignes`, { method: 'POST', body })
-        : apiFetch(`/factures/lignes/${line!.IDligne_facture}`, { method: 'PUT', body })
+        ? apiFetch(`/factures/${facture.kind}/${facture.id}/lignes`, { method: 'POST', body })
+        : apiFetch(`/factures/${facture.kind}/lignes/${line!.IDligne_facture}`, { method: 'PUT', body })
     },
     onSuccess,
     onError: (e: unknown) => setError(e instanceof Error ? e.message : 'Erreur'),
@@ -979,7 +1126,7 @@ function DetailSidebar({
               editIDAdresse={editIDAdresse} onEditIDAdresseChange={onEditIDAdresseChange}
             />
           )}
-          {activeTab === 'historique' && <HistoriqueTab factureId={facture.IDfacture} />}
+          {activeTab === 'historique' && <HistoriqueTab kind={facture.kind} factureId={facture.id} />}
         </div>
       </div>
     </div>
@@ -1168,10 +1315,10 @@ function AdressePickerDialog({
 
 interface HistoriqueEvent { kind: 'email'; type_label: string; recipients: string[]; DATE: string }
 
-function HistoriqueTab({ factureId }: { factureId: number }) {
+function HistoriqueTab({ kind, factureId }: { kind: Kind; factureId: number }) {
   const { data, isLoading, error } = useQuery<HistoriqueEvent[]>({
-    queryKey: ['facture-historique', factureId],
-    queryFn: () => apiFetch(`/factures/${factureId}/historique`),
+    queryKey: ['facture-historique', kind, factureId],
+    queryFn: () => apiFetch(`/factures/${kind}/${factureId}/historique`),
   })
   if (isLoading) return <div className="flex items-center justify-center py-6"><Loader2 className="h-4 w-4 animate-spin text-accent" /></div>
   if (error) return <div className="flex items-center gap-1.5 py-3 text-xs text-destructive"><AlertCircle className="h-3.5 w-3.5" /><span>Erreur de chargement</span></div>
@@ -1179,7 +1326,9 @@ function HistoriqueTab({ factureId }: { factureId: number }) {
     <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
       <History className="h-10 w-10 mb-3 opacity-40" />
       <p className="text-sm font-medium">Aucun évènement</p>
-      <p className="text-[11px] mt-1 text-center">Les envois d'emails liés à ce document apparaîtront ici.</p>
+      <p className="text-[11px] mt-1 text-center">
+        {kind === 'prov' ? 'Les proformas ne sont pas envoyés par email.' : "Les envois d'emails liés à ce document apparaîtront ici."}
+      </p>
     </div>
   )
   return (
@@ -1206,7 +1355,8 @@ function HistoriqueTab({ factureId }: { factureId: number }) {
 
 // ── Create Dialog ──────────────────────────────────────
 
-function CreateFactureDialog({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: (newId: number) => void }) {
+function CreateFactureDialog({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: (newId: number, kind: Kind) => void }) {
+  const [kind, setKind] = useState<Kind>('prov')
   const [clientId, setClientId] = useState(0)
   const [type, setType] = useState(1)
   const [date, setDate] = useState<string>(() => new Date().toISOString().slice(0, 10))
@@ -1215,15 +1365,15 @@ function CreateFactureDialog({ open, onClose, onCreated }: { open: boolean; onCl
   const { data: clients } = useQuery<ClientLite[]>({ queryKey: ['fac-clients'], queryFn: () => apiFetch('/factures/lookups/clients'), enabled: open })
 
   useEffect(() => {
-    if (!open) { setClientId(0); setType(1); setDate(new Date().toISOString().slice(0, 10)); setError(null) }
+    if (!open) { setKind('prov'); setClientId(0); setType(1); setDate(new Date().toISOString().slice(0, 10)); setError(null) }
   }, [open])
 
   const createMut = useMutation({
-    mutationFn: () => apiFetch('/factures', {
+    mutationFn: () => apiFetch(`/factures/${kind}`, {
       method: 'POST',
       body: JSON.stringify({ IDclient: clientId, type, date: inputDateToHfsql(date) }),
     }),
-    onSuccess: (data: { IDfacture: number }) => onCreated(data.IDfacture),
+    onSuccess: (data: { id: number; kind: Kind }) => onCreated(data.id, data.kind),
     onError: (e: unknown) => setError(e instanceof Error ? e.message : 'Erreur'),
   })
 
@@ -1233,9 +1383,35 @@ function CreateFactureDialog({ open, onClose, onCreated }: { open: boolean; onCl
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
       <DialogContent className="max-w-md" onClose={onClose}>
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2"><Receipt className="h-5 w-5 text-accent" />Nouvelle facture</DialogTitle>
+          <DialogTitle className="flex items-center gap-2"><Receipt className="h-5 w-5 text-accent" />Nouveau document</DialogTitle>
         </DialogHeader>
         <div className="mt-4 space-y-3">
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Document</label>
+            <div className="flex gap-1">
+              {([
+                { k: 'prov', l: 'Proforma' },
+                { k: 'def', l: 'Facture définitive' },
+              ] as const).map((o) => (
+                <button
+                  key={o.k}
+                  type="button"
+                  onClick={() => setKind(o.k)}
+                  className={cn(
+                    'flex-1 px-2 py-1.5 text-xs rounded-md transition-colors border',
+                    kind === o.k ? 'bg-accent text-accent-foreground border-accent shadow-sm font-medium' : 'border-input text-muted-foreground hover:bg-accent/10',
+                  )}
+                >
+                  {o.l}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              {kind === 'prov'
+                ? 'Un proforma reste modifiable jusqu’à sa conversion en facture.'
+                : 'Une facture définitive est verrouillée dès sa création et reçoit un numéro officiel.'}
+            </p>
+          </div>
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Client</label>
             <SearchableCombobox<ClientLite>

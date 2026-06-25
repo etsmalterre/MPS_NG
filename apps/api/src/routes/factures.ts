@@ -1,15 +1,31 @@
-// Factures — client invoices & credit notes (facture / ligne_facture).
+// Factures — client invoices: proforma drafts + definitive invoices.
 // Mirrors commandes-client.ts but for the ETM invoicing ledger. This is the
 // MANUAL invoicing screen (legacy "Détail facture" / "Nouvelle facture"): an
 // invoice header + free-text lines, with computed HT / TVA / TTC totals.
 //
+// PROFORMA vs DEFINITIVE — two parallel table pairs (legacy model):
+//   kind 'prov' → facture_prov / ligne_facture_prov  (editable drafts)
+//   kind 'def'  → facture / ligne_facture            (locked once issued)
+// Both header tables have the same column shape EXCEPT facture_prov has no
+// IDcommande_client. A proforma is fully editable; converting it copies the
+// header + lines into `facture` with a fresh definitive numero. A definitive
+// facture is read-only (corrections go through an Avoir, never an edit/delete).
+//
+// CONVERTED-PROFORMA MARKER (no schema change) — facture_prov has no spare
+// boolean/link column, so we REPURPOSE `facture_prov.IDexpedition_divers`
+// (always 0, unused by MPS_NG — the legacy auto-gen-from-expeditions flow that
+// would populate it is deferred) as a back-pointer to the resulting definitive:
+//   IDexpedition_divers = 0          → open proforma (editable / deletable)
+//   IDexpedition_divers = <IDfacture> → converted; locked; links to facture #N
+//
 // Hard rules baked in (verified against live data + the XDD + CLAUDE.md):
 //  - ETM scope: every read/write is IDsociete = 1 (IDsociete=2 rows are TRM).
-//  - numero allocator: MAX(numero)+1 WHERE IDsociete=1, with a retry loop.
-//  - `facture` has NO accented columns; `date` and `type` are reserved words →
-//    SELECT/INSERT/UPDATE them as uppercase DATE / TYPE (same trick as
+//  - numero allocator: MAX(numero)+1 per table WHERE IDsociete=1, retry loop.
+//    facture and facture_prov keep INDEPENDENT numero sequences.
+//  - Neither header table has accented columns; `date` and `type` are reserved
+//    words → SELECT/INSERT/UPDATE them as uppercase DATE / TYPE (same trick as
 //    envoi_email.DATE and ligne_commande_client.TYPE). SELECT * is safe here.
-//  - `ligne_facture.designation` is corrupted on read (ODBC) → fixEncoding it.
+//  - line `designation` is corrupted on read (ODBC) → fixEncoding it.
 //    `unite` is FREE TEXT ("Ml"/"Kg"/"Pièce"…), not the numeric enum used by
 //    ligne_commande_client.
 //  - No stored totals: HT = Σ(quantite×prix), TVA = HT×tva.valeur/100, TTC=HT+TVA.
@@ -20,6 +36,9 @@
 //  - On create, billing defaults are auto-filled from the client row
 //    (num_tva, IDtva, IDmode_paiement, IDecheance, IDcode_comptable + the
 //    est_defaut_facturation address), matching the legacy auto-fill.
+//  - Email + historique are DEFINITIVE-ONLY: prov and def share a numeric id
+//    space but the same envoi_email IDtype_doc, so emailing a proforma would
+//    collide histories. Proforma still prints (proforma PDF).
 
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
 import { z } from 'zod'
@@ -36,6 +55,37 @@ export const facturesRouter: RouterType = Router()
 // type_doc 19 = "facture definitve" (sic — validated invoice). Used for the
 // envoi_email audit log when a facture/avoir is emailed.
 const TYPE_DOC_FACTURE = 19
+
+// ── Proforma / définitive table model ────────────────────
+
+type Kind = 'prov' | 'def'
+
+const TBL: Record<Kind, {
+  table: string; lineTable: string; pk: string; linePk: string; lineFk: string
+}> = {
+  prov: { table: 'facture_prov', lineTable: 'ligne_facture_prov', pk: 'IDfacture_prov', linePk: 'IDligne_facture_prov', lineFk: 'IDfacture_prov' },
+  def:  { table: 'facture',      lineTable: 'ligne_facture',      pk: 'IDfacture',      linePk: 'IDligne_facture',      lineFk: 'IDfacture' },
+}
+
+function parseKind(raw: string | undefined): Kind | null {
+  return raw === 'prov' ? 'prov' : raw === 'def' ? 'def' : null
+}
+
+// Write-path lock responses.
+const DEF_LOCK = { error: 'facture_definitive', message: 'Facture définitive — non modifiable. Créez un avoir pour corriger.' }
+const PROV_CONVERTED = { error: 'proforma_convertie', message: 'Proforma converti — non modifiable.' }
+
+/** True when a proforma row has been converted (IDexpedition_divers back-link set). */
+async function provConverted(provId: number): Promise<boolean> {
+  const rows = await query<any>(`SELECT IDexpedition_divers FROM facture_prov WHERE IDfacture_prov = ${provId} AND IDsociete = 1`)
+  return rows.length > 0 && (Number(rows[0].IDexpedition_divers) || 0) > 0
+}
+
+/** Parent proforma id for a ligne_facture_prov row (0 if not found). */
+async function provLineParent(lineId: number): Promise<number> {
+  const rows = await query<any>(`SELECT IDfacture_prov FROM ligne_facture_prov WHERE IDligne_facture_prov = ${lineId}`)
+  return rows.length > 0 ? Number(rows[0].IDfacture_prov) || 0 : 0
+}
 
 // ── Small SQL/format helpers (same as commandes-client.ts) ──
 
@@ -106,11 +156,12 @@ function todayDigits(): string {
   return `${t.getFullYear()}${String(t.getMonth() + 1).padStart(2, '0')}${String(t.getDate()).padStart(2, '0')}`
 }
 
-/** Next numero for the ETM invoice ledger (IDsociete=1). MAX+1 matches the
- *  legacy allocator; concurrent POSTs retry on collision. */
-async function nextNumero(): Promise<number> {
+/** Next numero for the given ledger (IDsociete=1). MAX+1 matches the legacy
+ *  allocator; concurrent POSTs retry on collision. facture and facture_prov
+ *  keep separate sequences. */
+async function nextNumero(kind: Kind): Promise<number> {
   const r = await query<{ m: number | null }>(
-    `SELECT MAX(numero) AS m FROM facture WHERE IDsociete = 1`,
+    `SELECT MAX(numero) AS m FROM ${TBL[kind].table} WHERE IDsociete = 1`,
   )
   return (Number(r[0]?.m) || 0) + 1
 }
@@ -167,15 +218,16 @@ async function loadAdresse(id: number): Promise<Record<string, unknown> | null> 
 }
 
 /** Per-facture line totals (Σ qty×prix, count). Batched over a set of ids. */
-async function lineTotals(factureIds: number[]): Promise<Map<number, { total_ht: number; nb_lignes: number }>> {
+async function lineTotals(kind: Kind, factureIds: number[]): Promise<Map<number, { total_ht: number; nb_lignes: number }>> {
   const out = new Map<number, { total_ht: number; nb_lignes: number }>()
   const ids = factureIds.filter((x) => x > 0)
   if (ids.length === 0) return out
-  const rows = await query<{ IDfacture: number; quantite: number | null; prix: number | null }>(
-    `SELECT IDfacture, quantite, prix FROM ligne_facture WHERE IDfacture IN (${ids.join(',')})`,
+  const t = TBL[kind]
+  const rows = await query<{ pid: number; quantite: number | null; prix: number | null }>(
+    `SELECT ${t.lineFk} AS pid, quantite, prix FROM ${t.lineTable} WHERE ${t.lineFk} IN (${ids.join(',')})`,
   )
   for (const r of rows) {
-    const id = Number(r.IDfacture)
+    const id = Number(r.pid)
     const acc = out.get(id) ?? { total_ht: 0, nb_lignes: 0 }
     acc.total_ht += (Number(r.quantite) || 0) * (Number(r.prix) || 0)
     acc.nb_lignes += 1
@@ -205,7 +257,7 @@ const ligneBody = z.object({
 })
 
 // ════════════════════════════════════════════════════════
-//  LOOKUPS  (literal paths — must register before /:id)
+//  LOOKUPS  (literal paths — must register before /:kind/*)
 // ════════════════════════════════════════════════════════
 
 facturesRouter.get('/lookups/clients', async (_req: Request, res: Response) => {
@@ -282,11 +334,13 @@ facturesRouter.get('/lookups/tva', async (_req: Request, res: Response) => {
 })
 
 // ════════════════════════════════════════════════════════
-//  LIST
+//  LIST  (one bucket per call: ?status=prov|def)
 // ════════════════════════════════════════════════════════
 
 facturesRouter.get('/', async (req: Request, res: Response) => {
   try {
+    const kind = parseKind(String(req.query.status ?? 'def')) ?? 'def'
+    const t = TBL[kind]
     const q = String(req.query.q ?? '').trim()
     const typeFilter = String(req.query.type ?? 'all') // 'facture' | 'avoir' | 'all'
     const limitRaw = parseInt(String(req.query.limit ?? ''), 10)
@@ -315,27 +369,44 @@ facturesRouter.get('/', async (req: Request, res: Response) => {
     }
 
     const whereSql = `WHERE ${whereParts.join(' AND ')}`
-    // SELECT * is safe on facture (no accented columns). DATE/TYPE come back
-    // uppercase (reserved words).
+    // SELECT * is safe on both header tables (no accented columns). DATE/TYPE
+    // come back uppercase (reserved words).
     const factures = await query<any>(
-      `SELECT TOP ${limit} * FROM facture f ${whereSql} ORDER BY f.IDfacture DESC`,
+      `SELECT TOP ${limit} * FROM ${t.table} f ${whereSql} ORDER BY f.${t.pk} DESC`,
     )
 
-    const ids = factures.map((f: any) => Number(f.IDfacture)).filter(Boolean)
+    const ids = factures.map((f: any) => Number(f[t.pk])).filter(Boolean)
     const clientIds = factures.map((f: any) => Number(f.IDclient)).filter(Boolean)
     const [clientNames, tvaMap, totalsMap] = await Promise.all([
       resolveClientNames(clientIds),
       loadTvaMap(),
-      lineTotals(ids),
+      lineTotals(kind, ids),
     ])
 
+    // For converted proformas, resolve the linked definitive numero (for the
+    // "→ N°…" hint in the list).
+    let numeroDefMap = new Map<number, number>()
+    if (kind === 'prov') {
+      const defIds = factures
+        .map((f: any) => Number(f.IDexpedition_divers) || 0)
+        .filter((x: number) => x > 0)
+      if (defIds.length > 0) {
+        const defRows = await query<{ IDfacture: number; numero: number | null }>(
+          `SELECT IDfacture, numero FROM facture WHERE IDfacture IN (${Array.from(new Set(defIds)).join(',')})`,
+        )
+        numeroDefMap = new Map(defRows.map((r) => [Number(r.IDfacture), Number(r.numero) || 0]))
+      }
+    }
+
     const result = factures.map((f: any) => {
-      const id = Number(f.IDfacture)
+      const id = Number(f[t.pk])
       const totals = totalsMap.get(id) ?? { total_ht: 0, nb_lignes: 0 }
       const tva = tvaMap.get(Number(f.IDtva)) ?? { valeur: 0, libelle: '' }
       const tvaAmount = totals.total_ht * (tva.valeur / 100)
+      const idDef = kind === 'prov' ? Number(f.IDexpedition_divers) || 0 : 0
       return {
-        IDfacture: id,
+        id,
+        kind,
         numero: f.numero != null ? Number(f.numero) : null,
         date: f.DATE ?? null,
         IDclient: Number(f.IDclient) || 0,
@@ -346,6 +417,9 @@ facturesRouter.get('/', async (req: Request, res: Response) => {
         total_tva: tvaAmount,
         total_ttc: totals.total_ht + tvaAmount,
         nb_lignes: totals.nb_lignes,
+        converted: kind === 'prov' && idDef > 0,
+        IDfacture_def: idDef,
+        numero_def: idDef > 0 ? (numeroDefMap.get(idDef) ?? null) : null,
       }
     })
     res.json(result)
@@ -359,35 +433,40 @@ facturesRouter.get('/', async (req: Request, res: Response) => {
 //  DETAIL
 // ════════════════════════════════════════════════════════
 
-async function loadFactureLines(id: number): Promise<Array<{
+async function loadFactureLines(kind: Kind, id: number): Promise<Array<{
   IDligne_facture: number; IDligne_expedition: number; designation: string | null
   quantite: number; unite: string; prix: number; montant: number
 }>> {
+  const t = TBL[kind]
   const rows = await query<any>(
-    `SELECT IDligne_facture, IDfacture, IDligne_expedition, designation, quantite, unite, prix
-     FROM ligne_facture WHERE IDfacture = ${id} ORDER BY IDligne_facture`,
+    `SELECT ${t.linePk}, ${t.lineFk}, IDligne_expedition, designation, quantite, unite, prix
+     FROM ${t.lineTable} WHERE ${t.lineFk} = ${id} ORDER BY ${t.linePk}`,
   )
-  const fixed = await fixEncoding(rows, 'ligne_facture', 'IDligne_facture', ['designation', 'unite'])
-  return fixed.map((l: any) => {
-    const qty = Number(l.quantite) || 0
-    const prix = Number(l.prix) || 0
+  // fixEncoding needs the REAL pk column name in its WHERE — pass t.linePk.
+  const fixed = await fixEncoding(rows, t.lineTable, t.linePk, ['designation', 'unite'])
+  return fixed.map((r: any) => {
+    const qty = Number(r.quantite) || 0
+    const prix = Number(r.prix) || 0
     return {
-      IDligne_facture: Number(l.IDligne_facture),
-      IDligne_expedition: Number(l.IDligne_expedition) || 0,
-      designation: (l.designation ?? '') as string,
+      IDligne_facture: Number(r[t.linePk]),
+      IDligne_expedition: Number(r.IDligne_expedition) || 0,
+      designation: r.designation ?? null,
       quantite: qty,
-      unite: (l.unite ?? '').toString(),
+      unite: (r.unite ?? '').toString(),
       prix,
       montant: qty * prix,
     }
   })
 }
 
-facturesRouter.get('/:id', async (req: Request, res: Response) => {
+facturesRouter.get('/:kind/:id', async (req: Request, res: Response) => {
   try {
+    const kind = parseKind(req.params.kind)
+    if (!kind) { res.status(404).json({ error: 'Not found' }); return }
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
-    const rows = await query<any>(`SELECT * FROM facture WHERE IDfacture = ${id}`)
+    const t = TBL[kind]
+    const rows = await query<any>(`SELECT * FROM ${t.table} WHERE ${t.pk} = ${id}`)
     if (rows.length === 0) { res.status(404).json({ error: 'Facture not found' }); return }
     const h = rows[0]
     const IDclient = Number(h.IDclient) || 0
@@ -395,7 +474,7 @@ facturesRouter.get('/:id', async (req: Request, res: Response) => {
     const [clientNames, adr, lignes, tvaMap, modePaiement, echeance] = await Promise.all([
       resolveClientNames([IDclient]),
       loadAdresse(Number(h.IDadresse) || 0),
-      loadFactureLines(id),
+      loadFactureLines(kind, id),
       loadTvaMap(),
       loadModePaiementLabel(Number(h.IDmode_paiement) || 0),
       loadEcheanceLabel(Number(h.IDecheance) || 0),
@@ -405,8 +484,20 @@ facturesRouter.get('/:id', async (req: Request, res: Response) => {
     const totalHt = lignes.reduce((s, l) => s + l.montant, 0)
     const tvaAmount = totalHt * (tva.valeur / 100)
 
+    // Converted-proforma back-link (def is never "converted").
+    const idDef = kind === 'prov' ? Number(h.IDexpedition_divers) || 0 : 0
+    let numeroDef: number | null = null
+    if (idDef > 0) {
+      const defRows = await query<{ numero: number | null }>(`SELECT numero FROM facture WHERE IDfacture = ${idDef}`)
+      numeroDef = defRows.length > 0 ? Number(defRows[0].numero) || 0 : null
+    }
+
     res.json({
-      IDfacture: id,
+      id,
+      kind,
+      converted: kind === 'prov' && idDef > 0,
+      IDfacture_def: idDef,
+      numero_def: numeroDef,
       IDclient,
       client_nom: clientNames.get(IDclient) ?? '',
       numero: h.numero != null ? Number(h.numero) : null,
@@ -438,8 +529,11 @@ facturesRouter.get('/:id', async (req: Request, res: Response) => {
 //  HEADER CRUD
 // ════════════════════════════════════════════════════════
 
-facturesRouter.post('/', async (req: Request, res: Response) => {
+facturesRouter.post('/:kind', async (req: Request, res: Response) => {
   try {
+    const kind = parseKind(req.params.kind)
+    if (!kind) { res.status(404).json({ error: 'Not found' }); return }
+    const t = TBL[kind]
     const parsed = factureBody.safeParse(req.body)
     if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
     const d = parsed.data
@@ -476,40 +570,50 @@ facturesRouter.post('/', async (req: Request, res: Response) => {
     const numTva = d.num_tva ?? (c.num_tva ?? '').toString()
 
     // numero allocator with collision retry. DATE / TYPE written uppercase
-    // (reserved words). IDexpedition_divers / IDcommande_client default to 0.
+    // (reserved words). IDexpedition_divers defaults to 0 (= open proforma).
+    // facture also has IDcommande_client (= 0); facture_prov does not.
     let newNumero = 0
     let inserted = false
     let lastErr: unknown = null
     for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
-      newNumero = await nextNumero()
+      newNumero = await nextNumero(kind)
+      const cols = kind === 'def'
+        ? `(IDsociete, numero, IDclient, IDadresse, IDmode_paiement, IDecheance,
+            DATE, IDtva, num_tva, TYPE, IDcode_comptable, IDexpedition_divers, IDcommande_client)`
+        : `(IDsociete, numero, IDclient, IDadresse, IDmode_paiement, IDecheance,
+            DATE, IDtva, num_tva, TYPE, IDcode_comptable, IDexpedition_divers)`
+      const vals = kind === 'def'
+        ? `(1, ${newNumero}, ${n(d.IDclient)}, ${n(idAdresse)}, ${n(idMode)}, ${n(idEcheance)},
+            '${date}', ${n(idTva)}, ${sqlText(numTva)}, ${type}, ${n(idCode)}, 0, 0)`
+        : `(1, ${newNumero}, ${n(d.IDclient)}, ${n(idAdresse)}, ${n(idMode)}, ${n(idEcheance)},
+            '${date}', ${n(idTva)}, ${sqlText(numTva)}, ${type}, ${n(idCode)}, 0)`
       try {
-        await query(
-          `INSERT INTO facture
-             (IDsociete, numero, IDclient, IDadresse, IDmode_paiement, IDecheance,
-              DATE, IDtva, num_tva, TYPE, IDcode_comptable, IDexpedition_divers, IDcommande_client)
-           VALUES
-             (1, ${newNumero}, ${n(d.IDclient)}, ${n(idAdresse)}, ${n(idMode)}, ${n(idEcheance)},
-              '${date}', ${n(idTva)}, ${sqlText(numTva)}, ${type}, ${n(idCode)}, 0, 0)`,
-        )
+        await query(`INSERT INTO ${t.table} ${cols} VALUES ${vals}`)
         inserted = true
       } catch (e) { lastErr = e }
     }
     if (!inserted) throw lastErr ?? new Error('insert failed after 3 attempts')
 
-    const newRows = await query<{ IDfacture: number }>(
-      `SELECT IDfacture FROM facture WHERE IDsociete = 1 AND numero = ${newNumero} ORDER BY IDfacture DESC`,
+    const newRows = await query<any>(
+      `SELECT ${t.pk} FROM ${t.table} WHERE IDsociete = 1 AND numero = ${newNumero} ORDER BY ${t.pk} DESC`,
     )
-    res.status(201).json({ IDfacture: Number(newRows[0]?.IDfacture) || 0 })
+    res.status(201).json({ id: Number(newRows[0]?.[t.pk]) || 0, kind })
   } catch (err) {
     console.error('Error creating facture:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
 
-facturesRouter.put('/:id', async (req: Request, res: Response) => {
+facturesRouter.put('/:kind/:id', async (req: Request, res: Response) => {
   try {
+    const kind = parseKind(req.params.kind)
+    if (!kind) { res.status(404).json({ error: 'Not found' }); return }
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    // Lock: definitive is read-only; a converted proforma is read-only.
+    if (kind === 'def') { res.status(409).json(DEF_LOCK); return }
+    if (await provConverted(id)) { res.status(409).json(PROV_CONVERTED); return }
+
     const parsed = factureBody.partial().safeParse(req.body)
     if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
     const d = parsed.data
@@ -524,7 +628,7 @@ facturesRouter.put('/:id', async (req: Request, res: Response) => {
     if (d.num_tva !== undefined) sets.push(`num_tva = ${sqlText(d.num_tva)}`)
     if (sets.length === 0) { res.status(400).json({ error: 'No fields to update' }); return }
 
-    await query(`UPDATE facture SET ${sets.join(', ')} WHERE IDfacture = ${id}`)
+    await query(`UPDATE ${TBL[kind].table} SET ${sets.join(', ')} WHERE ${TBL[kind].pk} = ${id}`)
     res.json({ ok: true })
   } catch (err) {
     console.error('Error updating facture:', err)
@@ -532,12 +636,19 @@ facturesRouter.put('/:id', async (req: Request, res: Response) => {
   }
 })
 
-facturesRouter.delete('/:id', async (req: Request, res: Response) => {
+facturesRouter.delete('/:kind/:id', async (req: Request, res: Response) => {
   try {
+    const kind = parseKind(req.params.kind)
+    if (!kind) { res.status(404).json({ error: 'Not found' }); return }
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
-    await query(`DELETE FROM ligne_facture WHERE IDfacture = ${id}`)
-    await query(`DELETE FROM facture WHERE IDfacture = ${id}`)
+    // Lock: definitive can't be deleted; a converted proforma can't be deleted.
+    if (kind === 'def') { res.status(409).json(DEF_LOCK); return }
+    if (await provConverted(id)) { res.status(409).json(PROV_CONVERTED); return }
+
+    const t = TBL[kind]
+    await query(`DELETE FROM ${t.lineTable} WHERE ${t.lineFk} = ${id}`)
+    await query(`DELETE FROM ${t.table} WHERE ${t.pk} = ${id}`)
     res.json({ ok: true })
   } catch (err) {
     console.error('Error deleting facture:', err)
@@ -546,18 +657,88 @@ facturesRouter.delete('/:id', async (req: Request, res: Response) => {
 })
 
 // ════════════════════════════════════════════════════════
-//  LINE CRUD
+//  CONVERT  (proforma → definitive facture)
 // ════════════════════════════════════════════════════════
 
-facturesRouter.post('/:id/lignes', async (req: Request, res: Response) => {
+facturesRouter.post('/prov/:id/convert', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const provRows = await query<any>(`SELECT * FROM facture_prov WHERE IDfacture_prov = ${id} AND IDsociete = 1`)
+    if (provRows.length === 0) { res.status(404).json({ error: 'Proforma not found' }); return }
+    const p = provRows[0]
+    if ((Number(p.IDexpedition_divers) || 0) > 0) { res.status(409).json(PROV_CONVERTED); return }
+
+    const lignes = await loadFactureLines('prov', id)
+    const type = Number(p.TYPE) === 2 ? 2 : 1
+    // Issue date carries over the (editable) proforma date; today as fallback.
+    const date = /^\d{8}$/.test(String(p.DATE ?? '')) ? String(p.DATE) : todayDigits()
+    const numTva = (p.num_tva ?? '').toString()
+
+    // Allocate a definitive numero (facture sequence) with collision retry.
+    let newNumero = 0
+    let inserted = false
+    let lastErr: unknown = null
+    for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
+      newNumero = await nextNumero('def')
+      try {
+        await query(
+          `INSERT INTO facture
+             (IDsociete, numero, IDclient, IDadresse, IDmode_paiement, IDecheance,
+              DATE, IDtva, num_tva, TYPE, IDcode_comptable, IDexpedition_divers, IDcommande_client)
+           VALUES
+             (1, ${newNumero}, ${n(p.IDclient)}, ${n(p.IDadresse)}, ${n(p.IDmode_paiement)}, ${n(p.IDecheance)},
+              '${date}', ${n(p.IDtva)}, ${sqlText(numTva)}, ${type}, ${n(p.IDcode_comptable)}, 0, 0)`,
+        )
+        inserted = true
+      } catch (e) { lastErr = e }
+    }
+    if (!inserted) throw lastErr ?? new Error('insert failed after 3 attempts')
+
+    const newRows = await query<{ IDfacture: number }>(
+      `SELECT IDfacture FROM facture WHERE IDsociete = 1 AND numero = ${newNumero} ORDER BY IDfacture DESC`,
+    )
+    const newId = Number(newRows[0]?.IDfacture) || 0
+    if (!newId) throw new Error('could not resolve new facture id')
+
+    // Copy lines (designation/unite re-encoded via sqlText after fixEncoding read).
+    for (const l of lignes) {
+      await query(
+        `INSERT INTO ligne_facture (IDfacture, IDligne_expedition, designation, quantite, unite, prix)
+         VALUES (${newId}, ${n(l.IDligne_expedition)}, ${sqlText(l.designation ?? '')}, ${Number(l.quantite) || 0}, ${sqlText(l.unite ?? '')}, ${Number(l.prix) || 0})`,
+      )
+    }
+
+    // Mark the proforma converted + back-link to the definitive (overloaded col).
+    await query(`UPDATE facture_prov SET IDexpedition_divers = ${newId} WHERE IDfacture_prov = ${id}`)
+
+    res.json({ IDfacture: newId, numero: newNumero })
+  } catch (err) {
+    console.error('Error converting proforma:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ════════════════════════════════════════════════════════
+//  LINE CRUD
+// ════════════════════════════════════════════════════════
+
+facturesRouter.post('/:kind/:id/lignes', async (req: Request, res: Response) => {
+  try {
+    const kind = parseKind(req.params.kind)
+    if (!kind) { res.status(404).json({ error: 'Not found' }); return }
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (kind === 'def') { res.status(409).json(DEF_LOCK); return }
+    if (await provConverted(id)) { res.status(409).json(PROV_CONVERTED); return }
+
     const parsed = ligneBody.safeParse(req.body)
     if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
     const d = parsed.data
+    const t = TBL[kind]
     await query(
-      `INSERT INTO ligne_facture (IDfacture, IDligne_expedition, designation, quantite, unite, prix)
+      `INSERT INTO ${t.lineTable} (${t.lineFk}, IDligne_expedition, designation, quantite, unite, prix)
        VALUES (${id}, 0, ${sqlText(d.designation ?? '')}, ${Number(d.quantite) || 0}, ${sqlText(d.unite ?? '')}, ${Number(d.prix) || 0})`,
     )
     res.status(201).json({ ok: true })
@@ -567,10 +748,17 @@ facturesRouter.post('/:id/lignes', async (req: Request, res: Response) => {
   }
 })
 
-facturesRouter.put('/lignes/:lineId', async (req: Request, res: Response) => {
+facturesRouter.put('/:kind/lignes/:lineId', async (req: Request, res: Response) => {
   try {
+    const kind = parseKind(req.params.kind)
+    if (!kind) { res.status(404).json({ error: 'Not found' }); return }
     const lineId = parseInt(req.params.lineId, 10)
     if (isNaN(lineId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (kind === 'def') { res.status(409).json(DEF_LOCK); return }
+    const parent = await provLineParent(lineId)
+    if (parent === 0) { res.status(404).json({ error: 'Line not found' }); return }
+    if (await provConverted(parent)) { res.status(409).json(PROV_CONVERTED); return }
+
     const parsed = ligneBody.safeParse(req.body)
     if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
     const d = parsed.data
@@ -580,7 +768,7 @@ facturesRouter.put('/lignes/:lineId', async (req: Request, res: Response) => {
     if (d.unite !== undefined) sets.push(`unite = ${sqlText(d.unite)}`)
     if (d.prix !== undefined) sets.push(`prix = ${Number(d.prix) || 0}`)
     if (sets.length === 0) { res.status(400).json({ error: 'No fields to update' }); return }
-    await query(`UPDATE ligne_facture SET ${sets.join(', ')} WHERE IDligne_facture = ${lineId}`)
+    await query(`UPDATE ${TBL[kind].lineTable} SET ${sets.join(', ')} WHERE ${TBL[kind].linePk} = ${lineId}`)
     res.json({ ok: true })
   } catch (err) {
     console.error('Error updating facture line:', err)
@@ -588,11 +776,18 @@ facturesRouter.put('/lignes/:lineId', async (req: Request, res: Response) => {
   }
 })
 
-facturesRouter.delete('/lignes/:lineId', async (req: Request, res: Response) => {
+facturesRouter.delete('/:kind/lignes/:lineId', async (req: Request, res: Response) => {
   try {
+    const kind = parseKind(req.params.kind)
+    if (!kind) { res.status(404).json({ error: 'Not found' }); return }
     const lineId = parseInt(req.params.lineId, 10)
     if (isNaN(lineId)) { res.status(400).json({ error: 'Invalid ID' }); return }
-    await query(`DELETE FROM ligne_facture WHERE IDligne_facture = ${lineId}`)
+    if (kind === 'def') { res.status(409).json(DEF_LOCK); return }
+    const parent = await provLineParent(lineId)
+    if (parent === 0) { res.status(404).json({ error: 'Line not found' }); return }
+    if (await provConverted(parent)) { res.status(409).json(PROV_CONVERTED); return }
+
+    await query(`DELETE FROM ${TBL[kind].lineTable} WHERE ${TBL[kind].linePk} = ${lineId}`)
     res.json({ ok: true })
   } catch (err) {
     console.error('Error deleting facture line:', err)
@@ -604,8 +799,9 @@ facturesRouter.delete('/lignes/:lineId', async (req: Request, res: Response) => 
 //  PDF
 // ════════════════════════════════════════════════════════
 
-export async function buildFacturePdfData(id: number): Promise<FacturePdfData | null> {
-  const rows = await query<any>(`SELECT * FROM facture WHERE IDfacture = ${id}`)
+export async function buildFacturePdfData(kind: Kind, id: number): Promise<FacturePdfData | null> {
+  const t = TBL[kind]
+  const rows = await query<any>(`SELECT * FROM ${t.table} WHERE ${t.pk} = ${id}`)
   if (rows.length === 0) return null
   const h = rows[0]
   const IDclient = Number(h.IDclient) || 0
@@ -613,7 +809,7 @@ export async function buildFacturePdfData(id: number): Promise<FacturePdfData | 
   const [clientNames, adr, lignes, tvaMap, modePaiement, echeance] = await Promise.all([
     resolveClientNames([IDclient]),
     loadAdresse(Number(h.IDadresse) || 0),
-    loadFactureLines(id),
+    loadFactureLines(kind, id),
     loadTvaMap(),
     loadModePaiementLabel(Number(h.IDmode_paiement) || 0),
     loadEcheanceLabel(Number(h.IDecheance) || 0),
@@ -629,6 +825,7 @@ export async function buildFacturePdfData(id: number): Promise<FacturePdfData | 
   return {
     numero: String(h.numero ?? id),
     type: Number(h.TYPE) || 1,
+    isProforma: kind === 'prov',
     dateFacture: formatHfsqlDateLongFr(h.DATE),
     clientNom: clientNames.get(IDclient) ?? '',
     numTva: (h.num_tva ?? '').toString() || null,
@@ -648,14 +845,16 @@ async function renderFacturePdfBuffer(data: FacturePdfData): Promise<Buffer> {
   )
 }
 
-facturesRouter.get('/:id/pdf', async (req: Request, res: Response) => {
+facturesRouter.get('/:kind/:id/pdf', async (req: Request, res: Response) => {
   try {
+    const kind = parseKind(req.params.kind)
+    if (!kind) { res.status(404).json({ error: 'Not found' }); return }
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
-    const data = await buildFacturePdfData(id)
+    const data = await buildFacturePdfData(kind, id)
     if (!data) { res.status(404).json({ error: 'Facture not found' }); return }
     const buffer = await renderFacturePdfBuffer(data)
-    const word = data.type === 2 ? 'avoir' : 'facture'
+    const word = data.isProforma ? 'proforma' : (data.type === 2 ? 'avoir' : 'facture')
     res.setHeader('Content-Type', 'application/pdf')
     res.setHeader('Content-Disposition', `inline; filename="${word}-${data.numero}.pdf"`)
     res.removeHeader('X-Frame-Options')
@@ -669,7 +868,7 @@ facturesRouter.get('/:id/pdf', async (req: Request, res: Response) => {
 })
 
 // ════════════════════════════════════════════════════════
-//  EMAIL
+//  EMAIL  (definitive only — see header note)
 // ════════════════════════════════════════════════════════
 
 interface EmailRecipientPayload { email: string; name?: string; source: 'contact'; contactId: number }
@@ -724,8 +923,10 @@ async function buildEmailDefaults(id: number): Promise<{
   return { recipients: { selected, suggestions }, subject, body, clientNom, numero }
 }
 
-facturesRouter.get('/:id/email-defaults', async (req: Request, res: Response) => {
+facturesRouter.get('/:kind/:id/email-defaults', async (req: Request, res: Response) => {
   try {
+    const kind = parseKind(req.params.kind)
+    if (kind !== 'def') { res.status(400).json({ error: 'email_definitive_only' }); return }
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
     const defaults = await buildEmailDefaults(id)
@@ -777,8 +978,10 @@ async function logEnvoiEmails(idReference: number, recipients: string[], societe
   }
 }
 
-facturesRouter.post('/:id/email', async (req: Request, res: Response) => {
+facturesRouter.post('/:kind/:id/email', async (req: Request, res: Response) => {
   try {
+    const kind = parseKind(req.params.kind)
+    if (kind !== 'def') { res.status(400).json({ error: 'email_definitive_only' }); return }
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
     if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
@@ -809,7 +1012,7 @@ facturesRouter.post('/:id/email', async (req: Request, res: Response) => {
 
       const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
       if (parsed.data.attach_pdf !== false) {
-        const data = await buildFacturePdfData(id)
+        const data = await buildFacturePdfData('def', id)
         if (!data) { res.status(404).json({ error: 'Facture not found' }); return }
         const buffer = await renderFacturePdfBuffer(data)
         const word = data.type === 2 ? 'avoir' : 'facture'
@@ -843,11 +1046,16 @@ facturesRouter.post('/:id/email', async (req: Request, res: Response) => {
 })
 
 // ════════════════════════════════════════════════════════
-//  HISTORIQUE  (envoi_email timeline for this facture)
+//  HISTORIQUE  (envoi_email timeline — definitive only)
 // ════════════════════════════════════════════════════════
 
-facturesRouter.get('/:id/historique', async (req: Request, res: Response) => {
+facturesRouter.get('/:kind/:id/historique', async (req: Request, res: Response) => {
   try {
+    const kind = parseKind(req.params.kind)
+    if (!kind) { res.status(404).json({ error: 'Not found' }); return }
+    // Proforma rows never log emails; their id space would otherwise collide
+    // with definitive ids on the shared envoi_email IDtype_doc. Return empty.
+    if (kind === 'prov') { res.json([]); return }
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
     const rows = await query<{ adresse: string | null; DATE: string | null }>(

@@ -10,6 +10,29 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-25 — feat/facturation
+Clients › Facturation (`apps/web/src/pages/ClientsFacturation.tsx` + `apps/api/src/routes/factures.ts` +
+`apps/api/src/lib/pdf/FacturePdf.tsx`) — added the **proforma vs definitive** two-table model on top of the
+existing manual-invoicing screen. The API routes are now generalized over a `Kind` config (`TBL` map) and
+moved under `/factures/:kind/...` (`kind` = `prov` → `facture_prov`/`ligne_facture_prov`, `def` →
+`facture`/`ligne_facture`); the list is `GET /factures?status=prov|def`. Each table keeps an **independent
+`numero` sequence** (MAX+1 per table, retry loop). A proforma is fully editable; converting it
+(`POST /factures/prov/:id/convert`) copies the header + lines into `facture` with a fresh definitive numero.
+Because `facture_prov` has no spare flag, a converted proforma is marked by **overloading
+`facture_prov.IDexpedition_divers`** (else always 0) as a back-pointer to the resulting `facture.IDfacture`
+(`0` = open/editable, `>0` = converted/locked). Write-path **locks** (server 409 `DEF_LOCK` / `PROV_CONVERTED`,
+FE hides the buttons): definitive is read-only AND non-deletable; a converted proforma is read-only. **Email +
+historique are definitive-only** (prov/def share the `envoi_email` `IDtype_doc` 19 + a numeric id space, so
+emailing a proforma would cross-contaminate histories). Proforma still prints via a `FacturePdf` `isProforma`
+variant ("Facture proforma" title + "Document non contractuel" mention; no italic — bundled Lato has no italic
+face). FE: the create dialog now picks `prov`/`def`; the detail header shows a Proforma/Définitive/Converti
+badge, a "Convertir en facture" action on open proformas, and a "Voir la facture N°…" jump on converted ones.
+**Left-panel redesign** (this session's ask): the proforma/definitive selector is now a prominent bordered
+segmented control (`Proforma | Définitives` — renamed from "Factures" to kill the collision with the type
+filter's "Factures"), and the type filter below it (`Tous | Factures | Avoirs`) uses the standard left-list
+filter button group, so the category switch reads as dominant and the filter as subordinate. Verified end-to-end
+on local HFSQL; web `tsc --noEmit` clean.
+
 ## 2026-06-25 — feat/gestion-client
 Clients › Gestion (`apps/web/src/pages/ClientsGestion.tsx`) — right-panel reorganization (UI only, no
 API/data changes). The master-data form that previously lived in the **center** panel was moved into the
