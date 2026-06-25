@@ -70,6 +70,33 @@ Finis › Stock table (`apps/web/src/pages/FinisStock.tsx`) — cosmetic weight 
 `StockRow` carried a `font-medium` class that bolded every weight value relative to the surrounding columns.
 Removed it so the Poids values render at normal weight, consistent with the rest of the table row.
 
+## 2026-06-25 — feat/cmd-client
+Clients › Commandes — Ennoblissement supply tab: affectation modal, état pills, and the **create-ennoblisseur-order
+from a client line** flow (`apps/web/src/pages/ClientsCommandes.tsx` + `apps/api/src/routes/commandes-client.ts`).
+The line-drawer Ennoblissement/Tricotage supply tables gained **N°** + **Date** columns and a solid-hue
+`SupplyEtatPill` (En cours / Attente délai / Non envoyé), and single-clicking an ennoblisseur row opens
+`EnnoblissementAffectationDialog` (two-panel transfer) to reserve a dyer's input écru rolls to the client fini line
+— with a coloris-match fix on `buildEnnoblissement` (`lcs.IDColoris = ctx.coloriId`) so a dye order for a different
+coloris of the same ref_fini no longer leaks in. New this branch: below the in-progress orders table, an
+**EnnoLocationTable** ports the legacy "029 - écru disponible" panel — tombé-de-métier (écru) of this fini's écru ref
+(`ref_fini.IDref_ecru`) available, aggregated by sous-traitant location and grouped **Chez les ennoblisseurs**
+(IDtype_sst=2) vs **À l'usine** (other ssts), each row showing Poids (kg) + Métrage potentiel (poids×raw-rendement).
+Only ennoblisseur rows carry a gold **Commande** button that opens a location-scoped `CreateEnnoblisseurOrderDialog`
+("Disponible chez X" rolls, all pre-selected, Shift-range + Tout/Aucun, date commande/livraison). Creating commissions
+a `commande_sous_traitant` + one `type=2` line (IDreference=ref_fini, IDColoris=coloris, quantite=Σpoids×rendement Ml,
+unite=0, sstatut=Non_Envoye — INSERT shapes copied verbatim from commandes-sous-traitant.ts), affects the chosen écru
+rolls (`stock_ecru.IDref_commande_affectation`), auto-reserves the FREE ones to the client line
+(`IDligne_commande_client`, guarded so rolls reserved elsewhere keep their reservation), and auto-prices via
+`calcTarifSST` (€/Kg, best-effort). **Affect-only** — `IDmagasin` untouched (physical shipment stays a separate step).
+Backend endpoints (all scoped to a fini client line): `GET …/supply/ennoblissement/available-by-location`
+(`fetchEnnoLocations` + `resolveSousTraitantTypes`; factory `IDmagasin=0` excluded — only sous-traitant locations),
+`GET …/available-rolls[?magasin=<id>]` (`fetchEnnoAvailableRolls`; coloris NOT filtered — dyer dyes any source coloris;
+`reserved_elsewhere` surfaced not excluded; available = ref match + not-dyer-affected + not-shipped + not-consumed-by-fini),
+`GET/PUT/DELETE …/supply/ennoblissement/:sstLineId/rolls[/:stockId]` (`fetchEnnoRollsPayload`), and
+`POST …/supply/ennoblissement/orders` (`ennoOrderBody`). Ennoblisseurs are external → no TRM mirror / no bridge-storm.
+Reads verified live (cmd 6899/ligne 12648/040A → MATEL 2 rolls / 26.26 kg / 63 ml). (Memory:
+project_clients_line_supply_tabs.)
+
 ## 2026-06-24 — feat/devis
 Clients › Devis PDF (`apps/api/src/lib/pdf/DevisEtmPdf.tsx`) — header height reduction + delivery-address
 relocation. The delivery address (`ADRESSE DE LIVRAISON`) was removed from the top-right combo card and now

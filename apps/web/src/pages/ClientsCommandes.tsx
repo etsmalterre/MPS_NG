@@ -31,8 +31,11 @@ import {
   LockOpen,
   Sparkles,
   Droplets,
+  Hourglass,
+  Mail,
 } from 'lucide-react'
 import { KnitIcon } from '@/components/icons/KnitIcon'
+import { TmRollIcon } from '@/components/icons/TmRollIcon'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
@@ -111,6 +114,8 @@ interface AffectationPayload {
 
 interface SupplyTricoRow {
   id: number
+  commande_id: number
+  date_commande: string | null
   sous_traitant_nom: string | null
   date_livraison: string | null
   etat_label: string
@@ -120,6 +125,8 @@ interface SupplyTricoRow {
 }
 interface SupplyEnnoRow {
   id: number
+  commande_id: number
+  date_commande: string | null
   sous_traitant_nom: string | null
   date_livraison: string | null
   etat_label: string
@@ -231,6 +238,27 @@ function PhasePill({ phase, className }: { phase: ClientPhase; className?: strin
   return (
     <Badge variant="outline" className={cn('text-[10px] py-0 gap-1 border text-white', meta.solid, className)}>
       <Icon className="h-2.5 w-2.5" />{meta.label}
+    </Badge>
+  )
+}
+
+// Supply-line état pill — solid hue per sst line status, matching the colors
+// used by the Sous-traitants/Commandes phase pills (SST_PHASE_META). Keyed on
+// the French label the supply endpoint emits (SSTATUT_LABELS).
+const SUPPLY_ETAT_META: Record<string, { solid: string; icon: React.ElementType }> = {
+  'En cours': { solid: 'bg-primary border-primary', icon: Clock },
+  'Attente délai': { solid: 'bg-yellow-500 border-yellow-500', icon: Hourglass },
+  'Non envoyé': { solid: 'bg-slate-500 border-slate-500', icon: Mail },
+}
+
+function SupplyEtatPill({ label }: { label: string | null | undefined }) {
+  if (!label) return <span className="text-muted-foreground">—</span>
+  const meta = SUPPLY_ETAT_META[label]
+  if (!meta) return <span className="text-muted-foreground">{label}</span>
+  const Icon = meta.icon
+  return (
+    <Badge variant="outline" className={cn('text-[10px] py-0 gap-1 border text-white', meta.solid)}>
+      <Icon className="h-2.5 w-2.5" />{label}
     </Badge>
   )
 }
@@ -1077,6 +1105,18 @@ function AffectationDrawer({
     ...(supplyEnabled ? [{ key: 'trico' as const, label: 'Tricotage', icon: KnitIcon }] : []),
   ]
   const [tab, setTab] = useState<SupplyTab>('affectation')
+  // Ennoblissement row clicked → open the roll-affectation modal for that dyer order.
+  const [ennoTarget, setEnnoTarget] = useState<SupplyEnnoRow | null>(null)
+  // "Nouvelle commande" on a location row → open the create-order modal scoped to it.
+  const [createEnnoLocation, setCreateEnnoLocation] = useState<EnnoLocationRow | null>(null)
+
+  // Tombé-de-métier (écru) of this ref available, aggregated by sous-traitant
+  // location — the legacy "029 - écru disponible" panel below the orders table.
+  const { data: ennoLocations, isLoading: ennoLocLoading } = useQuery<EnnoLocationsPayload>({
+    queryKey: ['commande-client-enno-locations', commandeId, ligne.IDligne_commande_client],
+    queryFn: () => apiFetch(`/commandes-client/${commandeId}/lignes/${ligne.IDligne_commande_client}/supply/ennoblissement/available-by-location`),
+    enabled: ligne.type === 2,
+  })
 
   const linked = data?.linked ?? []
   const available = data?.available ?? []
@@ -1087,6 +1127,7 @@ function AffectationDrawer({
   const pct = target > 0 ? Math.min(100, (reserved / target) * 100) : 0
 
   return (
+    <>
     <div className="flex flex-col h-full min-h-0 overflow-hidden bg-zinc-100/80">
       {/* Tab strip + close (mps_designer §31.4) */}
       <div className="flex-shrink-0 flex items-center border-b bg-zinc-200/50 p-1 gap-1">
@@ -1185,20 +1226,39 @@ function AffectationDrawer({
       )}
 
       {tab === 'enno' && (
-        <div className="flex-1 overflow-y-auto p-3 scrollbar-transparent">
-          <SupplyTable
-            loading={supplyLoading}
-            rows={supply?.ennoblissement ?? []}
-            emptyLabel="Aucune commande ennoblisseur en cours"
-            emptyIcon={Droplets}
-            columns={[
-              { key: 'sst', label: 'Ennoblisseur', align: 'left', render: (r) => r.sous_traitant_nom || '—' },
-              { key: 'dl', label: 'Délai', align: 'left', render: (r) => fmtSupplyDate(r.date_livraison) },
-              { key: 'et', label: 'État', align: 'left', render: (r) => r.etat_label },
-              { key: 'di', label: 'Disponible', align: 'right', render: (r) => `${fmtNum(r.qte_disponible, 1)} ml` },
-              { key: 'af', label: 'Affecté', align: 'right', render: (r) => `${fmtNum(r.qte_affecte, 1)} ml` },
-            ]}
-          />
+        <div className="flex-1 overflow-y-auto p-3 space-y-4 scrollbar-transparent">
+          <section>
+            <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
+              Commandes ennoblisseur en cours
+            </h3>
+            <SupplyTable
+              loading={supplyLoading}
+              rows={supply?.ennoblissement ?? []}
+              emptyLabel="Aucune commande ennoblisseur en cours"
+              emptyIcon={Droplets}
+              onRowClick={setEnnoTarget}
+              columns={[
+                { key: 'no', label: 'N°', align: 'left', render: (r) => <span className="tabular-nums font-medium">{r.commande_id}</span> },
+                { key: 'dc', label: 'Date', align: 'left', render: (r) => fmtSupplyDate(r.date_commande) },
+                { key: 'sst', label: 'Ennoblisseur', align: 'left', render: (r) => r.sous_traitant_nom || '—' },
+                { key: 'dl', label: 'Délai', align: 'left', render: (r) => fmtSupplyDate(r.date_livraison) },
+                { key: 'et', label: 'État', align: 'left', render: (r) => <SupplyEtatPill label={r.etat_label} /> },
+                { key: 'di', label: 'Disponible', align: 'right', render: (r) => `${fmtNum(r.qte_disponible, 1)} ml` },
+                { key: 'af', label: 'Affecté', align: 'right', render: (r) => `${fmtNum(r.qte_affecte, 1)} ml` },
+              ]}
+            />
+          </section>
+
+          <section>
+            <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
+              {ligne.ref_label ? `${ligne.ref_label} — tombé de métier disponible` : 'Tombé de métier disponible'}
+            </h3>
+            <EnnoLocationTable
+              loading={ennoLocLoading}
+              locations={ennoLocations?.locations ?? []}
+              onNewOrder={setCreateEnnoLocation}
+            />
+          </section>
         </div>
       )}
 
@@ -1210,6 +1270,8 @@ function AffectationDrawer({
             emptyLabel="Aucune commande tricotage en cours"
             emptyIcon={KnitIcon}
             columns={[
+              { key: 'no', label: 'N°', align: 'left', render: (r) => <span className="tabular-nums font-medium">{r.commande_id}</span> },
+              { key: 'dc', label: 'Date', align: 'left', render: (r) => fmtSupplyDate(r.date_commande) },
               { key: 'sst', label: 'Tricoteur', align: 'left', render: (r) => r.sous_traitant_nom || '—' },
               { key: 'dl', label: 'Délai', align: 'left', render: (r) => fmtSupplyDate(r.date_livraison) },
               { key: 'di', label: 'Poids dispo.', align: 'right', render: (r) => `${fmtNum(r.poids_disponible, 1)} Kg` },
@@ -1220,6 +1282,32 @@ function AffectationDrawer({
         </div>
       )}
     </div>
+    {ennoTarget && (
+      <EnnoblissementAffectationDialog
+        commandeId={commandeId}
+        ligneId={ligne.IDligne_commande_client}
+        row={ennoTarget}
+        onClose={() => setEnnoTarget(null)}
+        onSuccess={onSuccess}
+      />
+    )}
+    {createEnnoLocation && (
+      <CreateEnnoblisseurOrderDialog
+        commandeId={commandeId}
+        ligne={ligne}
+        location={createEnnoLocation}
+        onClose={() => setCreateEnnoLocation(null)}
+        onSuccess={() => {
+          // Refresh the orders table + the affectation panel (new affected
+          // rolls) + the location pool, plus the parent line list.
+          queryClient.invalidateQueries({ queryKey: ['commande-client-supply', commandeId, ligne.IDligne_commande_client] })
+          queryClient.invalidateQueries({ queryKey })
+          queryClient.invalidateQueries({ queryKey: ['commande-client-enno-locations', commandeId, ligne.IDligne_commande_client] })
+          onSuccess()
+        }}
+      />
+    )}
+    </>
   )
 }
 
@@ -1232,13 +1320,14 @@ function fmtSupplyDate(d: string | null): string {
 // Compact table for the supply tabs (ennoblissement / tricotage). Generic over
 // the row shape; columns describe their own rendering + alignment.
 function SupplyTable<T extends { id: number }>({
-  loading, rows, columns, emptyLabel, emptyIcon: EmptyIcon,
+  loading, rows, columns, emptyLabel, emptyIcon: EmptyIcon, onRowClick,
 }: {
   loading: boolean
   rows: T[]
   columns: { key: string; label: string; align: 'left' | 'right'; render: (r: T) => ReactNode }[]
   emptyLabel: string
   emptyIcon: ComponentType<{ className?: string }>
+  onRowClick?: (r: T) => void
 }) {
   if (loading) {
     return <div className="space-y-2">{[1, 2, 3].map((i) => <div key={i} className="h-10 bg-muted animate-pulse rounded-md" />)}</div>
@@ -1265,7 +1354,14 @@ function SupplyTable<T extends { id: number }>({
         </thead>
         <tbody>
           {rows.map((r) => (
-            <tr key={r.id} className="border-b border-border/40 last:border-0 hover:bg-accent/5">
+            <tr
+              key={r.id}
+              onClick={onRowClick ? () => onRowClick(r) : undefined}
+              className={cn(
+                'border-b border-border/40 last:border-0',
+                onRowClick ? 'cursor-pointer hover:bg-accent/10' : 'hover:bg-accent/5',
+              )}
+            >
               {columns.map((c) => (
                 <td key={c.key} className={cn('px-2.5 py-2 whitespace-nowrap', c.align === 'right' ? 'text-right tabular-nums' : 'text-left')}>
                   {c.render(r)}
@@ -1317,6 +1413,455 @@ function RollRow({
         {action === 'link' ? 'Affecter' : 'Retirer'}
       </Button>
     </div>
+  )
+}
+
+// ── Ennoblissement roll affectation modal ──────────────
+// Click an Ennoblissement supply row → reserve the dyer's input écru rolls
+// (stock_ecru via IDref_commande_affectation) to this client fini line.
+// Two-panel transfer (mps_designer §18.C): left = affected, right = available.
+
+interface EnnoRollsPayload {
+  kind: 'ecru'
+  unite: number
+  unite_label: string
+  dim: 'metrage' | 'poids'
+  target_qty: number
+  rendement: number
+  sst_nom: string | null
+  reserved: number
+  linked: RollLite[]
+  available: RollLite[]
+}
+
+function EnnoblissementAffectationDialog({
+  commandeId, ligneId, row, onClose, onSuccess,
+}: {
+  commandeId: number
+  ligneId: number
+  row: SupplyEnnoRow
+  onClose: () => void
+  onSuccess: () => void
+}) {
+  const queryClient = useQueryClient()
+  const sstLineId = row.id
+  const queryKey = ['commande-client-enno-rolls', commandeId, ligneId, sstLineId]
+  const base = `/commandes-client/${commandeId}/lignes/${ligneId}/supply/ennoblissement/${sstLineId}/rolls`
+
+  const { data, isLoading, isError } = useQuery<EnnoRollsPayload>({
+    queryKey,
+    queryFn: () => apiFetch(base),
+  })
+  const linkMut = useMutation({
+    mutationFn: (stockId: number) => apiFetch(`${base}/${stockId}`, { method: 'PUT' }),
+    onSuccess: (payload: EnnoRollsPayload) => { queryClient.setQueryData(queryKey, payload); onSuccess() },
+  })
+  const unlinkMut = useMutation({
+    mutationFn: (stockId: number) => apiFetch(`${base}/${stockId}`, { method: 'DELETE' }),
+    onSuccess: (payload: EnnoRollsPayload) => { queryClient.setQueryData(queryKey, payload); onSuccess() },
+  })
+
+  const linked = data?.linked ?? []
+  const available = data?.available ?? []
+  const uniteLabel = data?.unite_label ?? 'Ml'
+  const target = data?.target_qty ?? 0
+  const reserved = data?.reserved ?? 0
+  const pct = target > 0 ? Math.min(100, (reserved / target) * 100) : 0
+  const sstNom = data?.sst_nom ?? row.sous_traitant_nom ?? '—'
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent className="max-w-5xl h-[85vh] flex flex-col" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Droplets className="h-5 w-5 text-accent" />
+            Affecter le stock — {sstNom}
+          </DialogTitle>
+        </DialogHeader>
+        <p className="text-xs text-muted-foreground">
+          Commande ennoblisseur N°<span className="tabular-nums">{row.commande_id}</span> · {fmtSupplyDate(row.date_commande)}
+        </p>
+
+        {/* Progress: reserved toward the client line target */}
+        <div className="mt-2 flex-shrink-0">
+          <div className="flex items-center justify-between text-[11px] font-medium tabular-nums mb-1">
+            <span className="text-muted-foreground uppercase tracking-wide">Affecté à la commande</span>
+            <span className={cn(pct >= 99.9 ? 'text-green-600' : 'text-foreground')}>
+              {fmtNum(reserved, 1)} / {fmtNum(target, 1)} {uniteLabel}
+            </span>
+          </div>
+          <div className="h-1.5 rounded-full bg-zinc-200 overflow-hidden">
+            <div className={cn('h-full rounded-full transition-all', pct >= 99.9 ? 'bg-green-500' : 'bg-accent')} style={{ width: `${pct}%` }} />
+          </div>
+        </div>
+
+        {/* Two-panel transfer */}
+        <div className="flex-1 min-h-0 flex gap-4 mt-3">
+          {/* Left: affected to this client order */}
+          <div className="flex-1 min-w-0 flex flex-col">
+            <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5 flex-shrink-0">
+              Affecté à la commande ({linked.length})
+            </h3>
+            <div className="flex-1 min-h-0 overflow-y-auto space-y-1.5 px-1 scrollbar-transparent">
+              {linked.map((roll) => (
+                <RollRow key={roll.id} roll={roll} dim="poids" action="unlink"
+                  onAction={() => unlinkMut.mutate(roll.id)}
+                  isBusy={unlinkMut.isPending && unlinkMut.variables === roll.id} />
+              ))}
+              {!isLoading && linked.length === 0 && (
+                <p className="text-xs text-muted-foreground italic text-center py-6">Aucun rouleau affecté.</p>
+              )}
+            </div>
+          </div>
+
+          {/* Right: available at the dyer */}
+          <div className="flex-1 min-w-0 flex flex-col">
+            <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5 flex-shrink-0">
+              Disponible chez l'ennoblisseur ({available.length})
+            </h3>
+            <div className="flex-1 min-h-0 overflow-y-auto space-y-1.5 px-1 scrollbar-transparent">
+              {isLoading && [1, 2, 3].map((i) => <div key={i} className="h-16 bg-muted animate-pulse rounded-lg" />)}
+              {isError && (
+                <div className="flex flex-col items-center justify-center py-6 text-destructive">
+                  <AlertCircle className="h-6 w-6 mb-2" /><p className="text-sm">Erreur de chargement</p>
+                </div>
+              )}
+              {available.map((roll) => (
+                <RollRow key={roll.id} roll={roll} dim="poids" action="link"
+                  onAction={() => linkMut.mutate(roll.id)}
+                  isBusy={linkMut.isPending && linkMut.variables === roll.id} />
+              ))}
+              {!isLoading && !isError && available.length === 0 && (
+                <p className="text-xs text-muted-foreground italic text-center py-6">Aucun rouleau disponible.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ── Tombé-de-métier disponible: per-location table + create-order dialog ──
+// Ports the legacy "029 - écru disponible" panel: écru of this fini's écru ref
+// available, aggregated by sous-traitant location (grouped chez les
+// ennoblisseurs / à l'usine). Ennoblisseur rows carry a "Nouvelle commande"
+// button that opens a create-order dialog scoped to that location's stock.
+
+interface AvailableEcruRoll extends RollLite {
+  reserved_elsewhere: boolean
+}
+interface AvailableRollsPayload {
+  unite: number
+  unite_label: string
+  dim: 'metrage' | 'poids'
+  rendement: number
+  rolls: AvailableEcruRoll[]
+}
+interface EnnoLocationRow {
+  IDsous_traitant: number
+  location_nom: string
+  is_ennoblisseur: boolean
+  group: 'ennoblisseur' | 'usine'
+  nb_rolls: number
+  poids: number
+  metrage_potentiel: number
+}
+interface EnnoLocationsPayload {
+  rendement: number
+  unite_label: string
+  locations: EnnoLocationRow[]
+}
+
+// Aggregated écru-by-location table. Two labelled groups; the "Nouvelle
+// commande" button shows only on ennoblisseur rows (you commission the dyer
+// that holds the écru — matches the legacy launcher on the MATEL row).
+function EnnoLocationTable({
+  loading, locations, onNewOrder,
+}: {
+  loading: boolean
+  locations: EnnoLocationRow[]
+  onNewOrder: (loc: EnnoLocationRow) => void
+}) {
+  if (loading) {
+    return <div className="space-y-2">{[1, 2].map((i) => <div key={i} className="h-10 bg-muted animate-pulse rounded-md" />)}</div>
+  }
+  if (locations.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+        <TmRollIcon className="h-8 w-8 mb-2 opacity-50" />
+        <p className="text-sm font-medium">Aucun tombé de métier disponible</p>
+        <p className="text-xs mt-1">Aucun rouleau écru disponible chez un sous-traitant.</p>
+      </div>
+    )
+  }
+  const ennoblisseurs = locations.filter((l) => l.group === 'ennoblisseur')
+  const usine = locations.filter((l) => l.group === 'usine')
+  const renderGroup = (label: string, rows: EnnoLocationRow[]) =>
+    rows.length > 0 && (
+      <div key={label}>
+        <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground bg-zinc-200/50 rounded-md">{label}</div>
+        <div className="mt-1 space-y-1">
+          {rows.map((loc) => (
+            <div key={loc.IDsous_traitant} className="flex items-center gap-2 px-2.5 py-2 rounded-lg border border-border/60 bg-card shadow-sm">
+              <MapPin className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+              <span className="text-sm font-medium truncate flex-1 min-w-0">{loc.location_nom}</span>
+              <span className="text-[11px] text-muted-foreground tabular-nums whitespace-nowrap">{fmtNum(loc.poids, 1)} kg</span>
+              <span className="text-[11px] text-muted-foreground tabular-nums whitespace-nowrap w-20 text-right">{fmtNum(loc.metrage_potentiel, 0)} ml</span>
+              {loc.is_ennoblisseur ? (
+                <Button variant="gold" size="sm" className="h-7 flex-shrink-0" onClick={() => onNewOrder(loc)}>
+                  <Plus className="h-3.5 w-3.5 mr-1" />Commande
+                </Button>
+              ) : (
+                <span className="w-[104px] flex-shrink-0" />
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  return (
+    <div className="space-y-3">
+      {renderGroup('Chez les ennoblisseurs', ennoblisseurs)}
+      {renderGroup("À l'usine", usine)}
+    </div>
+  )
+}
+
+// Create a new ennoblisseur order from the écru held at ONE location (the row's
+// sous-traitant = the dyer). Scoped roll list ("disponible chez X"), multi-
+// select (all pre-selected), then POST creates the order + affects the rolls.
+function CreateEnnoblisseurOrderDialog({
+  commandeId, ligne, location, onClose, onSuccess,
+}: {
+  commandeId: number
+  ligne: LigneCommande
+  location: EnnoLocationRow
+  onClose: () => void
+  onSuccess: () => void
+}) {
+  const ligneId = ligne.IDligne_commande_client
+  const [dateCommande, setDateCommande] = useState(() => new Date().toISOString().slice(0, 10))
+  const [dateLivraison, setDateLivraison] = useState('')
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const lastSelectedRef = useRef<number | null>(null)
+  const initRef = useRef(false)
+
+  const { data, isLoading, isError } = useQuery<AvailableRollsPayload>({
+    queryKey: ['commande-client-enno-available', commandeId, ligneId, location.IDsous_traitant],
+    queryFn: () => apiFetch(`/commandes-client/${commandeId}/lignes/${ligneId}/supply/ennoblissement/available-rolls?magasin=${location.IDsous_traitant}`),
+  })
+
+  const rolls = useMemo(() => data?.rolls ?? [], [data])
+  const rendement = data?.rendement ?? 0
+  // Pre-select everything available at this location on first load (the common
+  // intent is "commission the dyer for all the écru it holds").
+  useEffect(() => {
+    if (!initRef.current && rolls.length > 0) {
+      setSelected(new Set(rolls.map((r) => r.id)))
+      lastSelectedRef.current = rolls[rolls.length - 1]?.id ?? null
+      initRef.current = true
+    }
+  }, [rolls])
+
+  const orderedIds = rolls.map((r) => r.id)
+  const selectedKg = rolls.filter((r) => selected.has(r.id)).reduce((s, r) => s + (Number(r.poids) || 0), 0)
+  const selectedMl = selectedKg * rendement
+  const allSelected = rolls.length > 0 && rolls.every((r) => selected.has(r.id))
+
+  const selectAll = () => { setSelected(new Set(rolls.map((r) => r.id))); lastSelectedRef.current = rolls[rolls.length - 1]?.id ?? null }
+  const clearSelection = () => { setSelected(new Set()); lastSelectedRef.current = null }
+
+  const handleToggle = (id: number, shiftKey: boolean) => {
+    const anchor = lastSelectedRef.current
+    if (shiftKey && anchor !== null && anchor !== id) {
+      const a = orderedIds.indexOf(anchor)
+      const b = orderedIds.indexOf(id)
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a]
+        setSelected((prev) => {
+          const next = new Set(prev)
+          for (let i = lo; i <= hi; i++) next.add(orderedIds[i])
+          return next
+        })
+        return
+      }
+    }
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+    lastSelectedRef.current = id
+  }
+
+  const canSubmit = selected.size > 0 && dateCommande.length > 0 && !busy
+  const handleSubmit = async () => {
+    if (!canSubmit) return
+    setError(null)
+    setBusy(true)
+    try {
+      await apiFetch(`/commandes-client/${commandeId}/lignes/${ligneId}/supply/ennoblissement/orders`, {
+        method: 'POST',
+        body: JSON.stringify({
+          IDsous_traitant: location.IDsous_traitant,
+          date_commande: inputDateToHfsql(dateCommande),
+          date_livraison: dateLivraison ? inputDateToHfsql(dateLivraison) : undefined,
+          stockEcruIds: Array.from(selected),
+        }),
+      })
+      onSuccess()
+      onClose()
+    } catch (e: any) {
+      setError(e instanceof Error ? e.message : 'Erreur')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const inputCls = 'w-full h-9 px-2.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring'
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o && !busy) onClose() }}>
+      <DialogContent className="max-w-2xl w-[92vw] h-[85vh] flex flex-col p-0 overflow-hidden" onClose={busy ? undefined : onClose}>
+        {/* Header */}
+        <div className="flex-shrink-0 px-6 pt-4 pb-3 border-b bg-gradient-to-r from-gold/25 via-gold/10 to-transparent flex items-start gap-3">
+          <div className="h-10 w-10 rounded-lg icon-box-gold flex items-center justify-center flex-shrink-0">
+            <Droplets className="h-5 w-5" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h2 className="text-base font-heading font-bold tracking-tight truncate">Nouvelle commande — {location.location_nom}</h2>
+            <p className="text-xs text-muted-foreground mt-0.5 truncate">
+              {ligne.ref_label || `Réf ${ligne.IDreference}`}
+              {ligne.colori_reference && ` · ${ligne.colori_reference}`}
+            </p>
+            <p className="text-[10px] text-muted-foreground/80 italic mt-0.5">Astuce : Maj+clic pour sélectionner une plage.</p>
+          </div>
+        </div>
+
+        {/* Order dates */}
+        <div className="flex-shrink-0 px-6 py-3 border-b bg-zinc-200/30 grid grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Date commande</label>
+            <input type="date" value={dateCommande} onChange={(e) => setDateCommande(e.target.value)} className={inputCls} />
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Date livraison</label>
+            <input type="date" value={dateLivraison} onChange={(e) => setDateLivraison(e.target.value)} className={inputCls} />
+          </div>
+        </div>
+
+        {/* Disponible chez X — scoped roll list */}
+        <div className="flex-shrink-0 px-4 py-1.5 flex items-center bg-zinc-100/80 border-b">
+          <span className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold flex items-center gap-1.5">
+            <MapPin className="h-3 w-3" />Disponible chez {location.location_nom}
+          </span>
+          {rolls.length > 0 && (
+            <div className="ml-auto flex items-center gap-1">
+              <button type="button" onClick={selectAll} disabled={busy || allSelected}
+                className="text-[11px] text-accent hover:underline disabled:text-muted-foreground/50 disabled:no-underline disabled:cursor-default px-1">Tout</button>
+              <span className="text-muted-foreground/40 text-[11px]">·</span>
+              <button type="button" onClick={clearSelection} disabled={busy || selected.size === 0}
+                className="text-[11px] text-muted-foreground hover:text-foreground disabled:text-muted-foreground/40 disabled:cursor-default px-1">Aucun</button>
+            </div>
+          )}
+        </div>
+        <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1.5 bg-zinc-100/80 scrollbar-transparent">
+          {isLoading && <div className="space-y-2">{[1, 2, 3].map((i) => <div key={i} className="h-14 bg-muted animate-pulse rounded-lg" />)}</div>}
+          {isError && (
+            <div className="flex flex-col items-center justify-center py-10 text-destructive">
+              <AlertCircle className="h-6 w-6 mb-2" /><p className="text-sm">Erreur de chargement</p>
+            </div>
+          )}
+          {!isLoading && !isError && rolls.length === 0 && (
+            <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+              <Package className="h-10 w-10 mb-2 opacity-40" />
+              <p className="text-sm font-medium">Aucun rouleau disponible</p>
+            </div>
+          )}
+          {rolls.map((roll) => (
+            <SelectableEcruRoll
+              key={roll.id}
+              roll={roll}
+              rendement={rendement}
+              selected={selected.has(roll.id)}
+              disabled={busy}
+              onToggle={(shiftKey) => handleToggle(roll.id, shiftKey)}
+            />
+          ))}
+        </div>
+
+        {/* Footer */}
+        <div className="flex-shrink-0 px-6 py-3 border-t bg-zinc-200/50">
+          {!!error && (
+            <div className="mb-2 flex items-start gap-1.5 text-xs text-destructive">
+              <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" /><span className="break-all">{error}</span>
+            </div>
+          )}
+          <div className="flex items-center gap-3">
+            <p className="text-xs text-muted-foreground tabular-nums">
+              {selected.size > 0
+                ? `${selected.size} rouleau${selected.size > 1 ? 'x' : ''} · ${fmtNum(selectedKg, 1)} kg · ${fmtNum(selectedMl, 0)} ml`
+                : 'Aucun rouleau sélectionné'}
+            </p>
+            <div className="ml-auto flex gap-2">
+              <Button variant="outline" onClick={onClose} disabled={busy}>Annuler</Button>
+              <Button onClick={handleSubmit} disabled={!canSubmit}>
+                {busy
+                  ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Création…</>
+                  : <><Plus className="h-3.5 w-3.5 mr-1.5" />Créer la commande</>}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// Selectable écru roll row. Click (or Shift+click for a range) toggles
+// selection; shows poids + métrage potentiel (poids × rendement).
+function SelectableEcruRoll({
+  roll, rendement, selected, disabled, onToggle,
+}: {
+  roll: AvailableEcruRoll
+  rendement: number
+  selected: boolean
+  disabled: boolean
+  onToggle: (shiftKey: boolean) => void
+}) {
+  const poids = Number(roll.poids) || 0
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={(e) => onToggle(e.shiftKey)}
+      className={cn(
+        'w-full text-left rounded-lg border p-2.5 flex items-center gap-3 transition-colors disabled:opacity-60',
+        selected ? 'border-accent ring-1 ring-accent bg-accent/[0.06]' : 'border-border/60 bg-card hover:border-accent/40',
+      )}
+    >
+      <div className={cn('h-5 w-5 rounded flex items-center justify-center flex-shrink-0 border', selected ? 'bg-accent border-accent text-accent-foreground' : 'border-input bg-background')}>
+        {selected && <CheckCircle2 className="h-3.5 w-3.5" />}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm font-semibold truncate">{roll.numero || `Rouleau ${roll.id}`}</span>
+          {roll.lot && <span className="text-xs text-muted-foreground truncate">· Lot {roll.lot}</span>}
+          {!!roll.second_choix && <Badge variant="secondary" className="text-[10px] py-0 px-1.5">2nd choix</Badge>}
+          {roll.reserved_elsewhere && (
+            <Badge variant="outline" className="text-[10px] py-0 px-1.5 border-amber-500/40 text-amber-700 bg-amber-500/10">Réservé ailleurs</Badge>
+          )}
+        </div>
+        <div className="flex items-center gap-3 mt-0.5 text-[11px] text-muted-foreground tabular-nums">
+          <span className="font-medium text-foreground">{fmtNum(poids, 1)} kg</span>
+          {rendement > 0 && <span>· {fmtNum(poids * rendement, 0)} ml</span>}
+          {roll.coloris_reference && <span className="truncate">· {roll.coloris_reference}</span>}
+        </div>
+      </div>
+    </button>
   )
 }
 

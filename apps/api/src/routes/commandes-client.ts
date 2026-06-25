@@ -31,6 +31,7 @@ import React from 'react'
 import { query, queryRaw, fixEncoding } from '../lib/hfsql-auto.js'
 import { CommandeClientPdf, type CommandeClientPdfData } from '../lib/pdf/CommandeClientPdf.js'
 import { calcLignePriceClient } from '../lib/pricing-ligne-client.js'
+import { calcTarifSST } from '../lib/pricing-sst.js'
 import { sendMail } from '../lib/gmail.js'
 import { getUserEmail } from '../lib/user-emails.js'
 import { stripRtf } from '../lib/rtf-utils.js'
@@ -1341,6 +1342,8 @@ async function fetchAffectationPayload(ctx: ClientLineContext) {
 
 interface SupplyTricoRow {
   id: number
+  commande_id: number
+  date_commande: string | null
   sous_traitant_nom: string | null
   date_livraison: string | null
   etat_label: string
@@ -1350,6 +1353,8 @@ interface SupplyTricoRow {
 }
 interface SupplyEnnoRow {
   id: number
+  commande_id: number
+  date_commande: string | null
   sous_traitant_nom: string | null
   date_livraison: string | null
   etat_label: string
@@ -1374,7 +1379,8 @@ const round2c = (v: number) => Math.round(v * 100) / 100
 async function buildTricotage(ecruRefId: number, rendement: number): Promise<SupplyTricoRow[]> {
   const lines = await query<any>(
     `SELECT lcs.IDligne_commande_sous_traitant AS lid, lcs.quantite AS q, lcs.date_livraison AS dl,
-            lcs.sstatut AS st, cst.IDsous_traitant AS sstid
+            lcs.sstatut AS st, cst.IDsous_traitant AS sstid,
+            cst.IDcommande_sous_traitant AS cid, cst.date_commande AS dc
        FROM ligne_commande_sous_traitant lcs
        JOIN commande_sous_traitant cst ON cst.IDcommande_sous_traitant = lcs.IDcommande_sous_traitant
       WHERE lcs.type = 1 AND lcs.IDreference = ${ecruRefId}
@@ -1397,6 +1403,8 @@ async function buildTricotage(ecruRefId: number, rendement: number): Promise<Sup
     const dispo = Math.max(0, (Number(l.q) || 0) - aff)
     return {
       id: Number(l.lid),
+      commande_id: Number(l.cid),
+      date_commande: l.dc ?? null,
       sous_traitant_nom: sstNames.get(Number(l.sstid)) ?? null,
       date_livraison: l.dl ?? null,
       etat_label: SSTATUT_LABELS[String(l.st)] ?? String(l.st ?? ''),
@@ -1407,13 +1415,19 @@ async function buildTricotage(ecruRefId: number, rendement: number): Promise<Sup
   })
 }
 
-async function buildEnnoblissement(finiRefId: number, rendement: number): Promise<SupplyEnnoRow[]> {
+async function buildEnnoblissement(finiRefId: number, rendement: number, coloriId: number): Promise<SupplyEnnoRow[]> {
+  // Match the client line's coloris too: an ennoblisseur line is keyed on
+  // (fini ref, ref_fini_colori) via lcs.IDColoris. Without this filter a dye
+  // order for a different coloris of the same ref_fini (e.g. 029A Blanc) leaks
+  // into the supply view of an 029A Marine client line. coloriId=0 → no filter.
   const lines = await query<any>(
     `SELECT lcs.IDligne_commande_sous_traitant AS lid, lcs.date_livraison AS dl,
-            lcs.sstatut AS st, cst.IDsous_traitant AS sstid
+            lcs.sstatut AS st, cst.IDsous_traitant AS sstid,
+            cst.IDcommande_sous_traitant AS cid, cst.date_commande AS dc
        FROM ligne_commande_sous_traitant lcs
        JOIN commande_sous_traitant cst ON cst.IDcommande_sous_traitant = lcs.IDcommande_sous_traitant
       WHERE lcs.type = 2 AND lcs.IDreference = ${finiRefId}
+        AND (${coloriId} = 0 OR lcs.IDColoris = ${coloriId})
         AND cst.est_soldee = 0 AND lcs.sstatut IN (${SUPPLY_OPEN_STATUTS})`,
   )
   if (lines.length === 0) return []
@@ -1438,6 +1452,8 @@ async function buildEnnoblissement(finiRefId: number, rendement: number): Promis
     const lid = Number(l.lid)
     return {
       id: lid,
+      commande_id: Number(l.cid),
+      date_commande: l.dc ?? null,
       sous_traitant_nom: sstNames.get(Number(l.sstid)) ?? null,
       date_livraison: l.dl ?? null,
       etat_label: SSTATUT_LABELS[String(l.st)] ?? String(l.st ?? ''),
@@ -1472,7 +1488,7 @@ async function fetchSupplyPayload(ctx: ClientLineContext): Promise<SupplyPayload
   // legacy exactly (e.g. 240.60 kg × 3.548387 = 853.74 ml, validated).
 
   const tricotage = ecruRefId > 0 ? await buildTricotage(ecruRefId, rendement) : []
-  const ennoblissement = finiRefId > 0 ? await buildEnnoblissement(finiRefId, rendement) : []
+  const ennoblissement = finiRefId > 0 ? await buildEnnoblissement(finiRefId, rendement, ctx.coloriId) : []
   return { applicable: true, tricotage, ennoblissement }
 }
 
@@ -1586,6 +1602,449 @@ commandesClientRouter.delete('/:id/lignes/:ligneId/pieces/fini/:stockId', async 
     res.json(await fetchAffectationPayload(ctx))
   } catch (err) {
     console.error('Error unlinking fini from client line:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ════════════════════════════════════════════════════════
+//  ENNOBLISSEMENT roll affectation — reserve a dyer's INPUT écru
+//  rolls (stock_ecru via IDref_commande_affectation = the ennoblisseur
+//  sst line) to THIS client fini line (stock_ecru.IDligne_commande_client).
+//  Mirrors the legacy double-click "transfer" modal on the Ennoblissement
+//  tab. Same column buildEnnoblissement reads, so the supply table stays
+//  consistent. Roll quantity is reported in the client line's unite
+//  (ml = poids × fini rendement when unite=Ml, else raw poids in kg).
+// ════════════════════════════════════════════════════════
+
+/** Resolve the fini rendement + ennoblisseur (sous_traitant) name for an sst line. */
+async function loadEnnoLineMeta(sstLineId: number, finiRefId: number): Promise<{ rendement: number; sstNom: string | null }> {
+  const rRows = await query<{ rendement: number | null }>(
+    `SELECT rendement FROM ref_fini WHERE IDref_fini = ${finiRefId}`,
+  )
+  const rendement = Number(rRows[0]?.rendement) || 0
+  const stRows = await query<{ IDsous_traitant: number | null }>(
+    `SELECT cst.IDsous_traitant
+       FROM ligne_commande_sous_traitant lcs
+       JOIN commande_sous_traitant cst ON cst.IDcommande_sous_traitant = lcs.IDcommande_sous_traitant
+      WHERE lcs.IDligne_commande_sous_traitant = ${sstLineId}`,
+  )
+  const sstId = Number(stRows[0]?.IDsous_traitant) || 0
+  const sstNom = sstId > 0 ? (await resolveMagasinNames([sstId])).get(sstId) ?? null : null
+  return { rendement, sstNom }
+}
+
+async function fetchEnnoRollsPayload(ctx: ClientLineContext, sstLineId: number) {
+  const { rendement, sstNom } = await loadEnnoLineMeta(sstLineId, ctx.refId)
+  const dim = lineDim(ctx.unite)
+  const cols = 'IDstock_ecru, numero, lot, poids, metrage, IDcolori_ecru, IDmagasin, second_choix, observations'
+  const [linkedRaw, availRaw] = await Promise.all([
+    query<any>(
+      `SELECT ${cols} FROM stock_ecru
+        WHERE IDref_commande_affectation = ${sstLineId} AND IDligne_commande_client = ${ctx.ligneId}
+        ORDER BY date_saisie DESC, IDstock_ecru DESC`,
+    ),
+    query<any>(
+      `SELECT ${cols} FROM stock_ecru
+        WHERE IDref_commande_affectation = ${sstLineId}
+          AND (IDligne_commande_client IS NULL OR IDligne_commande_client = 0)
+        ORDER BY date_saisie DESC, IDstock_ecru DESC`,
+    ),
+  ])
+  const linkedFixed = await fixEncoding(linkedRaw, 'stock_ecru', 'IDstock_ecru', ['numero', 'lot', 'observations'])
+  const availFixed = await fixEncoding(availRaw, 'stock_ecru', 'IDstock_ecru', ['numero', 'lot', 'observations'])
+  const magNames = await resolveMagasinNames([...linkedFixed, ...availFixed].map((r: any) => Number(r.IDmagasin)))
+  const colNames = await resolveEcruColoris([...linkedFixed, ...availFixed].map((r: any) => Number(r.IDcolori_ecru)))
+  const toRoll = (r: any): RollLite => ({
+    id: Number(r.IDstock_ecru),
+    numero: r.numero ?? null,
+    lot: r.lot ?? null,
+    poids: Number(r.poids) || 0,
+    metrage: Number(r.metrage) || 0,
+    coloris_reference: colNames.get(Number(r.IDcolori_ecru)) ?? null,
+    magasin_nom: magNames.get(Number(r.IDmagasin)) ?? null,
+    second_choix: Number(r.second_choix) || 0,
+    observations: r.observations ?? null,
+    etat_label: null,
+  })
+  const linked = linkedFixed.map(toRoll)
+  const available = availFixed.map(toRoll)
+  // Reserved contribution toward the client line target, in the line's unite.
+  const reserved = linked.reduce((s, r) => s + (dim === 'metrage' ? (r.poids ?? 0) * rendement : (r.poids ?? 0)), 0)
+  return {
+    kind: 'ecru' as const,
+    unite: ctx.unite,
+    unite_label: uniteLabel(ctx.unite),
+    dim,
+    target_qty: ctx.quantite,
+    rendement,
+    sst_nom: sstNom,
+    reserved: Math.round(reserved * 100) / 100,
+    linked,
+    available,
+  }
+}
+
+commandesClientRouter.get('/:id/lignes/:ligneId/supply/ennoblissement/:sstLineId/rolls', async (req: Request, res: Response) => {
+  try {
+    const commandeId = parseInt(req.params.id, 10)
+    const ligneId = parseInt(req.params.ligneId, 10)
+    const sstLineId = parseInt(req.params.sstLineId, 10)
+    if (isNaN(commandeId) || isNaN(ligneId) || isNaN(sstLineId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const ctx = await loadClientLineContext(commandeId, ligneId)
+    if (!ctx || ctx.kind !== 'fini') { res.status(404).json({ error: 'Fini line not found' }); return }
+    res.json(await fetchEnnoRollsPayload(ctx, sstLineId))
+  } catch (err) {
+    console.error('Error fetching ennoblissement rolls:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Reserve a dyer's input écru roll to this client fini line.
+commandesClientRouter.put('/:id/lignes/:ligneId/supply/ennoblissement/:sstLineId/rolls/:stockId', async (req: Request, res: Response) => {
+  try {
+    const commandeId = parseInt(req.params.id, 10)
+    const ligneId = parseInt(req.params.ligneId, 10)
+    const sstLineId = parseInt(req.params.sstLineId, 10)
+    const stockId = parseInt(req.params.stockId, 10)
+    if (isNaN(commandeId) || isNaN(ligneId) || isNaN(sstLineId) || isNaN(stockId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const ctx = await loadClientLineContext(commandeId, ligneId)
+    if (!ctx || ctx.kind !== 'fini') { res.status(404).json({ error: 'Fini line not found' }); return }
+    if (refuseIfSoldee(res, await loadCommandeSoldee(commandeId))) return
+    const rollRows = await query<{ IDref_commande_affectation: number | null; IDligne_commande_client: number | null }>(
+      `SELECT IDref_commande_affectation, IDligne_commande_client FROM stock_ecru WHERE IDstock_ecru = ${stockId}`,
+    )
+    if (rollRows.length === 0) { res.status(404).json({ error: 'Stock ecru not found' }); return }
+    if (Number(rollRows[0].IDref_commande_affectation) !== sstLineId) { res.status(400).json({ error: 'Roll does not belong to this ennoblisseur order' }); return }
+    const current = Number(rollRows[0].IDligne_commande_client) || 0
+    if (current !== 0 && current !== ligneId) { res.status(409).json({ error: 'Roll already reserved to another line' }); return }
+    await query(`UPDATE stock_ecru SET IDligne_commande_client = ${ligneId} WHERE IDstock_ecru = ${stockId}`)
+    res.json(await fetchEnnoRollsPayload(ctx, sstLineId))
+  } catch (err) {
+    console.error('Error reserving ennoblissement roll:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+commandesClientRouter.delete('/:id/lignes/:ligneId/supply/ennoblissement/:sstLineId/rolls/:stockId', async (req: Request, res: Response) => {
+  try {
+    const commandeId = parseInt(req.params.id, 10)
+    const ligneId = parseInt(req.params.ligneId, 10)
+    const sstLineId = parseInt(req.params.sstLineId, 10)
+    const stockId = parseInt(req.params.stockId, 10)
+    if (isNaN(commandeId) || isNaN(ligneId) || isNaN(sstLineId) || isNaN(stockId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const ctx = await loadClientLineContext(commandeId, ligneId)
+    if (!ctx || ctx.kind !== 'fini') { res.status(404).json({ error: 'Fini line not found' }); return }
+    if (refuseIfSoldee(res, await loadCommandeSoldee(commandeId))) return
+    await query(`UPDATE stock_ecru SET IDligne_commande_client = 0 WHERE IDstock_ecru = ${stockId} AND IDligne_commande_client = ${ligneId}`)
+    res.json(await fetchEnnoRollsPayload(ctx, sstLineId))
+  } catch (err) {
+    console.error('Error releasing ennoblissement roll:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ════════════════════════════════════════════════════════
+//  CREATE ENNOBLISSEUR ORDER from a client fini line — the upstream
+//  half of the Ennoblissement tab. List the tombé-de-métier (écru)
+//  rolls available across every location for this line's écru ref, then
+//  commission a NEW commande_sous_traitant whose single type=2 line dyes
+//  this line's ref_fini/coloris. The chosen écru rolls are affected to the
+//  new sst line (IDref_commande_affectation) and, when free, reserved to
+//  this client line (IDligne_commande_client). Affect-only: roll location
+//  (IDmagasin) is untouched — physical shipment is a separate step. Ports
+//  the legacy "create dyeing order from the line" flow.
+// ════════════════════════════════════════════════════════
+
+interface AvailableEcruRoll extends RollLite {
+  reserved_elsewhere: boolean
+}
+
+/** type_sst per sous-traitant (2 = Ennoblisseur — memory project_type_sst_ids). */
+async function resolveSousTraitantTypes(ids: number[]): Promise<Map<number, number>> {
+  const out = new Map<number, number>()
+  const u = Array.from(new Set(ids.filter((x) => x > 0)))
+  if (u.length === 0) return out
+  const rows = await query<{ IDsous_traitant: number; IDtype_sst: number | null }>(
+    `SELECT IDsous_traitant, IDtype_sst FROM sous_traitant WHERE IDsous_traitant IN (${u.join(',')})`,
+  )
+  for (const r of rows) out.set(Number(r.IDsous_traitant), Number(r.IDtype_sst) || 0)
+  return out
+}
+
+async function fetchEnnoAvailableRolls(ctx: ClientLineContext, magasinId = 0) {
+  // The écru a fini line needs is ref_fini.IDref_ecru. Use the RAW rendement
+  // (NOT rounded) so the Ml projection matches the legacy / supply table.
+  const r = await query<{ IDref_ecru: number | null; rendement: number | null }>(
+    `SELECT IDref_ecru, rendement FROM ref_fini WHERE IDref_fini = ${ctx.refId}`,
+  )
+  const ecruRefId = Number(r[0]?.IDref_ecru) || 0
+  const rendement = Number(r[0]?.rendement) || 0
+  const base = {
+    unite: ctx.unite,
+    unite_label: uniteLabel(ctx.unite),
+    dim: lineDim(ctx.unite) as 'metrage' | 'poids',
+    rendement,
+    rolls: [] as AvailableEcruRoll[],
+  }
+  if (ecruRefId <= 0) return base
+
+  // Available = ETM écru of this ref, not yet affected to a dyer, not shipped
+  // out, not already consumed into a fini roll. Coloris is intentionally NOT
+  // filtered (the ennoblisseur dyes regardless of source écru coloris). We DO
+  // surface rolls reserved to another client line (flagged reserved_elsewhere)
+  // so the user sees the whole pool — the create step guards the reservation.
+  // When magasinId>0 the pool is scoped to that location ("disponible chez X").
+  const magFilter = magasinId > 0 ? ` AND IDmagasin = ${magasinId}` : ''
+  const rows = await query<any>(
+    `SELECT IDstock_ecru, numero, lot, poids, metrage, IDcolori_ecru, IDmagasin,
+            IDligne_commande_client, second_choix, observations
+     FROM stock_ecru
+     WHERE IDref_ecru = ${ecruRefId} AND IDsociete = 1${magFilter}
+       AND (IDref_commande_affectation IS NULL OR IDref_commande_affectation = 0)
+       AND (IDligne_expedition_ETM IS NULL OR IDligne_expedition_ETM = 0)
+     ORDER BY date_saisie DESC, IDstock_ecru DESC`,
+  )
+  const ids = rows.map((x: any) => Number(x.IDstock_ecru)).filter((x: number) => x > 0)
+  const consumed = new Set<number>()
+  if (ids.length > 0) {
+    const dyed = await query<{ IDstock_ecru: number }>(
+      `SELECT DISTINCT IDstock_ecru FROM stock_fini WHERE IDstock_ecru IN (${ids.join(',')})`,
+    )
+    for (const d of dyed) consumed.add(Number(d.IDstock_ecru))
+  }
+  const kept = rows.filter((x: any) => !consumed.has(Number(x.IDstock_ecru)))
+  const fixed = await fixEncoding(kept, 'stock_ecru', 'IDstock_ecru', ['numero', 'lot', 'observations'])
+  const magNames = await resolveMagasinNames(fixed.map((x: any) => Number(x.IDmagasin)))
+  const colNames = await resolveEcruColoris(fixed.map((x: any) => Number(x.IDcolori_ecru)))
+  base.rolls = fixed.map((x: any): AvailableEcruRoll => ({
+    id: Number(x.IDstock_ecru),
+    numero: x.numero ?? null,
+    lot: x.lot ?? null,
+    poids: Number(x.poids) || 0,
+    metrage: Number(x.metrage) || 0,
+    coloris_reference: colNames.get(Number(x.IDcolori_ecru)) ?? null,
+    magasin_nom: magNames.get(Number(x.IDmagasin)) ?? null,
+    second_choix: Number(x.second_choix) || 0,
+    observations: x.observations ?? null,
+    etat_label: null,
+    reserved_elsewhere:
+      (Number(x.IDligne_commande_client) || 0) > 0 && Number(x.IDligne_commande_client) !== ctx.ligneId,
+  }))
+  return base
+}
+
+commandesClientRouter.get('/:id/lignes/:ligneId/supply/ennoblissement/available-rolls', async (req: Request, res: Response) => {
+  try {
+    const commandeId = parseInt(req.params.id, 10)
+    const ligneId = parseInt(req.params.ligneId, 10)
+    if (isNaN(commandeId) || isNaN(ligneId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const ctx = await loadClientLineContext(commandeId, ligneId)
+    if (!ctx || ctx.kind !== 'fini') { res.status(404).json({ error: 'Fini line not found' }); return }
+    const magasinId = parseInt(String(req.query.magasin ?? '0'), 10) || 0
+    res.json(await fetchEnnoAvailableRolls(ctx, magasinId))
+  } catch (err) {
+    console.error('Error fetching ennoblissement available rolls:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Tombé-de-métier (écru) of this fini's écru ref, available and AGGREGATED by
+// current location (sous-traitant magasin). Powers the legacy "029 - écru
+// disponible" panel: rows grouped into "chez les ennoblisseurs" (IDtype_sst=2)
+// vs "à l'usine" (other sous-traitants, e.g. tricoteurs/TRM). Factory-only
+// rolls (IDmagasin=0) are excluded — only real sous-traitant locations show.
+interface EnnoLocationRow {
+  IDsous_traitant: number
+  location_nom: string
+  is_ennoblisseur: boolean
+  group: 'ennoblisseur' | 'usine'
+  nb_rolls: number
+  poids: number
+  metrage_potentiel: number
+}
+
+async function fetchEnnoLocations(ctx: ClientLineContext) {
+  const r = await query<{ IDref_ecru: number | null; rendement: number | null }>(
+    `SELECT IDref_ecru, rendement FROM ref_fini WHERE IDref_fini = ${ctx.refId}`,
+  )
+  const ecruRefId = Number(r[0]?.IDref_ecru) || 0
+  const rendement = Number(r[0]?.rendement) || 0
+  const base = { rendement, unite_label: uniteLabel(ctx.unite), locations: [] as EnnoLocationRow[] }
+  if (ecruRefId <= 0) return base
+
+  const rows = await query<{ IDstock_ecru: number; IDmagasin: number | null; poids: number | null }>(
+    `SELECT IDstock_ecru, IDmagasin, poids FROM stock_ecru
+      WHERE IDref_ecru = ${ecruRefId} AND IDsociete = 1 AND IDmagasin > 0
+        AND (IDref_commande_affectation IS NULL OR IDref_commande_affectation = 0)
+        AND (IDligne_expedition_ETM IS NULL OR IDligne_expedition_ETM = 0)`,
+  )
+  const ids = rows.map((x) => Number(x.IDstock_ecru)).filter((x) => x > 0)
+  const consumed = new Set<number>()
+  if (ids.length > 0) {
+    const dyed = await query<{ IDstock_ecru: number }>(
+      `SELECT DISTINCT IDstock_ecru FROM stock_fini WHERE IDstock_ecru IN (${ids.join(',')})`,
+    )
+    for (const d of dyed) consumed.add(Number(d.IDstock_ecru))
+  }
+  const agg = new Map<number, { nb: number; poids: number }>()
+  for (const x of rows) {
+    if (consumed.has(Number(x.IDstock_ecru))) continue
+    const m = Number(x.IDmagasin) || 0
+    const a = agg.get(m) ?? { nb: 0, poids: 0 }
+    a.nb += 1
+    a.poids += Number(x.poids) || 0
+    agg.set(m, a)
+  }
+  const magIds = Array.from(agg.keys())
+  const [names, types] = await Promise.all([resolveMagasinNames(magIds), resolveSousTraitantTypes(magIds)])
+  base.locations = magIds
+    .map((m): EnnoLocationRow => {
+      const a = agg.get(m)!
+      const isEnno = types.get(m) === 2
+      return {
+        IDsous_traitant: m,
+        location_nom: names.get(m) ?? `#${m}`,
+        is_ennoblisseur: isEnno,
+        group: isEnno ? 'ennoblisseur' : 'usine',
+        nb_rolls: a.nb,
+        poids: round2c(a.poids),
+        metrage_potentiel: round2c(a.poids * rendement),
+      }
+    })
+    // Ennoblisseur rows first (they bear the create button), then by name.
+    .sort((x, y) => (x.is_ennoblisseur === y.is_ennoblisseur ? x.location_nom.localeCompare(y.location_nom) : x.is_ennoblisseur ? -1 : 1))
+  return base
+}
+
+commandesClientRouter.get('/:id/lignes/:ligneId/supply/ennoblissement/available-by-location', async (req: Request, res: Response) => {
+  try {
+    const commandeId = parseInt(req.params.id, 10)
+    const ligneId = parseInt(req.params.ligneId, 10)
+    if (isNaN(commandeId) || isNaN(ligneId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const ctx = await loadClientLineContext(commandeId, ligneId)
+    if (!ctx || ctx.kind !== 'fini') { res.status(404).json({ error: 'Fini line not found' }); return }
+    res.json(await fetchEnnoLocations(ctx))
+  } catch (err) {
+    console.error('Error fetching ennoblissement locations:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+const ennoOrderBody = z.object({
+  IDsous_traitant: z.number().int().positive(),
+  date_commande: z.string().optional(),
+  date_livraison: z.string().optional(),
+  stockEcruIds: z.array(z.number().int().positive()).min(1),
+})
+
+commandesClientRouter.post('/:id/lignes/:ligneId/supply/ennoblissement/orders', async (req: Request, res: Response) => {
+  try {
+    const commandeId = parseInt(req.params.id, 10)
+    const ligneId = parseInt(req.params.ligneId, 10)
+    if (isNaN(commandeId) || isNaN(ligneId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const parsed = ennoOrderBody.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
+    const d = parsed.data
+    const ctx = await loadClientLineContext(commandeId, ligneId)
+    if (!ctx || ctx.kind !== 'fini') { res.status(404).json({ error: 'Fini line not found' }); return }
+    if (refuseIfSoldee(res, await loadCommandeSoldee(commandeId))) return
+
+    // Resolve the fini's écru ref + rendement (line ↔ dye trace).
+    const refRows = await query<{ IDref_ecru: number | null; rendement: number | null }>(
+      `SELECT IDref_ecru, rendement FROM ref_fini WHERE IDref_fini = ${ctx.refId}`,
+    )
+    const ecruRefId = Number(refRows[0]?.IDref_ecru) || 0
+    const rendement = Number(refRows[0]?.rendement) || 0
+    if (ecruRefId <= 0) { res.status(400).json({ error: 'Fini ref has no écru ref' }); return }
+
+    // Keep only selected rolls that are this écru ref AND still free of a dyer
+    // affectation (defensive against a stale client cache).
+    const rollRows = await query<{
+      IDstock_ecru: number; IDref_ecru: number; poids: number | null
+      IDref_commande_affectation: number | null
+    }>(
+      `SELECT IDstock_ecru, IDref_ecru, poids, IDref_commande_affectation
+         FROM stock_ecru WHERE IDstock_ecru IN (${d.stockEcruIds.join(',')})`,
+    )
+    const usable = rollRows.filter(
+      (r) => Number(r.IDref_ecru) === ecruRefId && (Number(r.IDref_commande_affectation) || 0) === 0,
+    )
+    if (usable.length === 0) { res.status(400).json({ error: 'No usable rolls in selection' }); return }
+    const totalPoids = usable.reduce((s, r) => s + (Number(r.poids) || 0), 0)
+
+    // ── Create the dyer order header. Ennoblisseurs are external sous-
+    //    traitants → NO TRM cross-ledger mirror (and no bridge-storm risk).
+    const dateCmd = dateStr(d.date_commande ?? '')
+    await query(
+      `INSERT INTO commande_sous_traitant
+       (IDsous_traitant, date_commande, est_soldee, commentaire, journal,
+        IDadresse_sous_traitant, IDadresse_livraison, IDdossier, IDcommande_client, IDligne_commande_client)
+       VALUES (${d.IDsous_traitant}, '${dateCmd}', 0, '', '',
+               0, 0, 0, 0, 0)`,
+    )
+    const hdr = await query<{ IDcommande_sous_traitant: number }>(
+      `SELECT IDcommande_sous_traitant FROM commande_sous_traitant
+        WHERE IDsous_traitant = ${d.IDsous_traitant} ORDER BY IDcommande_sous_traitant DESC`,
+    )
+    const newCmdId = Number(hdr[0]?.IDcommande_sous_traitant) || 0
+    if (newCmdId <= 0) { res.status(500).json({ error: 'Header insert lookup failed' }); return }
+
+    // ── Create the single ennoblisseur line (type=2). quantite is the metrage
+    //    to dye (Ml = Σ écru poids × raw rendement); unite=0 + prix=€/Kg match
+    //    how the Sous-traitants screen stores ennoblisseur lines. A fresh order
+    //    has not been sent → sstatut starts Non_Envoye.
+    const dateLiv = dateStr(d.date_livraison ?? '')
+    const quantiteMl = Math.round(totalPoids * rendement * 100) / 100
+    await query(
+      `INSERT INTO ligne_commande_sous_traitant
+       (IDcommande_sous_traitant, type, IDreference, IDColoris, quantite, unite, prix,
+        date_livraison, date_delai, sstatut, commentaire)
+       VALUES (${newCmdId}, 2, ${ctx.refId}, ${ctx.coloriId}, ${quantiteMl}, 0, 0,
+               '${dateLiv}', '${dateLiv}', 'Non_Envoye', '')`,
+    )
+    const lineRows = await query<{ IDligne_commande_sous_traitant: number }>(
+      `SELECT IDligne_commande_sous_traitant FROM ligne_commande_sous_traitant
+        WHERE IDcommande_sous_traitant = ${newCmdId} ORDER BY IDligne_commande_sous_traitant DESC`,
+    )
+    const newLineId = Number(lineRows[0]?.IDligne_commande_sous_traitant) || 0
+    if (newLineId <= 0) { res.status(500).json({ error: 'Line insert lookup failed' }); return }
+
+    // ── Affect rolls to the new dyer line; auto-reserve the FREE ones to this
+    //    client line (rolls already reserved elsewhere keep their reservation).
+    for (const r of usable) {
+      const sid = Number(r.IDstock_ecru)
+      await query(`UPDATE stock_ecru SET IDref_commande_affectation = ${newLineId} WHERE IDstock_ecru = ${sid}`)
+      await query(
+        `UPDATE stock_ecru SET IDligne_commande_client = ${ligneId}
+          WHERE IDstock_ecru = ${sid} AND (IDligne_commande_client IS NULL OR IDligne_commande_client = 0)`,
+      )
+    }
+
+    // ── Auto-price (best-effort: stays 0 when the dyer has no tariff data).
+    let prix = 0
+    try {
+      prix = await calcTarifSST({
+        xPoids: totalPoids,
+        IDsous_traitant: d.IDsous_traitant,
+        IDref_fini: ctx.refId,
+        IDref_fini_colori: ctx.coloriId,
+      })
+      if (prix > 0) {
+        await query(`UPDATE ligne_commande_sous_traitant SET prix = ${n(prix)} WHERE IDligne_commande_sous_traitant = ${newLineId}`)
+      }
+    } catch (e) {
+      console.error('[enno-order] auto-price failed for line', newLineId, e)
+    }
+
+    res.status(201).json({
+      ok: true,
+      IDcommande_sous_traitant: newCmdId,
+      IDligne_commande_sous_traitant: newLineId,
+      affected: usable.length,
+      prix,
+    })
+  } catch (err) {
+    console.error('Error creating ennoblisseur order from client line:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
