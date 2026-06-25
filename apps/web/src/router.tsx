@@ -10,7 +10,6 @@ import {
   FileBarChart,
   Palette,
   Euro,
-  Send,
   Droplet,
   TrendingUp,
   FolderOpen,
@@ -30,10 +29,6 @@ function createPlaceholder(title: string, description: string, Icon: LucideIcon)
     return <PagePlaceholder title={title} description={description} icon={Icon} />
   }
 }
-
-// Client pages — Commandes, Devis, Facturation, Gestion are real.
-// Expéditions is a placeholder pending the screen build.
-const ClientsExpeditionsPage = createPlaceholder('Expéditions', 'Expéditions et bons de livraison clients', Send)
 
 // Fils placeholder (prévisions only — other Fils sub-screens are real)
 const FilsPrevisionsPage = createPlaceholder('Prévisions Fournisseurs', 'Prévisions d\'approvisionnement fournisseurs', FileText)
@@ -60,6 +55,7 @@ import { FilsCommandes } from '@/pages/FilsCommandes'
 import { ClientsCommandes } from '@/pages/ClientsCommandes'
 import { ClientsFacturation } from '@/pages/ClientsFacturation'
 import { ClientsDevis } from '@/pages/ClientsDevis'
+import { ClientsExpeditions } from '@/pages/ClientsExpeditions'
 import { ClientsGestion } from '@/pages/ClientsGestion'
 
 // Sous-traitants pages (real)
@@ -106,7 +102,7 @@ export const router = createBrowserRouter([
       { path: 'clients', element: <Navigate to="/clients/commandes" replace /> },
       { path: 'clients/commandes', element: <ClientsCommandes /> },
       { path: 'clients/devis', element: <ClientsDevis /> },
-      { path: 'clients/expeditions', element: <ClientsExpeditionsPage /> },
+      { path: 'clients/expeditions', element: <ClientsExpeditions /> },
       { path: 'clients/facturation', element: <ClientsFacturation /> },
       { path: 'clients/gestion', element: <ClientsGestion /> },
 

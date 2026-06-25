@@ -33,6 +33,32 @@ payload field. **(4) Info tab**: new "Tombé de métier commandé" card listing 
 (`computeTombeMetier`: Kg lines count quantite, Ml lines convert kg = ml / rendement; fini lines trace through
 `ref_fini.IDref_ecru`); and fixed Mode-paiement/Échéance showing "—" in view mode by removing the `enabled: isEditing`
 gate on the two enum lookups (they're needed to resolve the labels outside edit mode).
+## 2026-06-25 — feat/expeditions
+Clients › Expéditions (`apps/web/src/pages/ClientsExpeditions.tsx` + `apps/api/src/routes/expeditions.ts`,
+registered at `/api/expeditions`) — new screen combining the legacy `FEN_Gestion_expédition_ETMV2` (formal,
+order-tied) and `FEN_Expéditions_diverses` (miscellaneous) windows into one master-detail with a **Formelles |
+Diverses** bucket toggle (same `Kind`/`TBL` config shape as factures). **Formelle** = `expedition` +
+`ligne_expedition`, tied to a `commande_client`: full create (pick a commande; transporteur + livraison
+address auto-filled from client/order) / edit / **roll picking** — clicking a commande line opens an in-screen
+drawer (mps_designer §31) to assign/free received rolls. Rolls point BACK at the shipment line via
+`stock_fini.IDligne_expedition` (fini lines, type 2) or `stock_ecru.IDligne_expedition_ETM` (écru lines,
+type 1); the `ligne_expedition` row is created **lazily** on first assign and deleted when emptied; deleting a
+shipment frees all its rolls first. **Diverses** = `expedition_divers` + `ligne_expedition_divers` (no
+`IDsociete` column; recipient = a registered `IDclient` or free-text `ref_client`), free-text `detail_ligne`
+lines (RTF via stripRtf/wrapRtf). A sidebar **status-footer pill** drives `est_valide` (Brouillon → Validée);
+a validated shipment is locked (header/line/roll writes return 409, like a definitive facture) but its lines
+still open read-only to view shipped rolls. HFSQL footguns baked in: `date` is reserved (write/read as `DATE`);
+`expedition.envoyé_client`/`envoyé_sst` are accented → never named (explicit column lists omit them, INSERT
+zero-fills); empty FK = 0 not NULL; `expedition` has **no `numero`** (document № = PK; new-id resolved via
+MAX-before + `TOP 1 > before DESC`); `IDsociete=1` on formelle reads/writes only. Per-line **dispo count is
+per the line's own stock kind** — écru rolls merely *reserved* to a fini line (ennoblissement dyeing input)
+are NOT shippable finished goods (bug found + fixed during build). Print / Email are "En developpement"
+placeholders for V1 (real Bon de Livraison PDF + Gmail send — `envoi_email` type_doc 14, contact flag
+`envoi_bl` — deferred; this screen also unblocks Facturation's génération-auto-from-expeditions). No conflict
+with the `facture_prov.IDexpedition_divers` overload (that's a column on `facture_prov`, never a real
+`expedition_divers` row). Verified end-to-end on local HFSQL — full formelle (create → assign/unassign roll →
+delete, rolls freed) and divers (create → line CRUD → validate-lock 409 → reopen → delete) write roundtrips,
+all reverted cleanly; web + api `tsc --noEmit` clean (api shows only the known baseline errors).
 
 ## 2026-06-25 — feat/facturation
 Clients › Facturation (`apps/web/src/pages/ClientsFacturation.tsx` + `apps/api/src/routes/factures.ts` +
