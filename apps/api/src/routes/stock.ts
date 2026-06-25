@@ -35,6 +35,22 @@ const STOCK_SELECT = IS_WINDOWS
 
 const STOCK_JOINS = `FROM stock_fil sf LEFT JOIN ref_fil rf ON sf.IDref_fil = rf.IDref_fil LEFT JOIN colori_fil cf ON sf.IDcolori_fil = cf.IDcolori_fil LEFT JOIN fournisseur f ON sf.IDfournisseur = f.IDfournisseur LEFT JOIN sous_traitant st ON sf.IDMagasin = st.IDsous_traitant`
 
+// Accented sf.* columns (terminé, controlé, certif_recyclé; ref_fil.recyclé) come
+// back from the Linux bridge with the identifier truncated at the accent AND a
+// non-deterministic garbage trailing byte from a reused buffer: `terminé` arrives
+// as `termin`, `termint`, `termini`, … depending on server load. A hardcoded
+// fallback (`row.termin`) therefore MISSES the key in production, leaving the flag
+// at 0 for every row (this broke "Masquer les lots terminés"). Always resolve
+// these columns by case-insensitive PREFIX, never by a hardcoded name.
+function pickVal(row: Record<string, unknown>, re: RegExp): unknown {
+  const k = Object.keys(row).find((key) => re.test(key))
+  return k === undefined ? undefined : row[k]
+}
+/** Delete every key matching `re` from `out` — strips all mangled variants. */
+function stripKeys(out: Record<string, unknown>, re: RegExp): void {
+  for (const k of Object.keys(out)) if (re.test(k)) delete out[k]
+}
+
 interface RefFilFlags {
   recycle: number
 }
@@ -45,9 +61,8 @@ async function loadRefFilRecycleMap(): Promise<Map<number, number>> {
   const map = new Map<number, number>()
   for (const r of rows) {
     const id = Number(r.IDref_fil)
-    // Bridge mangles recyclé → recycl; Windows ODBC keeps it as recyclé or returns
-    // the clean UTF-8. Accept either.
-    const recycle = Number((r as any).recycl ?? (r as any)['recyclé'] ?? 0)
+    // recyclé → recycl/recyclt/… on the bridge, recyclé on Windows — resolve by prefix.
+    const recycle = Number(pickVal(r, /^recycl/i)) || 0
     if (!Number.isNaN(id)) map.set(id, recycle)
   }
   return map
@@ -63,25 +78,17 @@ async function loadRefFilRecycleMap(): Promise<Map<number, number>> {
 function normalizeStockRow(row: Record<string, unknown>, recycleMap: Map<number, number>): Record<string, unknown> {
   const out: Record<string, unknown> = { ...row }
 
-  // terminé
-  if (out.termine === undefined) {
-    out.termine = (row as any)['terminé'] ?? (row as any).termin ?? 0
-  }
-  delete out['terminé']
-  delete out.termin
+  // terminé / controlé: read by prefix BEFORE stripping every mangled variant
+  // (the bridge key is non-deterministic — termin/termint/…; see pickVal above).
+  const termineVal = pickVal(out, /^termin/i)
+  const controleVal = pickVal(out, /^control/i)
+  stripKeys(out, /^termin/i)
+  stripKeys(out, /^control/i)
+  out.termine = Number(termineVal) || 0
+  out.controle = Number(controleVal) || 0
 
-  // controlé
-  if (out.controle === undefined) {
-    out.controle = (row as any)['controlé'] ?? (row as any).control ?? 0
-  }
-  delete out['controlé']
-  delete out.control
-
-  // certif_recyclé (blob presence — keep the blob field out of JSON by deleting it entirely)
-  delete out['certif_recyclé']
-  delete out.certif_recycl
-
-  // certif_bio — also remove the blob from the list/detail payload
+  // certif_recyclé / certif_bio blobs — keep them out of the JSON payload.
+  stripKeys(out, /^certif_recycl/i)
   delete out.certif_bio
 
   // recycle (from ref_fil)
@@ -322,7 +329,7 @@ stockRouter.get('/fil/la-gentle-stale', async (req: Request, res: Response) => {
 
     // terminé filter in JS (accented column, key varies by platform).
     const active = rows.filter((r) => {
-      const t = (r as any).termine ?? (r as any)['terminé'] ?? (r as any).termin ?? 0
+      const t = pickVal(r, /^termin/i)
       return !t || Number(t) === 0
     })
 
@@ -440,7 +447,7 @@ stockRouter.get('/fil/:id', async (req: Request, res: Response) => {
       if (rawRows.length > 0) {
         const r = rawRows[0] as any
         has_certif_bio = r.certif_bio != null && r.certif_bio !== '' && r.certif_bio !== '\x00'
-        const rec = r.certif_recycl ?? r['certif_recyclé']
+        const rec = pickVal(r, /^certif_recycl/i)
         has_certif_recycle = rec != null && rec !== '' && rec !== '\x00'
       }
     } catch {
@@ -620,7 +627,7 @@ stockRouter.get('/fil/:id/certif/:type', async (req: Request, res: Response) => 
     } else {
       const rows = await queryRaw(`SELECT * FROM stock_fil WHERE IDstock_fil = ${id}`)
       if (rows.length === 0) { res.status(404).json({ error: 'Not found' }); return }
-      fichier = (rows[0] as any).certif_recycl ?? (rows[0] as any)['certif_recyclé']
+      fichier = pickVal(rows[0], /^certif_recycl/i)
     }
 
     if (fichier == null) { res.status(404).json({ error: 'No document' }); return }
