@@ -10,6 +10,21 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-25 — feat/devis
+Clients › Devis PDF (`apps/api/src/lib/pdf/DevisEtmPdf.tsx`) — CONDITIONS header card redesign (follow-up to
+the 2026-06-24 header-height work). Three fixes: (1) **icon alignment** — every `flexDirection:'row'`+
+`alignItems:'center'` icon+title row in this file rendered the Svg visually *below* its text, because the
+content area inherits `lineHeight:1.45`, inflating each line box so glyphs sit at the top while the icon
+centers in the tall box. Added tight `lineHeight:1` on the meta labels/values and the card/livraison/
+commentaire titles so icons center against the real glyphs. (2) **relevant, distinct icons** — the old card
+reused a chat bubble for Réf. client and the calendar for both Validité and Échéance, so at ~10px they read
+as identical rectangles; now tag (réf. client) / calendar (validité) / credit-card (paiement) / clock
+(échéance), built from a typed `metaItems` array. (3) **vertical space** — conditions moved from 4 full-width
+stacked rows to a compact **2×2 grid** (icon beside a stacked caps-label + value), so the conditions card no
+longer drives the header height (the client address does). Added a dev script
+`apps/api/src/scripts/dump-devis-pdf.ts` (mirrors `dump-soumission-pdf.ts`/`dump-sst-pdf.ts`) that renders a
+devis PDF from synthetic data for offline layout inspection. Pure PDF layout — no API/data changes.
+
 ## 2026-06-25 — feat/stock-finis
 Finis › Stock table (`apps/web/src/pages/FinisStock.tsx`) — cosmetic weight fix. The Poids column cell in
 `StockRow` carried a `font-medium` class that bolded every weight value relative to the surrounding columns.

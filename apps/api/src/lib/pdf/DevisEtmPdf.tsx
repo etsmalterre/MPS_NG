@@ -16,7 +16,9 @@ import {
   MalterreDocument,
   CreditCardIcon,
   CalendarIcon,
+  ClockIcon,
   TruckIcon,
+  TagIcon,
   MessageSquareIcon,
   UserIcon,
 } from './MalterreDocument.js'
@@ -89,18 +91,24 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     padding: 10,
   },
-  cardHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 4 },
-  cardTitle: { fontSize: sizes.fontXs, color: colors.primary, fontWeight: 900, letterSpacing: 0.5 },
+  cardHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 5 },
+  cardTitle: { fontSize: sizes.fontXs, color: colors.primary, fontWeight: 900, letterSpacing: 0.5, lineHeight: 1 },
   cardName: { fontSize: sizes.fontBase, fontWeight: 900, color: colors.text, marginBottom: 1 },
   cardLine: { fontSize: sizes.fontBase, color: colors.text, lineHeight: 1.25 },
 
-  // Conditions as a 2-column grid (label/value pairs), tighter than the old
-  // icon+row stack.
-  metaGrid: { flexDirection: 'row', flexWrap: 'wrap' },
-  metaCell: { width: '100%', flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 2 },
-  metaIconBox: { width: 12, height: 12, alignItems: 'center', justifyContent: 'center' },
-  metaLabel: { fontSize: sizes.fontXs, color: colors.muted, fontWeight: 700, flex: 1 },
-  metaValue: { fontSize: sizes.fontXs, color: colors.text, fontWeight: 700, textAlign: 'right' },
+  // Conditions as a 2-column grid: each cell is an icon beside a stacked
+  // caps-label + value. The icon sits in a row next to the (taller) text
+  // column so it vertically centers cleanly — react-pdf won't center an Svg
+  // against a single short line. Two items per row halves the row count vs
+  // the old full-width stack, so the card no longer drives the header height.
+  metaGrid: { flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -4 },
+  metaCell: { width: '50%', flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 4, paddingVertical: 4 },
+  metaIconBox: { width: 11, height: 11, alignItems: 'center', justifyContent: 'center' },
+  metaText: { flexDirection: 'column', flex: 1 },
+  // Tight line-heights (the content area inherits 1.45, which inflates the line
+  // box and pushes the row's centered icon visually below the glyphs).
+  metaLabel: { fontSize: 6, color: colors.muted, fontWeight: 700, letterSpacing: 0.4, lineHeight: 1, marginBottom: 2 },
+  metaValue: { fontSize: sizes.fontBase, color: colors.text, fontWeight: 700, lineHeight: 1 },
 
   table: {
     marginBottom: 8,
@@ -182,7 +190,7 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   livraisonHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
-  livraisonTitle: { fontSize: sizes.fontXs, color: colors.primary, fontWeight: 900, letterSpacing: 0.5 },
+  livraisonTitle: { fontSize: sizes.fontXs, color: colors.primary, fontWeight: 900, letterSpacing: 0.5, lineHeight: 1 },
 
   commentaireBottom: { marginTop: 24 },
   commentaireBox: {
@@ -198,7 +206,7 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   commentaireHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
-  commentaireTitle: { fontSize: sizes.fontXs, color: colors.primary, fontWeight: 900, letterSpacing: 0.5 },
+  commentaireTitle: { fontSize: sizes.fontXs, color: colors.primary, fontWeight: 900, letterSpacing: 0.5, lineHeight: 1 },
   commentaireText: { fontSize: sizes.fontBase, color: colors.text, lineHeight: 1.45 },
 })
 
@@ -248,6 +256,15 @@ export function DevisEtmPdf({ data }: { data: DevisEtmPdfData }) {
   const ttc = netHT + tva
   const remisePctLabel = fmtNum(remiseFraction * 100, remiseFraction * 100 % 1 === 0 ? 0 : 1)
 
+  // Conditions grid — one cell per non-empty field, each with a distinct,
+  // concept-relevant icon (reference tag / validity calendar / payment card /
+  // due-date clock) so they're never indistinguishable at this size.
+  const metaItems: Array<{ key: string; icon: React.ReactNode; label: string; value: string }> = []
+  if (data.refClient) metaItems.push({ key: 'ref', icon: <TagIcon size={9} />, label: 'RÉF. CLIENT', value: data.refClient })
+  if (data.dateExpiration) metaItems.push({ key: 'exp', icon: <CalendarIcon size={9} />, label: 'VALIDITÉ', value: data.dateExpiration })
+  if (data.modePaiement) metaItems.push({ key: 'pay', icon: <CreditCardIcon size={9} />, label: 'PAIEMENT', value: data.modePaiement })
+  if (data.echeance) metaItems.push({ key: 'ech', icon: <ClockIcon size={9} />, label: 'ÉCHÉANCE', value: data.echeance })
+
   return (
     <MalterreDocument
       documentType="Devis"
@@ -278,34 +295,15 @@ export function DevisEtmPdf({ data }: { data: DevisEtmPdfData }) {
               <Text style={styles.cardTitle}>CONDITIONS</Text>
             </View>
             <View style={styles.metaGrid}>
-              {data.refClient ? (
-                <View style={styles.metaCell}>
-                  <View style={styles.metaIconBox}><MessageSquareIcon size={10} /></View>
-                  <Text style={styles.metaLabel}>Réf. client</Text>
-                  <Text style={styles.metaValue}>{data.refClient}</Text>
+              {metaItems.map((it) => (
+                <View key={it.key} style={styles.metaCell}>
+                  <View style={styles.metaIconBox}>{it.icon}</View>
+                  <View style={styles.metaText}>
+                    <Text style={styles.metaLabel}>{it.label}</Text>
+                    <Text style={styles.metaValue}>{it.value}</Text>
+                  </View>
                 </View>
-              ) : null}
-              {data.dateExpiration ? (
-                <View style={styles.metaCell}>
-                  <View style={styles.metaIconBox}><CalendarIcon size={10} /></View>
-                  <Text style={styles.metaLabel}>Validité jusqu'au</Text>
-                  <Text style={styles.metaValue}>{data.dateExpiration}</Text>
-                </View>
-              ) : null}
-              {data.modePaiement ? (
-                <View style={styles.metaCell}>
-                  <View style={styles.metaIconBox}><CreditCardIcon size={10} /></View>
-                  <Text style={styles.metaLabel}>Mode de paiement</Text>
-                  <Text style={styles.metaValue}>{data.modePaiement}</Text>
-                </View>
-              ) : null}
-              {data.echeance ? (
-                <View style={styles.metaCell}>
-                  <View style={styles.metaIconBox}><CalendarIcon size={10} /></View>
-                  <Text style={styles.metaLabel}>Échéance</Text>
-                  <Text style={styles.metaValue}>{data.echeance}</Text>
-                </View>
-              ) : null}
+              ))}
             </View>
           </View>
         </View>
