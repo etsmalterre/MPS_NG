@@ -10,6 +10,23 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-25 — feat/gestion-client
+Clients › Gestion (`apps/web/src/pages/ClientsGestion.tsx`) — right-panel reorganization (UI only, no
+API/data changes). The master-data form that previously lived in the **center** panel was moved into the
+right sidebar as two new tabs, so the sidebar now reads **Info / Commercial / Contacts / Adresses**:
+- **Info** tab (new) holds Général (téléphone, fax, remise %, % AJEOL, secteur, activité, the *client
+  interne* / *inclure rapports contrôle* toggles), Facturation (mode de paiement, échéance, TVA, N° TVA,
+  code comptable, compte client), and Commentaire — rendered as `InfoCard` + `KVRow` (label-left /
+  value-right; `size="sm"` `SearchableCombobox`/`PopoverSelect` in edit mode) wired straight through the
+  existing `draft`/`onPatch` state, so the unsaved-changes guard and Enregistrer/Annuler flow cover it.
+- **Commercial** tab (new) holds Dernier contact + Journal commercial (same `draft`/`onPatch` plumbing).
+- The **center** panel is now purely the read-only history collapsibles (Références / Historique /
+  Marchandise); `DetailMain` lost its now-unused `draft`/`onPatch`/lookup props.
+The sidebar root width went `w-96` → `w-[26rem]` (one-off for this screen, not recorded in mps_designer)
+to fit four tabs, and the per-tab count **pill** was replaced with a compact inline number so "Contacts"
+and "Adresses" labels stop truncating against `flex-1` equal widths. Removed the now-dead `Field`,
+`SelectField`, and `SectionCard` helpers.
+
 ## 2026-06-25 — feat/devis
 Clients › Devis PDF (`apps/api/src/lib/pdf/DevisEtmPdf.tsx`) — CONDITIONS header card redesign (follow-up to
 the 2026-06-24 header-height work). Three fixes: (1) **icon alignment** — every `flexDirection:'row'`+

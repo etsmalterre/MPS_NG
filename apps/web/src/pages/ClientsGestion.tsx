@@ -326,11 +326,11 @@ export function ClientsGestion() {
           onStartEdit={startEdit} onCancelEdit={cancelEdit} onSave={() => saveMutation.mutate()} isSaving={saveMutation.isPending}
           onDelete={() => setDeleteConfirm(true)} onPrint={() => setPrintOpen(true)} onEmail={() => setEmailOpen(true)} />}
         detail={<DetailMain client={detail ?? null} isLoading={detailLoading && selectedId !== null}
-          hasSelection={selectedId !== null} isEditing={isEditing} draft={draft} onPatch={patch}
-          secteurs={secteurs} activites={activites} modesPaiement={modesPaiement} echeances={echeances} tvas={tvas} codesComptables={codesComptables} />}
+          hasSelection={selectedId !== null} />}
         sidebar={selectedId !== null ? <DetailSidebar client={detail ?? null} isLoading={detailLoading}
           isEditing={isEditing} clientId={selectedId} onMutationSuccess={invalidateAll}
-          onSubFormsDirtyChange={setSubFormsDirty} /> : null}
+          onSubFormsDirtyChange={setSubFormsDirty} draft={draft} onPatch={patch}
+          secteurs={secteurs} activites={activites} modesPaiement={modesPaiement} echeances={echeances} tvas={tvas} codesComptables={codesComptables} /> : null}
         sidebarTitle="Contacts & Adresses" hasSelection={selectedId !== null}
         onBack={() => guard.guardAction(() => { setIsEditing(false); setDraft(null); setSelectedId(null) })}
       />
@@ -483,46 +483,6 @@ function DetailHeader({ client, isLoading, isEditing, draft, onPatch, onStartEdi
 
 // ── Field primitives ───────────────────────────────────
 
-function Field({ label, value, edit, onChange, type = 'text', placeholder }: {
-  label: string; value: string; edit: boolean; onChange: (v: string) => void; type?: string; placeholder?: string
-}) {
-  return (
-    <div className="space-y-1">
-      <label className="text-xs font-medium text-muted-foreground">{label}</label>
-      {edit ? (
-        <input type={type} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
-          autoComplete="off" data-form-type="other" data-lpignore="true" className={inputClass} />
-      ) : (
-        <p className="text-sm min-h-[1.25rem]">{value?.trim() ? value : <span className="text-muted-foreground">—</span>}</p>
-      )}
-    </div>
-  )
-}
-
-function SelectField({ label, value, edit, options, onChange, searchable }: {
-  label: string; value: number; edit: boolean; options: LookupLabel[]; onChange: (id: number) => void; searchable?: boolean
-}) {
-  const current = options.find((o) => o.id === value)
-  return (
-    <div className="space-y-1">
-      <label className="text-xs font-medium text-muted-foreground">{label}</label>
-      {edit ? (
-        searchable ? (
-          <SearchableCombobox
-            options={options} value={value} onChange={onChange}
-            getId={(o) => o.id} getPrimary={(o) => o.label}
-            placeholder={`Rechercher ${label.toLowerCase()}`} size="sm"
-          />
-        ) : (
-          <PopoverSelect options={options.map((o) => ({ id: o.id, primary: o.label }))} value={value} onChange={onChange} emptyLabel="— Aucun —" size="sm" />
-        )
-      ) : (
-        <p className="text-sm min-h-[1.25rem]">{current ? current.label : <span className="text-muted-foreground">—</span>}</p>
-      )}
-    </div>
-  )
-}
-
 function TogglePill({ label, checked, disabled, onChange }: {
   label: string; checked: boolean; disabled: boolean; onChange: (v: boolean) => void
 }) {
@@ -541,23 +501,10 @@ function TogglePill({ label, checked, disabled, onChange }: {
   )
 }
 
-function SectionCard({ icon, title, isEditing, children }: { icon: React.ReactNode; title: string; isEditing: boolean; children: React.ReactNode }) {
-  return (
-    <Card className={cn('card-premium', isEditing && editSectionClass)}>
-      <CardHeader className="flex flex-row items-center gap-2 pb-2">
-        {icon}
-        <CardTitle className="text-sm font-semibold">{title}</CardTitle>
-      </CardHeader>
-      <CardContent>{children}</CardContent>
-    </Card>
-  )
-}
+// ── Center: Detail Main (read-only history views) ──────
 
-// ── Center: Detail Main (master-data form) ─────────────
-
-function DetailMain({ client, isLoading, hasSelection, isEditing, draft, onPatch, secteurs, activites, modesPaiement, echeances, tvas, codesComptables }: {
-  client: ClientDetail | null; isLoading: boolean; hasSelection: boolean; isEditing: boolean; draft: Draft | null; onPatch: (p: Partial<Draft>) => void
-  secteurs: LookupLabel[]; activites: LookupLabel[]; modesPaiement: LookupLabel[]; echeances: LookupLabel[]; tvas: LookupLabel[]; codesComptables: LookupLabel[]
+function DetailMain({ client, isLoading, hasSelection }: {
+  client: ClientDetail | null; isLoading: boolean; hasSelection: boolean
 }) {
   if (!hasSelection) return (
     <div className="flex-1 flex items-center justify-center">
@@ -570,93 +517,9 @@ function DetailMain({ client, isLoading, hasSelection, isEditing, draft, onPatch
   if (isLoading) return <div className="flex-1 flex items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-accent" /></div>
   if (!client) return null
 
-  const ed = isEditing && draft !== null
-  // View-mode values come from `client`; edit-mode from `draft`.
-  const v = {
-    tel: ed ? draft!.tel : client.tel ?? '',
-    fax: ed ? draft!.fax : client.fax ?? '',
-    num_tva: ed ? draft!.num_tva : client.num_tva ?? '',
-    compte: ed ? draft!.compte : client.compte ?? '',
-    commentaire: ed ? draft!.commentaire : client.commentaire ?? '',
-    journal: ed ? draft!.journal_commercial : client.journal_commercial ?? '',
-    pct_remise: ed ? draft!.pct_remise : (client.pct_remise ? String(client.pct_remise) : ''),
-    pct_ajeol: ed ? draft!.pct_ajeol : (client.pct_ajeol ? String(client.pct_ajeol) : ''),
-    IDtva: ed ? draft!.IDtva : client.IDtva,
-    IDmode_paiement: ed ? draft!.IDmode_paiement : client.IDmode_paiement,
-    IDecheance: ed ? draft!.IDecheance : client.IDecheance,
-    IDcode_comptable: ed ? draft!.IDcode_comptable : client.IDcode_comptable,
-    IDsecteur_activite: ed ? draft!.IDsecteur_activite : client.IDsecteur_activite,
-    IDactivite: ed ? draft!.IDactivite : client.IDactivite,
-    client_interne: ed ? draft!.client_interne : !!client.client_interne,
-    inclureRapportQualite: ed ? draft!.inclureRapportQualite : !!client.inclureRapportQualite,
-    dernier_contact_input: ed ? draft!.dernier_contact : hfsqlDateToInput(client.dernier_contact),
-  }
-
   return (
     <div className="flex-1 min-h-0 overflow-auto space-y-4 pr-1">
-      {/* Général */}
-      <SectionCard icon={<Briefcase className="h-4 w-4 text-accent" />} title="Général" isEditing={ed}>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Téléphone" value={v.tel} edit={ed} onChange={(x) => onPatch({ tel: x })} />
-          <Field label="Fax" value={v.fax} edit={ed} onChange={(x) => onPatch({ fax: x })} />
-          <Field label="Remise (%)" value={v.pct_remise} edit={ed} type="number" onChange={(x) => onPatch({ pct_remise: x })} />
-          <Field label="% AJEOL" value={v.pct_ajeol} edit={ed} type="number" onChange={(x) => onPatch({ pct_ajeol: x })} />
-          <SelectField label="Secteur" value={v.IDsecteur_activite} edit={ed} options={secteurs} onChange={(id) => onPatch({ IDsecteur_activite: id })} searchable />
-          <SelectField label="Activité" value={v.IDactivite} edit={ed} options={activites} onChange={(id) => onPatch({ IDactivite: id })} searchable />
-        </div>
-        <div className="grid grid-cols-2 gap-3 mt-3">
-          <TogglePill label="Client interne" checked={v.client_interne} disabled={!ed} onChange={(x) => onPatch({ client_interne: x })} />
-          <TogglePill label="Inclure rapports contrôle (exp.)" checked={v.inclureRapportQualite} disabled={!ed} onChange={(x) => onPatch({ inclureRapportQualite: x })} />
-        </div>
-      </SectionCard>
-
-      {/* Facturation */}
-      <SectionCard icon={<Receipt className="h-4 w-4 text-accent" />} title="Facturation" isEditing={ed}>
-        <div className="grid grid-cols-2 gap-3">
-          <SelectField label="Mode de paiement" value={v.IDmode_paiement} edit={ed} options={modesPaiement} onChange={(id) => onPatch({ IDmode_paiement: id })} />
-          <SelectField label="Échéance" value={v.IDecheance} edit={ed} options={echeances} onChange={(id) => onPatch({ IDecheance: id })} />
-          <SelectField label="TVA" value={v.IDtva} edit={ed} options={tvas} onChange={(id) => onPatch({ IDtva: id })} />
-          <Field label="N° TVA" value={v.num_tva} edit={ed} onChange={(x) => onPatch({ num_tva: x })} />
-          <SelectField label="Code comptable" value={v.IDcode_comptable} edit={ed} options={codesComptables} onChange={(id) => onPatch({ IDcode_comptable: id })} searchable />
-          <Field label="Compte client" value={v.compte} edit={ed} onChange={(x) => onPatch({ compte: x })} />
-        </div>
-      </SectionCard>
-
-      {/* Commercial */}
-      <SectionCard icon={<CalendarClock className="h-4 w-4 text-accent" />} title="Commercial" isEditing={ed}>
-        <div className="grid grid-cols-2 gap-3">
-          <div className="space-y-1">
-            <label className="text-xs font-medium text-muted-foreground">Dernier contact</label>
-            {ed ? (
-              <input type="date" value={v.dernier_contact_input} onChange={(e) => onPatch({ dernier_contact: e.target.value })}
-                autoComplete="off" data-form-type="other" data-lpignore="true" className={inputClass} />
-            ) : (
-              <p className="text-sm min-h-[1.25rem]">{client.dernier_contact && /\d{8}/.test(client.dernier_contact) ? formatHfsqlDate(client.dernier_contact) : <span className="text-muted-foreground">—</span>}</p>
-            )}
-          </div>
-        </div>
-        <div className="space-y-1 mt-3">
-          <label className="text-xs font-medium text-muted-foreground">Journal commercial</label>
-          {ed ? (
-            <textarea value={v.journal} onChange={(e) => onPatch({ journal_commercial: e.target.value })} rows={6}
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y" />
-          ) : v.journal?.trim() ? (
-            <p className="text-sm text-muted-foreground whitespace-pre-line">{v.journal}</p>
-          ) : <p className="text-sm text-muted-foreground italic">Aucun journal</p>}
-        </div>
-      </SectionCard>
-
-      {/* Commentaire */}
-      <SectionCard icon={<FileText className="h-4 w-4 text-accent" />} title="Commentaire" isEditing={ed}>
-        {ed ? (
-          <textarea value={v.commentaire} onChange={(e) => onPatch({ commentaire: e.target.value })} rows={3}
-            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y" />
-        ) : v.commentaire?.trim() ? (
-          <p className="text-sm text-muted-foreground whitespace-pre-line">{v.commentaire}</p>
-        ) : <p className="text-sm text-muted-foreground italic">Aucun commentaire</p>}
-      </SectionCard>
-
-      {/* Commercial sub-views (read-only) */}
+      {/* Read-only commercial sub-views */}
       <ReferencesSection clientId={client.IDclient} />
       <HistoriqueSection clientId={client.IDclient} />
       <MarchandiseSection clientId={client.IDclient} />
@@ -691,46 +554,202 @@ function InlineForm({ title, children, onSave, onCancel, isSaving }: { title: st
 
 // ── Right Panel: Sidebar with Tabs ─────────────────────
 
-type SidebarTab = 'contacts' | 'adresses'
+type SidebarTab = 'info' | 'commercial' | 'contacts' | 'adresses'
 
-function DetailSidebar({ client, isLoading, isEditing, clientId, onMutationSuccess, onSubFormsDirtyChange }: {
+function DetailSidebar({ client, isLoading, isEditing, clientId, onMutationSuccess, onSubFormsDirtyChange, draft, onPatch, secteurs, activites, modesPaiement, echeances, tvas, codesComptables }: {
   client: ClientDetail | null; isLoading: boolean; isEditing: boolean; clientId: number; onMutationSuccess: () => void
   onSubFormsDirtyChange: (dirty: boolean) => void
+  draft: Draft | null; onPatch: (p: Partial<Draft>) => void
+  secteurs: LookupLabel[]; activites: LookupLabel[]; modesPaiement: LookupLabel[]; echeances: LookupLabel[]; tvas: LookupLabel[]; codesComptables: LookupLabel[]
 }) {
-  const [activeTab, setActiveTab] = useState<SidebarTab>('contacts')
+  const [activeTab, setActiveTab] = useState<SidebarTab>('info')
   if (isLoading) return (
-    <div className="w-96 flex-shrink-0 bg-muted/30 rounded-xl border p-4 space-y-4">
+    <div className="w-[26rem] flex-shrink-0 bg-muted/30 rounded-xl border p-4 space-y-4">
       <div className="flex gap-2"><div className="h-8 flex-1 bg-muted animate-pulse rounded-md" /><div className="h-8 flex-1 bg-muted animate-pulse rounded-md" /></div>
       {[1, 2, 3].map((i) => <div key={i} className="h-24 bg-muted animate-pulse rounded-lg" />)}
     </div>
   )
   if (!client) return null
 
-  const tabs: { key: SidebarTab; label: string; icon: React.ElementType; count: number }[] = [
+  const tabs: { key: SidebarTab; label: string; icon: React.ElementType; count: number | null }[] = [
+    { key: 'info', label: 'Info', icon: Briefcase, count: null },
+    { key: 'commercial', label: 'Commercial', icon: CalendarClock, count: null },
     { key: 'contacts', label: 'Contacts', icon: User, count: client.contacts.length },
     { key: 'adresses', label: 'Adresses', icon: MapPin, count: client.adresses.length },
   ]
 
   return (
-    <div className="w-96 flex-shrink-0 rounded-xl border flex flex-col overflow-hidden bg-zinc-100/80">
+    <div className="w-[26rem] flex-shrink-0 rounded-xl border flex flex-col overflow-hidden bg-zinc-100/80">
       <div className="flex border-b p-1 gap-1 rounded-t-xl bg-zinc-200/50">
         {tabs.map((tab) => {
           const Icon = tab.icon
           return (
             <button key={tab.key} onClick={() => setActiveTab(tab.key)}
-              className={cn('flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-md transition-colors',
+              className={cn('flex-1 min-w-0 flex items-center justify-center gap-1 px-1.5 py-2 text-xs font-medium rounded-md transition-colors',
                 activeTab === tab.key ? 'bg-accent text-accent-foreground shadow-sm' : 'text-muted-foreground hover:bg-accent/10')}>
-              <Icon className="h-3.5 w-3.5" />{tab.label}
-              <Badge variant="secondary" className="text-[10px] py-0 ml-0.5">{tab.count}</Badge>
+              <Icon className="h-3.5 w-3.5 flex-shrink-0" /><span className="truncate">{tab.label}</span>
+              {tab.count !== null && (
+                <span className={cn('text-[10px] tabular-nums flex-shrink-0', activeTab === tab.key ? 'text-accent-foreground/75' : 'text-muted-foreground')}>
+                  {tab.count}
+                </span>
+              )}
             </button>
           )
         })}
       </div>
       <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-transparent">
+        {activeTab === 'info' && <InfoTab client={client} isEditing={isEditing} draft={draft} onPatch={onPatch}
+          secteurs={secteurs} activites={activites} modesPaiement={modesPaiement} echeances={echeances} tvas={tvas} codesComptables={codesComptables} />}
+        {activeTab === 'commercial' && <CommercialTab client={client} isEditing={isEditing} draft={draft} onPatch={onPatch} />}
         {activeTab === 'contacts' && <ContactsTab contacts={client.contacts} isEditing={isEditing} clientId={clientId} onMutationSuccess={onMutationSuccess} onDirtyChange={onSubFormsDirtyChange} />}
         {activeTab === 'adresses' && <AdressesTab adresses={client.adresses} isEditing={isEditing} clientId={clientId} onMutationSuccess={onMutationSuccess} onDirtyChange={onSubFormsDirtyChange} />}
       </div>
     </div>
+  )
+}
+
+// ── Sidebar Tab: Info (général · facturation · commentaire) ──
+
+function InfoCard({ icon, title, isEditing, children }: { icon: React.ReactNode; title: string; isEditing: boolean; children: React.ReactNode }) {
+  return (
+    <div className={cn('p-3 rounded-lg border bg-card shadow-sm', isEditing && editSectionClass)}>
+      <div className="flex items-center gap-2 mb-2">{icon}<h3 className="text-sm font-semibold">{title}</h3></div>
+      <div className="space-y-2">{children}</div>
+    </div>
+  )
+}
+
+function KVRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-baseline justify-between gap-2 min-h-[1.75rem]">
+      <span className="text-xs text-muted-foreground flex-shrink-0">{label}</span>
+      <div className="min-w-0 text-sm text-right">{children}</div>
+    </div>
+  )
+}
+
+function KVText({ label, value, edit, onChange, type = 'text' }: {
+  label: string; value: string; edit: boolean; onChange: (v: string) => void; type?: string
+}) {
+  return (
+    <KVRow label={label}>
+      {edit ? (
+        <input type={type} value={value} onChange={(e) => onChange(e.target.value)}
+          autoComplete="off" data-form-type="other" data-lpignore="true"
+          className="h-7 w-[200px] px-2 text-sm text-right rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring" />
+      ) : (
+        <span className="block truncate">{value?.trim() ? value : <span className="text-muted-foreground">—</span>}</span>
+      )}
+    </KVRow>
+  )
+}
+
+function KVSelect({ label, value, edit, options, onChange, searchable }: {
+  label: string; value: number; edit: boolean; options: LookupLabel[]; onChange: (id: number) => void; searchable?: boolean
+}) {
+  const current = options.find((o) => o.id === value)
+  return (
+    <KVRow label={label}>
+      {edit ? (
+        searchable ? (
+          <SearchableCombobox options={options} value={value} onChange={onChange} getId={(o) => o.id} getPrimary={(o) => o.label} placeholder={`Rechercher ${label.toLowerCase()}`} size="sm" />
+        ) : (
+          <PopoverSelect options={options.map((o) => ({ id: o.id, primary: o.label }))} value={value} onChange={onChange} emptyLabel="— Aucun —" size="sm" />
+        )
+      ) : (
+        <span className="block truncate">{current ? current.label : <span className="text-muted-foreground">—</span>}</span>
+      )}
+    </KVRow>
+  )
+}
+
+function InfoTab({ client, isEditing, draft, onPatch, secteurs, activites, modesPaiement, echeances, tvas, codesComptables }: {
+  client: ClientDetail; isEditing: boolean; draft: Draft | null; onPatch: (p: Partial<Draft>) => void
+  secteurs: LookupLabel[]; activites: LookupLabel[]; modesPaiement: LookupLabel[]; echeances: LookupLabel[]; tvas: LookupLabel[]; codesComptables: LookupLabel[]
+}) {
+  const ed = isEditing && draft !== null
+  const v = {
+    tel: ed ? draft!.tel : client.tel ?? '',
+    fax: ed ? draft!.fax : client.fax ?? '',
+    num_tva: ed ? draft!.num_tva : client.num_tva ?? '',
+    compte: ed ? draft!.compte : client.compte ?? '',
+    commentaire: ed ? draft!.commentaire : client.commentaire ?? '',
+    pct_remise: ed ? draft!.pct_remise : (client.pct_remise ? String(client.pct_remise) : ''),
+    pct_ajeol: ed ? draft!.pct_ajeol : (client.pct_ajeol ? String(client.pct_ajeol) : ''),
+    IDtva: ed ? draft!.IDtva : client.IDtva,
+    IDmode_paiement: ed ? draft!.IDmode_paiement : client.IDmode_paiement,
+    IDecheance: ed ? draft!.IDecheance : client.IDecheance,
+    IDcode_comptable: ed ? draft!.IDcode_comptable : client.IDcode_comptable,
+    IDsecteur_activite: ed ? draft!.IDsecteur_activite : client.IDsecteur_activite,
+    IDactivite: ed ? draft!.IDactivite : client.IDactivite,
+    client_interne: ed ? draft!.client_interne : !!client.client_interne,
+    inclureRapportQualite: ed ? draft!.inclureRapportQualite : !!client.inclureRapportQualite,
+  }
+  return (
+    <>
+      <InfoCard icon={<Briefcase className="h-4 w-4 text-accent" />} title="Général" isEditing={ed}>
+        <KVText label="Téléphone" value={v.tel} edit={ed} onChange={(x) => onPatch({ tel: x })} />
+        <KVText label="Fax" value={v.fax} edit={ed} onChange={(x) => onPatch({ fax: x })} />
+        <KVText label="Remise (%)" value={v.pct_remise} edit={ed} type="number" onChange={(x) => onPatch({ pct_remise: x })} />
+        <KVText label="% AJEOL" value={v.pct_ajeol} edit={ed} type="number" onChange={(x) => onPatch({ pct_ajeol: x })} />
+        <KVSelect label="Secteur" value={v.IDsecteur_activite} edit={ed} options={secteurs} onChange={(id) => onPatch({ IDsecteur_activite: id })} searchable />
+        <KVSelect label="Activité" value={v.IDactivite} edit={ed} options={activites} onChange={(id) => onPatch({ IDactivite: id })} searchable />
+        <div className="space-y-2 pt-1">
+          <TogglePill label="Client interne" checked={v.client_interne} disabled={!ed} onChange={(x) => onPatch({ client_interne: x })} />
+          <TogglePill label="Inclure rapports contrôle (exp.)" checked={v.inclureRapportQualite} disabled={!ed} onChange={(x) => onPatch({ inclureRapportQualite: x })} />
+        </div>
+      </InfoCard>
+
+      <InfoCard icon={<Receipt className="h-4 w-4 text-accent" />} title="Facturation" isEditing={ed}>
+        <KVSelect label="Mode de paiement" value={v.IDmode_paiement} edit={ed} options={modesPaiement} onChange={(id) => onPatch({ IDmode_paiement: id })} />
+        <KVSelect label="Échéance" value={v.IDecheance} edit={ed} options={echeances} onChange={(id) => onPatch({ IDecheance: id })} />
+        <KVSelect label="TVA" value={v.IDtva} edit={ed} options={tvas} onChange={(id) => onPatch({ IDtva: id })} />
+        <KVText label="N° TVA" value={v.num_tva} edit={ed} onChange={(x) => onPatch({ num_tva: x })} />
+        <KVSelect label="Code comptable" value={v.IDcode_comptable} edit={ed} options={codesComptables} onChange={(id) => onPatch({ IDcode_comptable: id })} searchable />
+        <KVText label="Compte client" value={v.compte} edit={ed} onChange={(x) => onPatch({ compte: x })} />
+      </InfoCard>
+
+      <InfoCard icon={<FileText className="h-4 w-4 text-accent" />} title="Commentaire" isEditing={ed}>
+        {ed ? (
+          <textarea value={v.commentaire} onChange={(e) => onPatch({ commentaire: e.target.value })} rows={4}
+            className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y" />
+        ) : v.commentaire?.trim() ? (
+          <p className="text-sm text-muted-foreground whitespace-pre-line">{v.commentaire}</p>
+        ) : <p className="text-sm text-muted-foreground italic">Aucun commentaire</p>}
+      </InfoCard>
+    </>
+  )
+}
+
+// ── Sidebar Tab: Commercial (dernier contact · journal) ──
+
+function CommercialTab({ client, isEditing, draft, onPatch }: {
+  client: ClientDetail; isEditing: boolean; draft: Draft | null; onPatch: (p: Partial<Draft>) => void
+}) {
+  const ed = isEditing && draft !== null
+  const dernierContactInput = ed ? draft!.dernier_contact : hfsqlDateToInput(client.dernier_contact)
+  const journal = ed ? draft!.journal_commercial : client.journal_commercial ?? ''
+  return (
+    <InfoCard icon={<CalendarClock className="h-4 w-4 text-accent" />} title="Commercial" isEditing={ed}>
+      <KVRow label="Dernier contact">
+        {ed ? (
+          <input type="date" value={dernierContactInput} onChange={(e) => onPatch({ dernier_contact: e.target.value })}
+            autoComplete="off" data-form-type="other" data-lpignore="true"
+            className="h-7 w-[160px] px-2 text-sm text-right rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring" />
+        ) : (
+          <span className="block truncate">{client.dernier_contact && /\d{8}/.test(client.dernier_contact) ? formatHfsqlDate(client.dernier_contact) : <span className="text-muted-foreground">—</span>}</span>
+        )}
+      </KVRow>
+      <div className="space-y-1 pt-1">
+        <label className="text-xs font-medium text-muted-foreground">Journal commercial</label>
+        {ed ? (
+          <textarea value={journal} onChange={(e) => onPatch({ journal_commercial: e.target.value })} rows={8}
+            className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y" />
+        ) : journal?.trim() ? (
+          <p className="text-sm text-muted-foreground whitespace-pre-line">{journal}</p>
+        ) : <p className="text-sm text-muted-foreground italic">Aucun journal</p>}
+      </div>
+    </InfoCard>
   )
 }
 
