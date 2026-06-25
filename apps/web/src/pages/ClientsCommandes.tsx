@@ -192,8 +192,11 @@ interface CommandeDetail {
   adresse_livraison: AdresseLite | null
   adresse_facturation: AdresseLite | null
   lignes: LigneCommande[]
+  tombe_metier: TombeMetierRow[]
   phase: ClientPhase
 }
+
+interface TombeMetierRow { IDref_ecru: number; ref_label: string; poids_kg: number }
 
 interface ClientLite { IDclient: number; nom: string; IDmode_paiement?: number; IDecheance?: number }
 interface ModePaiement { IDmode_paiement: number; libelle: string }
@@ -886,8 +889,8 @@ function LignesSection({
     : null
 
   // When a line's drawer opens, collapse the list to that line's height and slide it
-  // up to the top so the drawer claims all the space below it; closing restores the
-  // full list and scrolls back to the original top.
+  // up to the top so the drawer claims all the space below it — identical behaviour for
+  // any line. Closing restores the full list and scrolls back to the original top.
   const listScrollRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const container = listScrollRef.current
@@ -899,10 +902,13 @@ function LignesSection({
         const cs = getComputedStyle(container)
         const padTop = parseFloat(cs.paddingTop) || 0
         const padBottom = parseFloat(cs.paddingBottom) || 0
-        // Shrink the viewport to one line so the chosen line can pin to the very top.
+        // Collapse the viewport to one line *instantly* (no height transition) so the
+        // scroll target below is measured against the final geometry, not a mid-anim
+        // height — otherwise the browser clamps the smooth scroll and the line lands short.
         container.style.maxHeight = `${el.offsetHeight + padTop + padBottom}px`
-        const delta = el.getBoundingClientRect().top - container.getBoundingClientRect().top - padTop
-        container.scrollBy({ top: delta, behavior: 'smooth' })
+        // Absolute target = current scroll + how far the line sits below the viewport top.
+        const target = container.scrollTop + (el.getBoundingClientRect().top - container.getBoundingClientRect().top) - padTop
+        container.scrollTo({ top: target, behavior: 'smooth' })
       })
       return () => cancelAnimationFrame(raf)
     }
@@ -913,7 +919,7 @@ function LignesSection({
   return (
     <>
       <div className="flex-1 min-h-0 flex flex-col">
-        <div ref={listScrollRef} className={cn('overflow-auto space-y-2 p-1 scrollbar-transparent transition-[max-height] duration-200', drawerOpen ? 'flex-shrink-0 max-h-[40%]' : 'flex-1 min-h-0')}>
+        <div ref={listScrollRef} className={cn('overflow-auto space-y-2 p-1 scrollbar-transparent', drawerOpen ? 'flex-shrink-0' : 'flex-1 min-h-0')}>
           {commande.lignes.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
               <Layers className="h-12 w-12 mb-3 opacity-40" />
@@ -1277,7 +1283,9 @@ function AffectationDrawer({
 
           <section>
             <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
-              {ligne.ref_label ? `${ligne.ref_label} — tombé de métier disponible` : 'Tombé de métier disponible'}
+              {ennoLocations?.ecru_ref_label
+                ? `${ennoLocations.ecru_ref_label} /ecru — tombé de métier disponible`
+                : 'Tombé de métier disponible'}
             </h3>
             <EnnoLocationTable
               loading={ennoLocLoading}
@@ -1596,6 +1604,7 @@ interface EnnoLocationRow {
 interface EnnoLocationsPayload {
   rendement: number
   unite_label: string
+  ecru_ref_label: string
   locations: EnnoLocationRow[]
 }
 
@@ -1629,18 +1638,26 @@ function EnnoLocationTable({
         <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground bg-zinc-200/50 rounded-md">{label}</div>
         <div className="mt-1 space-y-1">
           {rows.map((loc) => (
-            <div key={loc.IDsous_traitant} className="flex items-center gap-2 px-2.5 py-2 rounded-lg border border-border/60 bg-card shadow-sm">
-              <MapPin className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+            <div key={loc.IDsous_traitant} className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-border/60 bg-card shadow-sm">
+              <div className="h-8 w-8 rounded-md bg-accent/10 flex items-center justify-center flex-shrink-0">
+                <MapPin className="h-4 w-4 text-accent" />
+              </div>
               <span className="text-sm font-medium truncate flex-1 min-w-0">{loc.location_nom}</span>
-              <span className="text-[11px] text-muted-foreground tabular-nums whitespace-nowrap">{fmtNum(loc.poids, 1)} kg</span>
-              <span className="text-[11px] text-muted-foreground tabular-nums whitespace-nowrap w-20 text-right">{fmtNum(loc.metrage_potentiel, 0)} ml</span>
-              {loc.is_ennoblisseur ? (
-                <Button variant="gold" size="sm" className="h-7 flex-shrink-0" onClick={() => onNewOrder(loc)}>
-                  <Plus className="h-3.5 w-3.5 mr-1" />Commande
-                </Button>
-              ) : (
-                <span className="w-[104px] flex-shrink-0" />
-              )}
+              <div className="flex items-baseline gap-1 tabular-nums whitespace-nowrap w-[68px] justify-end">
+                <span className="text-base font-bold text-accent">{fmtNum(loc.poids, 1)}</span>
+                <span className="text-[11px] text-muted-foreground">kg</span>
+              </div>
+              <div className="flex items-baseline gap-1 tabular-nums whitespace-nowrap w-[76px] justify-end">
+                <span className="text-sm font-semibold text-foreground">{fmtNum(loc.metrage_potentiel, 0)}</span>
+                <span className="text-[11px] text-muted-foreground">ml</span>
+              </div>
+              <div className="w-[164px] flex-shrink-0 flex justify-end">
+                {loc.is_ennoblisseur && (
+                  <Button variant="ghost" size="sm" onClick={() => onNewOrder(loc)} className="text-accent hover:text-accent hover:bg-accent/10">
+                    <Plus className="h-3.5 w-3.5 mr-1" />Nouvelle commande
+                  </Button>
+                )}
+              </div>
             </div>
           ))}
         </div>
@@ -2211,15 +2228,17 @@ function DetailSidebar({
 }) {
   const [activeTab, setActiveTab] = useState<SidebarTab>('info')
 
+  // These two enum lookups are also needed in VIEW mode to resolve the
+  // IDmode_paiement / IDecheance labels (InfoTab). They're tiny + static, so load
+  // them unconditionally — gating on isEditing left view mode showing "—" until the
+  // user opened the editor (which is when the lookups were first fetched).
   const { data: modesPaiement } = useQuery<ModePaiement[]>({
     queryKey: ['cc-modes-paiement'],
     queryFn: () => apiFetch('/commandes-client/lookups/modes-paiement'),
-    enabled: isEditing,
   })
   const { data: echeances } = useQuery<Echeance[]>({
     queryKey: ['cc-echeances'],
     queryFn: () => apiFetch('/commandes-client/lookups/echeances'),
-    enabled: isEditing,
   })
   const { data: adresses } = useQuery<AdresseLookup[]>({
     queryKey: ['cc-adresses', commande?.IDclient],
@@ -2373,6 +2392,30 @@ function InfoTab({
           <input type="number" value={editFraisPort} onChange={(e) => onEditFraisPortChange(e.target.value)} className={smallInput} />
         ) : (commande.frais_port ? fmtNum(commande.frais_port, 2) : '—')} />
       </div>
+
+      {commande.tombe_metier.length > 0 && (
+        <div className="p-3 rounded-lg border bg-card shadow-sm">
+          <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
+            <TmRollIcon className="h-3.5 w-3.5" />Tombé de métier commandé
+          </p>
+          <div className="space-y-1.5">
+            {commande.tombe_metier.map((t) => (
+              <div key={t.IDref_ecru} className="flex items-center justify-between gap-2">
+                <span className="text-sm">{t.ref_label} /ecru</span>
+                <span className="text-sm font-semibold tabular-nums text-accent">{fmtNum(t.poids_kg, 1)} kg</span>
+              </div>
+            ))}
+            {commande.tombe_metier.length > 1 && (
+              <div className="flex items-center justify-between gap-2 pt-1.5 mt-0.5 border-t border-border/60">
+                <span className="text-[11px] uppercase tracking-wide text-muted-foreground font-semibold">Total</span>
+                <span className="text-sm font-bold tabular-nums">
+                  {fmtNum(commande.tombe_metier.reduce((s, t) => s + t.poids_kg, 0), 1)} kg
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className={cn('p-3 rounded-lg border bg-card shadow-sm', isEditing && editSectionClass)}>
         <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">

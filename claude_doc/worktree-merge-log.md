@@ -10,6 +10,30 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-06-25 — feat/cmd-client
+Clients › Commandes (`apps/web/src/pages/ClientsCommandes.tsx` + `apps/api/src/routes/commandes-client.ts`) —
+polish + correctness pass on the line affectation drawer's **Ennoblissement** supply tab plus the right-panel
+Info tab. **(1) Line pin-to-top drawer**: clicking a ligne now collapses the lines list to that line's height and
+smooth-scrolls it to the very top so the affectation drawer always claims the space below it (was using a
+max-height CSS transition that clamped the scroll and left the line short; now collapses height instantly and
+scrolls to an absolute target). **(2) "Écru disponible" by location — three correctness fixes** in
+`fetchEnnoLocations` / `fetchEnnoAvailableRolls`, all validated against the live legacy "029 - écru disponible"
+panel (ref_fini 639 "029A" → écru ref 146, cmd 3686): (a) **natural-écru filter** — restrict source écru to the
+`colori_ecru.reference = 'ecru'` base (helper `naturalEcruColoriIds`; fallback = whole pool if a ref has no
+'ecru' coloris) because color-knitted variants ("Gris clair C5010" etc.) can't be re-dyed; this dropped MATEL
+485→256.30 kg; (b) **"à l'usine" group** — dropped the old `IDsociete=1 AND IDmagasin>0` restriction so factory
+écru (`IDmagasin=0`) surfaces, grouped by owning company via new `resolveSocieteNames` (1=Ets Malterre, 2=Tricotage
+Malterre, 3=Malterre Confection); à-l'usine rows are read-only (no create button, synthetic `IDsous_traitant=-IDsociete`
+React key); (c) **orphan-roll filter `IDLigne_Commande_TRM > 0`** — only écru traceable to a TRM knitting order counts,
+which legacy applies uniformly (splits Tricotage Malterre 233.30→198.90 while leaving MATEL 256.30 intact; it is NOT a
+second_choix filter — MATEL's 256.30 includes a 2nd-choix roll). **(3) UI polish on the location table**: larger/bolder
+poids+métrage values with a gold icon box; the per-row button is now a ghost-accent "+ Nouvelle commande" matching the
+left-list "+ Nouvelle"; the section title reads "{écru} /ecru — tombé de métier disponible" via a new `ecru_ref_label`
+payload field. **(4) Info tab**: new "Tombé de métier commandé" card listing total écru kg ordered per écru ref
+(`computeTombeMetier`: Kg lines count quantite, Ml lines convert kg = ml / rendement; fini lines trace through
+`ref_fini.IDref_ecru`); and fixed Mode-paiement/Échéance showing "—" in view mode by removing the `enabled: isEditing`
+gate on the two enum lookups (they're needed to resolve the labels outside edit mode).
+
 ## 2026-06-25 — feat/facturation
 Clients › Facturation (`apps/web/src/pages/ClientsFacturation.tsx` + `apps/api/src/routes/factures.ts` +
 `apps/api/src/lib/pdf/FacturePdf.tsx`) — added the **proforma vs definitive** two-table model on top of the
