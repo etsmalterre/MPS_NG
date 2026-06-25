@@ -10,6 +10,7 @@ import {
   FileBarChart,
   Palette,
   Euro,
+  Send,
   Droplet,
   TrendingUp,
   FolderOpen,
@@ -30,7 +31,9 @@ function createPlaceholder(title: string, description: string, Icon: LucideIcon)
   }
 }
 
-// Client pages — all real now (Commandes, Devis, Facturation, Gestion)
+// Client pages — Commandes, Devis, Facturation, Gestion are real.
+// Expéditions is a placeholder pending the screen build.
+const ClientsExpeditionsPage = createPlaceholder('Expéditions', 'Expéditions et bons de livraison clients', Send)
 
 // Fils placeholder (prévisions only — other Fils sub-screens are real)
 const FilsPrevisionsPage = createPlaceholder('Prévisions Fournisseurs', 'Prévisions d\'approvisionnement fournisseurs', FileText)
@@ -103,6 +106,7 @@ export const router = createBrowserRouter([
       { path: 'clients', element: <Navigate to="/clients/commandes" replace /> },
       { path: 'clients/commandes', element: <ClientsCommandes /> },
       { path: 'clients/devis', element: <ClientsDevis /> },
+      { path: 'clients/expeditions', element: <ClientsExpeditionsPage /> },
       { path: 'clients/facturation', element: <ClientsFacturation /> },
       { path: 'clients/gestion', element: <ClientsGestion /> },
 

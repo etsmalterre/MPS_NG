@@ -80,6 +80,7 @@ export const mainNavigation: MainMenuItem[] = [
     submenus: [
       { title: 'Commandes', href: '/clients/commandes' },
       { title: 'Devis', href: '/clients/devis' },
+      { title: 'Expéditions', href: '/clients/expeditions' },
       { title: 'Facturation', href: '/clients/facturation' },
       { title: 'Gestion', href: '/clients/gestion' },
     ],
@@ -205,6 +206,7 @@ export const routeTitles: Record<string, string> = {
   '/clients': 'Clients',
   '/clients/commandes': 'Commandes',
   '/clients/devis': 'Devis',
+  '/clients/expeditions': 'Expéditions',
   '/clients/facturation': 'Facturation',
   '/clients/gestion': 'Gestion',
   // Sous-traitants
