@@ -11,7 +11,7 @@ Legacy MPS had three layers of status. MPS_NG now writes to two of them:
 |---|---|---|
 | Header | `commande_sous_traitant.est_soldee` BOOLEAN | Gates writes via `refuseIfTerminee`. Drives the Clôturer / Rouvrir toggle. |
 | Line | `ligne_commande_sous_traitant.sstatut` VARCHAR (12 legacy values) | MPS_NG drives three of them as a state machine (see below). Other legacy values preserved on read, never written from the new app. |
-| Roll | `stock_fini.IDetat_stock_fini` SMALLINT FK → `etat_stock_fini` | Per-roll workflow state, real DB enum (5 values). |
+| Roll | `stock_fini.IDetat_stock_fini` SMALLINT FK → `etat_stock_fini` | Per-roll workflow state, real DB enum: **1**=En Contrôle, **2**=En Reprise, **3**=Validé, **4**=Expédié, **5**=Attente de décision. |
 
 ### Line `sstatut` state machine (writes from MPS_NG)
 
@@ -242,6 +242,21 @@ can straddle the second boundary (e.g. timestamps `17:00:31.855 → :32.026`).
 - 14 = "Avis d'expédition envoyé" (Truck, cyan) — meta retained for a
   future expedition-chain wiring (sst lines → stock_fini → expedition)
 - 15 = "Soumission au client" (Send, violet)
+
+## Qualité verdict → roll cascade
+
+The responsable qualité's verdict in **Qualité › Suivi Lots**
+(`POST /suivi-lots/:id/etat`) cascades onto the lot's received rolls, keyed on
+`stock_fini.IDref_commande_source = suivilot.IDligne_commande_sous_traitant AND
+stock_fini.lot = suivilot.lot` (same key as the détail/pièces query):
+
+- **Valider** (`IDetatLot = 3`) → rolls set to `IDetat_stock_fini = 3` (Validé).
+- **Reprendre** (`IDetatLot = 2`) → rolls set to `IDetat_stock_fini = 2` (En reprise).
+- Guard `IDetat_stock_fini <> 4` so an already-Expédié roll is never pulled
+  backward. Best-effort: a cascade failure must not fail the recorded verdict.
+
+Both directions cascade (added 2026-06-30; the Valider half was missing, leaving
+rolls stuck "En Contrôle" after lot validation — fixed + back-filled 79 prod rolls).
 
 ## Reprise flow
 
