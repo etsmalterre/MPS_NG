@@ -10,6 +10,18 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-02 — feat/cmd-sst
+Sous-traitants › Commandes (`apps/web/src/pages/SousTraitantsCommandes.tsx` + `apps/api/src/routes/commandes-sous-traitant.ts`) —
+**Tricobot autofill now works in the Reprise reception modal** (was create-only). When rolls "En reprise" are
+multi-selected in the Réception tab and reopened via "Reprendre", the Tricobot mascot appears in the
+`BatchReceptionDialog` header and pre-fills Lot / Poids / Métrage / Défaut from `data_bl_tricotbot`, matching BL
+`num_piece` against the **fini** roll numeros (create mode keeps matching écru numeros) — a reprise sends the same
+physical rolls back to the sst, so the corrected BL lists the same piece numbers incl. `-1`/`-2` split suffixes.
+Overwrite semantics hardened for both modes: only **non-empty** BL values overwrite a field, so a hole in the BL
+can't wipe the reprise pre-fill (or a user-typed value in create mode). API tricobot endpoint now `ORDER BY
+IDdata_bl_tricotbot` so when the same num_piece exists twice (original + corrected reprise BL) the frontend's
+last-write-wins map deterministically keeps the newest row. Doc updated in `sous_traitants_status_model.md §Reprise`.
+
 ## 2026-07-02 — feat/suivilot
 Soumission Lot Client — per-coloris "Ref client" fix (`apps/api/src/routes/commandes-sous-traitant.ts`,
 `findEligibleLots`). A client can hold SEVERAL `designation_client` rows for the same ref_fini, one per

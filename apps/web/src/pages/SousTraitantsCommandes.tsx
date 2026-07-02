@@ -4405,16 +4405,16 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
   }
 
   // Tricobot autofill. Fetches rows from data_bl_tricotbot for this
-  // ligne, matches each row to a selected écru by `num_piece ===
-  // ecru.numero`, and overwrites that écru's lot/poids/metrage/defaut.
-  // The user's blue Commentaire is left untouched (it's a manual note
-  // to the customer, not on the BL).
-  //
-  // Tricobot is create-only: it pulls from the ennoblisseur's incoming
-  // BL, which doesn't apply when the visiteur is just correcting values
-  // on rolls that are already in the warehouse ("reprise" flow).
+  // ligne, matches each row to a wizard roll by `num_piece === numero`
+  // (écru numero in create mode, fini numero in reprise — a reprise
+  // sends the same physical rolls back to the sst, and the corrected
+  // BL Tricobot parses lists those same piece numbers), and overwrites
+  // that roll's lot/poids/metrage/defaut. Only non-empty BL values
+  // overwrite: in reprise the fields are pre-filled from the existing
+  // stock_fini row and a hole in the BL must not wipe them. The user's
+  // blue Commentaire is left untouched (it's a manual note to the
+  // customer, not on the BL).
   const handleTricobotClick = async () => {
-    if (isReprise) return
     if (tricobotState !== 'idle') return
     setTricobotState('loading')
     setTricobotMessage(null)
@@ -4438,39 +4438,41 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
       // Count matches synchronously — the setRows updater below runs
       // lazily, so reading a `filled++` from inside it would still be 0
       // when we build the status message.
-      const matches: Array<{ ecru: StockEcruLite; hit: typeof data[number] }> = []
-      for (const e of ecruRolls) {
-        const np = (e.numero ?? '').trim()
+      const matches: Array<{ rollId: number; hit: typeof data[number] }> = []
+      for (const r of rolls) {
+        const np = (r.numero ?? '').trim()
         const hit = np ? byNumero.get(np) : undefined
-        if (hit) matches.push({ ecru: e, hit })
+        if (hit) matches.push({ rollId: r.id, hit })
       }
       const filled = matches.length
       if (filled > 0) {
         setRows((prev) => {
           const next = { ...prev }
-          for (const { ecru, hit } of matches) {
+          for (const { rollId, hit } of matches) {
             const poidsNum = Number(hit.poids)
             const metrageNum = Number(hit.metrage)
-            next[ecru.IDstock_ecru] = {
-              ...next[ecru.IDstock_ecru],
-              lot: (hit.lot ?? '').trim(),
-              poids: poidsNum > 0 ? poidsNum.toFixed(1) : next[ecru.IDstock_ecru].poids,
-              metrage: metrageNum > 0 ? metrageNum.toFixed(1) : '',
-              observation_sst: (hit.observation ?? '').trim(),
+            const lotVal = (hit.lot ?? '').trim()
+            const obsVal = (hit.observation ?? '').trim()
+            next[rollId] = {
+              ...next[rollId],
+              lot: lotVal || next[rollId].lot,
+              poids: poidsNum > 0 ? poidsNum.toFixed(1) : next[rollId].poids,
+              metrage: metrageNum > 0 ? metrageNum.toFixed(1) : next[rollId].metrage,
+              observation_sst: obsVal || next[rollId].observation_sst,
             }
           }
           return next
         })
       }
       setTricobotState('done')
-      const missing = ecruRolls.length - filled
+      const missing = rolls.length - filled
       setTricobotMsgError(filled === 0)
       setTricobotMessage(
         filled === 0
           ? `Tricobot n'a trouvé aucun rouleau correspondant dans la base.`
           : missing === 0
             ? `Tricobot a trouvé les ${filled} rouleaux 🎉`
-            : `Tricobot a trouvé ${filled} rouleau${filled > 1 ? 'x' : ''} sur ${ecruRolls.length} · ${missing} restant${missing > 1 ? 's' : ''} à compléter manuellement`,
+            : `Tricobot a trouvé ${filled} rouleau${filled > 1 ? 'x' : ''} sur ${rolls.length} · ${missing} restant${missing > 1 ? 's' : ''} à compléter manuellement`,
       )
     } catch (err) {
       setTricobotState('idle')
@@ -4605,7 +4607,7 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
               </p>
             )}
           </div>
-          {!isReprise && <button
+          <button
             type="button"
             onClick={handleTricobotClick}
             disabled={tricobotState !== 'idle'}
@@ -4639,7 +4641,7 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
                 Tricobot
               </span>
             )}
-          </button>}
+          </button>
         </div>
 
         {/* Batch fields */}

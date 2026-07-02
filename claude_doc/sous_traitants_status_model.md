@@ -267,7 +267,12 @@ opens `BatchReceptionDialog` in `mode='reprise'` (discriminated union):
 - Pre-fills lot/poids/metrage/observations from the existing fini rows
 - Submits PATCH per fini (not POST) with the edited values
 - Resets `IDetat_stock_fini` back to `1` (En contrôle) server-side
-- Hides Tricobot (create-only)
+- Tricobot works here too (added 2026-07-02): matches BL `num_piece`
+  against the **fini** numeros (create mode matches écru numeros), and
+  only non-empty BL values overwrite the pre-filled fields. The tricobot
+  endpoint orders by PK ascending so when the same num_piece exists twice
+  (original + corrected reprise BL) the newest row wins in the frontend's
+  last-write map.
 
 PATCH endpoint at `PATCH /:commandeId/lignes/:ligneId/pieces/fini/:stockFiniId`
 accepts: `observations`, `observation_sst`, `numero`, `lot`, `poids`,

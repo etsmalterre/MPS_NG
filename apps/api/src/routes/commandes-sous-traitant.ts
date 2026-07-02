@@ -5826,8 +5826,11 @@ commandesSousTraitantRouter.patch(
 // received from sous-traitants, and writes per-piece rows into
 // `data_bl_tricotbot`. This endpoint returns those rows for a given
 // ligne so the frontend batch-reception dialog can pre-populate Lot /
-// Poids / Métrage / Défaut by matching `num_piece` to each écru's
-// numero.
+// Poids / Métrage / Défaut by matching `num_piece` to each roll's
+// numero (écru numero on create, fini numero on reprise). Ordered by
+// PK ascending: after a reprise the same num_piece exists twice (old +
+// corrected BL) and the frontend keeps the last row per num_piece, so
+// ascending order makes the newest BL win.
 commandesSousTraitantRouter.get(
   '/:commandeId/lignes/:ligneId/tricobot',
   async (req: Request, res: Response) => {
@@ -5851,7 +5854,8 @@ commandesSousTraitantRouter.get(
         `SELECT IDdata_bl_tricotbot, IDligne_commande_sous_traitant, lot, poids, metrage,
                 observation, num_piece, DATE
          FROM data_bl_tricotbot
-         WHERE IDligne_commande_sous_traitant = ${ligneId}`,
+         WHERE IDligne_commande_sous_traitant = ${ligneId}
+         ORDER BY IDdata_bl_tricotbot`,
       )
       const fixed = await fixEncoding(rows, 'data_bl_tricotbot', 'IDdata_bl_tricotbot', ['observation', 'num_piece', 'lot'])
       res.json(fixed)
