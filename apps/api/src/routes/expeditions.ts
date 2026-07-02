@@ -411,17 +411,23 @@ expeditionsRouter.get('/', async (req: Request, res: Response) => {
   try {
     const kind = parseKind(String(req.query.bucket ?? 'formelle')) ?? 'formelle'
     const q = String(req.query.q ?? '').trim()
-    const state = String(req.query.state ?? 'all') // 'all' | 'draft' | 'valid'
+    const state = String(req.query.state ?? 'all') // 'all' | 'facture' | 'nonfacture'
     const limitRaw = parseInt(String(req.query.limit ?? ''), 10)
     const limit = isNaN(limitRaw) ? 200 : Math.min(Math.max(limitRaw, 1), 500)
     const fetchCap = q ? 800 : limit
 
-    const stateSql = state === 'draft' ? ' AND (est_valide IS NULL OR est_valide = 0)' : state === 'valid' ? ' AND est_valide = 1' : ''
+    // Cursor pagination (load more): only ids strictly below `before`. Ignored while searching.
+    const beforeRaw = parseInt(String(req.query.before ?? ''), 10)
+    const beforeId = !q && !isNaN(beforeRaw) && beforeRaw > 0 ? beforeRaw : null
+
+    // Invoiced filter — HFSQL keeps empty flags at 0 (or NULL), never trust IS NULL alone.
+    const stateSql = state === 'nonfacture' ? ' AND (est_facture IS NULL OR est_facture = 0)' : state === 'facture' ? ' AND est_facture = 1' : ''
 
     if (kind === 'formelle') {
+      const beforeSql = beforeId !== null ? ` AND IDexpedition < ${beforeId}` : ''
       const heads = await query<any>(
         `SELECT TOP ${fetchCap} IDexpedition, IDcommande_client, IDtransporteur, DATE AS dexp, est_valide, est_facture, donation ` +
-          `FROM expedition WHERE IDsociete = 1${stateSql} ORDER BY IDexpedition DESC`,
+          `FROM expedition WHERE IDsociete = 1${stateSql}${beforeSql} ORDER BY IDexpedition DESC`,
       )
       const cmdIds = heads.map((h: any) => Number(h.IDcommande_client)).filter(Boolean)
       const cmdRows = cmdIds.length
@@ -462,9 +468,10 @@ expeditionsRouter.get('/', async (req: Request, res: Response) => {
     }
 
     // divers (no IDsociete)
+    const beforeSql = beforeId !== null ? ` AND IDexpedition_divers < ${beforeId}` : ''
     const heads = await query<any>(
       `SELECT TOP ${fetchCap} IDexpedition_divers, IDclient, ref_client, IDtransporteur, DATE AS dexp, est_valide, est_facture ` +
-        `FROM expedition_divers WHERE 1 = 1${stateSql} ORDER BY IDexpedition_divers DESC`,
+        `FROM expedition_divers WHERE 1 = 1${stateSql}${beforeSql} ORDER BY IDexpedition_divers DESC`,
     )
     const ids = heads.map((h: any) => Number(h.IDexpedition_divers)).filter(Boolean)
     const lineRows = ids.length

@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useCallback, useRef, type ComponentType } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { useUnsavedGuard } from '@/hooks/useUnsavedGuard'
@@ -38,6 +38,8 @@ import { fmtNum } from '@/lib/format'
 import { apiFetch, API_URL } from '@/lib/api'
 
 // ── Types ──────────────────────────────────────────────
+
+const LIST_PAGE_SIZE = 200
 
 type Kind = 'formelle' | 'divers'
 
@@ -160,7 +162,7 @@ export function ClientsExpeditions() {
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [debouncedQuery, setDebouncedQuery] = useState('')
-  const [stateFilter, setStateFilter] = useState<'all' | 'draft' | 'valid'>('all')
+  const [stateFilter, setStateFilter] = useState<'nonfacture' | 'facture'>('nonfacture')
   const [isEditing, setIsEditing] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [autoEditForId, setAutoEditForId] = useState<number | null>(null)
@@ -189,9 +191,17 @@ export function ClientsExpeditions() {
     return () => clearTimeout(t)
   }, [searchQuery])
 
-  const { data: rows, isLoading, isError, error } = useQuery<ExpeditionListRow[]>({
+  // Infinite list: pages of 200, cursor = last row id (API `before`). Search returns a single page.
+  const {
+    data: rowPages, isLoading, isError, error,
+    fetchNextPage, hasNextPage, isFetchingNextPage,
+  } = useInfiniteQuery({
     queryKey: ['expeditions', bucket, stateFilter, debouncedQuery],
-    queryFn: () => apiFetch(`/expeditions?bucket=${bucket}&state=${stateFilter}&q=${encodeURIComponent(debouncedQuery)}&limit=200`),
+    queryFn: ({ pageParam }): Promise<ExpeditionListRow[]> =>
+      apiFetch(`/expeditions?bucket=${bucket}&state=${stateFilter}&q=${encodeURIComponent(debouncedQuery)}&limit=${LIST_PAGE_SIZE}${pageParam ? `&before=${pageParam}` : ''}`),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage: ExpeditionListRow[]) =>
+      debouncedQuery || lastPage.length < LIST_PAGE_SIZE ? undefined : lastPage[lastPage.length - 1].id,
   })
 
   const { data: detail, isLoading: detailLoading } = useQuery<ExpeditionDetail>({
@@ -319,11 +329,11 @@ export function ClientsExpeditions() {
     guard.guardAction(() => { setIsEditing(false); setRollDrawerLcc(null); setBucket(b); setSelectedId(null) })
   }, [guard, bucket])
 
-  const handleStateFilterChange = useCallback((s: 'all' | 'draft' | 'valid') => {
+  const handleStateFilterChange = useCallback((s: 'nonfacture' | 'facture') => {
     guard.guardAction(() => { setIsEditing(false); setStateFilter(s); setSelectedId(null) })
   }, [guard])
 
-  const list = rows ?? []
+  const list = useMemo(() => (rowPages?.pages ?? []).flat(), [rowPages])
 
   useEffect(() => {
     if (isEditing || list.length === 0) return
@@ -350,6 +360,9 @@ export function ClientsExpeditions() {
             onStateFilterChange={handleStateFilterChange}
             onNew={() => setCreateOpen(true)}
             isEditing={isEditing}
+            hasMore={!!hasNextPage}
+            onLoadMore={() => fetchNextPage()}
+            isLoadingMore={isFetchingNextPage}
           />
         }
         detailHeader={
@@ -446,6 +459,7 @@ function ExpeditionListPanel({
   bucket, onBucketChange,
   stateFilter, onStateFilterChange,
   onNew, isEditing,
+  hasMore, onLoadMore, isLoadingMore,
 }: {
   rows: ExpeditionListRow[]
   isLoading: boolean
@@ -457,10 +471,13 @@ function ExpeditionListPanel({
   onSearchChange: (q: string) => void
   bucket: Kind
   onBucketChange: (b: Kind) => void
-  stateFilter: 'all' | 'draft' | 'valid'
-  onStateFilterChange: (s: 'all' | 'draft' | 'valid') => void
+  stateFilter: 'nonfacture' | 'facture'
+  onStateFilterChange: (s: 'nonfacture' | 'facture') => void
   onNew: () => void
   isEditing: boolean
+  hasMore: boolean
+  onLoadMore: () => void
+  isLoadingMore: boolean
 }) {
   return (
     <div className="flex flex-col h-full rounded-lg border shadow-sm bg-zinc-100/80">
@@ -479,7 +496,7 @@ function ExpeditionListPanel({
         {/* Category switch — formal shipments vs miscellaneous. Dominant control. */}
         <div className="flex gap-1 p-1 rounded-lg border border-border bg-background shadow-sm">
           {([
-            { key: 'formelle', label: 'Formelles' },
+            { key: 'formelle', label: 'Textile' },
             { key: 'divers', label: 'Diverses' },
           ] as const).map((opt) => (
             <button
@@ -497,16 +514,15 @@ function ExpeditionListPanel({
         {/* State filter within the current category. */}
         <div className="flex flex-wrap gap-1">
           {([
-            { key: 'all', label: 'Toutes' },
-            { key: 'draft', label: 'Brouillons' },
-            { key: 'valid', label: 'Validées' },
+            { key: 'nonfacture', label: 'Non facturées' },
+            { key: 'facture', label: 'Facturées' },
           ] as const).map((opt) => (
             <button
               key={opt.key}
               type="button"
               onClick={() => onStateFilterChange(opt.key)}
               className={cn(
-                'px-2 py-1 text-xs rounded-md transition-colors flex-grow basis-[calc(33.333%-0.25rem)]',
+                'px-2 py-1 text-xs rounded-md transition-colors flex-grow basis-[calc(50%-0.25rem)] whitespace-nowrap',
                 stateFilter === opt.key ? 'bg-accent text-accent-foreground shadow-sm font-medium' : 'text-muted-foreground hover:bg-accent/10',
               )}
             >
@@ -529,7 +545,8 @@ function ExpeditionListPanel({
             <Truck className="h-12 w-12 mb-3 opacity-50" />
             <p className="text-sm">{bucket === 'formelle' ? 'Aucune expédition' : 'Aucune expédition diverse'}</p>
           </div>
-        ) : rows.map((row) => {
+        ) : (<>
+        {rows.map((row) => {
           const isSelected = selectedId === row.id
           const valid = row.est_valide === 1
           return (
@@ -562,10 +579,25 @@ function ExpeditionListPanel({
             </div>
           )
         })}
+        {hasMore && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={onLoadMore}
+            disabled={isLoadingMore}
+            className="w-full text-muted-foreground hover:text-foreground"
+          >
+            {isLoadingMore
+              ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              : <Plus className="h-3.5 w-3.5 mr-1.5" />}
+            Charger plus
+          </Button>
+        )}
+        </>)}
       </div>
 
       <div className="p-3 border-t text-xs text-muted-foreground flex items-center justify-between rounded-b-lg bg-zinc-200/50">
-        <span>{rows.length} expédition{rows.length !== 1 ? 's' : ''}</span>
+        <span>{rows.length} expédition{rows.length !== 1 ? 's' : ''}{hasMore ? '+' : ''}</span>
         {!isEditing && (
           <Button size="sm" variant="ghost" onClick={onNew} className="text-accent hover:text-accent hover:bg-accent/10">
             <Plus className="h-3.5 w-3.5 mr-1" />Nouveau
@@ -1529,7 +1561,7 @@ function CreateExpeditionDialog({
             <label className="text-xs font-medium text-muted-foreground">Type</label>
             <div className="flex gap-1">
               {([
-                { k: 'formelle', l: 'Formelle' },
+                { k: 'formelle', l: 'Textile' },
                 { k: 'divers', l: 'Diverse' },
               ] as const).map((o) => (
                 <button

@@ -10,6 +10,22 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-02 — feat/expe
+Clients › Expéditions — filter + labelling + pagination pass (`apps/web/src/pages/ClientsExpeditions.tsx`,
+`apps/api/src/routes/expeditions.ts`). **(1) Bucket labels**: the two category tabs "Formelles"/"Diverses"
+now read **"Textile"/"Diverses"** (the internal `Kind` codes `formelle`/`divers` are unchanged; only the
+French display strings + the create-modal Type toggle label). **(2) Invoiced filter**: the left-list state
+filter was "Toutes / Brouillons / Validées" (on `est_valide`) and is now **"Non facturées / Facturées"**
+(on `est_facture`), defaulting to **Non facturées**; "Toutes" was dropped and the two buttons split the row
+50/50 with `whitespace-nowrap` so "Non facturées" stays on one line. API `?state=` accepts `facture` /
+`nonfacture` (non-facturées guarded as `est_facture IS NULL OR est_facture = 0` per the HFSQL empty-flag=0
+rule); legacy `all` still accepted but the UI never sends it. This matches the legacy app, where only 4
+diverses are not-yet-invoiced (595/596/599/600). **(3) Load-more pagination**: the list was hard-capped at
+`TOP 200`; it now pages via `useInfiniteQuery` (200/page) with a cursor `?before=<lastId>` (`IDexpedition <
+before`, ignored while searching), a ghost "Charger plus" button under the last card when a full page came
+back, and a `200+` footer count. Fixes the Textile/Facturées view showing exactly 200 when far more exist.
+Verified `tsc --noEmit` clean on web (API baseline errors only, none in expeditions.ts).
+
 ## 2026-07-02 — feat/cmd-client
 Clients › Commandes — line-item **Affectation drawer** upgrades plus supply-view accuracy fixes
 (`apps/api/src/routes/commandes-client.ts`, `apps/web/src/pages/ClientsCommandes.tsx`). **(1) Roll cards
