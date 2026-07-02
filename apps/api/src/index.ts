@@ -27,6 +27,7 @@ import { stockFiniRouter } from './routes/stock-fini.js'
 import { stockEcruRouter } from './routes/stock-ecru.js'
 import { suiviLotsRouter } from './routes/suivi-lots.js'
 import { rapportsRouter } from './routes/rapports.js'
+import { planningAtelierRouter } from './routes/planning-atelier.js'
 import { authRouter } from './routes/auth.js'
 import { permissionsRouter } from './routes/permissions.js'
 import { userEmailsRouter } from './routes/user-emails.js'
@@ -84,6 +85,8 @@ app.use('/api/stock', stockFiniRouter)
 app.use('/api/stock', stockEcruRouter)
 app.use('/api/suivi-lots', suiviLotsRouter)
 app.use('/api/rapports', rapportsRouter)
+// TRM atelier planning — consumed by the MPS-TRM web app (C:\dev\MPS-TRM)
+app.use('/api/planning-atelier', planningAtelierRouter)
 
 app.listen(PORT, () => {
   console.log(`MPS API running on port ${PORT} [${env}]`)
