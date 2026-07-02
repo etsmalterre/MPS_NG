@@ -10,6 +10,22 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-02 — feat/bug-pierrot
+Sous-traitants › Reprise / Qualité › Suivi Lots (`apps/api/src/routes/commandes-sous-traitant.ts`) —
+**correcting a roll's lot number in the Reprise modal now migrates the suivilot tracking** (bug reported by
+Pierre-Emmanuel: Tricobot received commande 8801 under the truncated lot "MA"; after a reprise re-reception
+with the right number, the "MA" lot stayed stuck "En reprise" with zero pieces in Qualité while the corrected
+lot never appeared there at all). Root cause: `suivilot` is keyed on (ligne, lot), but the reprise PATCH only
+updated `stock_fini.lot` and then synced `IDetatLot` against the NEW lot value (matching zero rows);
+`upsertSuivilot()` only ran on the reception POST. New `migrateSuivilotLot()` runs on every lot-changing
+PATCH: while rolls remain under the old lot it just ensures the new lot is tracked; when the last roll leaves,
+the old suivilot is renamed onto the new lot. When old and new rows both exist, whichever carries
+operator-entered contrôles survives (`suivilotHasControles()`, ASCII columns only) and a data-less placeholder
+is deleted — so the modal's one-PATCH-per-roll batch ends with a single row that preserves measurements, and
+operator input is never destroyed (worst case both rows survive + console.warn). Verified end-to-end on the
+local DB (commande 8518, 7 rolls, suivilot with contrôles). Deployed to prod 2026-07-02 + one-shot data
+repair: ligne 8776 rolls normalized `"MA 108715"`→`MA108715`, suivilot #5810 re-keyed MA→MA108715 état 2→1.
+
 ## 2026-07-02 — feat/cmd-sst
 Sous-traitants › Commandes (`apps/web/src/pages/SousTraitantsCommandes.tsx`) — **"Couper en deux" is now
 available in the Reprise reception modal** (was create-only: the toggle was gated `{!isReprise && …}` with a
