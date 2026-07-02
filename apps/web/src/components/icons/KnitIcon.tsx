@@ -20,11 +20,19 @@ export function KnitIcon(props: SVGProps<SVGSVGElement>) {
       <path d="M2 13 L6 10 L10 13 L14 10 L18 13 L22 10" />
       {/* Row 3 — peaks */}
       <path d="M2 19 L6 16 L10 19 L14 16 L18 19 L22 16" />
-      {/* Vertical connectors between rows (gives the interlock feel) */}
-      <line x1="6" y1="10" x2="6" y2="4" opacity="0" />
-      <line x1="10" y1="13" x2="10" y2="7" />
-      <line x1="14" y1="10" x2="14" y2="4" />
-      <line x1="18" y1="13" x2="18" y2="7" />
+      {/* Vertical connectors between rows (gives the interlock feel) —
+          every peak/valley is tied to the row below so each loop of the
+          mesh reads as closed, not just the one cell. */}
+      {/* Rows 1 → 2 */}
+      <line x1="6" y1="4" x2="6" y2="10" />
+      <line x1="10" y1="7" x2="10" y2="13" />
+      <line x1="14" y1="4" x2="14" y2="10" />
+      <line x1="18" y1="7" x2="18" y2="13" />
+      {/* Rows 2 → 3 */}
+      <line x1="6" y1="10" x2="6" y2="16" />
+      <line x1="10" y1="13" x2="10" y2="19" />
+      <line x1="14" y1="10" x2="14" y2="16" />
+      <line x1="18" y1="13" x2="18" y2="19" />
     </svg>
   )
 }

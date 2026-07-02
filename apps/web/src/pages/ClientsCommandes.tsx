@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback, useRef, type ReactNode, type ComponentType } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef, Fragment, type ReactNode, type ComponentType } from 'react'
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
@@ -37,6 +37,9 @@ import {
 } from 'lucide-react'
 import { KnitIcon } from '@/components/icons/KnitIcon'
 import { TmRollIcon } from '@/components/icons/TmRollIcon'
+import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
+import { BobineIcon } from '@/components/icons/BobineIcon'
+import { RollNotes } from '@/components/shared/RollNotes'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
@@ -101,7 +104,11 @@ interface RollLite {
   magasin_nom: string | null
   second_choix: number | null
   observations: string | null
+  /** Fini only — the ennoblisseur's defect report (stock_fini.observation_sst). */
+  observation_sst: string | null
   etat_label: string | null
+  /** Roll already shipped — affectation locked, no "Retirer" action. */
+  expedie: boolean
 }
 
 interface AffectationPayload {
@@ -1133,6 +1140,20 @@ function AffectationDrawer({
     onSuccess: (payload: AffectationPayload) => { queryClient.setQueryData(queryKey, payload); onSuccess() },
   })
 
+  // Edit a roll's free-text observations (pencil on each roll row).
+  const [editObsRoll, setEditObsRoll] = useState<RollLite | null>(null)
+  const obsMut = useMutation({
+    mutationFn: ({ stockId, observations }: { stockId: number; observations: string }) =>
+      apiFetch(`/commandes-client/${commandeId}/lignes/${ligne.IDligne_commande_client}/pieces/${kind}/${stockId}/observations`, {
+        method: 'PUT',
+        body: JSON.stringify({ observations }),
+      }),
+    onSuccess: (payload: AffectationPayload) => {
+      queryClient.setQueryData(queryKey, payload)
+      setEditObsRoll(null)
+    },
+  })
+
   // Supply view: in-progress sous-traitant orders (tricotage / ennoblissement)
   // feeding this line. Only meaningful for écru/fini lines.
   const supplyEnabled = ligne.type === 1 || ligne.type === 2
@@ -1159,6 +1180,14 @@ function AffectationDrawer({
     queryKey: ['commande-client-enno-locations', commandeId, ligne.IDligne_commande_client],
     queryFn: () => apiFetch(`/commandes-client/${commandeId}/lignes/${ligne.IDligne_commande_client}/supply/ennoblissement/available-by-location`),
     enabled: ligne.type === 2,
+  })
+
+  // Yarn on hand usable to knit this line's écru, aggregated by location —
+  // the legacy "Stock de fil disponible" panel of the Tricotage tab.
+  const { data: stockFil, isLoading: stockFilLoading } = useQuery<TricoStockFilPayload>({
+    queryKey: ['commande-client-trico-stockfil', commandeId, ligne.IDligne_commande_client],
+    queryFn: () => apiFetch(`/commandes-client/${commandeId}/lignes/${ligne.IDligne_commande_client}/supply/tricotage/stock-fil`),
+    enabled: supplyEnabled,
   })
 
   const linked = data?.linked ?? []
@@ -1239,6 +1268,8 @@ function AffectationDrawer({
                 <div className="space-y-1.5">
                   {linked.map((roll) => (
                     <RollRow key={roll.id} roll={roll} dim={dim} action="unlink"
+                      kind={kind === 'fini' ? 'fini' : 'ecru'}
+                      onEditObs={() => setEditObsRoll(roll)}
                       onAction={() => unlinkMut.mutate(roll.id)}
                       isBusy={unlinkMut.isPending && unlinkMut.variables === roll.id} />
                   ))}
@@ -1254,6 +1285,8 @@ function AffectationDrawer({
                 <div className="space-y-1.5">
                   {available.map((roll) => (
                     <RollRow key={roll.id} roll={roll} dim={dim} action="link"
+                      kind={kind === 'fini' ? 'fini' : 'ecru'}
+                      onEditObs={() => setEditObsRoll(roll)}
                       onAction={() => linkMut.mutate(roll.id)}
                       isBusy={linkMut.isPending && linkMut.variables === roll.id} />
                   ))}
@@ -1286,8 +1319,8 @@ function AffectationDrawer({
                 { key: 'sst', label: 'Ennoblisseur', align: 'left', render: (r) => r.sous_traitant_nom || '—' },
                 { key: 'dl', label: 'Délai', align: 'left', render: (r) => fmtSupplyDate(r.date_livraison) },
                 { key: 'et', label: 'État', align: 'left', render: (r) => <SupplyEtatPill label={r.etat_label} /> },
-                { key: 'di', label: 'Disponible', align: 'right', render: (r) => `${fmtNum(r.qte_disponible, 1)} ml` },
-                { key: 'af', label: 'Affecté', align: 'right', render: (r) => `${fmtNum(r.qte_affecte, 1)} ml` },
+                { key: 'di', label: 'Disponible', align: 'right', render: (r) => <span className="font-semibold">{fmtNum(r.qte_disponible, 1)} ml</span> },
+                { key: 'af', label: 'Affecté', align: 'right', render: (r) => <span className="font-semibold">{fmtNum(r.qte_affecte, 1)} ml</span> },
               ]}
             />
           </section>
@@ -1308,25 +1341,48 @@ function AffectationDrawer({
       )}
 
       {tab === 'trico' && (
-        <div className="flex-1 overflow-y-auto p-3 scrollbar-transparent">
-          <SupplyTable
-            loading={supplyLoading}
-            rows={supply?.tricotage ?? []}
-            emptyLabel="Aucune commande tricotage en cours"
-            emptyIcon={KnitIcon}
-            columns={[
-              { key: 'no', label: 'N°', align: 'left', render: (r) => <span className="tabular-nums font-medium">{r.commande_id}</span> },
-              { key: 'dc', label: 'Date', align: 'left', render: (r) => fmtSupplyDate(r.date_commande) },
-              { key: 'sst', label: 'Tricoteur', align: 'left', render: (r) => r.sous_traitant_nom || '—' },
-              { key: 'dl', label: 'Délai', align: 'left', render: (r) => fmtSupplyDate(r.date_livraison) },
-              { key: 'di', label: 'Poids dispo.', align: 'right', render: (r) => `${fmtNum(r.poids_disponible, 1)} Kg` },
-              { key: 'af', label: 'Poids affecté', align: 'right', render: (r) => `${fmtNum(r.poids_affecte, 1)} Kg` },
-              { key: 'mp', label: 'Métrage pot.', align: 'right', render: (r) => `${fmtNum(r.metrage_potentiel, 0)} ml` },
-            ]}
-          />
+        <div className="flex-1 overflow-y-auto p-3 space-y-4 scrollbar-transparent">
+          <section>
+            <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
+              Commandes tricoteur en cours
+            </h3>
+            <SupplyTable
+              loading={supplyLoading}
+              rows={supply?.tricotage ?? []}
+              emptyLabel="Aucune commande tricotage en cours"
+              emptyIcon={KnitIcon}
+              columns={[
+                { key: 'no', label: 'N°', align: 'left', render: (r) => <span className="tabular-nums font-medium">{r.commande_id}</span> },
+                { key: 'dc', label: 'Date', align: 'left', render: (r) => fmtSupplyDate(r.date_commande) },
+                { key: 'sst', label: 'Tricoteur', align: 'left', render: (r) => r.sous_traitant_nom || '—' },
+                { key: 'dl', label: 'Délai', align: 'left', render: (r) => fmtSupplyDate(r.date_livraison) },
+                { key: 'di', label: 'Poids dispo.', align: 'right', render: (r) => `${fmtNum(r.poids_disponible, 1)} Kg` },
+                { key: 'af', label: 'Poids affecté', align: 'right', render: (r) => `${fmtNum(r.poids_affecte, 1)} Kg` },
+                { key: 'mp', label: 'Métrage pot.', align: 'right', render: (r) => <span className="font-semibold">{fmtNum(r.metrage_potentiel, 0)} ml</span> },
+              ]}
+            />
+          </section>
+
+          <section>
+            <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
+              {stockFil?.ecru_ref_label
+                ? `${stockFil.ecru_ref_label} — stock de fil disponible`
+                : 'Stock de fil disponible'}
+            </h3>
+            <StockFilDispoTable loading={stockFilLoading} locations={stockFil?.locations ?? []} />
+          </section>
         </div>
       )}
     </div>
+    {editObsRoll && (kind === 'ecru' || kind === 'fini') && (
+      <EditRollObsDialog
+        roll={editObsRoll}
+        kind={kind}
+        isPending={obsMut.isPending}
+        onCancel={() => setEditObsRoll(null)}
+        onSave={(observations) => obsMut.mutate({ stockId: editObsRoll.id, observations })}
+      />
+    )}
     {ennoTarget && (
       <EnnoblissementAffectationDialog
         commandeId={commandeId}
@@ -1421,43 +1477,126 @@ function SupplyTable<T extends { id: number }>({
 }
 
 function RollRow({
-  roll, dim, action, onAction, isBusy,
+  roll, dim, action, onAction, isBusy, kind = 'ecru', onEditObs,
 }: {
   roll: RollLite
   dim: 'metrage' | 'poids'
   action: 'link' | 'unlink'
   onAction: () => void
   isBusy: boolean
+  /** Drives the domain icon: fini → green FiniRollIcon, écru → TmRollIcon
+   *  (mirrors the sous-traitant commande pieces drawer). */
+  kind?: 'ecru' | 'fini'
+  /** When set, a pencil opens the observations edit dialog for this roll. */
+  onEditObs?: () => void
 }) {
   const primary = dim === 'metrage' ? Number(roll.metrage) || 0 : Number(roll.poids) || 0
   const primaryLabel = dim === 'metrage' ? 'Ml' : 'kg'
   const secondary = dim === 'metrage' ? Number(roll.poids) || 0 : Number(roll.metrage) || 0
   const secondaryLabel = dim === 'metrage' ? 'kg' : 'Ml'
   return (
-    <div className="rounded-lg border border-border/60 bg-card shadow-sm p-3 flex items-center gap-3">
-      <div className="h-8 w-8 rounded-md bg-zinc-100 flex items-center justify-center flex-shrink-0">
-        <Package className="h-4 w-4 text-muted-foreground" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-sm font-semibold truncate">{roll.numero || `Rouleau ${roll.id}`}</span>
-          {roll.lot && <span className="text-xs text-muted-foreground truncate">· Lot {roll.lot}</span>}
-          {!!roll.second_choix && <Badge variant="secondary" className="text-[10px] py-0 px-1.5">2nd choix</Badge>}
-          <EtatPill libelle={roll.etat_label} />
+    <div className="rounded-lg border border-border/60 bg-card shadow-sm p-3">
+      <div className="flex items-center gap-3">
+        <div className={cn(
+          'h-10 w-10 rounded-md flex items-center justify-center flex-shrink-0',
+          kind === 'fini' ? 'bg-green-500/10' : 'bg-zinc-100',
+        )}>
+          {kind === 'fini'
+            ? <FiniRollIcon className="h-7 w-7 text-green-600" />
+            : <TmRollIcon className="h-7 w-7 text-muted-foreground" />}
         </div>
-        <div className="flex items-center gap-3 mt-1 text-[11px] text-muted-foreground tabular-nums">
-          <span className="font-medium text-foreground">{fmtNum(primary, 1)} {primaryLabel}</span>
-          {secondary > 0 && <span>· {fmtNum(secondary, 1)} {secondaryLabel}</span>}
-          {roll.coloris_reference && <span className="truncate">· {roll.coloris_reference}</span>}
-          {roll.magasin_nom && <span className="flex items-center gap-0.5 truncate"><MapPin className="h-2.5 w-2.5" />{roll.magasin_nom}</span>}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-semibold truncate">{roll.numero || `Rouleau ${roll.id}`}</span>
+            {roll.lot && <span className="text-xs text-muted-foreground truncate">· Lot {roll.lot}</span>}
+            <EtatPill libelle={roll.etat_label} />
+          </div>
+          <div className="flex items-center gap-3 mt-1 text-[11px] text-muted-foreground tabular-nums">
+            <span className="font-medium text-foreground">{fmtNum(primary, 1)} {primaryLabel}</span>
+            {secondary > 0 && <span>· {fmtNum(secondary, 1)} {secondaryLabel}</span>}
+            {roll.coloris_reference && <span className="truncate">· {roll.coloris_reference}</span>}
+            {roll.magasin_nom && <span className="flex items-center gap-0.5 truncate"><MapPin className="h-2.5 w-2.5" />{roll.magasin_nom}</span>}
+          </div>
         </div>
+        {onEditObs && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 text-muted-foreground hover:text-accent flex-shrink-0"
+            onClick={onEditObs}
+            title="Modifier les observations"
+          >
+            <Pencil className="h-3.5 w-3.5" />
+          </Button>
+        )}
+        {/* A shipped roll's affectation is locked (the expedition owns it) —
+            no "Retirer"; the état pill already says why. */}
+        {!(action === 'unlink' && roll.expedie) && (
+          <Button size="sm" variant={action === 'link' ? 'default' : 'outline'} onClick={onAction} disabled={isBusy} className="flex-shrink-0">
+            {isBusy ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              : action === 'link' ? <Link2 className="h-3.5 w-3.5 mr-1.5" /> : <Unlink className="h-3.5 w-3.5 mr-1.5" />}
+            {action === 'link' ? 'Affecter' : 'Retirer'}
+          </Button>
+        )}
       </div>
-      <Button size="sm" variant={action === 'link' ? 'default' : 'outline'} onClick={onAction} disabled={isBusy} className="flex-shrink-0">
-        {isBusy ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-          : action === 'link' ? <Link2 className="h-3.5 w-3.5 mr-1.5" /> : <Unlink className="h-3.5 w-3.5 mr-1.5" />}
-        {action === 'link' ? 'Affecter' : 'Retirer'}
-      </Button>
+      {/* Observations / defect banners — indented under the icon box
+          (h-10 = 40px + gap-3 = 12px), mirrors the sst pieces drawer. */}
+      <div className="ml-[52px]">
+        <RollNotes
+          secondChoix={Number(roll.second_choix) > 0}
+          observations={[{ label: null, text: roll.observations?.trim() ?? '' }]}
+          defautText={roll.observation_sst}
+        />
+      </div>
     </div>
+  )
+}
+
+/** One-field edit modal for a roll's free-text observations (the blue
+ *  banner). The red défaut report stays read-only here — it belongs to
+ *  the quality workflow (sst reception / Qualité). */
+function EditRollObsDialog({
+  roll, kind, isPending, onCancel, onSave,
+}: {
+  roll: RollLite
+  kind: 'ecru' | 'fini'
+  isPending: boolean
+  onCancel: () => void
+  onSave: (observations: string) => void
+}) {
+  const [observations, setObservations] = useState(roll.observations ?? '')
+  const dirty = (observations ?? '') !== (roll.observations ?? '')
+  const Icon = kind === 'fini' ? FiniRollIcon : TmRollIcon
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o && !isPending) onCancel() }}>
+      <DialogContent className="max-w-lg" onClose={onCancel}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Icon className="h-6 w-6 text-accent" />
+            {kind === 'fini' ? 'Rouleau fini' : 'Rouleau écru'} · {roll.numero || `#${roll.id}`}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="mt-4 space-y-1">
+          <label className="text-xs font-medium text-blue-700 flex items-center gap-1.5">
+            <MessageSquare className="h-3.5 w-3.5" />
+            Observations
+          </label>
+          <textarea
+            value={observations}
+            onChange={(e) => setObservations(e.target.value)}
+            rows={4}
+            autoFocus
+            className="w-full rounded-md border border-blue-300 bg-blue-50/40 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 resize-y"
+          />
+        </div>
+        <DialogFooter className="mt-4">
+          <Button variant="outline" onClick={onCancel} disabled={isPending}>Annuler</Button>
+          <Button onClick={() => onSave(observations)} disabled={!dirty || isPending}>
+            {isPending ? 'Enregistrement...' : 'Enregistrer'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -1622,6 +1761,19 @@ interface EnnoLocationsPayload {
   locations: EnnoLocationRow[]
 }
 
+// Shared chrome for the grouped supply tables below — same container, header
+// band and row typography as SupplyTable so the whole drawer tab reads as one
+// visual grammar. Groups render as full-width zinc band rows inside the table.
+function GroupBandRow({ label, colSpan }: { label: string; colSpan: number }) {
+  return (
+    <tr>
+      <td colSpan={colSpan} className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground bg-zinc-200/50 border-b border-border/40">
+        {label}
+      </td>
+    </tr>
+  )
+}
+
 // Aggregated écru-by-location table. Two labelled groups; the "Nouvelle
 // commande" button shows only on ennoblisseur rows (you commission the dyer
 // that holds the écru — matches the legacy launcher on the MATEL row).
@@ -1644,43 +1796,126 @@ function EnnoLocationTable({
       </div>
     )
   }
-  const ennoblisseurs = locations.filter((l) => l.group === 'ennoblisseur')
-  const usine = locations.filter((l) => l.group === 'usine')
-  const renderGroup = (label: string, rows: EnnoLocationRow[]) =>
-    rows.length > 0 && (
-      <div key={label}>
-        <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground bg-zinc-200/50 rounded-md">{label}</div>
-        <div className="mt-1 space-y-1">
-          {rows.map((loc) => (
-            <div key={loc.IDsous_traitant} className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-border/60 bg-card shadow-sm">
-              <div className="h-8 w-8 rounded-md bg-accent/10 flex items-center justify-center flex-shrink-0">
-                <MapPin className="h-4 w-4 text-accent" />
-              </div>
-              <span className="text-sm font-medium truncate flex-1 min-w-0">{loc.location_nom}</span>
-              <div className="flex items-baseline gap-1 tabular-nums whitespace-nowrap w-[68px] justify-end">
-                <span className="text-base font-bold text-accent">{fmtNum(loc.poids, 1)}</span>
-                <span className="text-[11px] text-muted-foreground">kg</span>
-              </div>
-              <div className="flex items-baseline gap-1 tabular-nums whitespace-nowrap w-[76px] justify-end">
-                <span className="text-sm font-semibold text-foreground">{fmtNum(loc.metrage_potentiel, 0)}</span>
-                <span className="text-[11px] text-muted-foreground">ml</span>
-              </div>
-              <div className="w-[164px] flex-shrink-0 flex justify-end">
-                {loc.is_ennoblisseur && (
-                  <Button variant="ghost" size="sm" onClick={() => onNewOrder(loc)} className="text-accent hover:text-accent hover:bg-accent/10">
-                    <Plus className="h-3.5 w-3.5 mr-1" />Nouvelle commande
-                  </Button>
-                )}
-              </div>
-            </div>
+  const groups: { label: string; rows: EnnoLocationRow[] }[] = [
+    { label: 'Chez les ennoblisseurs', rows: locations.filter((l) => l.group === 'ennoblisseur') },
+    { label: "À l'usine", rows: locations.filter((l) => l.group === 'usine') },
+  ].filter((g) => g.rows.length > 0)
+  return (
+    <div className="rounded-lg border border-border/60 bg-card shadow-sm overflow-hidden">
+      <table className="w-full text-xs">
+        <tbody>
+          {groups.map((g) => (
+            <Fragment key={g.label}>
+              <GroupBandRow label={g.label} colSpan={4} />
+              {g.rows.map((loc) => (
+                <tr key={loc.IDsous_traitant} className="border-b border-border/40 last:border-0 hover:bg-accent/5">
+                  <td className="px-2.5 py-2 whitespace-nowrap">
+                    <span className="inline-flex items-center gap-1.5 font-medium">
+                      <MapPin className="h-3.5 w-3.5 text-accent flex-shrink-0" />
+                      {loc.location_nom}
+                    </span>
+                  </td>
+                  <td className="px-2.5 py-2 whitespace-nowrap text-right tabular-nums">{fmtNum(loc.poids, 1)} kg</td>
+                  <td className="px-2.5 py-2 whitespace-nowrap text-right tabular-nums font-semibold">{fmtNum(loc.metrage_potentiel, 0)} ml</td>
+                  <td className="px-2.5 py-1 whitespace-nowrap text-right">
+                    {loc.is_ennoblisseur && (
+                      <Button variant="ghost" size="sm" onClick={() => onNewOrder(loc)} className="h-7 text-accent hover:text-accent hover:bg-accent/10">
+                        <Plus className="h-3.5 w-3.5 mr-1" />Nouvelle commande
+                      </Button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </Fragment>
           ))}
-        </div>
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// ── Tricotage: "Stock de fil disponible" (legacy right-hand panel) ──
+// Yarn on hand matching the écru's composition, grouped by holding location.
+// Métrage potentiel = fabric the yarn weight can produce (poids / % × rendement).
+
+interface TricoStockFilYarn {
+  IDref_fil: number
+  IDcolori_fil: number
+  reference: string
+  coloris: string
+  pourcentage: number
+  poids: number
+  metrage_potentiel: number
+}
+interface TricoStockFilLocation {
+  magasin_id: number
+  magasin_nom: string
+  yarns: TricoStockFilYarn[]
+}
+interface TricoStockFilPayload {
+  rendement: number
+  ecru_ref_label: string
+  locations: TricoStockFilLocation[]
+}
+
+function StockFilDispoTable({
+  loading, locations,
+}: {
+  loading: boolean
+  locations: TricoStockFilLocation[]
+}) {
+  if (loading) {
+    return <div className="space-y-2">{[1, 2].map((i) => <div key={i} className="h-10 bg-muted animate-pulse rounded-md" />)}</div>
+  }
+  if (locations.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+        <BobineIcon className="h-8 w-8 mb-2 opacity-50" />
+        <p className="text-sm font-medium">Aucun stock de fil disponible</p>
+        <p className="text-xs mt-1">Aucun lot de fil correspondant à la composition de cet écru.</p>
       </div>
     )
+  }
   return (
-    <div className="space-y-3">
-      {renderGroup('Chez les ennoblisseurs', ennoblisseurs)}
-      {renderGroup("À l'usine", usine)}
+    <div className="rounded-lg border border-border/60 bg-card shadow-sm overflow-hidden">
+      <table className="w-full text-xs">
+        <tbody>
+          {locations.map((loc) => (
+            <Fragment key={loc.magasin_id}>
+              {/* Group band doubles as the header row: location name on the
+                  left, column labels aligned over their columns. */}
+              <tr className="text-[10px] uppercase tracking-wide text-muted-foreground bg-zinc-200/50 border-b border-border/40">
+                <td className="px-2.5 py-1 font-semibold whitespace-nowrap text-left">{loc.magasin_nom}</td>
+                <td className="px-2.5 py-1 font-semibold whitespace-nowrap text-right">Compo.</td>
+                <td className="px-2.5 py-1 font-semibold whitespace-nowrap text-right">Poids</td>
+                <td className="px-2.5 py-1 font-semibold whitespace-nowrap text-right">Métrage pot.</td>
+              </tr>
+              {loc.yarns.map((y) => {
+                const noStock = !(y.poids > 0)
+                // Legacy stores 6.4 as 6.400000095… — show one decimal only when needed.
+                const pct = Math.round(y.pourcentage * 10) / 10
+                return (
+                  <tr key={`${y.IDref_fil}:${y.IDcolori_fil}`} className={cn('border-b border-border/40 last:border-0 hover:bg-accent/5', noStock && 'text-muted-foreground')}>
+                    <td className="px-2.5 py-2 whitespace-nowrap">
+                      <span className="inline-flex items-center gap-1.5 font-medium">
+                        <BobineIcon className={cn('h-3.5 w-3.5 flex-shrink-0', noStock ? 'text-muted-foreground/50' : 'text-accent')} />
+                        {y.reference}{y.coloris ? ` - ${y.coloris}` : ''}
+                      </span>
+                    </td>
+                    <td className="px-2.5 py-2 whitespace-nowrap text-right tabular-nums">
+                      {pct > 0 ? `${fmtNum(pct, Number.isInteger(pct) ? 0 : 1)} %` : '—'}
+                    </td>
+                    <td className="px-2.5 py-2 whitespace-nowrap text-right tabular-nums">{fmtNum(y.poids, 1)} kg</td>
+                    <td className={cn('px-2.5 py-2 whitespace-nowrap text-right tabular-nums', y.metrage_potentiel > 0 && 'font-semibold')}>
+                      {y.metrage_potentiel > 0 ? `${fmtNum(y.metrage_potentiel, 0)} ml` : '—'}
+                    </td>
+                  </tr>
+                )
+              })}
+            </Fragment>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }

@@ -10,6 +10,31 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-02 — feat/cmd-client
+Clients › Commandes — line-item **Affectation drawer** upgrades plus supply-view accuracy fixes
+(`apps/api/src/routes/commandes-client.ts`, `apps/web/src/pages/ClientsCommandes.tsx`). **(1) Roll cards
+now show the fini/écru domain icon** (`FiniRollIcon` green box for fini lines, `TmRollIcon` for écru) instead
+of a generic box, mirroring the sst pieces drawer. **(2) Défauts + observations are visible on each roll** via
+the new shared `apps/web/src/components/shared/RollNotes.tsx` (blue observation banner / red défaut banner) —
+extracted from `SousTraitantsCommandes.tsx` (which now imports it; its local copy was deleted). The `/pieces`
+payload gained `observation_sst` (the ennoblisseur's defect report). **(3) Observations are editable** per roll
+via a pencil → dialog, saved through new `PUT /commandes-client/:id/lignes/:ligneId/pieces/:kind/:stockId/observations`
+(guards ref match + line ownership, writes via `sqlText()` for Linux-bridge-safe accents). **(4) Shipped rolls
+are locked** — the "Retirer" button is hidden when a roll is expédié (fini état 4 or `IDligne_expedition` set;
+écru `IDligne_expedition_ETM` set), and both unlink `DELETE` endpoints refuse with 409 server-side. **(5) New
+"Stock de fil disponible" panel in the Tricotage tab** (`GET …/supply/tricotage/stock-fil`): yarn on hand usable
+to knit the line's écru, scoped by `composition_ecru`, aggregated per holding location (`stock_fil.IDMagasin` →
+sous_traitant), with métrage potentiel = poids / (pourcentage/100) × rendement. Composition pairs with no
+on-hand lot still render under a synthetic "Sans stock" group so the full composition is always visible.
+**(6) Tricotage orders now filter by écru coloris** — `buildTricotage` gained an `IDColoris IN (…)` restriction
+(same `ennoInputColoriIds` rule as the écru-disponible pool) so a 029/gris-anthracite knitting order no longer
+leaks into a line that needs 029/ecru (matches legacy; verified on commande 3686 / sst 8524). **(7) Supply tables
+harmonized** — the enno location groups and the new stock-fil list now use the same table grammar as
+"Commandes … en cours" (shared `GroupBandRow`, zinc band headers, right-aligned tabular numbers, bold métrage).
+**(8) `KnitIcon`** (`apps/web/src/components/icons/KnitIcon.tsx`) — filled in the knit-mesh lattice: the hidden
+`opacity="0"` connector was made visible and the missing rows-2→3 vertical connectors added, so the icon reads
+as a closed diamond mesh rather than one filled loop.
+
 ## 2026-07-02 — feat/bug-pierrot
 Sous-traitants › Reprise / Qualité › Suivi Lots (`apps/api/src/routes/commandes-sous-traitant.ts`) —
 **correcting a roll's lot number in the Reprise modal now migrates the suivilot tracking** (bug reported by

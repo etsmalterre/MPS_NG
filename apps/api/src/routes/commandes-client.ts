@@ -1276,7 +1276,12 @@ interface RollLite {
   magasin_nom: string | null
   second_choix: number | null
   observations: string | null
+  /** Fini only — the ennoblisseur's defect report (stock_fini.observation_sst). */
+  observation_sst: string | null
   etat_label: string | null
+  /** Roll already shipped (état Expédié / expedition line set) — the
+   *  affectation is locked, unlink is refused. */
+  expedie: boolean
 }
 
 const ETAT_FINI_LABELS: Record<number, string> = {
@@ -1360,12 +1365,12 @@ async function fetchAffectationPayload(ctx: ClientLineContext) {
     // not reserved/shipped/at-a-dyer, and not already consumed into a fini roll.
     const [linkedRaw, availRaw] = await Promise.all([
       query<any>(
-        `SELECT IDstock_ecru, numero, lot, poids, metrage, IDcolori_ecru, IDmagasin, second_choix, observations
+        `SELECT IDstock_ecru, numero, lot, poids, metrage, IDcolori_ecru, IDmagasin, second_choix, observations, IDligne_expedition_ETM
          FROM stock_ecru WHERE IDligne_commande_client = ${ctx.ligneId}
          ORDER BY date_saisie DESC, IDstock_ecru DESC`,
       ),
       query<any>(
-        `SELECT IDstock_ecru, numero, lot, poids, metrage, IDcolori_ecru, IDmagasin, second_choix, observations
+        `SELECT IDstock_ecru, numero, lot, poids, metrage, IDcolori_ecru, IDmagasin, second_choix, observations, IDligne_expedition_ETM
          FROM stock_ecru
          WHERE IDref_ecru = ${ctx.refId} AND IDsociete = 1
            AND (${ctx.coloriId} = 0 OR IDcolori_ecru = ${ctx.coloriId})
@@ -1400,7 +1405,9 @@ async function fetchAffectationPayload(ctx: ClientLineContext) {
       magasin_nom: magNames.get(Number(r.IDmagasin)) ?? null,
       second_choix: Number(r.second_choix) || 0,
       observations: r.observations ?? null,
+      observation_sst: null,
       etat_label: null,
+      expedie: (Number(r.IDligne_expedition_ETM) || 0) > 0,
     })
     base.linked = linkedFixed.map(toRoll)
     base.available = availFixed.map(toRoll)
@@ -1414,12 +1421,12 @@ async function fetchAffectationPayload(ctx: ClientLineContext) {
   const avecTeinture = Number(refRows[0]?.avec_teinture) || 0
   const [linkedRaw, availRaw] = await Promise.all([
     query<any>(
-      `SELECT IDstock_fini, numero, lot, poids, metrage, IDColoris, IDmagasin, second_choix, observations, IDetat_stock_fini
+      `SELECT IDstock_fini, numero, lot, poids, metrage, IDColoris, IDmagasin, second_choix, observations, observation_sst, IDetat_stock_fini, IDligne_expedition
        FROM stock_fini WHERE IDligne_commande_client = ${ctx.ligneId}
        ORDER BY date_saisie DESC, IDstock_fini DESC`,
     ),
     query<any>(
-      `SELECT IDstock_fini, numero, lot, poids, metrage, IDColoris, IDmagasin, second_choix, observations, IDetat_stock_fini
+      `SELECT IDstock_fini, numero, lot, poids, metrage, IDColoris, IDmagasin, second_choix, observations, observation_sst, IDetat_stock_fini, IDligne_expedition
        FROM stock_fini
        WHERE IDref_fini = ${ctx.refId}
          AND (${ctx.coloriId} = 0 OR IDColoris = ${ctx.coloriId})
@@ -1430,8 +1437,8 @@ async function fetchAffectationPayload(ctx: ClientLineContext) {
        ORDER BY date_saisie DESC, IDstock_fini DESC`,
     ),
   ])
-  const linkedFixed = await fixEncoding(linkedRaw, 'stock_fini', 'IDstock_fini', ['numero', 'lot', 'observations'])
-  const availFixed = await fixEncoding(availRaw, 'stock_fini', 'IDstock_fini', ['numero', 'lot', 'observations'])
+  const linkedFixed = await fixEncoding(linkedRaw, 'stock_fini', 'IDstock_fini', ['numero', 'lot', 'observations', 'observation_sst'])
+  const availFixed = await fixEncoding(availRaw, 'stock_fini', 'IDstock_fini', ['numero', 'lot', 'observations', 'observation_sst'])
   const magNames = await resolveMagasinNames([...linkedFixed, ...availFixed].map((r: any) => Number(r.IDmagasin)))
   const colNames = await resolveFiniColoris([...linkedFixed, ...availFixed].map((r: any) => Number(r.IDColoris)), avecTeinture)
   const toRoll = (r: any): RollLite => ({
@@ -1444,7 +1451,9 @@ async function fetchAffectationPayload(ctx: ClientLineContext) {
     magasin_nom: magNames.get(Number(r.IDmagasin)) ?? null,
     second_choix: Number(r.second_choix) || 0,
     observations: r.observations ?? null,
+    observation_sst: r.observation_sst ?? null,
     etat_label: ETAT_FINI_LABELS[Number(r.IDetat_stock_fini)] ?? null,
+    expedie: Number(r.IDetat_stock_fini) === 4 || (Number(r.IDligne_expedition) || 0) > 0,
   })
   base.linked = linkedFixed.map(toRoll)
   base.available = availFixed.map(toRoll)
@@ -1498,14 +1507,19 @@ const SSTATUT_LABELS: Record<string, string> = {
 }
 const round2c = (v: number) => Math.round(v * 100) / 100
 
-async function buildTricotage(ecruRefId: number, rendement: number): Promise<SupplyTricoRow[]> {
+async function buildTricotage(ecruRefId: number, rendement: number, coloriIds: number[]): Promise<SupplyTricoRow[]> {
+  // Coloris filter: a tricoteur line's IDColoris is the colori_ecru being
+  // knitted. Without it, a 029/gris-anthracite knitting order leaks into the
+  // supply view of a line that needs 029/ecru (legacy commande 8524 case).
+  // Empty list → no filter (coloris restriction couldn't be resolved).
+  const coloriFilter = coloriIds.length > 0 ? ` AND lcs.IDColoris IN (${coloriIds.join(',')})` : ''
   const lines = await query<any>(
     `SELECT lcs.IDligne_commande_sous_traitant AS lid, lcs.quantite AS q, lcs.date_livraison AS dl,
             lcs.sstatut AS st, cst.IDsous_traitant AS sstid,
             cst.IDcommande_sous_traitant AS cid, cst.date_commande AS dc
        FROM ligne_commande_sous_traitant lcs
        JOIN commande_sous_traitant cst ON cst.IDcommande_sous_traitant = lcs.IDcommande_sous_traitant
-      WHERE lcs.type = 1 AND lcs.IDreference = ${ecruRefId}
+      WHERE lcs.type = 1 AND lcs.IDreference = ${ecruRefId}${coloriFilter}
         AND cst.est_soldee = 0 AND lcs.sstatut IN (${SUPPLY_OPEN_STATUTS})`,
   )
   if (lines.length === 0) return []
@@ -1595,24 +1609,31 @@ async function fetchSupplyPayload(ctx: ClientLineContext): Promise<SupplyPayload
   let ecruRefId = 0
   let finiRefId = 0
   let rendement = 0
+  // Écru coloris the tricotage view is restricted to (same rule as the
+  // écru-disponible pool / stock-fil panel): dyed finis knit the natural
+  // "ecru" base, wash finis and écru lines knit the line's own colori_ecru.
+  let ecruColoris: number[] = []
   if (ctx.kind === 'fini') {
     finiRefId = ctx.refId
-    const r = await query<{ IDref_ecru: number | null; rendement: number | null }>(
-      `SELECT IDref_ecru, rendement FROM ref_fini WHERE IDref_fini = ${finiRefId}`,
+    const r = await query<{ IDref_ecru: number | null; rendement: number | null; avec_teinture: number | null }>(
+      `SELECT IDref_ecru, rendement, avec_teinture FROM ref_fini WHERE IDref_fini = ${finiRefId}`,
     )
     ecruRefId = Number(r[0]?.IDref_ecru) || 0
     rendement = Number(r[0]?.rendement) || 0
+    const avecTeinture = Number(r[0]?.avec_teinture) || 0
+    if (ecruRefId > 0) ecruColoris = await ennoInputColoriIds(ecruRefId, avecTeinture, ctx.coloriId)
   } else {
     ecruRefId = ctx.refId
     const r = await query<{ rendement: number | null }>(
       `SELECT rendement FROM ref_ecru WHERE IDref_ecru = ${ecruRefId}`,
     )
     rendement = Number(r[0]?.rendement) || 0
+    if (ctx.coloriId > 0) ecruColoris = [ctx.coloriId]
   }
   // Use the raw rendement (NOT rounded) — the écru→fini métrage must match the
   // legacy exactly (e.g. 240.60 kg × 3.548387 = 853.74 ml, validated).
 
-  const tricotage = ecruRefId > 0 ? await buildTricotage(ecruRefId, rendement) : []
+  const tricotage = ecruRefId > 0 ? await buildTricotage(ecruRefId, rendement, ecruColoris) : []
   const ennoblissement = finiRefId > 0 ? await buildEnnoblissement(finiRefId, rendement, ctx.coloriId) : []
   return { applicable: true, tricotage, ennoblissement }
 }
@@ -1680,6 +1701,13 @@ commandesClientRouter.delete('/:id/lignes/:ligneId/pieces/ecru/:stockId', async 
     const ctx = await loadClientLineContext(commandeId, ligneId)
     if (!ctx || ctx.kind !== 'ecru') { res.status(404).json({ error: 'Écru line not found' }); return }
     if (refuseIfSoldee(res, await loadCommandeSoldee(commandeId))) return
+    // A shipped roll's affectation is locked — the expedition owns it.
+    const rollRows = await query<{ IDligne_expedition_ETM: number | null }>(
+      `SELECT IDligne_expedition_ETM FROM stock_ecru WHERE IDstock_ecru = ${stockId}`,
+    )
+    if (rollRows.length > 0 && (Number(rollRows[0].IDligne_expedition_ETM) || 0) > 0) {
+      res.status(409).json({ error: 'Roll already shipped — affectation locked' }); return
+    }
     await query(`UPDATE stock_ecru SET IDligne_commande_client = 0 WHERE IDstock_ecru = ${stockId} AND IDligne_commande_client = ${ligneId}`)
     res.json(await fetchAffectationPayload(ctx))
   } catch (err) {
@@ -1723,10 +1751,56 @@ commandesClientRouter.delete('/:id/lignes/:ligneId/pieces/fini/:stockId', async 
     const ctx = await loadClientLineContext(commandeId, ligneId)
     if (!ctx || ctx.kind !== 'fini') { res.status(404).json({ error: 'Fini line not found' }); return }
     if (refuseIfSoldee(res, await loadCommandeSoldee(commandeId))) return
+    // A shipped roll's affectation is locked — the expedition owns it.
+    const rollRows = await query<{ IDetat_stock_fini: number | null; IDligne_expedition: number | null }>(
+      `SELECT IDetat_stock_fini, IDligne_expedition FROM stock_fini WHERE IDstock_fini = ${stockId}`,
+    )
+    if (rollRows.length > 0
+      && (Number(rollRows[0].IDetat_stock_fini) === 4 || (Number(rollRows[0].IDligne_expedition) || 0) > 0)) {
+      res.status(409).json({ error: 'Roll already shipped — affectation locked' }); return
+    }
     await query(`UPDATE stock_fini SET IDligne_commande_client = 0 WHERE IDstock_fini = ${stockId} AND IDligne_commande_client = ${ligneId}`)
     res.json(await fetchAffectationPayload(ctx))
   } catch (err) {
     console.error('Error unlinking fini from client line:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// Update a roll's free-text observations from the affectation drawer.
+// Roll-level metadata (same column FinisStock edits), so no soldée guard —
+// but the roll must belong to this line's ref and be either unreserved or
+// reserved to THIS line (i.e. actually visible in the drawer).
+const rollObsSchema = z.object({ observations: z.string().max(2000) })
+
+commandesClientRouter.put('/:id/lignes/:ligneId/pieces/:kind/:stockId/observations', async (req: Request, res: Response) => {
+  try {
+    const commandeId = parseInt(req.params.id, 10)
+    const ligneId = parseInt(req.params.ligneId, 10)
+    const stockId = parseInt(req.params.stockId, 10)
+    const kind = req.params.kind
+    if (isNaN(commandeId) || isNaN(ligneId) || isNaN(stockId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (kind !== 'ecru' && kind !== 'fini') { res.status(400).json({ error: 'Invalid kind' }); return }
+    const parsed = rollObsSchema.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
+    const ctx = await loadClientLineContext(commandeId, ligneId)
+    if (!ctx || ctx.kind !== kind) { res.status(404).json({ error: 'Line not found or kind mismatch' }); return }
+
+    const table = kind === 'fini' ? 'stock_fini' : 'stock_ecru'
+    const pk = kind === 'fini' ? 'IDstock_fini' : 'IDstock_ecru'
+    const refCol = kind === 'fini' ? 'IDref_fini' : 'IDref_ecru'
+    const rollRows = await query<{ ref: number; lcc: number | null }>(
+      `SELECT ${refCol} AS ref, IDligne_commande_client AS lcc FROM ${table} WHERE ${pk} = ${stockId}`,
+    )
+    if (rollRows.length === 0) { res.status(404).json({ error: 'Roll not found' }); return }
+    if (Number(rollRows[0].ref) !== ctx.refId) { res.status(400).json({ error: 'Roll ref does not match the line' }); return }
+    const current = Number(rollRows[0].lcc) || 0
+    if (current !== 0 && current !== ligneId) { res.status(409).json({ error: 'Roll reserved to another line' }); return }
+
+    await query(`UPDATE ${table} SET observations = ${sqlText(parsed.data.observations)} WHERE ${pk} = ${stockId}`)
+    res.json(await fetchAffectationPayload(ctx))
+  } catch (err) {
+    console.error('Error updating roll observations:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -1789,7 +1863,9 @@ async function fetchEnnoRollsPayload(ctx: ClientLineContext, sstLineId: number) 
     magasin_nom: magNames.get(Number(r.IDmagasin)) ?? null,
     second_choix: Number(r.second_choix) || 0,
     observations: r.observations ?? null,
+    observation_sst: null,
     etat_label: null,
+    expedie: false,
   })
   const linked = linkedFixed.map(toRoll)
   const available = availFixed.map(toRoll)
@@ -1990,7 +2066,9 @@ async function fetchEnnoAvailableRolls(ctx: ClientLineContext, magasinId = 0) {
     magasin_nom: magNames.get(Number(x.IDmagasin)) ?? null,
     second_choix: Number(x.second_choix) || 0,
     observations: x.observations ?? null,
+    observation_sst: null,
     etat_label: null,
+    expedie: false,
     reserved_elsewhere:
       (Number(x.IDligne_commande_client) || 0) > 0 && Number(x.IDligne_commande_client) !== ctx.ligneId,
   }))
@@ -2146,6 +2224,182 @@ async function fetchEnnoLocations(ctx: ClientLineContext) {
     .sort((x, y) => (x.is_ennoblisseur === y.is_ennoblisseur ? x.location_nom.localeCompare(y.location_nom) : x.is_ennoblisseur ? -1 : 1))
   return base
 }
+
+// ── Tricotage: "Stock de fil disponible" — yarn on hand usable to knit this
+// line's écru (legacy right-hand panel of the Tricotage tab). Yarn is scoped
+// by composition_ecru (which yarn ref + coloris the écru is knitted from),
+// aggregated per holding location (stock_fil.IDMagasin → sous_traitant, e.g.
+// "Tricotage Malterre"; 0 = à l'usine). Métrage potentiel per yarn bucket:
+// the fabric its weight can produce — poids / (pourcentage/100) × rendement,
+// with the same rendement the rest of the supply view uses (fini's for fini
+// lines, écru's for écru lines).
+
+interface StockFilYarnRow {
+  IDref_fil: number
+  IDcolori_fil: number
+  reference: string
+  coloris: string
+  pourcentage: number
+  poids: number
+  metrage_potentiel: number
+}
+interface StockFilLocationRow {
+  magasin_id: number
+  magasin_nom: string
+  yarns: StockFilYarnRow[]
+}
+
+async function fetchTricoStockFil(ctx: ClientLineContext) {
+  const base = {
+    rendement: 0,
+    ecru_ref_label: '',
+    locations: [] as StockFilLocationRow[],
+  }
+  if (ctx.kind === 'none' || ctx.refId <= 0) return base
+
+  // Resolve the écru being knitted + the rendement used for Ml projections
+  // (identical to fetchSupplyPayload so the two Tricotage sections agree).
+  let ecruRefId = 0
+  let rendement = 0
+  let ecruColoris: number[] = []
+  if (ctx.kind === 'fini') {
+    const r = await query<{ IDref_ecru: number | null; rendement: number | null; avec_teinture: number | null }>(
+      `SELECT IDref_ecru, rendement, avec_teinture FROM ref_fini WHERE IDref_fini = ${ctx.refId}`,
+    )
+    ecruRefId = Number(r[0]?.IDref_ecru) || 0
+    rendement = Number(r[0]?.rendement) || 0
+    const avecTeinture = Number(r[0]?.avec_teinture) || 0
+    // Same coloris restriction as the écru-disponible pool: dyed finis knit the
+    // natural "ecru" base; wash-only finis knit the line's own colori_ecru.
+    if (ecruRefId > 0) ecruColoris = await ennoInputColoriIds(ecruRefId, avecTeinture, ctx.coloriId)
+  } else {
+    ecruRefId = ctx.refId
+    const r = await query<{ rendement: number | null }>(
+      `SELECT rendement FROM ref_ecru WHERE IDref_ecru = ${ecruRefId}`,
+    )
+    rendement = Number(r[0]?.rendement) || 0
+    if (ctx.coloriId > 0) ecruColoris = [ctx.coloriId]
+  }
+  base.rendement = rendement
+  if (ecruRefId <= 0) return base
+  base.ecru_ref_label = await resolveEcruRefLabel(ecruRefId)
+
+  // Composition pairs — which (yarn ref, yarn coloris, %) knit this écru.
+  // Coloris-scoped first; if the scoped variant has no composition rows,
+  // fall back to every variant of the écru (composition data is sparse).
+  const pairQuery = (coloriIn: string) => query<{ IDref_fil: number; IDcolori_fil: number; pourcentage: number | null }>(
+    `SELECT DISTINCT IDref_fil, IDcolori_fil, pourcentage FROM composition_ecru
+     WHERE IDref_ecru = ${ecruRefId}${coloriIn} AND IDref_fil > 0`,
+  )
+  let pairRows = ecruColoris.length > 0
+    ? await pairQuery(` AND IDcolori_ecru IN (${ecruColoris.join(',')})`)
+    : await pairQuery('')
+  if (pairRows.length === 0 && ecruColoris.length > 0) pairRows = await pairQuery('')
+  const pairs = pairRows
+    .map((p) => ({ IDref_fil: Number(p.IDref_fil) || 0, IDcolori_fil: Number(p.IDcolori_fil) || 0, pourcentage: Number(p.pourcentage) || 0 }))
+    .filter((p) => p.IDref_fil > 0 && p.pourcentage > 0)
+  if (pairs.length === 0) return base
+  const pctByPair = new Map<string, number>()
+  for (const p of pairs) {
+    const k = `${p.IDref_fil}:${p.IDcolori_fil}`
+    if (!pctByPair.has(k)) pctByPair.set(k, p.pourcentage)
+  }
+
+  // On-hand yarn lots matching the composition (stock > 0 = active lots,
+  // same filter as the sst tricoteur "Stock fil" tab).
+  const pairClause = Array.from(pctByPair.keys())
+    .map((k) => { const [rf, cf] = k.split(':'); return `(IDref_fil = ${rf} AND IDcolori_fil = ${cf})` })
+    .join(' OR ')
+  const lots = await query<{ IDstock_fil: number; IDref_fil: number; IDcolori_fil: number; IDMagasin: number | null; stock: number | null }>(
+    `SELECT IDstock_fil, IDref_fil, IDcolori_fil, IDMagasin, stock FROM stock_fil
+     WHERE (${pairClause}) AND stock > 0`,
+  )
+
+  // Aggregate per (location, yarn ref, yarn coloris).
+  const agg = new Map<string, { magId: number; refFil: number; coloriFil: number; poids: number }>()
+  for (const l of lots) {
+    const magId = Number(l.IDMagasin) || 0
+    const key = `${magId}|${Number(l.IDref_fil)}:${Number(l.IDcolori_fil)}`
+    const a = agg.get(key) ?? { magId, refFil: Number(l.IDref_fil), coloriFil: Number(l.IDcolori_fil), poids: 0 }
+    a.poids += Number(l.stock) || 0
+    agg.set(key, a)
+  }
+  const cells = Array.from(agg.values())
+
+  // Composition pairs with NO on-hand lot anywhere still get a row — the
+  // user must see at a glance which yarn of the composition is missing
+  // (e.g. 180102's coton/ecru 45% with every lot depleted). They group
+  // under a synthetic "Sans stock" location (magasin_id = -1, sorted last).
+  const stockedPairs = new Set(cells.map((c) => `${c.refFil}:${c.coloriFil}`))
+  for (const k of pctByPair.keys()) {
+    if (stockedPairs.has(k)) continue
+    const [rf, cf] = k.split(':')
+    cells.push({ magId: -1, refFil: Number(rf), coloriFil: Number(cf), poids: 0 })
+  }
+
+  // Display names — flat batched lookups (no JOIN+CONVERT).
+  const refFilIds = Array.from(new Set(cells.map((c) => c.refFil)))
+  const coloriFilIds = Array.from(new Set(cells.map((c) => c.coloriFil).filter((x) => x > 0)))
+  const magIds = cells.map((c) => c.magId).filter((x) => x > 0)
+  const refFilNames = new Map<number, string>()
+  if (refFilIds.length > 0) {
+    const r = await query<{ IDref_fil: number; reference: string | null }>(
+      `SELECT IDref_fil, reference FROM ref_fil WHERE IDref_fil IN (${refFilIds.join(',')})`,
+    )
+    for (const row of await fixEncoding(r, 'ref_fil', 'IDref_fil', ['reference']))
+      refFilNames.set(Number(row.IDref_fil), (row.reference ?? '').toString().trim())
+  }
+  const coloriFilNames = new Map<number, string>()
+  if (coloriFilIds.length > 0) {
+    const r = await query<{ IDcolori_fil: number; reference: string | null }>(
+      `SELECT IDcolori_fil, reference FROM colori_fil WHERE IDcolori_fil IN (${coloriFilIds.join(',')})`,
+    )
+    for (const row of await fixEncoding(r, 'colori_fil', 'IDcolori_fil', ['reference']))
+      coloriFilNames.set(Number(row.IDcolori_fil), (row.reference ?? '').toString().trim())
+  }
+  const magNames = await resolveMagasinNames(magIds)
+
+  // Group per location, ennoblisseur-style ordering (name asc, usine last).
+  const byLocation = new Map<number, StockFilLocationRow>()
+  for (const c of cells) {
+    const loc = byLocation.get(c.magId) ?? {
+      magasin_id: c.magId,
+      magasin_nom: c.magId > 0 ? (magNames.get(c.magId) ?? `#${c.magId}`) : c.magId === 0 ? "À l'usine" : 'Sans stock',
+      yarns: [],
+    }
+    const pct = pctByPair.get(`${c.refFil}:${c.coloriFil}`) ?? 0
+    loc.yarns.push({
+      IDref_fil: c.refFil,
+      IDcolori_fil: c.coloriFil,
+      reference: refFilNames.get(c.refFil) ?? `#${c.refFil}`,
+      coloris: coloriFilNames.get(c.coloriFil) ?? '',
+      pourcentage: pct,
+      poids: round2c(c.poids),
+      metrage_potentiel: pct > 0 ? round2c((c.poids / (pct / 100)) * rendement) : 0,
+    })
+    byLocation.set(c.magId, loc)
+  }
+  // Order: sous-traitant locations by name, then "À l'usine", then "Sans stock".
+  const locRank = (l: StockFilLocationRow) => (l.magasin_id > 0 ? 0 : l.magasin_id === 0 ? 1 : 2)
+  base.locations = Array.from(byLocation.values())
+    .sort((a, b) => (locRank(a) !== locRank(b) ? locRank(a) - locRank(b) : a.magasin_nom.localeCompare(b.magasin_nom)))
+  for (const loc of base.locations) loc.yarns.sort((a, b) => a.reference.localeCompare(b.reference))
+  return base
+}
+
+commandesClientRouter.get('/:id/lignes/:ligneId/supply/tricotage/stock-fil', async (req: Request, res: Response) => {
+  try {
+    const commandeId = parseInt(req.params.id, 10)
+    const ligneId = parseInt(req.params.ligneId, 10)
+    if (isNaN(commandeId) || isNaN(ligneId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const ctx = await loadClientLineContext(commandeId, ligneId)
+    if (!ctx) { res.status(404).json({ error: 'Line not found or does not belong to commande' }); return }
+    res.json(await fetchTricoStockFil(ctx))
+  } catch (err) {
+    console.error('Error fetching tricotage stock fil:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
 
 commandesClientRouter.get('/:id/lignes/:ligneId/supply/ennoblissement/available-by-location', async (req: Request, res: Response) => {
   try {
