@@ -231,6 +231,9 @@ stockEcruRouter.get('/ecru', async (req: Request, res: Response) => {
     ]
     if (statut === 'disponible') {
       where.push(`(se.IDref_commande_affectation IS NULL OR se.IDref_commande_affectation = 0)`)
+      // Rolls reserved to a donation commande client are already assigned —
+      // they are not disponible (still visible under "tous").
+      where.push(`(se.IDcommande_donation IS NULL OR se.IDcommande_donation = 0)`)
     } else if (statut === 'teinture') {
       where.push(`se.IDref_commande_affectation > 0`)
     }

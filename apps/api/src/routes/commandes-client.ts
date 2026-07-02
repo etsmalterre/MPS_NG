@@ -696,14 +696,19 @@ interface ResolvedMaps {
 }
 
 /** Batch-resolve all ref + coloris labels for a set of lines. */
-// Total "tombé de métier" (écru) ordered on a commande, aggregated by écru ref.
-// Each line's écru weight: Kg lines (unite=1) count their quantite directly; Ml
-// lines (unite=3) convert via rendement (kg = ml / rendement). Fini lines (type=2)
-// trace to ref_fini.IDref_ecru + ref_fini.rendement; écru lines (type=1) use the
-// ref directly + ref_ecru.rendement. Divers lines (type=3) are excluded.
-interface TombeMetierRow { IDref_ecru: number; ref_label: string; poids_kg: number }
+// Total "tombé de métier" (écru) ordered on a commande, aggregated by écru ref
+// AND input coloris. Each line's écru weight: Kg lines (unite=1) count their
+// quantite directly; Ml lines (unite=3) convert via rendement (kg = ml /
+// rendement). Fini lines (type=2) trace to ref_fini.IDref_ecru +
+// ref_fini.rendement; écru lines (type=1) use the ref directly +
+// ref_ecru.rendement. Divers lines (type=3) are excluded.
+// Input coloris per line: dyed finis (avec_teinture 1/2) consume the natural
+// "ecru" base; wash-only finis (avec_teinture 0) and écru lines carry a
+// colori_ecru id on the line itself — the écru consumed is knitted in that
+// exact coloris (e.g. 040A/gris8985 ← écru 040/gris8985).
+interface TombeMetierRow { IDref_ecru: number; ref_label: string; coloris_label: string; poids_kg: number }
 async function computeTombeMetier(
-  lignes: Array<{ type_kind: number; IDreference: number; quantite: number; unite: number }>,
+  lignes: Array<{ type_kind: number; IDreference: number; IDcolori: number; quantite: number; unite: number }>,
 ): Promise<TombeMetierRow[]> {
   const finiIds = new Set<number>()
   const ecruLineIds = new Set<number>()
@@ -713,12 +718,17 @@ async function computeTombeMetier(
     if (Number(l.type_kind) === 2) finiIds.add(ref)
     else if (Number(l.type_kind) === 1) ecruLineIds.add(ref)
   }
-  const finiMap = new Map<number, { ecru: number; rdt: number }>()
+  const finiMap = new Map<number, { ecru: number; rdt: number; avecTeinture: number }>()
   if (finiIds.size > 0) {
-    const rows = await query<{ IDref_fini: number; IDref_ecru: number | null; rendement: number | null }>(
-      `SELECT IDref_fini, IDref_ecru, rendement FROM ref_fini WHERE IDref_fini IN (${[...finiIds].join(',')})`,
+    const rows = await query<{ IDref_fini: number; IDref_ecru: number | null; rendement: number | null; avec_teinture: number | null }>(
+      `SELECT IDref_fini, IDref_ecru, rendement, avec_teinture FROM ref_fini WHERE IDref_fini IN (${[...finiIds].join(',')})`,
     )
-    for (const r of rows) finiMap.set(Number(r.IDref_fini), { ecru: Number(r.IDref_ecru) || 0, rdt: Number(r.rendement) || 0 })
+    for (const r of rows)
+      finiMap.set(Number(r.IDref_fini), {
+        ecru: Number(r.IDref_ecru) || 0,
+        rdt: Number(r.rendement) || 0,
+        avecTeinture: Number(r.avec_teinture) || 0,
+      })
   }
   const ecruIds = new Set<number>(ecruLineIds)
   for (const v of finiMap.values()) if (v.ecru > 0) ecruIds.add(v.ecru)
@@ -730,28 +740,50 @@ async function computeTombeMetier(
     const fixed = await fixEncoding(rows, 'ref_ecru', 'IDref_ecru', ['reference'])
     for (const r of fixed) ecruMap.set(Number(r.IDref_ecru), { reference: (r.reference ?? '').toString(), rdt: Number(r.rendement) || 0 })
   }
-  const agg = new Map<number, { ref_label: string; kg: number }>()
+  // Lines that carry a colori_ecru id (écru lines + wash-only fini lines) need
+  // its label; dyed fini lines use the fixed "ecru" label.
+  const coloriEcruIds = new Set<number>()
+  for (const l of lignes) {
+    const t = Number(l.type_kind) || 0
+    const colId = Number(l.IDcolori) || 0
+    if (colId <= 0) continue
+    if (t === 1 || (t === 2 && finiMap.get(Number(l.IDreference) || 0)?.avecTeinture === 0)) coloriEcruIds.add(colId)
+  }
+  const coloriEcruLabels = coloriEcruIds.size > 0 ? await resolveEcruColoris([...coloriEcruIds]) : new Map<number, string>()
+
+  const agg = new Map<string, { IDref_ecru: number; ref_label: string; coloris_label: string; kg: number }>()
   for (const l of lignes) {
     const t = Number(l.type_kind) || 0
     const ref = Number(l.IDreference) || 0
+    const colId = Number(l.IDcolori) || 0
     const qte = Number(l.quantite) || 0
     const unite = Number(l.unite) || 0
     if (ref <= 0 || qte <= 0) continue
     let ecruRef = 0
     let rdt = 0
-    if (t === 2) { const f = finiMap.get(ref); if (!f) continue; ecruRef = f.ecru; rdt = f.rdt }
-    else if (t === 1) { ecruRef = ref; rdt = ecruMap.get(ref)?.rdt ?? 0 }
-    else continue
+    let coloris = ''
+    if (t === 2) {
+      const f = finiMap.get(ref)
+      if (!f) continue
+      ecruRef = f.ecru
+      rdt = f.rdt
+      coloris = f.avecTeinture === 0 ? (coloriEcruLabels.get(colId) ?? '').trim() : 'ecru'
+    } else if (t === 1) {
+      ecruRef = ref
+      rdt = ecruMap.get(ref)?.rdt ?? 0
+      coloris = (coloriEcruLabels.get(colId) ?? '').trim()
+    } else continue
     if (ecruRef <= 0) continue
     const kg = unite === 1 ? qte : (rdt > 0 ? qte / rdt : 0)
     if (kg <= 0) continue
-    const a = agg.get(ecruRef) ?? { ref_label: ecruMap.get(ecruRef)?.reference ?? '', kg: 0 }
+    const key = `${ecruRef}|${coloris}`
+    const a = agg.get(key) ?? { IDref_ecru: ecruRef, ref_label: ecruMap.get(ecruRef)?.reference ?? '', coloris_label: coloris, kg: 0 }
     a.kg += kg
-    agg.set(ecruRef, a)
+    agg.set(key, a)
   }
-  return [...agg.entries()]
-    .map(([id, a]): TombeMetierRow => ({ IDref_ecru: id, ref_label: a.ref_label, poids_kg: Math.round(a.kg * 100) / 100 }))
-    .sort((x, y) => x.ref_label.localeCompare(y.ref_label))
+  return [...agg.values()]
+    .map((a): TombeMetierRow => ({ IDref_ecru: a.IDref_ecru, ref_label: a.ref_label, coloris_label: a.coloris_label, poids_kg: Math.round(a.kg * 100) / 100 }))
+    .sort((x, y) => x.ref_label.localeCompare(y.ref_label) || x.coloris_label.localeCompare(y.coloris_label))
 }
 
 async function resolveLineLabels(
@@ -877,8 +909,13 @@ commandesClientRouter.get('/:id', async (req: Request, res: Response) => {
     h.observations_facturation = stripRtf(h.observations_facturation) || null
 
     const IDclient = Number(h.IDclient) || 0
-    const [clientNames, adrLivRows, adrFacRows, lignesRaw] = await Promise.all([
+    const [clientNames, ficheRows, adrLivRows, adrFacRows, lignesRaw] = await Promise.all([
       resolveClientNames([IDclient]),
+      // "Fiche client" = client.commentaire — customer-specific handling notes
+      // the legacy app surfaces on every commande (procedures, contrôle rules…).
+      IDclient > 0
+        ? query<any>(`SELECT IDclient, commentaire FROM client WHERE IDclient = ${IDclient}`)
+        : Promise.resolve([]),
       h.IDadresse_livraison
         ? query(`SELECT IDadresse, nom, adresse1, adresse2, adresse3, cp, ville, pays FROM adresse WHERE IDadresse = ${n(h.IDadresse_livraison)}`)
         : Promise.resolve([]),
@@ -898,6 +935,8 @@ commandesClientRouter.get('/:id', async (req: Request, res: Response) => {
 
     const adrLiv = (await fixEncoding(adrLivRows, 'adresse', 'IDadresse', ['nom', 'adresse1', 'adresse2', 'adresse3', 'ville', 'pays']))[0] ?? null
     const adrFac = (await fixEncoding(adrFacRows, 'adresse', 'IDadresse', ['nom', 'adresse1', 'adresse2', 'adresse3', 'ville', 'pays']))[0] ?? null
+    const ficheFixed = (await fixEncoding(ficheRows, 'client', 'IDclient', ['commentaire']))[0] as any
+    const clientFiche = (stripRtf(ficheFixed?.commentaire) || '').trim() || null
     const lignesFixed = (await fixEncoding(lignesRaw, 'ligne_commande_client', 'IDligne_commande_client', ['commentaire'])) as any[]
     for (const l of lignesFixed) l.commentaire = stripRtf(l.commentaire) || null
 
@@ -947,6 +986,7 @@ commandesClientRouter.get('/:id', async (req: Request, res: Response) => {
     const tombe_metier = await computeTombeMetier(lignesFixed.map((l) => ({
       type_kind: Number(l.type_kind) || 0,
       IDreference: Number(l.IDreference) || 0,
+      IDcolori: Number(l.IDcolori) || 0,
       quantite: Number(l.quantite) || 0,
       unite: Number(l.unite) || 0,
     })))
@@ -955,6 +995,7 @@ commandesClientRouter.get('/:id', async (req: Request, res: Response) => {
       IDcommande_client: id,
       IDclient,
       client_nom: clientNames.get(IDclient) ?? '',
+      client_fiche: clientFiche,
       numero: h.numero != null ? Number(h.numero) : null,
       date_commande: h.date_commande ?? null,
       ref_client: h.ref_client ?? null,
@@ -1329,6 +1370,7 @@ async function fetchAffectationPayload(ctx: ClientLineContext) {
          WHERE IDref_ecru = ${ctx.refId} AND IDsociete = 1
            AND (${ctx.coloriId} = 0 OR IDcolori_ecru = ${ctx.coloriId})
            AND (IDligne_commande_client IS NULL OR IDligne_commande_client = 0)
+           AND (IDcommande_donation IS NULL OR IDcommande_donation = 0)
            AND (IDligne_expedition_ETM IS NULL OR IDligne_expedition_ETM = 0)
            AND (IDref_commande_affectation IS NULL OR IDref_commande_affectation = 0)
          ORDER BY date_saisie DESC, IDstock_ecru DESC`,
@@ -1382,6 +1424,7 @@ async function fetchAffectationPayload(ctx: ClientLineContext) {
        WHERE IDref_fini = ${ctx.refId}
          AND (${ctx.coloriId} = 0 OR IDColoris = ${ctx.coloriId})
          AND (IDligne_commande_client IS NULL OR IDligne_commande_client = 0)
+         AND (IDcommande_donation IS NULL OR IDcommande_donation = 0)
          AND (IDligne_expedition IS NULL OR IDligne_expedition = 0)
          AND (IDetat_stock_fini IS NULL OR IDetat_stock_fini <> 4)
        ORDER BY date_saisie DESC, IDstock_fini DESC`,
@@ -1512,17 +1555,20 @@ async function buildEnnoblissement(finiRefId: number, rendement: number, coloriI
   if (lines.length === 0) return []
   const lineIds = lines.map((l: any) => Number(l.lid)).filter((x: number) => x > 0)
   // Input écru affected to each ennoblisseur line, split by client-affectation.
+  // A roll reserved to a donation commande (IDcommande_donation > 0) is spoken
+  // for exactly like a client-line reservation — count it as affecté, never
+  // disponible.
   const affKg = new Map<number, number>()
   const dispoKg = new Map<number, number>()
   if (lineIds.length > 0) {
     const rows = await query<any>(
-      `SELECT IDref_commande_affectation AS lid, IDligne_commande_client AS lcc, poids
+      `SELECT IDref_commande_affectation AS lid, IDligne_commande_client AS lcc, IDcommande_donation AS don, poids
          FROM stock_ecru WHERE IDref_commande_affectation IN (${lineIds.join(',')})`,
     )
     for (const r of rows) {
       const lid = Number(r.lid)
       const p = Number(r.poids) || 0
-      if (Number(r.lcc) > 0) affKg.set(lid, (affKg.get(lid) ?? 0) + p)
+      if (Number(r.lcc) > 0 || Number(r.don) > 0) affKg.set(lid, (affKg.get(lid) ?? 0) + p)
       else dispoKg.set(lid, (dispoKg.get(lid) ?? 0) + p)
     }
   }
@@ -1866,14 +1912,29 @@ async function naturalEcruColoriIds(ecruRefId: number): Promise<number[]> {
   return rows.map((r) => Number(r.IDcolori_ecru)).filter((x) => x > 0)
 }
 
+// Which colori_ecru can feed this client line's ennoblissement? Branches on
+// ref_fini.avec_teinture (the coloris-catalog rule):
+//  - Dyed finis (avec_teinture 1/2): only the natural "ecru" base — the dyer
+//    needs undyed input (naturalEcruColoriIds above).
+//  - Wash-only finis (avec_teinture 0): the line's IDColoris IS a colori_ecru
+//    id — the fini is built from tombé de métier in that exact coloris (e.g.
+//    040A gris8985 ← écru 040 gris8985), NOT from the "ecru" base. Without
+//    this branch, a 040A/gris8985 line wrongly showed the 040/ecru pool.
+//    Line without a coloris ⇒ empty (callers fall back to the whole pool).
+async function ennoInputColoriIds(ecruRefId: number, avecTeinture: number, lineColoriId: number): Promise<number[]> {
+  if (avecTeinture === 0) return lineColoriId > 0 ? [lineColoriId] : []
+  return naturalEcruColoriIds(ecruRefId)
+}
+
 async function fetchEnnoAvailableRolls(ctx: ClientLineContext, magasinId = 0) {
   // The écru a fini line needs is ref_fini.IDref_ecru. Use the RAW rendement
   // (NOT rounded) so the Ml projection matches the legacy / supply table.
-  const r = await query<{ IDref_ecru: number | null; rendement: number | null }>(
-    `SELECT IDref_ecru, rendement FROM ref_fini WHERE IDref_fini = ${ctx.refId}`,
+  const r = await query<{ IDref_ecru: number | null; rendement: number | null; avec_teinture: number | null }>(
+    `SELECT IDref_ecru, rendement, avec_teinture FROM ref_fini WHERE IDref_fini = ${ctx.refId}`,
   )
   const ecruRefId = Number(r[0]?.IDref_ecru) || 0
   const rendement = Number(r[0]?.rendement) || 0
+  const avecTeinture = Number(r[0]?.avec_teinture) || 0
   const base = {
     unite: ctx.unite,
     unite_label: uniteLabel(ctx.unite),
@@ -1884,12 +1945,14 @@ async function fetchEnnoAvailableRolls(ctx: ClientLineContext, magasinId = 0) {
   if (ecruRefId <= 0) return base
 
   // Available = ETM écru of this ref, not yet affected to a dyer, not shipped
-  // out, not already consumed into a fini roll. Restrict to the natural "ecru"
-  // base coloris (see naturalEcruColoriIds) — color-knitted variants aren't
-  // dyeable. We DO surface rolls reserved to another client line (flagged
-  // reserved_elsewhere) so the user sees the whole base pool — the create step
-  // guards the reservation. When magasinId>0 scope to that location.
-  const ecruColoris = await naturalEcruColoriIds(ecruRefId)
+  // out, not reserved to a donation commande (IDcommande_donation), not already
+  // consumed into a fini roll. Coloris restricted per avec_teinture (see
+  // ennoInputColoriIds): natural "ecru" base for dyed finis, the line's own
+  // colori_ecru for wash-only finis. We DO surface rolls reserved to another
+  // client line (flagged reserved_elsewhere) so the user sees the whole base
+  // pool — the create step guards the reservation. When magasinId>0 scope to
+  // that location.
+  const ecruColoris = await ennoInputColoriIds(ecruRefId, avecTeinture, ctx.coloriId)
   const coloriFilter = ecruColoris.length > 0 ? ` AND IDcolori_ecru IN (${ecruColoris.join(',')})` : ''
   const magFilter = magasinId > 0 ? ` AND IDmagasin = ${magasinId}` : ''
   // IDLigne_Commande_TRM>0: same orphan-roll exclusion as the by-location aggregate
@@ -1900,6 +1963,7 @@ async function fetchEnnoAvailableRolls(ctx: ClientLineContext, magasinId = 0) {
      FROM stock_ecru
      WHERE IDref_ecru = ${ecruRefId} AND IDsociete = 1${magFilter}${coloriFilter}
        AND IDLigne_Commande_TRM > 0
+       AND (IDcommande_donation IS NULL OR IDcommande_donation = 0)
        AND (IDref_commande_affectation IS NULL OR IDref_commande_affectation = 0)
        AND (IDligne_expedition_ETM IS NULL OR IDligne_expedition_ETM = 0)
      ORDER BY date_saisie DESC, IDstock_ecru DESC`,
@@ -1974,18 +2038,33 @@ async function resolveEcruRefLabel(ecruRefId: number): Promise<string> {
 }
 
 async function fetchEnnoLocations(ctx: ClientLineContext) {
-  const r = await query<{ IDref_ecru: number | null; rendement: number | null }>(
-    `SELECT IDref_ecru, rendement FROM ref_fini WHERE IDref_fini = ${ctx.refId}`,
+  const r = await query<{ IDref_ecru: number | null; rendement: number | null; avec_teinture: number | null }>(
+    `SELECT IDref_ecru, rendement, avec_teinture FROM ref_fini WHERE IDref_fini = ${ctx.refId}`,
   )
   const ecruRefId = Number(r[0]?.IDref_ecru) || 0
   const rendement = Number(r[0]?.rendement) || 0
+  const avecTeinture = Number(r[0]?.avec_teinture) || 0
   const ecruRefLabel = await resolveEcruRefLabel(ecruRefId)
-  const base = { rendement, unite_label: uniteLabel(ctx.unite), ecru_ref_label: ecruRefLabel, locations: [] as EnnoLocationRow[] }
+  const base = {
+    rendement,
+    unite_label: uniteLabel(ctx.unite),
+    ecru_ref_label: ecruRefLabel,
+    // Coloris the pool is filtered on ("ecru", "gris8985", …) so the UI can
+    // title the panel truthfully; '' when the pool is unfiltered.
+    ecru_coloris_label: '',
+    locations: [] as EnnoLocationRow[],
+  }
   if (ecruRefId <= 0) return base
 
-  // Only the natural "ecru" base coloris is dyeable écru — color-knitted variants
-  // are excluded so the per-location totals match legacy (see naturalEcruColoriIds).
-  const ecruColoris = await naturalEcruColoriIds(ecruRefId)
+  // Coloris restriction per avec_teinture (see ennoInputColoriIds): dyed finis
+  // count only the natural "ecru" base (color-knitted variants aren't dyeable —
+  // the per-location totals match legacy); wash-only finis count the line's own
+  // colori_ecru (their input tombé de métier is knitted in that coloris).
+  const ecruColoris = await ennoInputColoriIds(ecruRefId, avecTeinture, ctx.coloriId)
+  if (ecruColoris.length > 0) {
+    const names = await resolveEcruColoris(ecruColoris)
+    base.ecru_coloris_label = Array.from(new Set(ecruColoris.map((id) => (names.get(id) ?? '').trim()).filter(Boolean))).join(', ')
+  }
   const coloriFilter = ecruColoris.length > 0 ? ` AND IDcolori_ecru IN (${ecruColoris.join(',')})` : ''
   // No IDsociete/IDmagasin restriction: legacy's "écru disponible" panel spans the
   // Malterre companies. Écru at a sous-traitant magasin (IDmagasin>0) groups under
@@ -1997,10 +2076,14 @@ async function fetchEnnoLocations(ctx: ClientLineContext) {
   // is what splits TRM 233.30→198.90 while leaving MATEL 256.30 untouched (all its
   // rolls carry a TRM line); it is NOT a second_choix filter (MATEL's 256.30
   // includes a 2nd-choix roll, so second_choix=0 would wrongly drop it).
+  // IDcommande_donation=0: rolls reserved to a donation commande client are
+  // already spoken for — legacy never counts them as écru disponible (bug seen
+  // on ref 040: 44.7 kg of donation rolls showed as available at the usine).
   const rows = await query<{ IDstock_ecru: number; IDmagasin: number | null; IDsociete: number | null; poids: number | null }>(
     `SELECT IDstock_ecru, IDmagasin, IDsociete, poids FROM stock_ecru
       WHERE IDref_ecru = ${ecruRefId} AND IDsociete > 0${coloriFilter}
         AND IDLigne_Commande_TRM > 0
+        AND (IDcommande_donation IS NULL OR IDcommande_donation = 0)
         AND (IDref_commande_affectation IS NULL OR IDref_commande_affectation = 0)
         AND (IDligne_expedition_ETM IS NULL OR IDligne_expedition_ETM = 0)`,
   )
@@ -2105,17 +2188,21 @@ commandesClientRouter.post('/:id/lignes/:ligneId/supply/ennoblissement/orders', 
     const rendement = Number(refRows[0]?.rendement) || 0
     if (ecruRefId <= 0) { res.status(400).json({ error: 'Fini ref has no écru ref' }); return }
 
-    // Keep only selected rolls that are this écru ref AND still free of a dyer
-    // affectation (defensive against a stale client cache).
+    // Keep only selected rolls that are this écru ref, still free of a dyer
+    // affectation, and not reserved to a donation commande (defensive against
+    // a stale client cache).
     const rollRows = await query<{
       IDstock_ecru: number; IDref_ecru: number; poids: number | null
-      IDref_commande_affectation: number | null
+      IDref_commande_affectation: number | null; IDcommande_donation: number | null
     }>(
-      `SELECT IDstock_ecru, IDref_ecru, poids, IDref_commande_affectation
+      `SELECT IDstock_ecru, IDref_ecru, poids, IDref_commande_affectation, IDcommande_donation
          FROM stock_ecru WHERE IDstock_ecru IN (${d.stockEcruIds.join(',')})`,
     )
     const usable = rollRows.filter(
-      (r) => Number(r.IDref_ecru) === ecruRefId && (Number(r.IDref_commande_affectation) || 0) === 0,
+      (r) =>
+        Number(r.IDref_ecru) === ecruRefId &&
+        (Number(r.IDref_commande_affectation) || 0) === 0 &&
+        (Number(r.IDcommande_donation) || 0) === 0,
     )
     if (usable.length === 0) { res.status(400).json({ error: 'No usable rolls in selection' }); return }
     const totalPoids = usable.reduce((s, r) => s + (Number(r.poids) || 0), 0)

@@ -4582,6 +4582,7 @@ async function fetchPiecesPayload(ctx: LineContext, ligneId: number): Promise<{
        WHERE IDref_ecru = ${ctx.IDref_ecru}
          AND IDmagasin = ${ctx.IDsous_traitant}
          AND (IDref_commande_affectation IS NULL OR IDref_commande_affectation = 0)
+         AND (IDcommande_donation IS NULL OR IDcommande_donation = 0)
        ORDER BY date_saisie DESC, IDstock_ecru DESC`,
     )
     available = await fixEncoding(availRows, 'stock_ecru', 'IDstock_ecru', ['numero', 'lot', 'observations'])

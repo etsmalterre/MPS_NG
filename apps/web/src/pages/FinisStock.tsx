@@ -47,7 +47,7 @@ import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
 import { fmtNum } from '@/lib/format'
 import { apiFetch, API_URL } from '@/lib/api'
-import { etatPillClass } from '@/lib/etat-stock-fini'
+import { EtatPill } from '@/lib/etat-stock-fini'
 import { useHasPermission } from '@/contexts/PermissionsContext'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 
@@ -1643,14 +1643,7 @@ const StockRow = memo(function StockRow({
       <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">{row.commande_numero ?? '—'}</td>
       <td className="px-2 py-1.5">
         {row.etat_libelle ? (
-          <span
-            className={cn(
-              'inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border',
-              etatPillClass(row.etat_libelle),
-            )}
-          >
-            {row.etat_libelle}
-          </span>
+          <EtatPill libelle={row.etat_libelle} />
         ) : (
           <span className="text-muted-foreground">—</span>
         )}
@@ -1976,18 +1969,7 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
                   <KV
                     label="Statut"
                     value={
-                      detail.etat_libelle ? (
-                        <span
-                          className={cn(
-                            'inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border',
-                            etatPillClass(detail.etat_libelle),
-                          )}
-                        >
-                          {detail.etat_libelle}
-                        </span>
-                      ) : (
-                        '—'
-                      )
+                      detail.etat_libelle ? <EtatPill libelle={detail.etat_libelle} /> : '—'
                     }
                   />
                   <KV

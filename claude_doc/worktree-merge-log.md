@@ -26,6 +26,29 @@ operator input is never destroyed (worst case both rows survive + console.warn).
 local DB (commande 8518, 7 rolls, suivilot with contrôles). Deployed to prod 2026-07-02 + one-shot data
 repair: ligne 8776 rolls normalized `"MA 108715"`→`MA108715`, suivilot #5810 re-keyed MA→MA108715 état 2→1.
 
+## 2026-07-02 — feat/cmd-client
+Clients › Commandes line-drawer accuracy pass + shared état pill. **(1) `EtatPill`**: the stock_fini état
+pill (green Validé / amber Contrôle / orange Reprise / red Refusé) is now a shared component in
+`apps/web/src/lib/etat-stock-fini.tsx` (file renamed from `.ts`); the Affectation-tab roll rows in
+`ClientsCommandes.tsx` (previously a plain grey outline Badge), `FinisStock.tsx` (table + drawer) and
+`SousTraitantsGestion.tsx` all render it — rule recorded as mps_designer §37. **(2) `IDcommande_donation`
+availability guard**: écru/fini rolls reserved to a donation-type commande client are no longer counted as
+available anywhere — Affectation drawer (écru + fini pools), Ennoblissement per-location totals +
+create-order roll picker (`fetchEnnoLocations`/`fetchEnnoAvailableRolls`), `buildEnnoblissement` (donation →
+affecté bucket), create-order defensive filter, the sst écru picker in `commandes-sous-traitant.ts`, and
+Tombé Métier/Stock "Disponible" (`stock-ecru.ts`; still visible under "Tous"). Verified: ref 040 phantom
+44.7 kg gone, legacy-validated ref 029 totals unchanged. **(3) Wash-only enno input coloris** (user-found):
+for `ref_fini.avec_teinture=0` the line's IDcolori IS a colori_ecru id, so the Ennoblissement écru pool
+filters to that exact coloris (e.g. 040A/gris8985 ← écru 040/gris8985), not the natural "ecru" base (which
+remains correct for dyed finis) — helper `ennoInputColoriIds`; panel title now shows the real coloris via
+`ecru_coloris_label`; `computeTombeMetier` (sidebar "Tombé de métier commandé" card) aggregates per
+(écru ref, input coloris) instead of hardcoding "/ecru". Verified: cmd 3692 (040A gris8985) now shows an
+empty pool titled "040 /gris8985", matching legacy. **(4) Fiche client**: commande detail returns
+`client_fiche` (= `client.commentaire`, fixEncoding + defensive stripRtf) and the Info tab shows it in a
+read-only ClipboardList card — customer handling procedures visible on every commande like legacy.
+**(5) Line commentaire**: `LineCard` renders the line's commentaire with the §24 MessageSquare pattern
+(trim-guarded, ml-9, italic muted).
+
 ## 2026-07-02 — feat/cmd-sst
 Sous-traitants › Commandes (`apps/web/src/pages/SousTraitantsCommandes.tsx`) — **"Couper en deux" is now
 available in the Reprise reception modal** (was create-only: the toggle was gated `{!isReprise && …}` with a

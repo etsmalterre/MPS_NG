@@ -33,6 +33,7 @@ import {
   Droplets,
   Hourglass,
   Mail,
+  ClipboardList,
 } from 'lucide-react'
 import { KnitIcon } from '@/components/icons/KnitIcon'
 import { TmRollIcon } from '@/components/icons/TmRollIcon'
@@ -47,6 +48,7 @@ import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates
 import { fmtNum } from '@/lib/format'
 import { apiFetch, API_URL } from '@/lib/api'
 import { postEmail } from '@/lib/email'
+import { EtatPill } from '@/lib/etat-stock-fini'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -175,6 +177,9 @@ interface CommandeDetail {
   IDcommande_client: number
   IDclient: number
   client_nom: string
+  /** "Fiche client" — client.commentaire: customer-specific handling notes
+   *  (procedures, contrôle rules…) surfaced on every commande like legacy. */
+  client_fiche: string | null
   numero: number | null
   date_commande: string | null
   ref_client: string | null
@@ -196,7 +201,7 @@ interface CommandeDetail {
   phase: ClientPhase
 }
 
-interface TombeMetierRow { IDref_ecru: number; ref_label: string; poids_kg: number }
+interface TombeMetierRow { IDref_ecru: number; ref_label: string; coloris_label: string; poids_kg: number }
 
 interface ClientLite { IDclient: number; nom: string; IDmode_paiement?: number; IDecheance?: number }
 interface ModePaiement { IDmode_paiement: number; libelle: string }
@@ -1074,6 +1079,12 @@ function LineCard({
           )
         })()}
       </div>
+      {!!line.commentaire?.trim() && (
+        <div className="flex items-start gap-1.5 mt-2 ml-9">
+          <MessageSquare className="h-3 w-3 text-muted-foreground/50 flex-shrink-0 mt-0.5" />
+          <p className="text-[11px] text-muted-foreground italic">{line.commentaire.trim()}</p>
+        </div>
+      )}
       {/* Affectation gauge for écru/fini lines */}
       {canAffect && (
         <div className="mt-2 ml-9">
@@ -1284,7 +1295,7 @@ function AffectationDrawer({
           <section>
             <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
               {ennoLocations?.ecru_ref_label
-                ? `${ennoLocations.ecru_ref_label} /ecru — tombé de métier disponible`
+                ? `${ennoLocations.ecru_ref_label}${ennoLocations.ecru_coloris_label ? ` /${ennoLocations.ecru_coloris_label}` : ''} — tombé de métier disponible`
                 : 'Tombé de métier disponible'}
             </h3>
             <EnnoLocationTable
@@ -1432,7 +1443,7 @@ function RollRow({
           <span className="text-sm font-semibold truncate">{roll.numero || `Rouleau ${roll.id}`}</span>
           {roll.lot && <span className="text-xs text-muted-foreground truncate">· Lot {roll.lot}</span>}
           {!!roll.second_choix && <Badge variant="secondary" className="text-[10px] py-0 px-1.5">2nd choix</Badge>}
-          {roll.etat_label && <Badge variant="outline" className="text-[10px] py-0 px-1.5">{roll.etat_label}</Badge>}
+          <EtatPill libelle={roll.etat_label} />
         </div>
         <div className="flex items-center gap-3 mt-1 text-[11px] text-muted-foreground tabular-nums">
           <span className="font-medium text-foreground">{fmtNum(primary, 1)} {primaryLabel}</span>
@@ -1605,6 +1616,9 @@ interface EnnoLocationsPayload {
   rendement: number
   unite_label: string
   ecru_ref_label: string
+  /** Coloris the pool is filtered on ("ecru" for dyed finis, the line's own
+   *  colori_ecru for wash-only finis); '' when unfiltered. */
+  ecru_coloris_label: string
   locations: EnnoLocationRow[]
 }
 
@@ -2393,6 +2407,17 @@ function InfoTab({
         ) : (commande.frais_port ? fmtNum(commande.frais_port, 2) : '—')} />
       </div>
 
+      {/* Fiche client — customer-specific handling notes (client.commentaire),
+          read-only here; edited from Clients › Gestion. */}
+      {!!commande.client_fiche && (
+        <div className="p-3 rounded-lg border bg-card shadow-sm">
+          <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
+            <ClipboardList className="h-3.5 w-3.5" />Fiche client
+          </p>
+          <p className="text-sm text-muted-foreground whitespace-pre-line">{commande.client_fiche}</p>
+        </div>
+      )}
+
       {commande.tombe_metier.length > 0 && (
         <div className="p-3 rounded-lg border bg-card shadow-sm">
           <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
@@ -2400,8 +2425,8 @@ function InfoTab({
           </p>
           <div className="space-y-1.5">
             {commande.tombe_metier.map((t) => (
-              <div key={t.IDref_ecru} className="flex items-center justify-between gap-2">
-                <span className="text-sm">{t.ref_label} /ecru</span>
+              <div key={`${t.IDref_ecru}|${t.coloris_label}`} className="flex items-center justify-between gap-2">
+                <span className="text-sm">{t.ref_label}{t.coloris_label ? ` /${t.coloris_label}` : ''}</span>
                 <span className="text-sm font-semibold tabular-nums text-accent">{fmtNum(t.poids_kg, 1)} kg</span>
               </div>
             ))}

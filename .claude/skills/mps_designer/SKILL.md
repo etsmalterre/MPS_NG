@@ -3681,3 +3681,33 @@ The match is **case-insensitive on the French label** (`type.trim().toLowerCase(
 - **Two sizes only**: `size="sm"` (`px-1.5 py-0.5 text-[10px]`) for left-list cards, `size="md"` (`px-2 py-0.5 text-xs`) for detail headers and KV-row values.
 - When a new sous-traitant type is added to `type_sst`, add its hue to `sstTypeTagClasses` in the shared module — do not let it silently fall through to the stone fallback if it deserves its own colour.
 
+---
+
+## 37. Stock-fini état pill (`EtatPill`) — one component, everywhere
+
+Reference: **`apps/web/src/lib/etat-stock-fini.tsx`** — `<EtatPill libelle={...} />` + `etatPillClass(libelle)`. Consumers: `FinisStock.tsx` (table État column + drawer Statut KV), `SousTraitantsGestion.tsx` (rolls-on-site table), `ClientsCommandes.tsx` (Affectation drawer roll rows).
+
+Whenever a screen displays a `stock_fini` roll's **état** (the `etat_stock_fini` libellé — En Contrôle, Validé, Reprise, Refusé…), render the shared `<EtatPill>` component. **Never** an ad-hoc `<Badge variant="outline">`, never inline colour classes. The whole point of the pill is its colour language, and it only works if it is identical on every screen:
+
+| État (libellé match) | Colours |
+|---|---|
+| contrôle | `bg-amber-100 text-amber-800 border-amber-200` |
+| reprise | `bg-orange-100 text-orange-800 border-orange-200` |
+| validé / disponible / prêt | `bg-emerald-100 text-emerald-800 border-emerald-200` |
+| refusé / rebut | `bg-red-100 text-red-700 border-red-200` |
+| unknown / other | `bg-zinc-100 text-zinc-700 border-zinc-200` |
+
+```tsx
+import { EtatPill } from '@/lib/etat-stock-fini'
+
+<EtatPill libelle={roll.etat_libelle} />
+```
+
+Conventions — do not deviate:
+
+- **Markup is fixed**: `inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border` + the colour classes. It's baked into the component — don't rebuild the `<span>` by hand with `etatPillClass`; the class-only export exists for exceptional cases (e.g. applying the colours to a non-pill element), not as an invitation to fork the markup.
+- **`EtatPill` renders `null` for an empty libellé.** When the surrounding layout needs an explicit empty marker (a table cell), the call site renders the `—` fallback itself: `{row.etat_libelle ? <EtatPill libelle={row.etat_libelle} /> : <span className="text-muted-foreground">—</span>}`. Inline flows (chips row on a roll card) just render `<EtatPill libelle={x} />` and let it disappear.
+- **Matching is substring-based on the French libellé** (case-insensitive, accent-tolerant for contrôle/prêt). New états added to the `etat_stock_fini` catalog that deserve their own colour get added to `etatPillClass` in the shared module — never a per-screen override.
+- This pill is a **read-only category/status display** — it is NOT the §29 user-controlled status footer (état changes go through their own workflows, e.g. Qualité/Suivi lots), and NOT the §36 sous-traitant type chip (different palette, different domain).
+- **History**: the Clients/Commandes Affectation drawer originally rendered the état as a plain outline Badge (grey, regardless of state) — exactly the drift this rule prevents. If you find another surface showing a roll état without `EtatPill`, fix it as part of your change.
+

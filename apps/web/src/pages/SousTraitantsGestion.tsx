@@ -40,7 +40,7 @@ import { cn } from '@/lib/utils'
 import { apiFetch } from '@/lib/api'
 import { fmtNum } from '@/lib/format'
 import { formatHfsqlDate } from '@/lib/dates'
-import { etatPillClass } from '@/lib/etat-stock-fini'
+import { EtatPill } from '@/lib/etat-stock-fini'
 
 // IDtype_sst value for "Ennoblisseur" (dyer/finisher) — see type_sst catalog.
 const ENNOBLISSEUR_TYPE = 2
@@ -710,9 +710,7 @@ function RollsSection({ sousTraitantId, className }: { sousTraitantId: number; c
                       </td>
                       <td className="px-2.5 py-1.5 truncate">
                         {r.kind === 'fini' && r.etat_libelle ? (
-                          <span className={cn('inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border', etatPillClass(r.etat_libelle))}>
-                            {r.etat_libelle}
-                          </span>
+                          <EtatPill libelle={r.etat_libelle} />
                         ) : <span className="text-muted-foreground">—</span>}
                       </td>
                       <td className="px-2.5 py-1.5 text-right tabular-nums whitespace-nowrap">{r.poids != null ? fmtNum(r.poids, 1) : '—'}</td>
