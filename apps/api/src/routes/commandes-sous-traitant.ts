@@ -4325,6 +4325,87 @@ async function upsertSuivilot(opts: {
   }
 }
 
+/** True when a suivilot row carries operator-entered contrôles data worth
+ *  preserving (measurements, observations, archivage). Only ASCII columns are
+ *  checked — the accented `*_demandée` spec columns are system-filled copies
+ *  of ref_fini and carry no operator input. */
+function suivilotHasControles(row: Record<string, unknown>): boolean {
+  const numCols = [
+    'laize_sst', 'poids_sst', 'rendement_sst', 'stabH_sst', 'stabL_sst',
+    'laize_tirelle', 'poids_tirelle', 'rendement_tirelle', 'stabH_tirelle', 'stabL_tirelle',
+  ]
+  if (numCols.some((c) => Number(row[c]) > 0)) return true
+  const textCols = ['observations', 'emplacement_tirelle', 'fin_archivage']
+  return textCols.some((c) => (row[c] ?? '').toString().replace(/\0/g, '').trim() !== '')
+}
+
+/** Re-key the suivilot tracking of (ligneId, oldLot) onto newLot after a
+ *  reprise edit renamed a roll's lot (see the PATCH handler). Invoked once
+ *  per patched roll, AFTER the stock_fini UPDATE:
+ *   - rolls still left under oldLot → just ensure newLot is tracked (the
+ *     old suivilot still legitimately describes the remaining rolls);
+ *   - oldLot empty → migrate: rename the old suivilot to newLot when the
+ *     new lot is untracked; when both rows exist keep whichever carries
+ *     contrôles data (the loser is deleted only if it carries none, so
+ *     operator input is never destroyed — worst case both rows survive
+ *     and the état sync below still fixes the visible status). */
+async function migrateSuivilotLot(opts: {
+  commandeId: number
+  ligneId: number
+  oldLot: string
+  newLot: string
+}): Promise<void> {
+  const { commandeId, ligneId, oldLot, newLot } = opts
+  const [oldRows, newRows, remaining] = await Promise.all([
+    oldLot
+      ? query<Record<string, unknown>>(
+          `SELECT * FROM suivilot
+           WHERE IDligne_commande_sous_traitant = ${ligneId} AND lot = ${sqlText(oldLot)}`,
+        )
+      : Promise.resolve([] as Record<string, unknown>[]),
+    query<Record<string, unknown>>(
+      `SELECT * FROM suivilot
+       WHERE IDligne_commande_sous_traitant = ${ligneId} AND lot = ${sqlText(newLot)}`,
+    ),
+    oldLot
+      ? query<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM stock_fini
+           WHERE IDref_commande_source = ${ligneId} AND lot = ${sqlText(oldLot)}`,
+        )
+      : Promise.resolve([{ n: 0 }]),
+  ])
+  const oldId = Number(oldRows[0]?.IDsuivilot) || 0
+  const newId = Number(newRows[0]?.IDsuivilot) || 0
+  const oldLotEmpty = Number(remaining[0]?.n) === 0
+
+  if (!oldLotEmpty || oldId === 0) {
+    // Old lot still live (or was never tracked): only ensure the new lot
+    // is tracked so it surfaces in Qualité.
+    if (newId === 0) await upsertSuivilot({ commandeId, ligneId, lot: newLot })
+    return
+  }
+
+  // Old lot has no rolls left — its suivilot must not linger.
+  if (newId === 0) {
+    await query(`UPDATE suivilot SET lot = ${sqlText(newLot)} WHERE IDsuivilot = ${oldId}`)
+    return
+  }
+  const oldHasData = suivilotHasControles(oldRows[0])
+  const newHasData = suivilotHasControles(newRows[0])
+  if (oldHasData && !newHasData) {
+    // Typical batch tail: the new-lot row is a placeholder created by an
+    // earlier roll of this same batch — keep the old row's contrôles.
+    await query(`DELETE FROM suivilot WHERE IDsuivilot = ${newId}`)
+    await query(`UPDATE suivilot SET lot = ${sqlText(newLot)} WHERE IDsuivilot = ${oldId}`)
+  } else if (!oldHasData) {
+    await query(`DELETE FROM suivilot WHERE IDsuivilot = ${oldId}`)
+  } else {
+    console.warn(
+      `Suivilot migration ligne=${ligneId}: both '${oldLot}' (#${oldId}) and '${newLot}' (#${newId}) carry contrôles — keeping both.`,
+    )
+  }
+}
+
 /** Quality defect recorded against an écru roll. Stored in the legacy
  *  `defaut_qualite` table with a polymorphic link: when
  *  `Type_Reference = 2`, `reference` is a stringified `IDstock_ecru`.
@@ -5794,6 +5875,31 @@ commandesSousTraitantRouter.patch(
       if (d.IDetat_stock_fini !== undefined) setParts.push(`IDetat_stock_fini = ${d.IDetat_stock_fini}`)
       if (setParts.length > 0) {
         await query(`UPDATE stock_fini SET ${setParts.join(', ')} WHERE IDstock_fini = ${stockFiniId}`)
+      }
+
+      // Lot migration: suivilot rows are keyed on (ligne, lot), so when the
+      // reprise dialog corrects a roll's lot number the old lot's suivilot
+      // would otherwise stay orphaned (stuck "En reprise", zero pieces) and
+      // the corrected lot would never appear in Qualité at all.
+      //
+      // The reprise dialog PATCHes the batch one roll at a time, so this runs
+      // once per roll: while rolls remain under the old lot we only make sure
+      // the new lot is tracked; when the last roll leaves the old lot we
+      // migrate the old suivilot onto the new lot — preferring the row that
+      // carries contrôles data (rename the old row and drop a data-less
+      // placeholder created earlier in the same batch, never the reverse).
+      // Best-effort: a failure here must not fail the roll update itself.
+      const oldLot = ((verify[0].lot ?? '') as string).toString().trim()
+      const newLot = d.lot !== undefined ? d.lot.trim() : oldLot
+      if (d.lot !== undefined && newLot && newLot !== oldLot) {
+        try {
+          await migrateSuivilotLot({ commandeId, ligneId, oldLot, newLot })
+        } catch (err) {
+          console.error(
+            `Suivilot lot migration failed for ligne=${ligneId} '${oldLot}' -> '${newLot}':`,
+            err,
+          )
+        }
       }
 
       // Reprise sync: when a roll's état is reset (En reprise 2 → En contrôle 1),
