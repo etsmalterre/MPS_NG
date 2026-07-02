@@ -10,6 +10,19 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-02 — feat/cmd-sst
+Sous-traitants › Commandes (`apps/web/src/pages/SousTraitantsCommandes.tsx`) — **"Couper en deux" is now
+available in the Reprise reception modal** (was create-only: the toggle was gated `{!isReprise && …}` with a
+comment claiming a reprise can't split rolls). The two-piece editor, preview list (scissors on both halves),
+per-piece lot+métrage validation and progress counter were already mode-generic, so the toggle simply renders
+in both modes. Submit for a split reprise roll: the existing `stock_fini` row is **PATCHed** into piece 1 —
+renamed `<base>-1` (base trimmed to 18 chars for the 20-char numero column), new poids/métrage, état reset to
+1 (En contrôle) — and piece 2 **POSTs** as a new roll `<base>-2` through the existing `pieces/fini` create
+endpoint, passing the original's `IDstock_ecru`/`IDColoris`/`IDmagasin` explicitly so both halves match apart
+from poids/métrage (the POST also inherits the écru's client reservation and upserts the suivilot
+idempotently). No API changes — the PATCH already accepted `numero`. Doc updated in
+`sous_traitants_status_model.md §Reprise flow`.
+
 ## 2026-07-02 — feat/prospect
 Prospects › Demandes (`apps/web/src/pages/ProspectsDemandes.tsx`) — **search now auto-selects the top
 visible result**. The screen's auto-select effect predated the mps_designer §5 guideline: it ran only on

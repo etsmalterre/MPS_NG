@@ -4158,11 +4158,13 @@ function EditFiniRollDialog({
  *  earlier successes stay persisted and the dialog stops on the error
  *  so the user can fix and retry the remainder.
  *
- *  Couper en deux (create mode only): the dyer sometimes returns a single
- *  tombé-de-métier roll cut into two physical pieces. Toggling `split` on
- *  a roll turns it into two fini rows on submit — `<numero>-1` (poids /
- *  metrage) and `<numero>-2` (poids2 / metrage2) — both pointing at the
- *  same source écru. Matches legacy FEN_Coupe_Fini.
+ *  Couper en deux: the dyer sometimes returns a single roll cut into two
+ *  physical pieces. Toggling `split` on a roll turns it into two fini
+ *  rows on submit — `<numero>-1` (poids / metrage) and `<numero>-2`
+ *  (poids2 / metrage2). In create mode both rows POST and point at the
+ *  same source écru; in reprise mode the existing stock_fini row is
+ *  PATCHed into piece 1 (renamed) and piece 2 POSTs as a new row keeping
+ *  the original's écru / coloris / magasin. Matches legacy FEN_Coupe_Fini.
  */
 interface BatchReceptionRow {
   lot: string
@@ -4170,7 +4172,7 @@ interface BatchReceptionRow {
   metrage: string
   observations: string
   observation_sst: string
-  /** When true the écru yields two fini rolls on submit (see couper note). */
+  /** When true the roll yields two fini rows on submit (see couper note). */
   split: boolean
   /** Poids / metrage of the second piece — only read when `split`. */
   poids2: string
@@ -4315,7 +4317,7 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
   const canNext = currentIndex < rolls.length - 1
 
   // Fini-level preview: one entry per stock_fini row that will be created
-  // (or PATCHed in reprise). A split écru expands into two entries —
+  // (or PATCHed in reprise). A split roll expands into two entries —
   // `<base>-1` and `<base>-2` — so the bottom list shows the operator
   // exactly the rolls they'll receive (3 écru with one cut → 4 finis).
   // `wizardIndex` points back at the écru editor step the entry belongs to.
@@ -4486,24 +4488,35 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
     setSubmitting(true)
     setDoneCount(0)
     let lastPayload: PiecesPayload | null = null
+    const num = (v: string) => {
+      const x = Number(v)
+      return isNaN(x) ? 0 : x
+    }
     try {
       if (isReprise) {
         // Reprise: PATCH each fini roll with the edited values. The
         // server resets IDetat_stock_fini back to 1 (En contrôle) so the
         // visiteur can re-validate after the correction.
+        //
+        // Split ("Couper en deux"): the sst sometimes returns a reprise
+        // roll cut into two physical pieces. The existing row becomes
+        // piece 1 (renamed `<base>-1`) via the same PATCH; piece 2 POSTs
+        // as a new stock_fini row (`<base>-2`) carrying the original's
+        // source écru plus explicit coloris/magasin overrides so both
+        // halves stay identical apart from poids/metrage.
         for (const r of finiRolls) {
           const row = rows[r.IDstock_fini]
-          const poidsNum = Number(row.poids)
-          const metrageNum = Number(row.metrage)
+          const base = (r.numero || `#${r.IDstock_fini}`).slice(0, 18)
           const payload = await apiFetch<PiecesPayload>(
             `/commandes-sous-traitant/${commandeId}/lignes/${ligne.IDligne_commande_sous_traitant}/pieces/fini/${r.IDstock_fini}`,
             {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
+                ...(row.split ? { numero: `${base}-1` } : {}),
                 lot: row.lot,
-                poids: isNaN(poidsNum) ? 0 : poidsNum,
-                metrage: isNaN(metrageNum) ? 0 : metrageNum,
+                poids: num(row.poids),
+                metrage: num(row.metrage),
                 observations: row.observations,
                 observation_sst: row.observation_sst,
                 // Reset to En contrôle for re-validation.
@@ -4513,6 +4526,28 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
           )
           lastPayload = payload
           setDoneCount((n) => n + 1)
+          if (row.split) {
+            lastPayload = await apiFetch<PiecesPayload>(
+              `/commandes-sous-traitant/${commandeId}/lignes/${ligne.IDligne_commande_sous_traitant}/pieces/fini`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  numero: `${base}-2`,
+                  lot: row.lot,
+                  poids: num(row.poids2),
+                  metrage: num(row.metrage2),
+                  IDstock_ecru: r.IDstock_ecru || 0,
+                  IDref_fini: r.IDref_fini || idRefFini,
+                  IDColoris: r.IDColoris || 0,
+                  IDmagasin: r.IDmagasin || 0,
+                  observations: row.observations,
+                  observation_sst: row.observation_sst,
+                }),
+              },
+            )
+            setDoneCount((n) => n + 1)
+          }
         }
       } else {
         const postFini = async (body: Record<string, unknown>) =>
@@ -4524,10 +4559,6 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
               body: JSON.stringify(body),
             },
           )
-        const num = (v: string) => {
-          const x = Number(v)
-          return isNaN(x) ? 0 : x
-        }
         for (const r of ecruRolls) {
           const row = rows[r.IDstock_ecru]
           const shared = {
@@ -4675,8 +4706,10 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
             </div>
 
             {/* Lot (shared across both halves when split) + the
-                couper-en-deux toggle. The toggle is create-only — a
-                reprise edits existing rolls, it can't split them. */}
+                couper-en-deux toggle — available in both modes. Create
+                mode splits the écru into two POSTed fini rows; reprise
+                mode splits the existing fini row (PATCH piece 1 + POST
+                piece 2 — see handleSubmit). */}
             <div className="flex items-end gap-3">
               <div className="flex-1 min-w-0">
                 <LabeledInput
@@ -4686,37 +4719,35 @@ function BatchReceptionDialog(props: BatchReceptionProps) {
                   autoFocus
                 />
               </div>
-              {!isReprise && (
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={currentRow.split}
-                  onClick={() => updateCurrent({ split: !currentRow.split })}
-                  title="Le rouleau a été coupé en deux par l'ennoblisseur"
+              <button
+                type="button"
+                role="switch"
+                aria-checked={currentRow.split}
+                onClick={() => updateCurrent({ split: !currentRow.split })}
+                title="Le rouleau a été coupé en deux par l'ennoblisseur"
+                className={cn(
+                  'flex items-center gap-2 h-8 flex-shrink-0 rounded-md border px-2.5 text-xs font-medium transition-colors',
+                  currentRow.split
+                    ? 'border-accent bg-accent/10 text-accent'
+                    : 'border-border/60 bg-white text-muted-foreground hover:border-accent/40',
+                )}
+              >
+                <Scissors className="h-3.5 w-3.5" />
+                Couper en deux
+                <span
                   className={cn(
-                    'flex items-center gap-2 h-8 flex-shrink-0 rounded-md border px-2.5 text-xs font-medium transition-colors',
-                    currentRow.split
-                      ? 'border-accent bg-accent/10 text-accent'
-                      : 'border-border/60 bg-white text-muted-foreground hover:border-accent/40',
+                    'relative inline-flex h-4 w-7 items-center rounded-full transition-colors',
+                    currentRow.split ? 'bg-accent shadow-inner' : 'bg-zinc-300',
                   )}
                 >
-                  <Scissors className="h-3.5 w-3.5" />
-                  Couper en deux
                   <span
                     className={cn(
-                      'relative inline-flex h-4 w-7 items-center rounded-full transition-colors',
-                      currentRow.split ? 'bg-accent shadow-inner' : 'bg-zinc-300',
+                      'inline-block h-3 w-3 rounded-full bg-white shadow transition-transform duration-200 ease-out',
+                      currentRow.split ? 'translate-x-[14px]' : 'translate-x-0.5',
                     )}
-                  >
-                    <span
-                      className={cn(
-                        'inline-block h-3 w-3 rounded-full bg-white shadow transition-transform duration-200 ease-out',
-                        currentRow.split ? 'translate-x-[14px]' : 'translate-x-0.5',
-                      )}
-                    />
-                  </span>
-                </button>
-              )}
+                  />
+                </span>
+              </button>
             </div>
 
             {currentRow.split ? (

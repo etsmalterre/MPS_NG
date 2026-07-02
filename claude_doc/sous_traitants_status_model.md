@@ -267,6 +267,12 @@ opens `BatchReceptionDialog` in `mode='reprise'` (discriminated union):
 - Pre-fills lot/poids/metrage/observations from the existing fini rows
 - Submits PATCH per fini (not POST) with the edited values
 - Resets `IDetat_stock_fini` back to `1` (En contrôle) server-side
+- "Couper en deux" works here too (added 2026-07-02): the existing row is
+  PATCHed into piece 1 (renamed `<base>-1`) and piece 2 POSTs as a new
+  `stock_fini` row (`<base>-2`) via the create endpoint, passing the
+  original's `IDstock_ecru` / `IDColoris` / `IDmagasin` so both halves
+  match apart from poids/metrage (create mode instead splits the écru
+  into two POSTed rows)
 - Tricobot works here too (added 2026-07-02): matches BL `num_piece`
   against the **fini** numeros (create mode matches écru numeros), and
   only non-empty BL values overwrite the pre-filled fields. The tricobot
