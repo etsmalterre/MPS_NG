@@ -10,6 +10,16 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-02 — feat/rapport-sst
+Rapports › Commandes sous-traitants (`apps/web/src/pages/RapportCommandesSst.tsx`) — the Excel-export
+column selection is now remembered **per user**, not per PC: the localStorage key is suffixed with the
+logged-in `IDutilisateur` (`mps:rapport-sst:export-columns:<id>`), so users sharing or switching accounts
+on one station no longer overwrite each other's choice (reported by an employee as "selection not
+memorized"). Loader falls back to the old shared key so existing saved selections carry over; a
+`useEffect` re-reads the selection when the logged-in user changes without a remount (user picker /
+admin impersonation). Save still happens only on a successful export. Marked temporary — to be replaced
+by a server-side per-user preference once proper user management lands post-migration.
+
 ## 2026-06-25 — feat/cmd-client
 Clients › Commandes (`apps/web/src/pages/ClientsCommandes.tsx` + `apps/api/src/routes/commandes-client.ts`) —
 polish + correctness pass on the line affectation drawer's **Ennoblissement** supply tab plus the right-panel

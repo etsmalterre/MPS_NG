@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   Search,
@@ -32,6 +32,7 @@ import {
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate } from '@/lib/dates'
 import { apiFetch } from '@/lib/api'
+import { useUser } from '@/contexts/UserContext'
 import { fmtNum } from '@/lib/format'
 
 // ── Types ──────────────────────────────────────────────
@@ -174,13 +175,20 @@ const EXPORT_COLUMNS: ExportColumn[] = [
 ]
 const EXPORT_COLUMN_KEYS = EXPORT_COLUMNS.map((c) => c.key)
 
-// Persisted per-user (per-browser) column selection. The station-based user
-// identity means localStorage is effectively per-user here.
-const EXPORT_PREF_KEY = 'mps:rapport-sst:export-columns'
+// Persisted column selection, keyed by user id so people sharing (or
+// switching users on) a PC don't overwrite each other's choice. Temporary:
+// localStorage only — replace with a server-side per-user preference once
+// proper user management lands post-migration.
+const EXPORT_PREF_KEY_BASE = 'mps:rapport-sst:export-columns'
+const exportPrefKey = (userId: number | null) =>
+  userId == null ? EXPORT_PREF_KEY_BASE : `${EXPORT_PREF_KEY_BASE}:${userId}`
 
-function loadExportSelection(): string[] {
+function loadExportSelection(userId: number | null): string[] {
   try {
-    const raw = localStorage.getItem(EXPORT_PREF_KEY)
+    // Fall back to the pre-per-user shared key so existing selections survive.
+    const raw =
+      localStorage.getItem(exportPrefKey(userId)) ??
+      localStorage.getItem(EXPORT_PREF_KEY_BASE)
     if (!raw) return EXPORT_COLUMN_KEYS
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed)) return EXPORT_COLUMN_KEYS
@@ -194,9 +202,9 @@ function loadExportSelection(): string[] {
   }
 }
 
-function saveExportSelection(keys: string[]): void {
+function saveExportSelection(userId: number | null, keys: string[]): void {
   try {
-    localStorage.setItem(EXPORT_PREF_KEY, JSON.stringify(keys))
+    localStorage.setItem(exportPrefKey(userId), JSON.stringify(keys))
   } catch {
     /* ignore quota / privacy-mode errors */
   }
@@ -326,7 +334,15 @@ export function RapportCommandesSst() {
   // limited to the columns the user selected. The selection is remembered.
   const [exporting, setExporting] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
-  const [exportCols, setExportCols] = useState<string[]>(() => loadExportSelection())
+  const { user } = useUser()
+  const userId = user?.IDutilisateur ?? null
+  const [exportCols, setExportCols] = useState<string[]>(() => loadExportSelection(userId))
+
+  // Re-read the saved selection if the logged-in user changes (user picker /
+  // admin impersonation) without the page remounting.
+  useEffect(() => {
+    setExportCols(loadExportSelection(userId))
+  }, [userId])
 
   const handleExport = useCallback(async () => {
     if (filteredSorted.length === 0) return
@@ -359,14 +375,14 @@ export function RapportCommandesSst() {
       XLSX.utils.book_append_sheet(wb, ws, 'Commandes sous-traitants')
       const stamp = new Date().toISOString().slice(0, 10)
       XLSX.writeFile(wb, `Commandes_sous-traitants_${stamp}.xlsx`)
-      saveExportSelection(exportCols)
+      saveExportSelection(userId, exportCols)
       setExportOpen(false)
     } catch (err) {
       console.error('Export Excel échoué:', err)
     } finally {
       setExporting(false)
     }
-  }, [filteredSorted, exportCols])
+  }, [filteredSorted, exportCols, userId])
 
   const toggleExportCol = useCallback((key: string) => {
     setExportCols((prev) =>
