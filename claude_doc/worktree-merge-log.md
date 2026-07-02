@@ -10,6 +10,16 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-02 — feat/prospect
+Prospects › Demandes (`apps/web/src/pages/ProspectsDemandes.tsx`) — **search now auto-selects the top
+visible result**. The screen's auto-select effect predated the mps_designer §5 guideline: it ran only on
+first load (gated on `selectedId === null`) and against the raw list, so narrowing the search to a single
+demande left the previous selection in place and the detail panel never switched. Replaced with the
+canonical effect from `FilsCommandes.tsx`/`EtudesColoris.tsx`: it watches the **filtered** list, re-selects
+`filtered[0]` whenever the current selection drops out of the visible set, and skips while `isEditing` so
+unsaved changes are never discarded. No skill/doc update needed — the behaviour was already recorded in
+mps_designer §5.
+
 ## 2026-07-02 — feat/cmd-sst
 Sous-traitants › Commandes (`apps/web/src/pages/SousTraitantsCommandes.tsx` + `apps/api/src/routes/commandes-sous-traitant.ts`) —
 **Tricobot autofill now works in the Reprise reception modal** (was create-only). When rolls "En reprise" are

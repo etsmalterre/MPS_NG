@@ -163,13 +163,6 @@ export function ProspectsDemandes() {
     staleTime: 5 * 60 * 1000,
   })
 
-  // Auto-select first on load.
-  useEffect(() => {
-    if (demandes && demandes.length > 0 && selectedId === null) {
-      setSelectedId(demandes[0].IDprospect)
-    }
-  }, [demandes, selectedId])
-
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['prospects'] })
     queryClient.invalidateQueries({ queryKey: ['prospect', selectedId] })
@@ -334,6 +327,16 @@ export function ProspectsDemandes() {
       `${d.prenom} ${d.nom} ${d.societe} ${d.email} ${d.ville}`.toLowerCase().includes(q)
     )
   }, [demandes, searchQuery])
+
+  // Keep the selection valid against the (possibly search-filtered) list: when
+  // the selected row isn't among the current results, select the one at the top.
+  // Covers both the initial load and search narrowing the list. Skip while
+  // editing so we never discard unsaved changes out from under the user.
+  useEffect(() => {
+    if (isEditing || filtered.length === 0) return
+    const stillVisible = selectedId !== null && filtered.some((d) => d.IDprospect === selectedId)
+    if (!stillVisible) setSelectedId(filtered[0].IDprospect)
+  }, [filtered, selectedId, isEditing])
 
   return (
     <>
