@@ -1,6 +1,9 @@
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
 import { z } from 'zod'
+import React from 'react'
+import { renderToBuffer } from '@react-pdf/renderer'
 import { query, fixEncoding, queryB64Text } from '../lib/hfsql-auto.js'
+import { PlanningAtelierPdf, type PlanningAtelierPdfData } from '../lib/pdf/PlanningAtelierPdf.js'
 
 // Atelier planning (TRM knitting mill) — weekly bonnetier schedule + desiderata.
 // Legacy: FI_Planning_Atelier.wdw / FEN_Desiderata.wdw in TRM mode.
@@ -315,6 +318,93 @@ planningAtelierRouter.post('/entries/repeat', async (req: Request, res: Response
     res.status(201).json({ copied: source.length })
   } catch (err) {
     console.error('Error repeating planning week:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Weekly planning PDF (landscape, MalterreDocument frame) ──
+
+const DAY_NAMES_FR = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi']
+const MONTH_NAMES_FR = [
+  'janvier', 'février', 'mars', 'avril', 'mai', 'juin',
+  'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre',
+]
+
+/** ISO week number of the ISO week containing `dateIso`. */
+function isoWeekNumber(dateIso: string): number {
+  const d = new Date(`${dateIso}T00:00:00Z`)
+  const day = d.getUTCDay() || 7
+  d.setUTCDate(d.getUTCDate() + 4 - day) // Thursday of this ISO week
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1))
+  return Math.ceil(((d.getTime() - yearStart.getTime()) / 86_400_000 + 1) / 7)
+}
+
+function frLongDate(dateIso: string): string {
+  const d = new Date(`${dateIso}T00:00:00Z`)
+  return `${d.getUTCDate()} ${MONTH_NAMES_FR[d.getUTCMonth()]} ${d.getUTCFullYear()}`
+}
+
+async function buildPlanningPdfData(from: string, comment: string): Promise<PlanningAtelierPdfData> {
+  const days = Array.from({ length: 7 }, (_, i) => addDays(from, i))
+  const to = days[6]
+  const [allBonnetiers, entries] = await Promise.all([selectBonnetiers(), selectEntries(from, to)])
+  const bonnetiers = allBonnetiers
+    .filter((b) => b.archive === 0 && b.regleur === 0)
+    .sort((a, b) => a.prenom.localeCompare(b.prenom, 'fr'))
+
+  const byCell = new Map<string, { debut: string; fin: string }>()
+  for (const e of entries) byCell.set(`${e.IDbonnetier}|${e.date}`, { debut: e.debut, fin: e.fin })
+
+  // The grid week starts on Sunday (legacy convention); its ISO week is the
+  // one containing the following Monday.
+  const semaine = isoWeekNumber(addDays(from, 1))
+  const today = new Date()
+  const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+
+  return {
+    semaineLabel: `Semaine ${semaine}`,
+    periodeLabel: `Planning du ${frLongDate(from)} au ${frLongDate(to)}`,
+    printedDate: frLongDate(todayIso),
+    dayLabels: days.map((d) => `${DAY_NAMES_FR[new Date(`${d}T00:00:00Z`).getUTCDay()]} ${parseInt(d.slice(8, 10), 10)}`),
+    rows: bonnetiers.map((b) => ({
+      nom: `${b.prenom} ${b.nom}`.trim(),
+      cells: days.map((d) => byCell.get(`${b.IDbonnetier}|${d}`) ?? null),
+    })),
+    comment,
+  }
+}
+
+// GET /api/planning-atelier/pdf?from=YYYY-MM-DD&comment=...
+// `from` is the visible week's Sunday; `comment` is the print-time free text.
+planningAtelierRouter.get('/pdf', async (req: Request, res: Response) => {
+  try {
+    const from = String(req.query.from ?? '')
+    if (!DATE_RE.test(from)) {
+      res.status(400).json({ error: 'from must be YYYY-MM-DD' })
+      return
+    }
+    const comment = String(req.query.comment ?? '').slice(0, 500)
+
+    const data = await buildPlanningPdfData(from, comment)
+    const buffer = await renderToBuffer(
+      React.createElement(PlanningAtelierPdf, { data }) as unknown as React.ReactElement<
+        import('@react-pdf/renderer').DocumentProps
+      >,
+    )
+
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="planning-atelier-${data.semaineLabel.toLowerCase().replace(' ', '-')}.pdf"`,
+    )
+    // Strip helmet's restrictive headers so the web app (different origin/port
+    // in dev) can embed the PDF in an <iframe>. See mps_designer §21.
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.send(buffer)
+  } catch (err) {
+    console.error('Error rendering planning-atelier PDF:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

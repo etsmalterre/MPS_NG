@@ -509,6 +509,9 @@ export interface MalterreDocumentProps {
   topRightInfo?: MetadataCardData
   /** PDF document title (browser tab) */
   title?: string
+  /** Page orientation — defaults to portrait. Landscape is used by wide
+   *  grid documents (e.g. the atelier weekly planning). */
+  orientation?: 'portrait' | 'landscape'
   /** Body sections — table, totals, etc. */
   children: React.ReactNode
   /** Optional second logical <Page> appended after the primary one. Has no
@@ -652,6 +655,7 @@ export function MalterreDocument({
   topLeftAddress,
   topRightInfo,
   title,
+  orientation = 'portrait',
   children,
   secondPage,
 }: MalterreDocumentProps) {
@@ -665,7 +669,7 @@ export function MalterreDocument({
           flow content. Matches HEADER_HEIGHT exactly so page-1 content keeps the
           same vertical position it had when the header was in-flow — no change
           to per-page capacity, just a header on the continuation pages too. */}
-      <Page size="A4" style={[styles.page, { paddingTop: HEADER_HEIGHT }]}>
+      <Page size="A4" orientation={orientation} style={[styles.page, { paddingTop: HEADER_HEIGHT }]}>
         {/* Yellow header band: logo on the left, document title in the
             top-right (on the gold background, in white text). `fixed` so it
             repeats at the top of every physical page this logical Page spans
@@ -709,6 +713,7 @@ export function MalterreDocument({
       {secondPage && (
         <Page
           size="A4"
+          orientation={orientation}
           style={[
             styles.page,
             {
