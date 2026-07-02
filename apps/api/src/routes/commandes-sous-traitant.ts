@@ -2790,7 +2790,8 @@ export async function findEligibleLots(commandeId: number): Promise<EligibleLot[
   //       surfaces), filter in JS by both keys.
   const uniqueClients = Array.from(new Set(Array.from(groups.values()).map((g) => g.IDclient)))
   const uniqueRefFini = Array.from(new Set(Array.from(groups.values()).map((g) => g.IDref_fini)))
-  const dcMap = new Map<string, string>() // `${IDclient}|${IDref_fini}` → designation
+  const dcMap = new Map<string, string>() // `${IDclient}|${IDref_fini}` → designation (fallback)
+  const dcColorisMap = new Map<string, string>() // `${IDclient}|${IDref_fini}|${IDColoris}` → designation
   if (uniqueClients.length > 0 && uniqueRefFini.length > 0) {
     const dcRows = await query<any>(
       `SELECT * FROM designation_client
@@ -2804,6 +2805,29 @@ export async function findEligibleLots(commandeId: number): Promise<EligibleLot[
     const dcFixed = await fixEncoding(dcActive as any[], 'designation_client', 'IDdesignation_client', ['designation'])
     for (const r of dcFixed as any[]) {
       dcMap.set(`${n(r.IDclient)}|${n(r.IDref_fini)}`, (r.designation ?? '').toString())
+    }
+    // A client may carry SEVERAL designations for the same ref_fini, one per
+    // coloris (linked through ref_client_colori). Keying on (client, ref)
+    // alone lets an arbitrary sibling overwrite the right one (bug: commande
+    // 8500 printed 65511019000 instead of 65511008000 for coloris 3520).
+    // Build a per-coloris map to resolve exactly; dcMap stays as fallback.
+    const dcIds = (dcFixed as any[]).map((r) => n(r.IDdesignation_client)).filter((x) => x > 0)
+    if (dcIds.length > 0) {
+      const dcById = new Map<number, any>((dcFixed as any[]).map((r) => [n(r.IDdesignation_client), r]))
+      const rccRows = await query<any>(
+        `SELECT * FROM ref_client_colori WHERE IDdesignation_client IN (${dcIds.join(',')})`,
+      )
+      for (const r of rccRows as any[]) {
+        if (Number(r.archiv ?? r['archivé'] ?? 0) !== 0) continue
+        const dc = dcById.get(n(r.IDdesignation_client))
+        if (!dc) continue
+        // dye refs link via IDref_fini_colori, wash refs via IDcolori_ecru —
+        // group IDColoris carries whichever catalog the ref dictates.
+        const colorisId = n(r.IDref_fini_colori) > 0 ? n(r.IDref_fini_colori) : n(r.IDcolori_ecru)
+        if (colorisId <= 0) continue
+        const key = `${n(dc.IDclient)}|${n(dc.IDref_fini)}|${colorisId}`
+        if (!dcColorisMap.has(key)) dcColorisMap.set(key, (dc.designation ?? '').toString())
+      }
     }
   }
 
@@ -2880,7 +2904,9 @@ export async function findEligibleLots(commandeId: number): Promise<EligibleLot[
   const out: EligibleLot[] = []
   for (const g of groups.values()) {
     const dcKey = `${g.IDclient}|${g.IDref_fini}`
-    const clientDesignation = dcMap.get(dcKey)
+    // Exact per-coloris designation first; (client, ref) fallback keeps
+    // eligibility for coloris without a ref_client_colori row.
+    const clientDesignation = dcColorisMap.get(`${dcKey}|${g.IDColoris}`) ?? dcMap.get(dcKey)
     if (clientDesignation === undefined) continue
     // Key encodes kind so the same (ref, coloris, cc) tuple can carry both a
     // received and a manual candidate if we ever want to surface them

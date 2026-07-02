@@ -10,6 +10,19 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-02 — feat/suivilot
+Soumission Lot Client — per-coloris "Ref client" fix (`apps/api/src/routes/commandes-sous-traitant.ts`,
+`findEligibleLots`). A client can hold SEVERAL `designation_client` rows for the same ref_fini, one per
+coloris, each linked to its coloris through `ref_client_colori` (THUASNE has three for ref 1732:
+65511008000→coloris 3520 Blanc, 65511227000→3521, 65511019000→3522). The eligibility map keyed only on
+`(IDclient, IDref_fini)`, so an arbitrary sibling row overwrote the right one — commande 8500's soumission
+PDF printed 65511019000 instead of 65511008000. Fix: also load the non-archived `ref_client_colori` rows for
+the soumettre=1 designations and build a per-coloris map `client|ref|coloris → designation` (dye refs link via
+`IDref_fini_colori`, wash via `IDcolori_ecru`), consulted first at assembly; the old `(client, ref)` map stays
+as fallback for coloris without a `ref_client_colori` row. Flows into the eligible-lot card AND the soumission
+PDF/email (shared data). Verified live: probe on 8500 now returns 65511008000 for Blanc 54508/1. Probe scripts
+`inspect-soumission-8500-refclient.ts` / `probe-eligible-8500.ts` committed alongside.
+
 ## 2026-07-02 — feat/rapport-sst
 Rapports › Commandes sous-traitants (`apps/web/src/pages/RapportCommandesSst.tsx`) — the Excel-export
 column selection is now remembered **per user**, not per PC: the localStorage key is suffixed with the
