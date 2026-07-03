@@ -28,13 +28,24 @@
 //    (observation_bl / detail_ligne) via stripRtf (read) + wrapRtf+sqlText (write);
 //    text reads via fixEncoding.
 //  - No `numero` column on either header — the document number IS the PK.
-//  - A validated shipment (est_valide=1) is locked: header/line/roll writes 409.
+//  - Lock model: the legacy validé/dévalider concept is RETIRED in MPS_NG.
+//    An expedition is either "non facturée" (fully editable) or "facturée"
+//    (est_facture=1 OR a definitive facture references it) — then header/line/
+//    roll writes 409. Facture linkage: formelle via ligne_facture.
+//    IDligne_expedition → ligne_expedition; divers via the facture.
+//    IDexpedition_divers header back-pointer. est_valide still exists in the
+//    schema (legacy writes it) but MPS_NG ignores it everywhere.
 
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
 import { z } from 'zod'
+import React from 'react'
+import { renderToBuffer } from '@react-pdf/renderer'
 import { query, fixEncoding } from '../lib/hfsql-auto.js'
-import { esc, n, dateDigits as dateStr } from '../lib/sst-shared.js'
+import { esc, n, dateDigits as dateStr, IS_WINDOWS } from '../lib/sst-shared.js'
 import { stripRtf, wrapRtf } from '../lib/rtf-utils.js'
+import { BonLivraisonPdf, type BonLivraisonPdfData, type BlArticle, type BlLot, type BlPiece } from '../lib/pdf/BonLivraisonPdf.js'
+import { sendMail } from '../lib/gmail.js'
+import { getUserEmail } from '../lib/user-emails.js'
 
 export const expeditionsRouter: RouterType = Router()
 
@@ -51,7 +62,7 @@ function parseKind(raw: string | undefined): Kind | null {
   return raw === 'formelle' ? 'formelle' : raw === 'divers' ? 'divers' : null
 }
 
-const VALID_LOCK = { error: 'expedition_validee', message: 'Expédition validée — non modifiable. Rouvrez-la pour la modifier.' }
+const FACTURE_LOCK = { error: 'expedition_facturee', message: 'Expédition facturée — non modifiable.' }
 
 // ── Small SQL/format helpers (same as factures.ts / clients.ts) ──
 
@@ -150,8 +161,9 @@ async function loadAdresse(id: number): Promise<Record<string, unknown> | null> 
 
 async function loadContactName(id: number): Promise<string | null> {
   if (!(id > 0)) return null
-  const rows = await query<{ nom: string | null; prenom: string | null }>(
-    `SELECT nom, prenom FROM contact WHERE IDcontact = ${id}`,
+  // IDcontact must be in the SELECT — fixEncoding keys its CONVERT repair on it.
+  const rows = await query<{ IDcontact: number; nom: string | null; prenom: string | null }>(
+    `SELECT IDcontact, nom, prenom FROM contact WHERE IDcontact = ${id}`,
   )
   const fixed = await fixEncoding(rows, 'contact', 'IDcontact', ['nom', 'prenom'])
   const c = fixed[0] as any
@@ -256,11 +268,54 @@ async function resolveFiniColoris(coloriIds: number[], avecTeinture: number): Pr
   return out
 }
 
-// ── Validation lock helper ───────────────────────────────
+// ── Facture linkage + lock helper ────────────────────────
 
-async function isValidated(kind: Kind, id: number): Promise<boolean> {
-  const rows = await query<{ est_valide: number | null }>(`SELECT est_valide FROM ${TBL[kind].head} WHERE ${TBL[kind].pk} = ${id}`)
-  return rows.length > 0 && Number(rows[0].est_valide) === 1
+interface FactureRef { IDfacture: number; numero: number | null; date: string | null; type: number }
+
+/** Definitive factures attached to an expedition.
+ *  formelle: ligne_facture.IDligne_expedition → this expedition's ligne_expedition rows.
+ *  divers:   facture.IDexpedition_divers header back-pointer.
+ *  (facture_prov.IDexpedition_divers is EXCLUDED on purpose — MPS_NG repurposed
+ *  it as the converted-proforma marker, it holds an IDfacture, not an expedition.) */
+async function attachedFactures(kind: Kind, id: number): Promise<FactureRef[]> {
+  let factIds: number[] = []
+  if (kind === 'formelle') {
+    const leRows = await query<{ IDligne_expedition: number }>(
+      `SELECT IDligne_expedition FROM ligne_expedition WHERE IDexpedition = ${id}`,
+    )
+    const leIds = leRows.map((r) => Number(r.IDligne_expedition)).filter((x) => x > 0)
+    if (leIds.length === 0) return []
+    const lfRows = await query<{ IDfacture: number }>(
+      `SELECT IDfacture FROM ligne_facture WHERE IDligne_expedition IN (${leIds.join(',')})`,
+    )
+    factIds = Array.from(new Set(lfRows.map((r) => Number(r.IDfacture)).filter((x) => x > 0)))
+  } else {
+    const rows = await query<{ IDfacture: number }>(
+      `SELECT IDfacture FROM facture WHERE IDexpedition_divers = ${id}`,
+    )
+    factIds = Array.from(new Set(rows.map((r) => Number(r.IDfacture)).filter((x) => x > 0)))
+  }
+  if (factIds.length === 0) return []
+  const heads = await query<any>(
+    `SELECT IDfacture, numero, DATE AS dfac, TYPE AS type_kind FROM facture WHERE IDfacture IN (${factIds.join(',')}) ORDER BY IDfacture`,
+  )
+  return heads.map((h: any) => ({
+    IDfacture: Number(h.IDfacture),
+    numero: h.numero != null ? Number(h.numero) : null,
+    date: h.dfac ?? null,
+    type: Number(h.type_kind) === 2 ? 2 : 1,
+  }))
+}
+
+/** Write lock: an expedition with a definitive facture is fully read-only.
+ *  est_facture=1 (legacy flag) short-circuits; otherwise check real linkage. */
+async function isLocked(kind: Kind, id: number): Promise<boolean> {
+  const rows = await query<{ est_facture: number | null }>(
+    `SELECT est_facture FROM ${TBL[kind].head} WHERE ${TBL[kind].pk} = ${id}`,
+  )
+  if (rows.length === 0) return false
+  if (Number(rows[0].est_facture) === 1) return true
+  return (await attachedFactures(kind, id)).length > 0
 }
 
 /** Allocate the new PK after an INSERT (no numero column). Capture MAX before,
@@ -426,7 +481,7 @@ expeditionsRouter.get('/', async (req: Request, res: Response) => {
     if (kind === 'formelle') {
       const beforeSql = beforeId !== null ? ` AND IDexpedition < ${beforeId}` : ''
       const heads = await query<any>(
-        `SELECT TOP ${fetchCap} IDexpedition, IDcommande_client, IDtransporteur, DATE AS dexp, est_valide, est_facture, donation ` +
+        `SELECT TOP ${fetchCap} IDexpedition, IDcommande_client, IDtransporteur, DATE AS dexp, est_facture, donation ` +
           `FROM expedition WHERE IDsociete = 1${stateSql}${beforeSql} ORDER BY IDexpedition DESC`,
       )
       const cmdIds = heads.map((h: any) => Number(h.IDcommande_client)).filter(Boolean)
@@ -451,7 +506,6 @@ expeditionsRouter.get('/', async (req: Request, res: Response) => {
           client_nom: clientNames.get(cmd.IDclient) ?? '',
           transporteur_nom: transNames.get(Number(h.IDtransporteur)) ?? '',
           date: h.dexp ?? null,
-          est_valide: Number(h.est_valide) || 0,
           est_facture: Number(h.est_facture) || 0,
           donation: Number(h.donation) || 0,
           nb_rolls: agg.nb_rolls, total_poids: agg.poids, total_metrage: agg.metrage,
@@ -470,7 +524,7 @@ expeditionsRouter.get('/', async (req: Request, res: Response) => {
     // divers (no IDsociete)
     const beforeSql = beforeId !== null ? ` AND IDexpedition_divers < ${beforeId}` : ''
     const heads = await query<any>(
-      `SELECT TOP ${fetchCap} IDexpedition_divers, IDclient, ref_client, IDtransporteur, DATE AS dexp, est_valide, est_facture ` +
+      `SELECT TOP ${fetchCap} IDexpedition_divers, IDclient, ref_client, IDtransporteur, DATE AS dexp, est_facture ` +
         `FROM expedition_divers WHERE 1 = 1${stateSql}${beforeSql} ORDER BY IDexpedition_divers DESC`,
     )
     const ids = heads.map((h: any) => Number(h.IDexpedition_divers)).filter(Boolean)
@@ -492,7 +546,6 @@ expeditionsRouter.get('/', async (req: Request, res: Response) => {
         client_nom: IDclient > 0 ? (clientNames.get(IDclient) ?? '') : refClient,
         transporteur_nom: transNames.get(Number(h.IDtransporteur)) ?? '',
         date: h.dexp ?? null,
-        est_valide: Number(h.est_valide) || 0,
         est_facture: Number(h.est_facture) || 0,
         nb_lignes: lineCount.get(id) ?? 0,
       }
@@ -587,7 +640,7 @@ expeditionsRouter.get('/:kind/:id', async (req: Request, res: Response) => {
     if (kind === 'formelle') {
       const rows = await query<any>(
         `SELECT IDexpedition, IDsociete, IDcommande_client, IDadresse, IDtransporteur, DATE AS dexp, ` +
-          `affiche_observations, est_valide, est_facture, donation, IDcontact, observation_bl, inclureRapportQualite ` +
+          `affiche_observations, est_facture, donation, IDcontact, observation_bl, inclureRapportQualite ` +
           `FROM expedition WHERE IDexpedition = ${id} AND IDsociete = 1`,
       )
       if (rows.length === 0) { res.status(404).json({ error: 'Expédition not found' }); return }
@@ -599,11 +652,12 @@ expeditionsRouter.get('/:kind/:id', async (req: Request, res: Response) => {
         : []
       const IDclient = Number(cmdRows[0]?.IDclient) || 0
 
-      const [clientNames, transNames, adr, contactNom, lignesRaw] = await Promise.all([
+      const [clientNames, transNames, adr, contactNom, factures, lignesRaw] = await Promise.all([
         resolveClientNames([IDclient]),
         resolveTransporteurNames([Number(h.IDtransporteur)]),
         loadAdresse(Number(h.IDadresse) || 0),
         loadContactName(Number(h.IDcontact) || 0),
+        attachedFactures('formelle', id),
         cmdId > 0
           ? query<any>(
               `SELECT IDligne_commande_client, TYPE AS type_kind, IDreference, IDcolori, quantite, unite ` +
@@ -659,8 +713,9 @@ expeditionsRouter.get('/:kind/:id', async (req: Request, res: Response) => {
         affiche_observations: Number(h.affiche_observations) || 0,
         inclureRapportQualite: Number(h.inclureRapportQualite) || 0,
         observation_bl: stripRtf(h.observation_bl) || '',
-        est_valide: Number(h.est_valide) || 0,
         est_facture: Number(h.est_facture) || 0,
+        factures,
+        locked: Number(h.est_facture) === 1 || factures.length > 0,
         lignes,
       })
       return
@@ -668,16 +723,17 @@ expeditionsRouter.get('/:kind/:id', async (req: Request, res: Response) => {
 
     // divers
     const rows = await query<any>(
-      `SELECT IDexpedition_divers, IDclient, ref_client, IDadresse, IDtransporteur, DATE AS dexp, est_valide, est_facture, IDcommande_client ` +
+      `SELECT IDexpedition_divers, IDclient, ref_client, IDadresse, IDtransporteur, DATE AS dexp, est_facture, IDcommande_client ` +
         `FROM expedition_divers WHERE IDexpedition_divers = ${id}`,
     )
     if (rows.length === 0) { res.status(404).json({ error: 'Expédition not found' }); return }
     const h = rows[0]
     const IDclient = Number(h.IDclient) || 0
-    const [clientNames, transNames, adr, lignesRaw] = await Promise.all([
+    const [clientNames, transNames, adr, factures, lignesRaw] = await Promise.all([
       resolveClientNames([IDclient]),
       resolveTransporteurNames([Number(h.IDtransporteur)]),
       loadAdresse(Number(h.IDadresse) || 0),
+      attachedFactures('divers', id),
       query<any>(`SELECT IDligne_expedition_divers, detail_ligne FROM ligne_expedition_divers WHERE IDexpedition_divers = ${id} ORDER BY IDligne_expedition_divers`),
     ])
     const lignesFixed = await fixEncoding(lignesRaw, 'ligne_expedition_divers', 'IDligne_expedition_divers', ['detail_ligne'])
@@ -694,8 +750,9 @@ expeditionsRouter.get('/:kind/:id', async (req: Request, res: Response) => {
       transporteur_nom: transNames.get(Number(h.IDtransporteur)) ?? '',
       IDadresse: Number(h.IDadresse) || 0,
       adresse_livraison: adr,
-      est_valide: Number(h.est_valide) || 0,
       est_facture: Number(h.est_facture) || 0,
+      factures,
+      locked: Number(h.est_facture) === 1 || factures.length > 0,
       lignes,
     })
   } catch (err) {
@@ -787,7 +844,7 @@ expeditionsRouter.put('/:kind/:id', async (req: Request, res: Response) => {
     if (!kind) { res.status(404).json({ error: 'Not found' }); return }
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
-    if (await isValidated(kind, id)) { res.status(409).json(VALID_LOCK); return }
+    if (await isLocked(kind, id)) { res.status(409).json(FACTURE_LOCK); return }
 
     const parsed = updateBody.safeParse(req.body)
     if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
@@ -821,7 +878,7 @@ expeditionsRouter.delete('/:kind/:id', async (req: Request, res: Response) => {
     if (!kind) { res.status(404).json({ error: 'Not found' }); return }
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
-    if (await isValidated(kind, id)) { res.status(409).json(VALID_LOCK); return }
+    if (await isLocked(kind, id)) { res.status(409).json(FACTURE_LOCK); return }
 
     if (kind === 'formelle') {
       // Free every roll shipped on this expedition, then drop the lines + header.
@@ -841,23 +898,6 @@ expeditionsRouter.delete('/:kind/:id', async (req: Request, res: Response) => {
     res.json({ ok: true })
   } catch (err) {
     console.error('Error deleting expedition:', err)
-    res.status(500).json({ error: 'Internal server error' })
-  }
-})
-
-// ── Validate / reopen ────────────────────────────────────
-
-expeditionsRouter.post('/:kind/:id/validate', async (req: Request, res: Response) => {
-  try {
-    const kind = parseKind(req.params.kind)
-    if (!kind) { res.status(404).json({ error: 'Not found' }); return }
-    const id = parseInt(req.params.id, 10)
-    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
-    const valide = req.body?.valide === true || req.body?.valide === 1
-    await query(`UPDATE ${TBL[kind].head} SET est_valide = ${valide ? 1 : 0} WHERE ${TBL[kind].pk} = ${id}`)
-    res.json({ ok: true, est_valide: valide ? 1 : 0 })
-  } catch (err) {
-    console.error('Error validating expedition:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -979,7 +1019,7 @@ expeditionsRouter.put('/formelle/:id/lignes/:lccId/rolls/:stockId', async (req: 
     const lccId = parseInt(req.params.lccId, 10)
     const stockId = parseInt(req.params.stockId, 10)
     if (isNaN(id) || isNaN(lccId) || isNaN(stockId)) { res.status(400).json({ error: 'Invalid ID' }); return }
-    if (await isValidated('formelle', id)) { res.status(409).json(VALID_LOCK); return }
+    if (await isLocked('formelle', id)) { res.status(409).json(FACTURE_LOCK); return }
     const ctx = await loadLineCtx(lccId)
     if (!ctx || ctx.kind === 'none') { res.status(404).json({ error: 'Ligne non expédiable' }); return }
 
@@ -1024,7 +1064,7 @@ expeditionsRouter.delete('/formelle/:id/lignes/:lccId/rolls/:stockId', async (re
     const lccId = parseInt(req.params.lccId, 10)
     const stockId = parseInt(req.params.stockId, 10)
     if (isNaN(id) || isNaN(lccId) || isNaN(stockId)) { res.status(400).json({ error: 'Invalid ID' }); return }
-    if (await isValidated('formelle', id)) { res.status(409).json(VALID_LOCK); return }
+    if (await isLocked('formelle', id)) { res.status(409).json(FACTURE_LOCK); return }
     const ctx = await loadLineCtx(lccId)
     if (!ctx || ctx.kind === 'none') { res.status(404).json({ error: 'Ligne non expédiable' }); return }
     const leId = await findLigneExpedition(id, lccId)
@@ -1060,7 +1100,7 @@ expeditionsRouter.post('/divers/:id/lignes', async (req: Request, res: Response)
   try {
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
-    if (await isValidated('divers', id)) { res.status(409).json(VALID_LOCK); return }
+    if (await isLocked('divers', id)) { res.status(409).json(FACTURE_LOCK); return }
     const parsed = diversLineBody.safeParse(req.body)
     if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
     await query(
@@ -1084,7 +1124,7 @@ expeditionsRouter.put('/divers/lignes/:lineId', async (req: Request, res: Respon
     if (isNaN(lineId)) { res.status(400).json({ error: 'Invalid ID' }); return }
     const parent = await diversLineParent(lineId)
     if (parent === 0) { res.status(404).json({ error: 'Line not found' }); return }
-    if (await isValidated('divers', parent)) { res.status(409).json(VALID_LOCK); return }
+    if (await isLocked('divers', parent)) { res.status(409).json(FACTURE_LOCK); return }
     const parsed = diversLineBody.safeParse(req.body)
     if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
     await query(`UPDATE ligne_expedition_divers SET detail_ligne = ${sqlText(wrapRtf(parsed.data.detail_ligne ?? ''))} WHERE IDligne_expedition_divers = ${lineId}`)
@@ -1101,11 +1141,408 @@ expeditionsRouter.delete('/divers/lignes/:lineId', async (req: Request, res: Res
     if (isNaN(lineId)) { res.status(400).json({ error: 'Invalid ID' }); return }
     const parent = await diversLineParent(lineId)
     if (parent === 0) { res.status(404).json({ error: 'Line not found' }); return }
-    if (await isValidated('divers', parent)) { res.status(409).json(VALID_LOCK); return }
+    if (await isLocked('divers', parent)) { res.status(409).json(FACTURE_LOCK); return }
     await query(`DELETE FROM ligne_expedition_divers WHERE IDligne_expedition_divers = ${lineId}`)
     res.json({ ok: true })
   } catch (err) {
     console.error('Error deleting divers line:', err)
     res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ════════════════════════════════════════════════════════
+//  PDF — Avis d'expédition (formelle only)
+// ════════════════════════════════════════════════════════
+
+const FRENCH_MONTHS = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre']
+
+function formatHfsqlDateLongFr(raw: string | null | undefined): string {
+  if (!raw) return ''
+  const s = String(raw)
+  if (!/^\d{8}$/.test(s)) return ''
+  const day = parseInt(s.slice(6, 8), 10)
+  const month = parseInt(s.slice(4, 6), 10)
+  const year = s.slice(0, 4)
+  if (month < 1 || month > 12) return ''
+  return `${day} ${FRENCH_MONTHS[month - 1]} ${year}`
+}
+
+// Legacy gtaFinition enum (WinDev project globals) — printed under the
+// article identity block on the avis d'expédition.
+const FINITION_LABELS: Record<number, string> = {
+  1: 'OUVERT AU LARGE',
+  2: "TUBULAIRE AVEC MAILLE D'OUVERTURE",
+  3: "TUBULAIRE SANS MAILLE D'OUVERTURE",
+}
+
+/** Group shipped pieces (already ORDER BY lot, numero) into per-lot buckets —
+ *  Map preserves the SQL ordering. */
+function groupByLot(rows: any[]): BlLot[] {
+  const byLot = new Map<string, BlPiece[]>()
+  for (const p of rows) {
+    const lot = (p.lot ?? '').toString().trim()
+    const arr = byLot.get(lot) ?? []
+    arr.push({
+      numero: (p.numero ?? '').toString().trim(),
+      poids: Number(p.poids) || 0,
+      metrage: Number(p.metrage) || 0,
+      observations: p.observations != null ? String(p.observations) : null,
+    })
+    byLot.set(lot, arr)
+  }
+  return Array.from(byLot, ([lot, pieces]) => ({ lot, pieces }))
+}
+
+export async function buildBlPdfData(id: number): Promise<BonLivraisonPdfData | null> {
+  const rows = await query<any>(
+    `SELECT IDexpedition, IDcommande_client, IDadresse, IDtransporteur, IDcontact, DATE AS dexp, ` +
+      `affiche_observations, donation, observation_bl ` +
+      `FROM expedition WHERE IDexpedition = ${id} AND IDsociete = 1`,
+  )
+  if (rows.length === 0) return null
+  const h = rows[0]
+  const cmdId = Number(h.IDcommande_client) || 0
+
+  const cmdRows = cmdId > 0
+    ? await query<any>(`SELECT IDcommande_client, numero, IDclient, ref_client FROM commande_client WHERE IDcommande_client = ${cmdId}`)
+    : []
+  const cmd = (await fixEncoding(cmdRows, 'commande_client', 'IDcommande_client', ['ref_client']))[0] as any
+  const IDclient = Number(cmd?.IDclient) || 0
+
+  const [clientNames, transNames, adr, contactNom, leRows] = await Promise.all([
+    resolveClientNames([IDclient]),
+    resolveTransporteurNames([Number(h.IDtransporteur)]),
+    loadAdresse(Number(h.IDadresse) || 0),
+    loadContactName(Number(h.IDcontact) || 0),
+    query<any>(`SELECT IDligne_expedition, IDligne_commande_client FROM ligne_expedition WHERE IDexpedition = ${id} ORDER BY IDligne_expedition`),
+  ])
+
+  const articles: BlArticle[] = []
+  for (const le of leRows as any[]) {
+    const leId = Number(le.IDligne_expedition) || 0
+    const lccId = Number(le.IDligne_commande_client) || 0
+    if (leId === 0 || lccId === 0) continue
+    const lccRows = await query<any>(
+      `SELECT IDligne_commande_client, IDdesignation_client, TYPE AS type_kind, IDreference, IDcolori ` +
+        `FROM ligne_commande_client WHERE IDligne_commande_client = ${lccId}`,
+    )
+    if (lccRows.length === 0) continue
+    const lcc = lccRows[0]
+    const kind = lineStockKind(Number(lcc.type_kind) || 0)
+    if (kind === 'none') continue
+    const refId = Number(lcc.IDreference) || 0
+    const colId = Number(lcc.IDcolori) || 0
+    const desigId = Number(lcc.IDdesignation_client) || 0
+
+    // Client-side article reference ("V/réf. : 227A").
+    let refClientArticle: string | null = null
+    if (desigId > 0) {
+      const dcRows = await query<any>(`SELECT IDdesignation_client, designation FROM designation_client WHERE IDdesignation_client = ${desigId}`)
+      const dc = (await fixEncoding(dcRows, 'designation_client', 'IDdesignation_client', ['designation']))[0] as any
+      refClientArticle = (dc?.designation ?? '').toString().trim() || null
+    }
+
+    let reference = ''
+    let designation = ''
+    let finition: string | null = null
+    let coloris = ''
+    let piecesRaw: any[] = []
+
+    if (kind === 'fini') {
+      const rfRows = refId > 0
+        ? await query<any>(`SELECT IDref_fini, reference, designation, finition, avec_teinture FROM ref_fini WHERE IDref_fini = ${refId}`)
+        : []
+      const rf = (await fixEncoding(rfRows, 'ref_fini', 'IDref_fini', ['reference', 'designation']))[0] as any
+      reference = (rf?.reference ?? '').toString().trim()
+      designation = (rf?.designation ?? '').toString().trim()
+      const avec = Number(rf?.avec_teinture) || 0
+      let colFinition = 0
+      if (colId > 0) {
+        if (avec === 0) {
+          // Wash-only fini → coloris lives in the écru catalog (avec_teinture rule).
+          const cRows = await query<any>(`SELECT IDcolori_ecru, reference FROM colori_ecru WHERE IDcolori_ecru = ${colId}`)
+          const c = (await fixEncoding(cRows, 'colori_ecru', 'IDcolori_ecru', ['reference']))[0] as any
+          coloris = (c?.reference ?? '').toString().trim()
+        } else {
+          const cRows = await query<any>(`SELECT IDref_fini_colori, reference, finition FROM ref_fini_colori WHERE IDref_fini_colori = ${colId}`)
+          const c = (await fixEncoding(cRows, 'ref_fini_colori', 'IDref_fini_colori', ['reference']))[0] as any
+          coloris = (c?.reference ?? '').toString().trim()
+          colFinition = Number(c?.finition) || 0
+        }
+      }
+      finition = FINITION_LABELS[colFinition || Number(rf?.finition) || 0] ?? null
+      const rollRows = await query<any>(
+        `SELECT IDstock_fini, numero, lot, poids, metrage, observations FROM stock_fini WHERE IDligne_expedition = ${leId} ORDER BY lot, numero`,
+      )
+      piecesRaw = await fixEncoding(rollRows, 'stock_fini', 'IDstock_fini', ['numero', 'lot', 'observations'])
+    } else {
+      // écru (tombé de métier)
+      const reRows = refId > 0
+        ? await query<any>(`SELECT IDref_ecru, reference, designation FROM ref_ecru WHERE IDref_ecru = ${refId}`)
+        : []
+      const re = (await fixEncoding(reRows, 'ref_ecru', 'IDref_ecru', ['reference', 'designation']))[0] as any
+      reference = (re?.reference ?? '').toString().trim()
+      designation = (re?.designation ?? '').toString().trim()
+      if (colId > 0) {
+        const cRows = await query<any>(`SELECT IDcolori_ecru, reference FROM colori_ecru WHERE IDcolori_ecru = ${colId}`)
+        const c = (await fixEncoding(cRows, 'colori_ecru', 'IDcolori_ecru', ['reference']))[0] as any
+        coloris = (c?.reference ?? '').toString().trim()
+      }
+      const rollRows = await query<any>(
+        `SELECT IDstock_ecru, numero, lot, poids, metrage, observations FROM stock_ecru WHERE IDligne_expedition_ETM = ${leId} ORDER BY lot, numero`,
+      )
+      piecesRaw = await fixEncoding(rollRows, 'stock_ecru', 'IDstock_ecru', ['numero', 'lot', 'observations'])
+    }
+
+    const lots = groupByLot(piecesRaw)
+    if (lots.length === 0) continue
+    const titre = [reference, coloris].filter(Boolean).join(' - ') || `Ligne ${lccId}`
+    const sousTitre = designation ? [designation, coloris].filter(Boolean).join(' - ') : null
+    articles.push({ titre, sousTitre, finition, refClientArticle, lots })
+  }
+
+  const a = adr as any
+  return {
+    numero: id,
+    dateLong: formatHfsqlDateLongFr(h.dexp),
+    clientNom: clientNames.get(IDclient) ?? '',
+    refClient: (cmd?.ref_client ?? '').toString().trim() || null,
+    commandeNumero: cmd?.numero != null ? Number(cmd.numero) : null,
+    transporteurNom: transNames.get(Number(h.IDtransporteur)) || null,
+    contactNom,
+    donation: Number(h.donation) === 1,
+    showObservations: Number(h.affiche_observations) === 1,
+    observationBl: stripRtf(h.observation_bl) || null,
+    adresseLivraison: a
+      ? {
+          nom: (a.nom ?? null) as string | null,
+          adresse1: (a.adresse1 ?? null) as string | null,
+          adresse2: (a.adresse2 ?? null) as string | null,
+          adresse3: (a.adresse3 ?? null) as string | null,
+          cp: (a.cp ?? null) as string | null,
+          ville: (a.ville ?? null) as string | null,
+          pays: (a.pays ?? null) as string | null,
+        }
+      : null,
+    articles,
+  }
+}
+
+async function renderBlPdfBuffer(data: BonLivraisonPdfData): Promise<Buffer> {
+  return renderToBuffer(
+    React.createElement(BonLivraisonPdf, { data }) as unknown as React.ReactElement<
+      import('@react-pdf/renderer').DocumentProps
+    >,
+  )
+}
+
+expeditionsRouter.get('/formelle/:id/pdf', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const data = await buildBlPdfData(id)
+    if (!data) { res.status(404).json({ error: 'Expédition not found' }); return }
+    const buffer = await renderBlPdfBuffer(data)
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `inline; filename="BL-${id}.pdf"`)
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.send(buffer)
+  } catch (err) {
+    console.error('Error rendering expedition PDF:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ════════════════════════════════════════════════════════
+//  EMAIL — Avis d'expédition (formelle only)
+// ════════════════════════════════════════════════════════
+
+// type_doc 14 = "avis expedition" — envoi_email audit rows for formelle BLs.
+// (16 = "avis expedition diver" is reserved for the divers flow, not built yet.)
+const TYPE_DOC_AVIS_EXPEDITION = 14
+
+function nowHfsqlDatetime(): string {
+  const d = new Date()
+  const pad = (x: number, w = 2) => String(x).padStart(w, '0')
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.` +
+    `${String(d.getMilliseconds()).padStart(3, '0')}`
+  )
+}
+
+interface EmailRecipientPayload { email: string; name?: string; source: 'contact'; contactId: number }
+
+async function buildBlEmailDefaults(id: number): Promise<{
+  recipients: { selected: EmailRecipientPayload[]; suggestions: EmailRecipientPayload[] }
+  subject: string; body: string; clientNom: string
+} | null> {
+  const rows = await query<{ IDcommande_client: number }>(
+    `SELECT IDcommande_client FROM expedition WHERE IDexpedition = ${id} AND IDsociete = 1`,
+  )
+  if (rows.length === 0) return null
+  const cmdId = Number(rows[0].IDcommande_client) || 0
+  const cmdRows = cmdId > 0
+    ? await query<{ IDclient: number }>(`SELECT IDclient FROM commande_client WHERE IDcommande_client = ${cmdId}`)
+    : []
+  const IDclient = Number(cmdRows[0]?.IDclient) || 0
+
+  const [clientNames, contactRows] = await Promise.all([
+    resolveClientNames([IDclient]),
+    IDclient > 0
+      ? query<{ IDcontact: number; nom: string | null; prenom: string | null; mail: string | null; envoi_bl: number | null; est_visible: number | null }>(
+          `SELECT IDcontact, nom, prenom, mail, envoi_bl, est_visible FROM contact WHERE IDclient = ${IDclient}`,
+        )
+      : Promise.resolve([]),
+  ])
+  const clientNom = clientNames.get(IDclient) ?? ''
+  const fixedContacts = await fixEncoding(contactRows, 'contact', 'IDcontact', ['nom', 'prenom', 'mail'])
+
+  const selected: EmailRecipientPayload[] = []
+  const suggestions: EmailRecipientPayload[] = []
+  const seen = new Set<string>()
+  for (const c of fixedContacts as any[]) {
+    if (c.est_visible === 0) continue
+    const raw = (c.mail ?? '').toString().trim()
+    if (!raw || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) continue
+    const key = raw.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    const displayName = [c.prenom, c.nom].map((s: string | null) => (s ?? '').toString().trim()).filter((s: string) => s.length > 0).join(' ')
+    const recipient: EmailRecipientPayload = { email: raw, source: 'contact', contactId: Number(c.IDcontact) }
+    if (displayName) recipient.name = displayName
+    if (c.envoi_bl === 1) selected.push(recipient)
+    else suggestions.push(recipient)
+  }
+
+  const subject = `Avis d'expédition N°${id} — ETS Malterre`
+  const body =
+    `Bonjour,\n\n` +
+    `Veuillez trouver ci-joint notre avis d'expédition N°${id}.\n\n` +
+    `Nous restons à votre disposition pour toute information complémentaire.\n\n` +
+    `Cordialement,\n` +
+    `ETS Malterre`
+  return { recipients: { selected, suggestions }, subject, body, clientNom }
+}
+
+expeditionsRouter.get('/formelle/:id/email-defaults', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const defaults = await buildBlEmailDefaults(id)
+    if (!defaults) { res.status(404).json({ error: 'Expédition not found' }); return }
+    res.json(defaults)
+  } catch (err) {
+    console.error('Error building expedition email defaults:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+const extraAttachmentSchema = z.object({
+  filename: z.string().min(1).max(255),
+  content_base64: z.string().min(1),
+  content_type: z.string().min(1).max(100),
+})
+const emailBody = z.object({
+  to: z.array(z.string().email()).min(1, 'At least one recipient is required'),
+  cc: z.array(z.string().email()).optional(),
+  subject: z.string().min(1).max(500),
+  body: z.string().min(1).max(20000),
+  attach_pdf: z.boolean().optional(),
+  extra_attachments: z.array(extraAttachmentSchema).optional(),
+  dev_skip_send: z.boolean().optional(),
+})
+const ALLOW_DEV_SKIP_SEND = process.env.NODE_ENV !== 'production'
+
+async function logEnvoiEmails(idReference: number, recipients: string[], societe: string): Promise<void> {
+  if (recipients.length === 0) return
+  const ts = nowHfsqlDatetime()
+  for (const raw of recipients) {
+    const addr = String(raw).trim()
+    if (!addr) continue
+    try {
+      if (IS_WINDOWS) {
+        await query(
+          `INSERT INTO envoi_email (DATE, adresse, société, IDreference, invalidé, notes, IDtype_doc)
+           VALUES ('${ts}', ${sqlText(addr)}, ${sqlText(societe || '')}, ${idReference}, 0, '', ${TYPE_DOC_AVIS_EXPEDITION})`,
+        )
+      } else {
+        await query(
+          `INSERT INTO envoi_email (DATE, adresse, IDreference, notes, IDtype_doc)
+           VALUES ('${ts}', ${sqlText(addr)}, ${idReference}, '', ${TYPE_DOC_AVIS_EXPEDITION})`,
+        )
+      }
+    } catch (e) {
+      console.error(`envoi_email log failed (expedition/${idReference}/${addr}):`, (e as Error).message)
+    }
+  }
+}
+
+expeditionsRouter.post('/formelle/:id/email', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
+    const parsed = emailBody.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
+    const devSkip = parsed.data.dev_skip_send === true && ALLOW_DEV_SKIP_SEND
+
+    let messageId: string
+    if (devSkip) {
+      messageId = `dev-skip-${Date.now()}`
+      console.log(`[dev-skip-send] expedition #${id} — fake send to ${parsed.data.to.join(', ')}`)
+    } else {
+      const senderEmail = await getUserEmail(req.userId)
+      if (!senderEmail) {
+        res.status(400).json({
+          error: 'no_sender_email',
+          message: "Aucune adresse email n'est associée à votre compte. Un administrateur doit en définir une dans Paramètres › Utilisateurs.",
+        })
+        return
+      }
+      const userRows = await query<{ prenom: string | null; nom: string | null }>(
+        `SELECT prenom, nom FROM utilisateur WHERE IDutilisateur = ${req.userId}`,
+      )
+      const fixedUser = await fixEncoding(userRows, 'utilisateur', 'IDutilisateur', ['prenom', 'nom'])
+      const u = (fixedUser[0] as any) ?? null
+      const displayName = u ? [u.prenom, u.nom].filter((s: string | null) => s && s.trim()).map((s: string) => s.trim()).join(' ') : ''
+      const fromName = displayName ? `${displayName} — ETS Malterre` : 'ETS Malterre'
+
+      const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
+      if (parsed.data.attach_pdf !== false) {
+        const data = await buildBlPdfData(id)
+        if (!data) { res.status(404).json({ error: 'Expédition not found' }); return }
+        const buffer = await renderBlPdfBuffer(data)
+        attachments.push({ filename: `BL-${id}.pdf`, content: buffer, contentType: 'application/pdf' })
+      }
+      for (const a of parsed.data.extra_attachments ?? []) {
+        attachments.push({ filename: a.filename, content: Buffer.from(a.content_base64, 'base64'), contentType: a.content_type })
+      }
+      messageId = await sendMail({
+        from: senderEmail, fromName, to: parsed.data.to, cc: parsed.data.cc,
+        subject: parsed.data.subject, body: parsed.data.body,
+        attachments: attachments.length > 0 ? attachments : undefined,
+      })
+    }
+
+    const allRecipients = [...parsed.data.to, ...(parsed.data.cc ?? [])]
+    let societe = ''
+    try {
+      const er = await query<{ IDcommande_client: number }>(`SELECT IDcommande_client FROM expedition WHERE IDexpedition = ${id} AND IDsociete = 1`)
+      const cr = Number(er[0]?.IDcommande_client) > 0
+        ? await query<{ IDclient: number }>(`SELECT IDclient FROM commande_client WHERE IDcommande_client = ${Number(er[0].IDcommande_client)}`)
+        : []
+      const names = await resolveClientNames([Number(cr[0]?.IDclient) || 0])
+      societe = names.get(Number(cr[0]?.IDclient) || 0) ?? ''
+    } catch { /* informational */ }
+    await logEnvoiEmails(id, allRecipients, societe)
+
+    res.json({ ok: true, messageId })
+  } catch (err) {
+    console.error('Error sending expedition email:', err)
+    const message = err instanceof Error ? err.message : 'Internal server error'
+    res.status(500).json({ error: 'send_failed', message })
   }
 })

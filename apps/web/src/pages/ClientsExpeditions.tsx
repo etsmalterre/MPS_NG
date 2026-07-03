@@ -26,12 +26,18 @@ import {
   Gift,
   FileText,
   Lock,
+  Receipt,
+  ChevronDown,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { TmRollIcon } from '@/components/icons/TmRollIcon'
+import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { SendEmailDialog } from '@/components/email/SendEmailDialog'
+import { postEmail } from '@/lib/email'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
 import { fmtNum } from '@/lib/format'
@@ -53,7 +59,6 @@ interface ExpeditionListRow {
   ref_client?: string
   transporteur_nom: string
   date: string | null
-  est_valide: number
   est_facture: number
   donation?: number
   nb_rolls?: number
@@ -99,6 +104,13 @@ interface DiversLigne {
   detail_ligne: string
 }
 
+interface FactureRef {
+  IDfacture: number
+  numero: number | null
+  date: string | null
+  type: number // 1 = Facture, 2 = Avoir
+}
+
 interface ExpeditionDetail {
   id: number
   kind: Kind
@@ -118,8 +130,9 @@ interface ExpeditionDetail {
   affiche_observations?: number
   inclureRapportQualite?: number
   observation_bl?: string
-  est_valide: number
   est_facture: number
+  factures: FactureRef[]
+  locked: boolean
   lignes: FormelleLigne[] | DiversLigne[]
 }
 
@@ -210,8 +223,8 @@ export function ClientsExpeditions() {
     enabled: selectedId !== null,
   })
 
-  // A shipment is editable only while it is not validated (locked).
-  const editable = !!detail && detail.est_valide !== 1
+  // A shipment is editable only while no definitive facture is attached.
+  const editable = !!detail && !detail.locked
 
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['expeditions'] })
@@ -219,7 +232,7 @@ export function ClientsExpeditions() {
   }, [queryClient, bucket, selectedId])
 
   const startEdit = useCallback(() => {
-    if (!detail || detail.est_valide === 1) return
+    if (!detail || detail.locked) return
     const snapshot: Record<string, string | number> = {
       date: hfsqlDateToInput(detail.date),
       IDtransporteur: detail.IDtransporteur ?? 0,
@@ -298,16 +311,8 @@ export function ClientsExpeditions() {
     },
   })
 
-  const validateMut = useMutation({
-    mutationFn: (valide: boolean) => apiFetch(`/expeditions/${bucket}/${selectedId}/validate`, {
-      method: 'POST',
-      body: JSON.stringify({ valide }),
-    }),
-    onSuccess: () => invalidateAll(),
-  })
-
   useEffect(() => {
-    if (autoEditForId !== null && detail?.id === autoEditForId && detail.est_valide !== 1) {
+    if (autoEditForId !== null && detail?.id === autoEditForId && !detail.locked) {
       startEdit()
       setAutoEditForId(null)
     }
@@ -376,7 +381,11 @@ export function ClientsExpeditions() {
             onSave={() => saveHeaderMut.mutate()}
             isSaving={saveHeaderMut.isPending}
             onDelete={() => setDeleteConfirmOpen(true)}
-            onPrintClick={() => setPrintOpen(true)}
+            onPrintClick={() => {
+              // Avis d'expédition PDF exists for formelle; divers has no print yet.
+              if (bucket === 'formelle' && selectedId !== null) window.open(`${API_URL}/expeditions/formelle/${selectedId}/pdf`, '_blank')
+              else setPrintOpen(true)
+            }}
             onEmailClick={() => setEmailOpen(true)}
           />
         }
@@ -406,8 +415,6 @@ export function ClientsExpeditions() {
             editObservation={editObservation} onEditObservationChange={setEditObservation}
             editIDClient={editIDClient} onEditIDClientChange={setEditIDClient}
             editRefClient={editRefClient} onEditRefClientChange={setEditRefClient}
-            onValidate={(v) => validateMut.mutate(v)}
-            isValidating={validateMut.isPending}
           />
         ) : null}
         sidebarTitle="Informations"
@@ -445,7 +452,22 @@ export function ClientsExpeditions() {
       />
 
       <PlaceholderDialog open={printOpen} onClose={() => setPrintOpen(false)} title="Imprimer" Icon={Printer} CenterIcon={FileText} />
-      <PlaceholderDialog open={emailOpen} onClose={() => setEmailOpen(false)} title="Envoyer un email" Icon={AtSign} CenterIcon={AtSign} />
+
+      {/* Email: real send flow for formelle (BL PDF attached); divers has no document yet. */}
+      {selectedId !== null && bucket === 'formelle' ? (
+        <SendEmailDialog
+          open={emailOpen}
+          onClose={() => setEmailOpen(false)}
+          contextLabel={detail?.client_nom ?? undefined}
+          queryKey={['expedition-email-defaults', selectedId]}
+          loadDefaults={() => apiFetch(`/expeditions/formelle/${selectedId}/email-defaults`)}
+          pdfUrl={`${API_URL}/expeditions/formelle/${selectedId}/pdf`}
+          pdfAttachmentLabel={`BL-${selectedId}.pdf`}
+          onSend={(p) => postEmail(`${API_URL}/expeditions/formelle/${selectedId}/email`, p, { includeAttachPdf: true })}
+        />
+      ) : (
+        <PlaceholderDialog open={emailOpen} onClose={() => setEmailOpen(false)} title="Envoyer un email" Icon={AtSign} CenterIcon={AtSign} />
+      )}
     </>
   )
 }
@@ -548,7 +570,7 @@ function ExpeditionListPanel({
         ) : (<>
         {rows.map((row) => {
           const isSelected = selectedId === row.id
-          const valid = row.est_valide === 1
+          const facturee = row.est_facture === 1
           return (
             <div
               key={row.id}
@@ -559,10 +581,10 @@ function ExpeditionListPanel({
               )}
             >
               <div className="flex items-center gap-2">
-                <Truck className={cn('h-4 w-4 flex-shrink-0', valid ? 'text-green-600' : 'text-muted-foreground')} />
+                <Truck className={cn('h-4 w-4 flex-shrink-0', facturee ? 'text-green-600' : 'text-muted-foreground')} />
                 <span className="font-medium text-sm">N° {row.id}</span>
                 {!!row.donation && <Gift className="h-3 w-3 text-accent" />}
-                <StatePill valid={valid} className="ml-auto" />
+                <StatePill facturee={facturee} className="ml-auto" />
               </div>
               <p className="text-xs text-muted-foreground mt-1 truncate">{row.client_nom || '—'}</p>
               <div className="flex items-center gap-2 mt-1 text-[11px] text-muted-foreground">
@@ -608,14 +630,14 @@ function ExpeditionListPanel({
   )
 }
 
-function StatePill({ valid, className }: { valid: boolean; className?: string }) {
+function StatePill({ facturee, className }: { facturee: boolean; className?: string }) {
   return (
     <Badge
       variant="outline"
-      className={cn('text-[10px] py-0 gap-1 border text-white', valid ? 'bg-success border-success' : 'bg-primary border-primary', className)}
+      className={cn('text-[10px] py-0 gap-1 border text-white', facturee ? 'bg-success border-success' : 'bg-primary border-primary', className)}
     >
-      {valid ? <CheckCircle2 className="h-2.5 w-2.5" /> : <Clock className="h-2.5 w-2.5" />}
-      {valid ? 'Validée' : 'Brouillon'}
+      {facturee ? <Receipt className="h-2.5 w-2.5" /> : <Clock className="h-2.5 w-2.5" />}
+      {facturee ? 'Facturée' : 'Non facturée'}
     </Badge>
   )
 }
@@ -640,7 +662,7 @@ function DetailHeader({
   onEmailClick: () => void
 }) {
   if (!expedition && !isLoading) return null
-  const valid = expedition?.est_valide === 1
+  const locked = expedition?.locked === true
   return (
     <div className="flex-shrink-0 pt-0.5">
       <div className="flex items-center gap-3">
@@ -657,10 +679,10 @@ function DetailHeader({
                 <span className="text-muted-foreground font-normal"> · {expedition?.client_nom || '—'}</span>
               </h1>
               <div className="flex items-center gap-2 flex-shrink-0">
-                {valid ? (
-                  <Badge variant="secondary" className="text-xs gap-1"><Lock className="h-3 w-3" />Validée</Badge>
+                {locked ? (
+                  <Badge variant="secondary" className="text-xs gap-1"><Lock className="h-3 w-3" />Facturée</Badge>
                 ) : (
-                  <Badge className="bg-amber-400/15 text-amber-700 border border-amber-500/30 text-xs gap-1"><Clock className="h-3 w-3" />Brouillon</Badge>
+                  <Badge className="bg-amber-400/15 text-amber-700 border border-amber-500/30 text-xs gap-1"><Clock className="h-3 w-3" />Non facturée</Badge>
                 )}
                 {!!expedition?.donation && <Badge variant="secondary" className="text-xs gap-1"><Gift className="h-3 w-3" />Donation</Badge>}
                 {expedition?.date && <Badge variant="secondary" className="text-xs">{formatHfsqlDate(expedition.date)}</Badge>}
@@ -772,30 +794,62 @@ function FormelleLignesSection({
   const lignes = expedition.lignes as FormelleLigne[]
   const drawerOpen = rollDrawerLcc !== null && !isEditing
   const drawerLigne = drawerOpen ? lignes.find((l) => l.IDligne_commande_client === rollDrawerLcc) ?? null : null
+  const [showOthers, setShowOthers] = useState(false)
 
-  const totalRolls = lignes.reduce((s, l) => s + l.nb_rolls_exp, 0)
-  const totalPoids = lignes.reduce((s, l) => s + l.poids_exp, 0)
-  const totalMetrage = lignes.reduce((s, l) => s + l.metrage_exp, 0)
+  // Legacy parity: an expedition only "owns" the commande lines that have a
+  // ligne_expedition row on it (big orders ship line-by-line across many
+  // expeditions). The remaining lines are mere candidates for roll picking —
+  // shown in a collapsed secondary group, and ONLY while the expedition is
+  // still editable. On a facturée (locked) expedition you see exactly the
+  // shipped lines, like the legacy screen.
+  const onExpLines = lignes.filter((l) => l.IDligne_expedition > 0)
+  const otherLines = editable ? lignes.filter((l) => l.IDligne_expedition === 0 && l.stock_kind !== 'none') : []
+  // Keep candidates visible when nothing is shipped yet, or when the roll
+  // drawer is open on a candidate line (it drops back here after its last
+  // roll is unassigned).
+  const othersExpanded = showOthers || onExpLines.length === 0
+    || (drawerLigne !== null && drawerLigne.IDligne_expedition === 0)
+
+  const totalRolls = onExpLines.reduce((s, l) => s + l.nb_rolls_exp, 0)
+  const totalPoids = onExpLines.reduce((s, l) => s + l.poids_exp, 0)
+  const totalMetrage = onExpLines.reduce((s, l) => s + l.metrage_exp, 0)
+
+  const renderLine = (l: FormelleLigne) => (
+    <FormelleLineCard
+      key={l.IDligne_commande_client}
+      line={l}
+      isDrawerOpen={rollDrawerLcc === l.IDligne_commande_client}
+      // Open to pick rolls when editable; when locked, still open to VIEW shipped rolls.
+      clickable={!isEditing && l.stock_kind !== 'none' && (editable || l.nb_rolls_exp > 0)}
+      onClick={() => onOpenRollDrawer(rollDrawerLcc === l.IDligne_commande_client ? null : l.IDligne_commande_client)}
+    />
+  )
 
   return (
     <div className="flex-1 min-h-0 flex flex-col">
       <div className={cn('overflow-auto space-y-2 p-1 scrollbar-transparent', drawerOpen ? 'flex-shrink-0 max-h-[40%]' : 'flex-1 min-h-0')}>
-        {lignes.length === 0 ? (
+        {onExpLines.length === 0 && otherLines.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
             <Layers className="h-12 w-12 mb-3 opacity-40" />
-            <p className="text-sm">Aucune ligne sur la commande</p>
+            <p className="text-sm">Aucune ligne sur l'expédition</p>
           </div>
         ) : (
-          lignes.map((l) => (
-            <FormelleLineCard
-              key={l.IDligne_commande_client}
-              line={l}
-              isDrawerOpen={rollDrawerLcc === l.IDligne_commande_client}
-              // Open to pick rolls when editable; when locked, still open to VIEW shipped rolls.
-              clickable={!isEditing && l.stock_kind !== 'none' && (editable || l.nb_rolls_exp > 0)}
-              onClick={() => onOpenRollDrawer(rollDrawerLcc === l.IDligne_commande_client ? null : l.IDligne_commande_client)}
-            />
-          ))
+          <>
+            {onExpLines.map(renderLine)}
+            {otherLines.length > 0 && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setShowOthers((v) => !v)}
+                  className="w-full flex items-center gap-1.5 px-1 pt-2 text-xs text-muted-foreground hover:text-foreground transition-colors select-none"
+                >
+                  <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', othersExpanded && 'rotate-180')} />
+                  Autres lignes de la commande ({otherLines.length})
+                </button>
+                {othersExpanded && otherLines.map(renderLine)}
+              </>
+            )}
+          </>
         )}
       </div>
 
@@ -811,7 +865,7 @@ function FormelleLignesSection({
         </div>
       )}
 
-      {lignes.length > 0 && (
+      {onExpLines.length > 0 && (
         <div className="flex-shrink-0 mt-3 pt-3 border-t border-border/60">
           <div className="flex flex-col items-end gap-1 text-sm tabular-nums">
             <div className="flex items-center gap-6">
@@ -848,6 +902,10 @@ function FormelleLineCard({
   const iconBg = hasRolls ? 'bg-amber-400/10' : 'bg-muted'
   const iconColor = hasRolls ? 'text-amber-600' : 'text-muted-foreground'
   const typeLabel = line.stock_kind === 'fini' ? 'Fini' : line.stock_kind === 'ecru' ? 'Écru' : 'Divers'
+  // Domain glyph per stock kind: fini roll / tombé-de-métier (écru) roll — same
+  // icons as the ClientsCommandes affectation drawer. Divers lines keep Package.
+  const LineIcon = line.stock_kind === 'fini' ? FiniRollIcon : line.stock_kind === 'ecru' ? TmRollIcon : Package
+  const lineIconSize = line.stock_kind === 'none' ? 'h-3.5 w-3.5' : 'h-5 w-5'
   return (
     <div
       className={cn(
@@ -861,7 +919,7 @@ function FormelleLineCard({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <div className={cn('h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0', iconBg)}>
-            <Package className={cn('h-3.5 w-3.5', iconColor)} />
+            <LineIcon className={cn(lineIconSize, iconColor)} />
           </div>
           <div className="min-w-0">
             <p className="text-sm font-medium truncate">{line.ref_label || '—'}</p>
@@ -914,6 +972,8 @@ function RollDrawer({
   const onExp = data?.onExp ?? []
   const dispo = data?.dispo ?? []
   const dim = data?.dim ?? ligne.dim
+  const rollKind: 'ecru' | 'fini' = (data?.kind ?? ligne.stock_kind) === 'fini' ? 'fini' : 'ecru'
+  const EmptyIcon = rollKind === 'fini' ? FiniRollIcon : TmRollIcon
 
   return (
     <div className="flex flex-col h-full min-h-0 overflow-hidden bg-zinc-100/80">
@@ -935,7 +995,7 @@ function RollDrawer({
         )}
         {!isLoading && !isError && onExp.length === 0 && dispo.length === 0 && (
           <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-            <Package className="h-8 w-8 mb-2 opacity-50" />
+            <EmptyIcon className="h-8 w-8 mb-2 opacity-50" />
             <p className="text-sm font-medium">Aucun rouleau</p>
             <p className="text-xs mt-1">Aucun rouleau affecté à cette ligne de commande.</p>
           </div>
@@ -946,7 +1006,7 @@ function RollDrawer({
             <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">Sur l'expédition ({onExp.length})</h3>
             <div className="space-y-1.5">
               {onExp.map((roll) => (
-                <RollRow key={roll.id} roll={roll} dim={dim} action="unlink" disabled={!editable}
+                <RollRow key={roll.id} roll={roll} dim={dim} kind={rollKind} action="unlink" disabled={!editable}
                   onAction={() => unlinkMut.mutate(roll.id)}
                   isBusy={unlinkMut.isPending && unlinkMut.variables === roll.id} />
               ))}
@@ -960,7 +1020,7 @@ function RollDrawer({
             <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">Disponibles ({dispo.length})</h3>
             <div className="space-y-1.5">
               {dispo.map((roll) => (
-                <RollRow key={roll.id} roll={roll} dim={dim} action="link" disabled={!editable}
+                <RollRow key={roll.id} roll={roll} dim={dim} kind={rollKind} action="link" disabled={!editable}
                   onAction={() => linkMut.mutate(roll.id)}
                   isBusy={linkMut.isPending && linkMut.variables === roll.id} />
               ))}
@@ -977,10 +1037,13 @@ function RollDrawer({
 }
 
 function RollRow({
-  roll, dim, action, onAction, isBusy, disabled,
+  roll, dim, kind, action, onAction, isBusy, disabled,
 }: {
   roll: RollLite
   dim: 'metrage' | 'poids'
+  /** Drives the domain icon: fini → green FiniRollIcon, écru → TmRollIcon
+   *  (mirrors the ClientsCommandes affectation drawer). */
+  kind: 'ecru' | 'fini'
   action: 'link' | 'unlink'
   onAction: () => void
   isBusy: boolean
@@ -992,8 +1055,13 @@ function RollRow({
   const secondaryLabel = dim === 'metrage' ? 'kg' : 'Ml'
   return (
     <div className="rounded-lg border border-border/60 bg-card shadow-sm p-3 flex items-center gap-3">
-      <div className="h-8 w-8 rounded-md bg-zinc-100 flex items-center justify-center flex-shrink-0">
-        <Package className="h-4 w-4 text-muted-foreground" />
+      <div className={cn(
+        'h-10 w-10 rounded-md flex items-center justify-center flex-shrink-0',
+        kind === 'fini' ? 'bg-green-500/10' : 'bg-zinc-100',
+      )}>
+        {kind === 'fini'
+          ? <FiniRollIcon className="h-7 w-7 text-green-600" />
+          : <TmRollIcon className="h-7 w-7 text-muted-foreground" />}
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 flex-wrap">
@@ -1199,7 +1267,9 @@ function DiversLineDialog({
   )
 }
 
-// ── Right Panel: Sidebar (Info tab) + status footer ────
+// ── Right Panel: Sidebar (Info + Factures tabs) ────────
+
+type SidebarTab = 'info' | 'factures'
 
 function DetailSidebar({
   expedition, isLoading, isEditing,
@@ -1211,7 +1281,6 @@ function DetailSidebar({
   editObservation, onEditObservationChange,
   editIDClient, onEditIDClientChange,
   editRefClient, onEditRefClientChange,
-  onValidate, isValidating,
 }: {
   expedition: ExpeditionDetail | null
   isLoading: boolean
@@ -1224,9 +1293,8 @@ function DetailSidebar({
   editObservation: string; onEditObservationChange: (v: string) => void
   editIDClient: number; onEditIDClientChange: (v: number) => void
   editRefClient: string; onEditRefClientChange: (v: string) => void
-  onValidate: (v: boolean) => void
-  isValidating: boolean
 }) {
+  const [activeTab, setActiveTab] = useState<SidebarTab>('info')
   // Lookups (loaded only in edit mode).
   const { data: transporteurs } = useQuery<TransporteurLite[]>({
     queryKey: ['exp-transporteurs'], queryFn: () => apiFetch('/expeditions/lookups/transporteurs'), enabled: isEditing,
@@ -1252,32 +1320,89 @@ function DetailSidebar({
   )
   if (!expedition) return null
 
+  const tabs: { key: SidebarTab; label: string; icon: ComponentType<{ className?: string }> }[] = [
+    { key: 'info', label: 'Info', icon: Info },
+    { key: 'factures', label: 'Factures', icon: Receipt },
+  ]
+
   return (
     <div className="w-96 flex-shrink-0 flex flex-col gap-3 min-h-0">
       <div className="flex-1 min-h-0 rounded-xl border flex flex-col overflow-hidden bg-zinc-100/80">
         <div className="flex border-b p-1 gap-1 rounded-t-xl bg-zinc-200/50">
-          <div className="flex-1 flex items-center justify-center gap-1.5 px-2 py-2 text-sm font-medium rounded-md bg-accent text-accent-foreground shadow-sm">
-            <Info className="h-3.5 w-3.5" />Info
-          </div>
+          {tabs.map((t) => {
+            const TabIcon = t.icon
+            const active = activeTab === t.key
+            return (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => setActiveTab(t.key)}
+                className={cn(
+                  'flex-1 flex items-center justify-center gap-1.5 px-2 py-2 text-sm font-medium rounded-md transition-colors',
+                  active ? 'bg-accent text-accent-foreground shadow-sm' : 'text-muted-foreground hover:bg-accent/10',
+                )}
+              >
+                <TabIcon className="h-3.5 w-3.5" />{t.label}
+              </button>
+            )
+          })}
         </div>
         <div className="flex-1 overflow-y-auto p-3 space-y-3 scrollbar-transparent">
-          <InfoTab
-            expedition={expedition} isEditing={isEditing}
-            transporteurs={transporteurs ?? []} adresses={adresses ?? []} contacts={contacts ?? []} clients={clients ?? []}
-            editDate={editDate} onEditDateChange={onEditDateChange}
-            editIDTransporteur={editIDTransporteur} onEditIDTransporteurChange={onEditIDTransporteurChange}
-            editIDAdresse={editIDAdresse} onEditIDAdresseChange={onEditIDAdresseChange}
-            editIDContact={editIDContact} onEditIDContactChange={onEditIDContactChange}
-            editDonation={editDonation} onEditDonationChange={onEditDonationChange}
-            editObservation={editObservation} onEditObservationChange={onEditObservationChange}
-            editIDClient={editIDClient} onEditIDClientChange={onEditIDClientChange}
-            editRefClient={editRefClient} onEditRefClientChange={onEditRefClientChange}
-          />
+          {activeTab === 'info' ? (
+            <InfoTab
+              expedition={expedition} isEditing={isEditing}
+              transporteurs={transporteurs ?? []} adresses={adresses ?? []} contacts={contacts ?? []} clients={clients ?? []}
+              editDate={editDate} onEditDateChange={onEditDateChange}
+              editIDTransporteur={editIDTransporteur} onEditIDTransporteurChange={onEditIDTransporteurChange}
+              editIDAdresse={editIDAdresse} onEditIDAdresseChange={onEditIDAdresseChange}
+              editIDContact={editIDContact} onEditIDContactChange={onEditIDContactChange}
+              editDonation={editDonation} onEditDonationChange={onEditDonationChange}
+              editObservation={editObservation} onEditObservationChange={onEditObservationChange}
+              editIDClient={editIDClient} onEditIDClientChange={onEditIDClientChange}
+              editRefClient={editRefClient} onEditRefClientChange={onEditRefClientChange}
+            />
+          ) : (
+            <FacturesTab factures={expedition.factures} />
+          )}
         </div>
       </div>
-
-      <StatusFooter valid={expedition.est_valide === 1} onToggle={() => onValidate(expedition.est_valide !== 1)} isToggling={isValidating} disabled={isEditing} />
     </div>
+  )
+}
+
+// ── Factures tab — definitive factures attached to the shipment ──
+
+function FacturesTab({ factures }: { factures: FactureRef[] }) {
+  if (factures.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+        <Receipt className="h-10 w-10 mb-2 opacity-40" />
+        <p className="text-sm">Aucune facture rattachée</p>
+        <p className="text-xs mt-1 text-center">L'expédition reste modifiable tant qu'aucune facture définitive n'y est rattachée.</p>
+      </div>
+    )
+  }
+  return (
+    <>
+      {factures.map((f) => (
+        <div key={f.IDfacture} className="p-3 rounded-lg border bg-card shadow-sm">
+          <div className="flex items-center gap-2">
+            <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-green-500/10">
+              <Receipt className="h-3.5 w-3.5 text-green-600" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium truncate">
+                {f.type === 2 ? 'Avoir' : 'Facture'} N° {f.numero ?? f.IDfacture}
+              </p>
+              {f.date && <p className="text-[11px] text-muted-foreground">{formatHfsqlDate(f.date)}</p>}
+            </div>
+            <Badge variant="secondary" className="text-[10px] py-0 gap-1 flex-shrink-0">
+              <Lock className="h-2.5 w-2.5" />Définitive
+            </Badge>
+          </div>
+        </div>
+      ))}
+    </>
   )
 }
 
@@ -1347,7 +1472,6 @@ function InfoTab({
             <KV label="Donation" value={isEditing ? (
               <ToggleSwitch value={editDonation === 1} onChange={(v) => onEditDonationChange(v ? 1 : 0)} />
             ) : (expedition.donation ? 'Oui' : 'Non')} />
-            {!!expedition.est_facture && <KV label="Facturée" value="Oui" />}
           </>
         )}
       </div>
@@ -1374,40 +1498,6 @@ function InfoTab({
           )}
         </div>
       )}
-    </div>
-  )
-}
-
-// ── Status footer pill (mps_designer §29.3 binary) ─────
-
-function StatusFooter({
-  valid, onToggle, isToggling, disabled,
-}: {
-  valid: boolean
-  onToggle: () => void
-  isToggling: boolean
-  disabled: boolean
-}) {
-  const Icon = valid ? CheckCircle2 : Clock
-  const label = valid ? 'Validée' : 'Brouillon'
-  const actionLabel = valid ? 'Rouvrir' : 'Valider'
-  const ActionIcon = valid ? Clock : CheckCircle2
-  return (
-    <div className={cn('flex-shrink-0 rounded-xl border shadow-sm overflow-hidden flex items-stretch h-11', valid ? 'bg-success border-success' : 'bg-primary border-primary')}>
-      <div className="flex items-center gap-2 px-3 flex-1 text-white min-w-0">
-        <Icon className="h-4 w-4 flex-shrink-0" />
-        <span className="text-sm font-bold uppercase tracking-wide truncate">{label}</span>
-      </div>
-      <button
-        type="button"
-        onClick={onToggle}
-        disabled={disabled || isToggling}
-        title={valid ? 'Rouvrir l\'expédition' : 'Valider l\'expédition'}
-        className="px-3.5 bg-white/15 hover:bg-white/25 active:bg-white/30 disabled:bg-white/5 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-semibold border-l border-white/25 flex items-center gap-1.5 transition-colors"
-      >
-        {isToggling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ActionIcon className="h-3.5 w-3.5" />}
-        {actionLabel}
-      </button>
     </div>
   )
 }
