@@ -34,6 +34,7 @@ import {
   Hourglass,
   Mail,
   ClipboardList,
+  Truck,
 } from 'lucide-react'
 import { KnitIcon } from '@/components/icons/KnitIcon'
 import { TmRollIcon } from '@/components/icons/TmRollIcon'
@@ -117,6 +118,9 @@ interface AffectationPayload {
   unite_label: string
   dim: 'metrage' | 'poids'
   target_qty: number
+  /** Combined affecté (rolls + écru×rendement + tricotage allocations) in the
+   *  line's dim — the "854 / 800 Ml" legacy gauge. */
+  affecte_total: number
   linked: RollLite[]
   available: RollLite[]
 }
@@ -975,6 +979,8 @@ function LignesSection({
               key={drawerLigne.IDligne_commande_client}
               commandeId={commande.IDcommande_client}
               ligne={drawerLigne}
+              clientNom={commande.client_nom}
+              soldee={Number(commande.est_soldee) === 1}
               onClose={() => onOpenAffectation(null)}
               onSuccess={onMutationSuccess}
             />
@@ -1114,10 +1120,14 @@ function LineCard({
 // ── Affectation drawer (reserve écru/fini rolls) ────────
 
 function AffectationDrawer({
-  commandeId, ligne, onClose, onSuccess,
+  commandeId, ligne, clientNom, soldee = false, onClose, onSuccess,
 }: {
   commandeId: number
   ligne: LigneCommande
+  clientNom?: string
+  /** Commande terminée (est_soldee) → the Affectation tab goes read-only:
+   *  no available pool, no affect/remove/ship, no observation edits. */
+  soldee?: boolean
   onClose: () => void
   onSuccess: () => void
 }) {
@@ -1167,12 +1177,39 @@ function AffectationDrawer({
     { key: 'affectation', label: 'Affectation', icon: Package },
     ...(ligne.type === 2 ? [{ key: 'enno' as const, label: 'Ennoblissement', icon: Droplets }] : []),
     ...(supplyEnabled ? [{ key: 'trico' as const, label: 'Tricotage', icon: KnitIcon }] : []),
+    ...(supplyEnabled ? [{ key: 'exped' as const, label: 'Expédition', icon: Truck }] : []),
   ]
   const [tab, setTab] = useState<SupplyTab>('affectation')
   // Ennoblissement row clicked → open the roll-affectation modal for that dyer order.
   const [ennoTarget, setEnnoTarget] = useState<SupplyEnnoRow | null>(null)
+  // Tricotage row clicked → adjust this line's planning allocation on that knitting order.
+  const [tricoTarget, setTricoTarget] = useState<SupplyTricoRow | null>(null)
   // "Nouvelle commande" on a location row → open the create-order modal scoped to it.
   const [createEnnoLocation, setCreateEnnoLocation] = useState<EnnoLocationRow | null>(null)
+  // "Nouvelle commande" on a stock-fil location band → knit-order modal
+  // scoped to that tricoteur (legacy "Commande de Tricotage Malterre" modal,
+  // generalized to any knitter holding matching yarn).
+  const [createTricoLocation, setCreateTricoLocation] = useState<TricoStockFilLocation | null>(null)
+
+  // Quick-ship (legacy Affectation tab "Expédier"): select affected rolls →
+  // one new expedition carrying them, then jump to the Expédition tab.
+  const [shipSel, setShipSel] = useState<Set<number>>(new Set())
+  const [confirmShip, setConfirmShip] = useState(false)
+  const shipMut = useMutation({
+    mutationFn: (stockIds: number[]) =>
+      apiFetch(`/commandes-client/${commandeId}/lignes/${ligne.IDligne_commande_client}/expedier`, {
+        method: 'POST',
+        body: JSON.stringify({ stockIds }),
+      }),
+    onSuccess: () => {
+      setConfirmShip(false)
+      setShipSel(new Set())
+      queryClient.invalidateQueries({ queryKey })
+      queryClient.invalidateQueries({ queryKey: ['commande-client-line-expeditions', commandeId, ligne.IDligne_commande_client] })
+      onSuccess()
+      setTab('exped')
+    },
+  })
 
   // Tombé-de-métier (écru) of this ref available, aggregated by sous-traitant
   // location — the legacy "029 - écru disponible" panel below the orders table.
@@ -1195,8 +1232,20 @@ function AffectationDrawer({
   const dim = data?.dim ?? 'poids'
   const uniteLabel = data?.unite_label ?? ligne.unite_label
   const target = data?.target_qty ?? (Number(ligne.quantite) || 0)
-  const reserved = linked.reduce((s, r) => s + (dim === 'metrage' ? (Number(r.metrage) || 0) : (Number(r.poids) || 0)), 0)
-  const pct = target > 0 ? Math.min(100, (reserved / target) * 100) : 0
+  // Combined affecté (rolls + écru at the dyer × rendement + tricotage
+  // allocations) — the legacy "854 / 800 Ml" gauge, computed server-side.
+  const reserved = data?.affecte_total ?? linked.reduce((s, r) => s + (dim === 'metrage' ? (Number(r.metrage) || 0) : (Number(r.poids) || 0)), 0)
+
+  // Shippable = affected rolls not already on an expedition. The selection is
+  // re-filtered against the live payload so a refetch can't leave stale ids.
+  const shippable = linked.filter((r) => !r.expedie)
+  const shipSelected = shippable.filter((r) => shipSel.has(r.id))
+  const shipQty = shipSelected.reduce((s, r) => s + (dim === 'metrage' ? (Number(r.metrage) || 0) : (Number(r.poids) || 0)), 0)
+  const toggleShip = (id: number) => setShipSel((prev) => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  })
 
   return (
     <>
@@ -1230,20 +1279,13 @@ function AffectationDrawer({
 
       {tab === 'affectation' && (
         <>
-          {/* Affectation progress */}
-          <div className="flex-shrink-0 px-3 py-2 border-b bg-zinc-200/30">
-            <div className="flex items-center justify-between text-[11px] font-medium tabular-nums mb-1">
-              <span className="text-muted-foreground uppercase tracking-wide">Stock affecté</span>
-              <span className={cn(pct >= 99.9 ? 'text-green-600' : 'text-foreground')}>
-                {fmtNum(reserved, 1)} / {fmtNum(target, 1)} {uniteLabel}
-              </span>
-            </div>
-            <div className="h-1.5 rounded-full bg-white overflow-hidden">
-              <div className={cn('h-full rounded-full transition-all', pct >= 99.9 ? 'bg-green-500' : 'bg-accent')} style={{ width: `${pct}%` }} />
-            </div>
-          </div>
-
           <div className="flex-1 overflow-y-auto p-3 space-y-4 scrollbar-transparent">
+            {soldee && (
+              <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border/60 bg-zinc-200/40 text-[11px] text-muted-foreground">
+                <Lock className="h-3.5 w-3.5 flex-shrink-0" />
+                Commande terminée — affectation en lecture seule.
+              </div>
+            )}
             {isLoading && (
               <div className="space-y-2">{[1, 2, 3].map((i) => <div key={i} className="h-14 bg-muted animate-pulse rounded-lg" />)}</div>
             )}
@@ -1252,11 +1294,11 @@ function AffectationDrawer({
                 <AlertCircle className="h-6 w-6 mb-2" /><p className="text-sm">Erreur de chargement</p>
               </div>
             )}
-            {!isLoading && !isError && linked.length === 0 && available.length === 0 && (
+            {!isLoading && !isError && linked.length === 0 && (soldee || available.length === 0) && (
               <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
                 <Package className="h-8 w-8 mb-2 opacity-50" />
-                <p className="text-sm font-medium">Aucun rouleau en stock</p>
-                <p className="text-xs mt-1">Aucun rouleau correspondant à cette référence n'est disponible.</p>
+                <p className="text-sm font-medium">{soldee ? 'Aucun rouleau affecté' : 'Aucun rouleau en stock'}</p>
+                {!soldee && <p className="text-xs mt-1">Aucun rouleau correspondant à cette référence n'est disponible.</p>}
               </div>
             )}
 
@@ -1269,15 +1311,20 @@ function AffectationDrawer({
                   {linked.map((roll) => (
                     <RollRow key={roll.id} roll={roll} dim={dim} action="unlink"
                       kind={kind === 'fini' ? 'fini' : 'ecru'}
-                      onEditObs={() => setEditObsRoll(roll)}
+                      readOnly={soldee}
+                      onEditObs={soldee ? undefined : () => setEditObsRoll(roll)}
                       onAction={() => unlinkMut.mutate(roll.id)}
-                      isBusy={unlinkMut.isPending && unlinkMut.variables === roll.id} />
+                      isBusy={unlinkMut.isPending && unlinkMut.variables === roll.id}
+                      selected={!soldee && !roll.expedie && shipSel.has(roll.id)}
+                      onToggleSelect={soldee || roll.expedie ? undefined : () => toggleShip(roll.id)} />
                   ))}
                 </div>
               </section>
             )}
 
-            {available.length > 0 && (
+            {/* Terminée → the available pool disappears: nothing can be
+                affected anymore, the tab is a record of what shipped. */}
+            {!soldee && available.length > 0 && (
               <section>
                 <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
                   Stock disponible ({available.length})
@@ -1294,10 +1341,37 @@ function AffectationDrawer({
               </section>
             )}
 
-            {!isLoading && !isError && linked.length > 0 && available.length === 0 && (
+            {!soldee && !isLoading && !isError && linked.length > 0 && available.length === 0 && (
               <p className="text-xs text-muted-foreground italic text-center">Aucun rouleau supplémentaire disponible.</p>
             )}
           </div>
+
+          {/* Quick-ship bar (legacy "Expédier"): select affected rolls above,
+              ship them on a brand-new expedition. */}
+          {!soldee && shippable.length > 0 && (
+            <div className="flex-shrink-0 px-3 py-2 border-t bg-zinc-200/50 flex items-center gap-2">
+              <div className="flex items-center gap-1">
+                <button type="button" onClick={() => setShipSel(new Set(shippable.map((r) => r.id)))}
+                  disabled={shipMut.isPending || shipSelected.length === shippable.length}
+                  className="text-[11px] text-accent hover:underline disabled:text-muted-foreground/50 disabled:no-underline disabled:cursor-default px-1">Tout</button>
+                <span className="text-muted-foreground/40 text-[11px]">·</span>
+                <button type="button" onClick={() => setShipSel(new Set())}
+                  disabled={shipMut.isPending || shipSelected.length === 0}
+                  className="text-[11px] text-muted-foreground hover:text-foreground disabled:text-muted-foreground/40 disabled:cursor-default px-1">Aucun</button>
+              </div>
+              <p className="text-[11px] text-muted-foreground tabular-nums ml-auto whitespace-nowrap">
+                {shipSelected.length > 0
+                  ? `${shipSelected.length} rouleau${shipSelected.length > 1 ? 'x' : ''} · ${fmtNum(shipQty, 1)} ${uniteLabel}`
+                  : 'Aucun rouleau sélectionné'}
+              </p>
+              <Button size="sm" onClick={() => setConfirmShip(true)} disabled={shipSelected.length === 0 || shipMut.isPending} className="flex-shrink-0">
+                {shipMut.isPending
+                  ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                  : <Truck className="h-3.5 w-3.5 mr-1.5" />}
+                Expédier
+              </Button>
+            </div>
+          )}
         </>
       )}
 
@@ -1319,8 +1393,8 @@ function AffectationDrawer({
                 { key: 'sst', label: 'Ennoblisseur', align: 'left', render: (r) => r.sous_traitant_nom || '—' },
                 { key: 'dl', label: 'Délai', align: 'left', render: (r) => fmtSupplyDate(r.date_livraison) },
                 { key: 'et', label: 'État', align: 'left', render: (r) => <SupplyEtatPill label={r.etat_label} /> },
-                { key: 'di', label: 'Disponible', align: 'right', render: (r) => <span className="font-semibold">{fmtNum(r.qte_disponible, 1)} ml</span> },
-                { key: 'af', label: 'Affecté', align: 'right', render: (r) => <span className="font-semibold">{fmtNum(r.qte_affecte, 1)} ml</span> },
+                { key: 'di', label: 'Disponible', align: 'right', render: (r) => <span className="font-semibold">{fmtNum(r.qte_disponible, 1)} Ml</span> },
+                { key: 'af', label: 'Affecté', align: 'right', render: (r) => <span className="font-semibold">{fmtNum(r.qte_affecte, 1)} Ml</span> },
               ]}
             />
           </section>
@@ -1351,6 +1425,7 @@ function AffectationDrawer({
               rows={supply?.tricotage ?? []}
               emptyLabel="Aucune commande tricotage en cours"
               emptyIcon={KnitIcon}
+              onRowClick={setTricoTarget}
               columns={[
                 { key: 'no', label: 'N°', align: 'left', render: (r) => <span className="tabular-nums font-medium">{r.commande_id}</span> },
                 { key: 'dc', label: 'Date', align: 'left', render: (r) => fmtSupplyDate(r.date_commande) },
@@ -1358,7 +1433,7 @@ function AffectationDrawer({
                 { key: 'dl', label: 'Délai', align: 'left', render: (r) => fmtSupplyDate(r.date_livraison) },
                 { key: 'di', label: 'Poids dispo.', align: 'right', render: (r) => `${fmtNum(r.poids_disponible, 1)} Kg` },
                 { key: 'af', label: 'Poids affecté', align: 'right', render: (r) => `${fmtNum(r.poids_affecte, 1)} Kg` },
-                { key: 'mp', label: 'Métrage pot.', align: 'right', render: (r) => <span className="font-semibold">{fmtNum(r.metrage_potentiel, 0)} ml</span> },
+                { key: 'mp', label: 'Métrage pot.', align: 'right', render: (r) => <span className="font-semibold">{fmtNum(r.metrage_potentiel, 0)} Ml</span> },
               ]}
             />
           </section>
@@ -1369,9 +1444,21 @@ function AffectationDrawer({
                 ? `${stockFil.ecru_ref_label} — stock de fil disponible`
                 : 'Stock de fil disponible'}
             </h3>
-            <StockFilDispoTable loading={stockFilLoading} locations={stockFil?.locations ?? []} />
+            <StockFilDispoTable
+              loading={stockFilLoading}
+              locations={stockFil?.locations ?? []}
+              onNewOrder={setCreateTricoLocation}
+            />
           </section>
         </div>
+      )}
+
+      {tab === 'exped' && (
+        <ExpeditionTab
+          commandeId={commandeId}
+          ligneId={ligne.IDligne_commande_client}
+          kind={kind === 'fini' ? 'fini' : 'ecru'}
+        />
       )}
     </div>
     {editObsRoll && (kind === 'ecru' || kind === 'fini') && (
@@ -1392,11 +1479,38 @@ function AffectationDrawer({
         onSuccess={onSuccess}
       />
     )}
+    {tricoTarget && (
+      <TricotageAffectationDialog
+        commandeId={commandeId}
+        ligneId={ligne.IDligne_commande_client}
+        row={tricoTarget}
+        clientNom={clientNom}
+        reserved={reserved}
+        target={target}
+        dim={dim}
+        uniteLabel={uniteLabel}
+        rendement={stockFil?.rendement ?? 0}
+        refLabel={ligne.ref_label}
+        onClose={() => setTricoTarget(null)}
+        onSuccess={() => {
+          // The allocation feeds the supply table AND the line's combined
+          // affecté gauge (pieces payload).
+          queryClient.invalidateQueries({ queryKey: ['commande-client-supply', commandeId, ligne.IDligne_commande_client] })
+          queryClient.invalidateQueries({ queryKey })
+          onSuccess()
+        }}
+      />
+    )}
     {createEnnoLocation && (
       <CreateEnnoblisseurOrderDialog
         commandeId={commandeId}
         ligne={ligne}
         location={createEnnoLocation}
+        clientNom={clientNom}
+        reserved={reserved}
+        target={target}
+        dim={dim}
+        uniteLabel={uniteLabel}
         onClose={() => setCreateEnnoLocation(null)}
         onSuccess={() => {
           // Refresh the orders table + the affectation panel (new affected
@@ -1408,11 +1522,41 @@ function AffectationDrawer({
         }}
       />
     )}
+    <ConfirmDialog
+      open={confirmShip}
+      variant="default"
+      title="Expédier les rouleaux"
+      description={`Créer une expédition avec ${shipSelected.length} rouleau${shipSelected.length > 1 ? 'x' : ''} (${fmtNum(shipQty, 1)} ${uniteLabel}) pour cette commande ?`}
+      confirmLabel="Expédier"
+      isPending={shipMut.isPending}
+      onCancel={() => setConfirmShip(false)}
+      onConfirm={() => shipMut.mutate(shipSelected.map((r) => r.id))}
+    />
+    {createTricoLocation && (
+      <CreateTricotageOrderDialog
+        commandeId={commandeId}
+        ligne={ligne}
+        location={createTricoLocation}
+        clientNom={clientNom}
+        reserved={reserved}
+        target={target}
+        dim={dim}
+        uniteLabel={uniteLabel}
+        onClose={() => setCreateTricoLocation(null)}
+        onSuccess={() => {
+          // New knit order + its allocation land in the supply table; the yarn
+          // reservations change the stock-fil panel too.
+          queryClient.invalidateQueries({ queryKey: ['commande-client-supply', commandeId, ligne.IDligne_commande_client] })
+          queryClient.invalidateQueries({ queryKey: ['commande-client-trico-stockfil', commandeId, ligne.IDligne_commande_client] })
+          onSuccess()
+        }}
+      />
+    )}
     </>
   )
 }
 
-type SupplyTab = 'affectation' | 'enno' | 'trico'
+type SupplyTab = 'affectation' | 'enno' | 'trico' | 'exped'
 
 function fmtSupplyDate(d: string | null): string {
   return d && d.length === 8 && d !== '00000000' ? formatHfsqlDate(d) : '—'
@@ -1421,7 +1565,7 @@ function fmtSupplyDate(d: string | null): string {
 // Compact table for the supply tabs (ennoblissement / tricotage). Generic over
 // the row shape; columns describe their own rendering + alignment.
 function SupplyTable<T extends { id: number }>({
-  loading, rows, columns, emptyLabel, emptyIcon: EmptyIcon, onRowClick,
+  loading, rows, columns, emptyLabel, emptyIcon: EmptyIcon, onRowClick, selectedId,
 }: {
   loading: boolean
   rows: T[]
@@ -1429,6 +1573,7 @@ function SupplyTable<T extends { id: number }>({
   emptyLabel: string
   emptyIcon: ComponentType<{ className?: string }>
   onRowClick?: (r: T) => void
+  selectedId?: number | null
 }) {
   if (loading) {
     return <div className="space-y-2">{[1, 2, 3].map((i) => <div key={i} className="h-10 bg-muted animate-pulse rounded-md" />)}</div>
@@ -1461,6 +1606,7 @@ function SupplyTable<T extends { id: number }>({
               className={cn(
                 'border-b border-border/40 last:border-0',
                 onRowClick ? 'cursor-pointer hover:bg-accent/10' : 'hover:bg-accent/5',
+                selectedId === r.id && 'bg-accent/10',
               )}
             >
               {columns.map((c) => (
@@ -1477,7 +1623,7 @@ function SupplyTable<T extends { id: number }>({
 }
 
 function RollRow({
-  roll, dim, action, onAction, isBusy, kind = 'ecru', onEditObs,
+  roll, dim, action, onAction, isBusy, kind = 'ecru', onEditObs, selected, onToggleSelect, readOnly = false,
 }: {
   roll: RollLite
   dim: 'metrage' | 'poids'
@@ -1489,14 +1635,36 @@ function RollRow({
   kind?: 'ecru' | 'fini'
   /** When set, a pencil opens the observations edit dialog for this roll. */
   onEditObs?: () => void
+  /** Quick-ship selection (Affectation tab): when onToggleSelect is set the
+   *  row shows a checkbox and highlights when selected. */
+  selected?: boolean
+  onToggleSelect?: () => void
+  /** Commande terminée: display only — no action button. */
+  readOnly?: boolean
 }) {
   const primary = dim === 'metrage' ? Number(roll.metrage) || 0 : Number(roll.poids) || 0
   const primaryLabel = dim === 'metrage' ? 'Ml' : 'kg'
   const secondary = dim === 'metrage' ? Number(roll.poids) || 0 : Number(roll.metrage) || 0
   const secondaryLabel = dim === 'metrage' ? 'kg' : 'Ml'
   return (
-    <div className="rounded-lg border border-border/60 bg-card shadow-sm p-3">
+    <div className={cn(
+      'rounded-lg border border-border/60 bg-card shadow-sm p-3',
+      selected && 'border-accent ring-1 ring-accent bg-accent/[0.06]',
+    )}>
       <div className="flex items-center gap-3">
+        {onToggleSelect && (
+          <button
+            type="button"
+            onClick={onToggleSelect}
+            title={selected ? 'Retirer de la sélection' : 'Sélectionner pour expédition'}
+            className={cn(
+              'h-5 w-5 rounded flex items-center justify-center flex-shrink-0 border transition-colors',
+              selected ? 'bg-accent border-accent text-accent-foreground' : 'border-input bg-background hover:border-accent/60',
+            )}
+          >
+            {selected && <CheckCircle2 className="h-3.5 w-3.5" />}
+          </button>
+        )}
         <div className={cn(
           'h-10 w-10 rounded-md flex items-center justify-center flex-shrink-0',
           kind === 'fini' ? 'bg-green-500/10' : 'bg-zinc-100',
@@ -1530,8 +1698,9 @@ function RollRow({
           </Button>
         )}
         {/* A shipped roll's affectation is locked (the expedition owns it) —
-            no "Retirer"; the état pill already says why. */}
-        {!(action === 'unlink' && roll.expedie) && (
+            no "Retirer"; the état pill already says why. Read-only mode
+            (commande terminée) hides the action entirely. */}
+        {!readOnly && !(action === 'unlink' && roll.expedie) && (
           <Button size="sm" variant={action === 'link' ? 'default' : 'outline'} onClick={onAction} disabled={isBusy} className="flex-shrink-0">
             {isBusy ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
               : action === 'link' ? <Link2 className="h-3.5 w-3.5 mr-1.5" /> : <Unlink className="h-3.5 w-3.5 mr-1.5" />}
@@ -1548,6 +1717,146 @@ function RollRow({
           defautText={roll.observation_sst}
         />
       </div>
+    </div>
+  )
+}
+
+// ── Expédition tab (legacy "Gestion ligne de commande" Expédition) ──
+// Expeditions carrying this line's rolls; clicking one shows its rolls and
+// the shipment info (transporteur, adresse, état).
+
+interface LineExpeditionRoll {
+  id: number
+  numero: string | null
+  lot: string | null
+  poids: number
+  metrage: number
+  magasin_nom: string | null
+}
+interface LineExpedition {
+  IDexpedition: number
+  date: string | null
+  est_valide: number
+  est_facture: number
+  inclure_rapport: number
+  transporteur_nom: string
+  adresse_nom: string
+  adresse_ville: string
+  nb_rolls: number
+  poids: number
+  metrage: number
+  rolls: LineExpeditionRoll[]
+}
+interface LineExpeditionsPayload {
+  dim: 'metrage' | 'poids'
+  unite_label: string
+  expeditions: LineExpedition[]
+}
+
+function ExpeditionTab({
+  commandeId, ligneId, kind,
+}: {
+  commandeId: number
+  ligneId: number
+  kind: 'ecru' | 'fini'
+}) {
+  const { data, isLoading } = useQuery<LineExpeditionsPayload>({
+    queryKey: ['commande-client-line-expeditions', commandeId, ligneId],
+    queryFn: () => apiFetch(`/commandes-client/${commandeId}/lignes/${ligneId}/expeditions`),
+  })
+  const exps = useMemo(() => data?.expeditions ?? [], [data])
+  const dim = data?.dim ?? 'metrage'
+  const [selId, setSelId] = useState<number | null>(null)
+  const sel = exps.find((e) => e.IDexpedition === selId) ?? exps[0] ?? null
+  const RollIcon = kind === 'fini' ? FiniRollIcon : TmRollIcon
+
+  return (
+    <div className="flex-1 overflow-y-auto p-3 space-y-4 scrollbar-transparent">
+      <section>
+        <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
+          Expéditions de la ligne
+        </h3>
+        <SupplyTable
+          loading={isLoading}
+          rows={exps.map((e) => ({ ...e, id: e.IDexpedition }))}
+          emptyLabel="Aucune expédition pour cette ligne"
+          emptyIcon={Truck}
+          onRowClick={(r) => setSelId(r.IDexpedition)}
+          selectedId={sel?.IDexpedition ?? null}
+          columns={[
+            { key: 'no', label: 'N°', align: 'left', render: (r) => <span className="tabular-nums font-medium">{r.IDexpedition}</span> },
+            { key: 'dt', label: 'Date', align: 'left', render: (r) => fmtSupplyDate(r.date) },
+            { key: 'tr', label: 'Transporteur', align: 'left', render: (r) => r.transporteur_nom || '—' },
+            {
+              key: 'et', label: 'État', align: 'left', render: (r) => (
+                r.est_facture
+                  ? <Badge variant="outline" className="text-[10px] py-0 gap-1 border text-white bg-success border-success">Facturée</Badge>
+                  : <Badge variant="outline" className="text-[10px] py-0 gap-1 border text-white bg-primary border-primary">Non facturée</Badge>
+              ),
+            },
+            { key: 'nb', label: 'Rouleaux', align: 'right', render: (r) => <span>{r.nb_rolls}</span> },
+            {
+              key: 'q', label: dim === 'metrage' ? 'Métrage' : 'Poids', align: 'right',
+              render: (r) => <span className="font-semibold">{dim === 'metrage' ? `${fmtNum(r.metrage, 1)} Ml` : `${fmtNum(r.poids, 1)} kg`}</span>,
+            },
+          ]}
+        />
+      </section>
+
+      {sel && (
+        <section>
+          <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
+            Expédition N° {sel.IDexpedition} — {sel.nb_rolls} rouleau{sel.nb_rolls > 1 ? 'x' : ''}
+          </h3>
+          {/* Shipment info (legacy right-hand "Informations" panel, condensed) */}
+          <div className="rounded-lg border border-border/60 bg-card shadow-sm p-2.5 mb-2 flex items-center gap-4 text-[11px] text-muted-foreground flex-wrap">
+            <span className="inline-flex items-center gap-1.5">
+              <Truck className="h-3.5 w-3.5 text-accent" />
+              {sel.transporteur_nom || 'Transporteur non défini'}
+            </span>
+            {(sel.adresse_nom || sel.adresse_ville) && (
+              <span className="inline-flex items-center gap-1.5 min-w-0">
+                <MapPin className="h-3.5 w-3.5 text-accent flex-shrink-0" />
+                <span className="truncate">{[sel.adresse_nom, sel.adresse_ville].filter(Boolean).join(' · ')}</span>
+              </span>
+            )}
+            {!!sel.inclure_rapport && (
+              <span className="inline-flex items-center gap-1.5">
+                <ClipboardList className="h-3.5 w-3.5 text-accent" />Rapport de contrôle inclus
+              </span>
+            )}
+          </div>
+          <div className="rounded-lg border border-border/60 bg-card shadow-sm overflow-hidden">
+            <table className="w-full text-xs">
+              <thead className="bg-zinc-200/60 border-b border-border/60">
+                <tr className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                  <th className="px-2.5 py-2 font-semibold text-left w-full">Numéro</th>
+                  <th className="px-2.5 py-2 font-semibold text-left">Lot</th>
+                  <th className="px-2.5 py-2 font-semibold text-right">Métrage</th>
+                  <th className="px-2.5 py-2 font-semibold text-right">Poids</th>
+                  <th className="px-2.5 py-2 font-semibold text-left">Magasin</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sel.rolls.map((r) => (
+                  <tr key={r.id} className="border-b border-border/40 last:border-0 hover:bg-accent/5">
+                    <td className="px-2.5 py-1.5 whitespace-nowrap">
+                      <span className="inline-flex items-center gap-1.5 font-medium">
+                        <RollIcon className={cn('h-4 w-4 flex-shrink-0', kind === 'fini' ? 'text-green-600' : 'text-muted-foreground')} />
+                        {r.numero || `#${r.id}`}
+                      </span>
+                    </td>
+                    <td className="px-2.5 py-1.5 whitespace-nowrap tabular-nums">{r.lot || '—'}</td>
+                    <td className="px-2.5 py-1.5 whitespace-nowrap text-right tabular-nums">{r.metrage > 0 ? `${fmtNum(r.metrage, 1)} Ml` : '—'}</td>
+                    <td className="px-2.5 py-1.5 whitespace-nowrap text-right tabular-nums">{r.poids > 0 ? `${fmtNum(r.poids, 1)} kg` : '—'}</td>
+                    <td className="px-2.5 py-1.5 whitespace-nowrap truncate max-w-[140px]">{r.magasin_nom || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
     </div>
   )
 }
@@ -1726,6 +2035,127 @@ function EnnoblissementAffectationDialog({
   )
 }
 
+// ── Tricotage affectation modal ─────────────────────────
+// Click a "Commandes tricoteur en cours" row → adjust the planning allocation
+// (affectation_cmd_tricotage) of that knitting order to this client line.
+// Knitting counterpart of the ennoblissement roll-transfer modal: here the
+// allocation is a weight, not rolls (production hasn't happened yet).
+
+function TricotageAffectationDialog({
+  commandeId, ligneId, row, clientNom, reserved, target, dim, uniteLabel, rendement, refLabel, onClose, onSuccess,
+}: {
+  commandeId: number
+  ligneId: number
+  row: SupplyTricoRow
+  clientNom?: string
+  /** Combined affecté already on the line / commanded qty, in the line's dim. */
+  reserved: number
+  target: number
+  dim: 'metrage' | 'poids'
+  uniteLabel: string
+  rendement: number
+  refLabel?: string | null
+  onClose: () => void
+  onSuccess: () => void
+}) {
+  const current = Number(row.poids_affecte) || 0
+  const [valueStr, setValueStr] = useState(() => (current !== 0 ? String(current) : ''))
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const parsed = parseFloat(valueStr.replace(',', '.'))
+  const value = Number.isFinite(parsed) ? parsed : 0
+  const delta = value - current
+  // Live remaining on the knitting order (its dispo already excludes the
+  // current allocation, so only the delta moves it).
+  const dispoLive = Math.round(((Number(row.poids_disponible) || 0) - delta) * 100) / 100
+  const over = dispoLive < -0.005
+  const projected = dim === 'metrage' ? reserved + delta * rendement : reserved + delta
+  const canSubmit = !busy && !over && Math.abs(delta) > 0.0001
+
+  const handleSubmit = async () => {
+    if (!canSubmit) return
+    setError(null)
+    setBusy(true)
+    try {
+      await apiFetch(`/commandes-client/${commandeId}/lignes/${ligneId}/supply/tricotage/${row.id}/affectation`, {
+        method: 'PUT',
+        body: JSON.stringify({ poids_affecte: value }),
+      })
+      onSuccess()
+      onClose()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Erreur')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o && !busy) onClose() }}>
+      <DialogContent className="max-w-md flex flex-col p-0 overflow-hidden" onClose={busy ? undefined : onClose}>
+        {/* Header */}
+        <div className="flex-shrink-0 px-6 pt-4 pb-3 border-b bg-gradient-to-r from-gold/25 via-gold/10 to-transparent flex items-start gap-3">
+          <div className="h-10 w-10 rounded-lg icon-box-gold flex items-center justify-center flex-shrink-0">
+            <KnitIcon className="h-5 w-5" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h2 className="text-base font-heading font-bold tracking-tight truncate">
+              Affectation — Commande N° {row.commande_id}
+            </h2>
+            <p className="text-xs text-muted-foreground mt-0.5 truncate">
+              {row.sous_traitant_nom || 'Tricoteur'} · {fmtSupplyDate(row.date_commande)}
+              {row.etat_label && <> · <SupplyEtatPill label={row.etat_label} /></>}
+            </p>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="p-4 bg-zinc-100/80 space-y-3">
+          <div className="rounded-lg border border-border/60 bg-card shadow-sm p-3">
+            <TricoWeightField
+              label={`Affecté à la commande${clientNom ? ` ${clientNom}` : ' client'}`}
+              value={valueStr}
+              onChange={setValueStr}
+              disabled={busy}
+              rendement={rendement}
+              refLabel={refLabel}
+              autoFocus
+            />
+            <div className={cn(
+              'flex items-baseline justify-between gap-2 pt-2 border-t border-border/40 text-[11px] tabular-nums',
+              over ? 'text-destructive font-medium' : 'text-muted-foreground',
+            )}>
+              <span>Disponible sur la commande tricoteur</span>
+              <span>{fmtNum(dispoLive, 1)} kg</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex-shrink-0 px-6 py-3 border-t bg-zinc-200/50">
+          {!!error && (
+            <div className="mb-2 flex items-start gap-1.5 text-xs text-destructive">
+              <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" /><span className="break-all">{error}</span>
+            </div>
+          )}
+          <div className="flex items-center gap-3">
+            <AffecteGauge projected={projected} target={target} uniteLabel={uniteLabel} clientNom={clientNom} />
+            <div className="flex gap-2 flex-shrink-0">
+              <Button variant="outline" onClick={onClose} disabled={busy}>Annuler</Button>
+              <Button onClick={handleSubmit} disabled={!canSubmit}>
+                {busy
+                  ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Enregistrement…</>
+                  : <><Save className="h-3.5 w-3.5 mr-1.5" />Enregistrer</>}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // ── Tombé-de-métier disponible: per-location table + create-order dialog ──
 // Ports the legacy "029 - écru disponible" panel: écru of this fini's écru ref
 // available, aggregated by sous-traitant location (grouped chez les
@@ -1734,6 +2164,8 @@ function EnnoblissementAffectationDialog({
 
 interface AvailableEcruRoll extends RollLite {
   reserved_elsewhere: boolean
+  /** Already reserved to this client line — counted in affecte_total. */
+  reserved_to_line: boolean
 }
 interface AvailableRollsPayload {
   unite: number
@@ -1816,7 +2248,7 @@ function EnnoLocationTable({
                     </span>
                   </td>
                   <td className="px-2.5 py-2 whitespace-nowrap text-right tabular-nums">{fmtNum(loc.poids, 1)} kg</td>
-                  <td className="px-2.5 py-2 whitespace-nowrap text-right tabular-nums font-semibold">{fmtNum(loc.metrage_potentiel, 0)} ml</td>
+                  <td className="px-2.5 py-2 whitespace-nowrap text-right tabular-nums font-semibold">{fmtNum(loc.metrage_potentiel, 0)} Ml</td>
                   <td className="px-2.5 py-1 whitespace-nowrap text-right">
                     {loc.is_ennoblisseur && (
                       <Button variant="ghost" size="sm" onClick={() => onNewOrder(loc)} className="h-7 text-accent hover:text-accent hover:bg-accent/10">
@@ -1850,6 +2282,7 @@ interface TricoStockFilYarn {
 interface TricoStockFilLocation {
   magasin_id: number
   magasin_nom: string
+  is_tricoteur: boolean
   yarns: TricoStockFilYarn[]
 }
 interface TricoStockFilPayload {
@@ -1859,10 +2292,11 @@ interface TricoStockFilPayload {
 }
 
 function StockFilDispoTable({
-  loading, locations,
+  loading, locations, onNewOrder,
 }: {
   loading: boolean
   locations: TricoStockFilLocation[]
+  onNewOrder: (loc: TricoStockFilLocation) => void
 }) {
   if (loading) {
     return <div className="space-y-2">{[1, 2].map((i) => <div key={i} className="h-10 bg-muted animate-pulse rounded-md" />)}</div>
@@ -1882,13 +2316,27 @@ function StockFilDispoTable({
         <tbody>
           {locations.map((loc) => (
             <Fragment key={loc.magasin_id}>
-              {/* Group band doubles as the header row: location name on the
-                  left, column labels aligned over their columns. */}
+              {/* Group band doubles as the header row: the location-name
+                  column takes the flexible width (w-full) so the value
+                  columns sit right, next to the content-width launcher column
+                  on tricoteur locations. */}
               <tr className="text-[10px] uppercase tracking-wide text-muted-foreground bg-zinc-200/50 border-b border-border/40">
-                <td className="px-2.5 py-1 font-semibold whitespace-nowrap text-left">{loc.magasin_nom}</td>
+                <td className="px-2.5 py-1 font-semibold whitespace-nowrap text-left w-full">{loc.magasin_nom}</td>
                 <td className="px-2.5 py-1 font-semibold whitespace-nowrap text-right">Compo.</td>
                 <td className="px-2.5 py-1 font-semibold whitespace-nowrap text-right">Poids</td>
                 <td className="px-2.5 py-1 font-semibold whitespace-nowrap text-right">Métrage pot.</td>
+                <td className="px-2.5 py-0.5 whitespace-nowrap text-right">
+                  {loc.is_tricoteur && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => onNewOrder(loc)}
+                      className="h-6 px-2 text-[11px] normal-case tracking-normal text-accent hover:text-accent hover:bg-accent/10"
+                    >
+                      <Plus className="h-3 w-3 mr-1" />Nouvelle commande
+                    </Button>
+                  )}
+                </td>
               </tr>
               {loc.yarns.map((y) => {
                 const noStock = !(y.poids > 0)
@@ -1907,8 +2355,9 @@ function StockFilDispoTable({
                     </td>
                     <td className="px-2.5 py-2 whitespace-nowrap text-right tabular-nums">{fmtNum(y.poids, 1)} kg</td>
                     <td className={cn('px-2.5 py-2 whitespace-nowrap text-right tabular-nums', y.metrage_potentiel > 0 && 'font-semibold')}>
-                      {y.metrage_potentiel > 0 ? `${fmtNum(y.metrage_potentiel, 0)} ml` : '—'}
+                      {y.metrage_potentiel > 0 ? `${fmtNum(y.metrage_potentiel, 0)} Ml` : '—'}
                     </td>
+                    <td />
                   </tr>
                 )
               })}
@@ -1920,15 +2369,47 @@ function StockFilDispoTable({
   )
 }
 
+// Shared footer gauge of the create-order modals: projected affecté vs the
+// commanded quantity, with a mini progress bar (legacy: "801 / 800 Ml affecté
+// à la commande de Le slip Français", green once covered).
+function AffecteGauge({
+  projected, target, uniteLabel, clientNom,
+}: {
+  projected: number
+  target: number
+  uniteLabel: string
+  clientNom?: string
+}) {
+  const covered = target > 0 && projected >= target
+  const pct = target > 0 ? Math.min(100, Math.max(0, (projected / target) * 100)) : 0
+  return (
+    <div className="min-w-0 flex-1">
+      <p className={cn('text-xs font-medium tabular-nums truncate', covered ? 'text-green-600' : 'text-muted-foreground')}>
+        <span className={cn('font-bold', !covered && 'text-foreground')}>{fmtNum(projected, 1)}</span>
+        {' / '}{fmtNum(target, 1)} {uniteLabel} affecté à la commande{clientNom ? ` de ${clientNom}` : ''}
+      </p>
+      <div className="h-1.5 mt-1.5 rounded-full bg-white overflow-hidden">
+        <div className={cn('h-full rounded-full transition-all', covered ? 'bg-green-500' : 'bg-accent')} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  )
+}
+
 // Create a new ennoblisseur order from the écru held at ONE location (the row's
 // sous-traitant = the dyer). Scoped roll list ("disponible chez X"), multi-
 // select (all pre-selected), then POST creates the order + affects the rolls.
 function CreateEnnoblisseurOrderDialog({
-  commandeId, ligne, location, onClose, onSuccess,
+  commandeId, ligne, location, clientNom, reserved, target, dim, uniteLabel, onClose, onSuccess,
 }: {
   commandeId: number
   ligne: LigneCommande
   location: EnnoLocationRow
+  clientNom?: string
+  /** Combined affecté already on the line / commanded qty, in the line's dim. */
+  reserved: number
+  target: number
+  dim: 'metrage' | 'poids'
+  uniteLabel: string
   onClose: () => void
   onSuccess: () => void
 }) {
@@ -1962,6 +2443,13 @@ function CreateEnnoblisseurOrderDialog({
   const selectedKg = rolls.filter((r) => selected.has(r.id)).reduce((s, r) => s + (Number(r.poids) || 0), 0)
   const selectedMl = selectedKg * rendement
   const allSelected = rolls.length > 0 && rolls.every((r) => selected.has(r.id))
+  // Gauge projection: only FREE selected rolls add to the line's affecté —
+  // rolls already reserved to this line are inside `reserved`, and rolls
+  // reserved to another line keep their reservation on create.
+  const newKg = rolls
+    .filter((r) => selected.has(r.id) && !r.reserved_to_line && !r.reserved_elsewhere)
+    .reduce((s, r) => s + (Number(r.poids) || 0), 0)
+  const projected = dim === 'metrage' ? reserved + newKg * rendement : reserved + newKg
 
   const selectAll = () => { setSelected(new Set(rolls.map((r) => r.id))); lastSelectedRef.current = rolls[rolls.length - 1]?.id ?? null }
   const clearSelection = () => { setSelected(new Set()); lastSelectedRef.current = null }
@@ -2051,12 +2539,20 @@ function CreateEnnoblisseurOrderDialog({
             <MapPin className="h-3 w-3" />Disponible chez {location.location_nom}
           </span>
           {rolls.length > 0 && (
-            <div className="ml-auto flex items-center gap-1">
-              <button type="button" onClick={selectAll} disabled={busy || allSelected}
-                className="text-[11px] text-accent hover:underline disabled:text-muted-foreground/50 disabled:no-underline disabled:cursor-default px-1">Tout</button>
-              <span className="text-muted-foreground/40 text-[11px]">·</span>
-              <button type="button" onClick={clearSelection} disabled={busy || selected.size === 0}
-                className="text-[11px] text-muted-foreground hover:text-foreground disabled:text-muted-foreground/40 disabled:cursor-default px-1">Aucun</button>
+            <div className="ml-auto flex items-center gap-2">
+              <span className="text-[11px] text-muted-foreground tabular-nums whitespace-nowrap">
+                {selected.size > 0
+                  ? `${selected.size} rouleau${selected.size > 1 ? 'x' : ''} · ${fmtNum(selectedKg, 1)} kg · ${fmtNum(selectedMl, 0)} Ml`
+                  : 'Aucun rouleau sélectionné'}
+              </span>
+              <span className="text-muted-foreground/40 text-[11px]">—</span>
+              <div className="flex items-center gap-1">
+                <button type="button" onClick={selectAll} disabled={busy || allSelected}
+                  className="text-[11px] text-accent hover:underline disabled:text-muted-foreground/50 disabled:no-underline disabled:cursor-default px-1">Tout</button>
+                <span className="text-muted-foreground/40 text-[11px]">·</span>
+                <button type="button" onClick={clearSelection} disabled={busy || selected.size === 0}
+                  className="text-[11px] text-muted-foreground hover:text-foreground disabled:text-muted-foreground/40 disabled:cursor-default px-1">Aucun</button>
+              </div>
             </div>
           )}
         </div>
@@ -2093,12 +2589,8 @@ function CreateEnnoblisseurOrderDialog({
             </div>
           )}
           <div className="flex items-center gap-3">
-            <p className="text-xs text-muted-foreground tabular-nums">
-              {selected.size > 0
-                ? `${selected.size} rouleau${selected.size > 1 ? 'x' : ''} · ${fmtNum(selectedKg, 1)} kg · ${fmtNum(selectedMl, 0)} ml`
-                : 'Aucun rouleau sélectionné'}
-            </p>
-            <div className="ml-auto flex gap-2">
+            <AffecteGauge projected={projected} target={target} uniteLabel={uniteLabel} clientNom={clientNom} />
+            <div className="flex gap-2 flex-shrink-0">
               <Button variant="outline" onClick={onClose} disabled={busy}>Annuler</Button>
               <Button onClick={handleSubmit} disabled={!canSubmit}>
                 {busy
@@ -2149,11 +2641,310 @@ function SelectableEcruRoll({
         </div>
         <div className="flex items-center gap-3 mt-0.5 text-[11px] text-muted-foreground tabular-nums">
           <span className="font-medium text-foreground">{fmtNum(poids, 1)} kg</span>
-          {rendement > 0 && <span>· {fmtNum(poids * rendement, 0)} ml</span>}
+          {rendement > 0 && <span>· {fmtNum(poids * rendement, 0)} Ml</span>}
           {roll.coloris_reference && <span className="truncate">· {roll.coloris_reference}</span>}
         </div>
       </div>
     </button>
+  )
+}
+
+// ── Tricotage: create a knit order at a yarn-holding knitter ──
+// Mirrors the legacy "Commande de Tricotage Malterre" modal launched from the
+// Tricotage tab, generalized to any tricoteur location of the stock-fil
+// panel: two kg inputs (affecté to this client commande / for the ETM stock)
+// with live ml conversions, info tables (yarn stock at the knitter net of
+// open OFs + yarn on order), and a footer gauge of the line's affected
+// métrage. TRM orders get the cross-ledger mirror + Attente_Delai; external
+// tricoteurs start Non_Envoye (bon de commande sent from the sst screen).
+
+interface TricoOrderYarnLot { id: number; lot: string; fournisseur: string; poids: number; metrage: number }
+interface TricoOrderYarnPending { id: number; date_livraison: string | null; fournisseur: string; poids: number; metrage: number }
+interface TricoOrderYarn {
+  IDref_fil: number
+  IDcolori_fil: number
+  reference: string
+  coloris: string
+  pourcentage: number
+  stock: TricoOrderYarnLot[]
+  pending: TricoOrderYarnPending[]
+}
+interface TricoNewOrderContext {
+  applicable: boolean
+  ecru_ref_label?: string
+  ecru_coloris_label?: string
+  rendement?: number
+  yarns?: TricoOrderYarn[]
+}
+
+function CreateTricotageOrderDialog({
+  commandeId, ligne, location, clientNom, reserved, target, dim, uniteLabel, onClose, onSuccess,
+}: {
+  commandeId: number
+  ligne: LigneCommande
+  /** The knitter whose stock-fil band launched the dialog. */
+  location: TricoStockFilLocation
+  clientNom?: string
+  /** Already affected to this line / commanded quantity, in the line's dim. */
+  reserved: number
+  target: number
+  dim: 'metrage' | 'poids'
+  uniteLabel: string
+  onClose: () => void
+  onSuccess: () => void
+}) {
+  const ligneId = ligne.IDligne_commande_client
+  const [affecteStr, setAffecteStr] = useState('')
+  const [stockStr, setStockStr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const { data: ctx, isLoading } = useQuery<TricoNewOrderContext>({
+    queryKey: ['commande-client-trico-neworder', commandeId, ligneId, location.magasin_id],
+    queryFn: () => apiFetch(`/commandes-client/${commandeId}/lignes/${ligneId}/supply/tricotage/new-order-context?magasin=${location.magasin_id}`),
+  })
+  const rendement = ctx?.rendement ?? 0
+  const yarns = ctx?.yarns ?? []
+
+  const parseKg = (s: string) => {
+    const v = parseFloat(s.replace(',', '.'))
+    return Number.isFinite(v) ? v : 0
+  }
+  const affecte = parseKg(affecteStr)
+  const stock = parseKg(stockStr)
+  const total = Math.round((affecte + stock) * 100) / 100
+  // Footer gauge: current affected + the new allocation, in the line's dim
+  // (legacy: "801 / 800 Ml affecté à la commande de Le slip Français").
+  const projected = dim === 'metrage' ? reserved + affecte * rendement : reserved + affecte
+  const canSubmit = total > 0 && stock >= 0 && !busy
+
+  const handleSubmit = async () => {
+    if (!canSubmit) return
+    setError(null)
+    setBusy(true)
+    try {
+      await apiFetch(`/commandes-client/${commandeId}/lignes/${ligneId}/supply/tricotage/orders`, {
+        method: 'POST',
+        body: JSON.stringify({ IDsous_traitant: location.magasin_id, poids_affecte: affecte, poids_stock: stock }),
+      })
+      onSuccess()
+      onClose()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Erreur')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o && !busy) onClose() }}>
+      <DialogContent className="max-w-3xl w-[92vw] max-h-[85vh] flex flex-col p-0 overflow-hidden" onClose={busy ? undefined : onClose}>
+        {/* Header */}
+        <div className="flex-shrink-0 px-6 pt-4 pb-3 border-b bg-gradient-to-r from-gold/25 via-gold/10 to-transparent flex items-start gap-3">
+          <div className="h-10 w-10 rounded-lg icon-box-gold flex items-center justify-center flex-shrink-0">
+            <KnitIcon className="h-5 w-5" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h2 className="text-base font-heading font-bold tracking-tight truncate">Nouvelle commande — {location.magasin_nom}</h2>
+            <p className="text-xs text-muted-foreground mt-0.5 truncate">
+              {ctx?.ecru_ref_label
+                ? <>Tricotage de <span className="font-semibold text-foreground">{ctx.ecru_ref_label}{ctx.ecru_coloris_label ? ` · ${ctx.ecru_coloris_label}` : ''}</span></>
+                : '…'}
+              {yarns.length > 0 && (
+                <> — {yarns.map((y) => {
+                  const pct = Math.round(y.pourcentage * 10) / 10
+                  return `${fmtNum(pct, Number.isInteger(pct) ? 0 : 1)} % ${y.reference}`
+                }).join(' + ')}</>
+              )}
+            </p>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 bg-zinc-100/80 scrollbar-transparent">
+          <div className="grid grid-cols-1 md:grid-cols-[280px,1fr] gap-4 items-start">
+            {/* Left: weight split */}
+            <div className="rounded-lg border border-border/60 bg-card shadow-sm overflow-hidden">
+              <div className="px-3 py-2 border-b border-border/40 bg-zinc-200/50">
+                <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">Répartition du poids</h3>
+              </div>
+              <div className="p-3 space-y-3">
+                <TricoWeightField
+                  label={`Affecté à la commande${clientNom ? ` ${clientNom}` : ' client'}`}
+                  value={affecteStr}
+                  onChange={setAffecteStr}
+                  disabled={busy}
+                  rendement={rendement}
+                  refLabel={ligne.ref_label}
+                  autoFocus
+                />
+                <div className="divider-warm" />
+                <TricoWeightField
+                  label="Pour le stock Ets Malterre"
+                  value={stockStr}
+                  onChange={setStockStr}
+                  disabled={busy}
+                  rendement={rendement}
+                  refLabel={ligne.ref_label}
+                />
+              </div>
+              <div className="px-3 py-2.5 border-t border-accent/25 bg-gradient-to-r from-gold/20 via-gold/10 to-transparent flex items-baseline justify-between gap-2">
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Poids total</span>
+                <span className="text-lg font-bold tabular-nums">
+                  {fmtNum(total, 1)} <span className="text-xs font-medium text-muted-foreground">kg</span>
+                </span>
+              </div>
+            </div>
+
+            {/* Right: yarn stock at TRM + on order */}
+            <div className="space-y-4 min-w-0">
+              <section>
+                <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
+                  Stock disponible chez {location.magasin_nom}
+                </h3>
+                {isLoading ? (
+                  <div className="space-y-2">{[1, 2].map((i) => <div key={i} className="h-10 bg-muted animate-pulse rounded-md" />)}</div>
+                ) : (
+                  <div className="rounded-lg border border-border/60 bg-card shadow-sm overflow-hidden">
+                    <table className="w-full text-xs">
+                      <tbody>
+                        {yarns.map((y) => (
+                          <Fragment key={`${y.IDref_fil}:${y.IDcolori_fil}`}>
+                            <tr className="text-[10px] uppercase tracking-wide text-muted-foreground bg-zinc-200/50 border-b border-border/40">
+                              <td colSpan={3} className="px-2.5 py-1 font-semibold whitespace-nowrap">
+                                <span className="inline-flex items-center gap-1.5">
+                                  <BobineIcon className="h-3.5 w-3.5 text-accent flex-shrink-0" />
+                                  {y.reference}{y.coloris ? ` - ${y.coloris}` : ''}
+                                </span>
+                              </td>
+                              <td className="px-2.5 py-1 font-semibold whitespace-nowrap text-right tabular-nums">
+                                {fmtNum(y.stock.reduce((s, l) => s + l.metrage, 0), 2)} Ml
+                              </td>
+                            </tr>
+                            {y.stock.length === 0 && (
+                              <tr className="border-b border-border/40 last:border-0">
+                                <td colSpan={4} className="px-2.5 py-2 text-muted-foreground italic">Aucun lot en stock</td>
+                              </tr>
+                            )}
+                            {y.stock.map((l) => (
+                              <tr key={l.id} className="border-b border-border/40 last:border-0 hover:bg-accent/5">
+                                <td className="px-2.5 py-1.5 whitespace-nowrap truncate max-w-[140px]">{l.fournisseur || '—'}</td>
+                                <td className="px-2.5 py-1.5 whitespace-nowrap tabular-nums">{l.lot || '—'}</td>
+                                <td className="px-2.5 py-1.5 whitespace-nowrap text-right tabular-nums">{fmtNum(l.poids, 2)} kg</td>
+                                <td className="px-2.5 py-1.5 whitespace-nowrap text-right tabular-nums font-semibold">{fmtNum(l.metrage, 2)} Ml</td>
+                              </tr>
+                            ))}
+                          </Fragment>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+
+              <section>
+                <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
+                  En commande
+                </h3>
+                {isLoading ? (
+                  <div className="space-y-2">{[1].map((i) => <div key={i} className="h-10 bg-muted animate-pulse rounded-md" />)}</div>
+                ) : (
+                  <div className="rounded-lg border border-border/60 bg-card shadow-sm overflow-hidden">
+                    <table className="w-full text-xs">
+                      <tbody>
+                        {yarns.map((y) => (
+                          <Fragment key={`${y.IDref_fil}:${y.IDcolori_fil}`}>
+                            <tr className="text-[10px] uppercase tracking-wide text-muted-foreground bg-zinc-200/50 border-b border-border/40">
+                              <td colSpan={3} className="px-2.5 py-1 font-semibold whitespace-nowrap">
+                                <span className="inline-flex items-center gap-1.5">
+                                  <BobineIcon className="h-3.5 w-3.5 text-accent flex-shrink-0" />
+                                  {y.reference}{y.coloris ? ` - ${y.coloris}` : ''}
+                                </span>
+                              </td>
+                              <td className="px-2.5 py-1 font-semibold whitespace-nowrap text-right tabular-nums">
+                                {fmtNum(y.pending.reduce((s, o) => s + o.metrage, 0), 2)} Ml
+                              </td>
+                            </tr>
+                            {y.pending.length === 0 && (
+                              <tr className="border-b border-border/40 last:border-0">
+                                <td colSpan={4} className="px-2.5 py-2 text-muted-foreground italic">Aucune commande de fil en attente</td>
+                              </tr>
+                            )}
+                            {y.pending.map((o) => (
+                              <tr key={o.id} className="border-b border-border/40 last:border-0 hover:bg-accent/5">
+                                <td className="px-2.5 py-1.5 whitespace-nowrap tabular-nums">{fmtSupplyDate(o.date_livraison)}</td>
+                                <td className="px-2.5 py-1.5 whitespace-nowrap truncate max-w-[140px]">{o.fournisseur || '—'}</td>
+                                <td className="px-2.5 py-1.5 whitespace-nowrap text-right tabular-nums">{fmtNum(o.poids, 2)} kg</td>
+                                <td className="px-2.5 py-1.5 whitespace-nowrap text-right tabular-nums font-semibold">{fmtNum(o.metrage, 2)} Ml</td>
+                              </tr>
+                            ))}
+                          </Fragment>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex-shrink-0 px-6 py-3 border-t bg-zinc-200/50">
+          {!!error && (
+            <div className="mb-2 flex items-start gap-1.5 text-xs text-destructive">
+              <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" /><span className="break-all">{error}</span>
+            </div>
+          )}
+          <div className="flex items-center gap-3">
+            <AffecteGauge projected={projected} target={target} uniteLabel={uniteLabel} clientNom={clientNom} />
+            <div className="flex gap-2 flex-shrink-0">
+              <Button variant="outline" onClick={onClose} disabled={busy}>Annuler</Button>
+              <Button onClick={handleSubmit} disabled={!canSubmit}>
+                {busy
+                  ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Création…</>
+                  : <><Plus className="h-3.5 w-3.5 mr-1.5" />Créer la commande</>}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// Weight input row of the knit-order modal: label above, right-aligned input
+// with an inset "kg" unit, Ml conversion hint underneath (mirrors the legacy
+// modal's "Environ X Ml de 029A" captions). Top-level component so the input
+// keeps its identity (and focus) across parent re-renders.
+function TricoWeightField({
+  label, value, onChange, disabled, rendement, refLabel, autoFocus,
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  disabled: boolean
+  rendement: number
+  refLabel?: string | null
+  autoFocus?: boolean
+}) {
+  const parsed = parseFloat(value.replace(',', '.'))
+  const kg = Number.isFinite(parsed) ? parsed : 0
+  return (
+    <div className="space-y-1">
+      <label className="text-xs font-medium text-muted-foreground">{label}</label>
+      <div className="relative">
+        <input
+          type="text" inputMode="decimal" value={value} disabled={disabled}
+          onChange={(e) => onChange(e.target.value)} placeholder="0" autoFocus={autoFocus}
+          className="w-full h-10 pl-3 pr-10 text-base font-semibold text-right tabular-nums rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+        />
+        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground pointer-events-none">kg</span>
+      </div>
+      <p className="text-[11px] text-muted-foreground italic text-right tabular-nums h-4">
+        {kg !== 0 && rendement > 0 ? `≈ ${fmtNum(kg * rendement, 1)} Ml${refLabel ? ` de ${refLabel}` : ''}` : ''}
+      </p>
+    </div>
   )
 }
 

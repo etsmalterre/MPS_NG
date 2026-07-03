@@ -10,6 +10,37 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-03 — feat/cmd-client
+Clients › Commandes — line drawer **supply accuracy pass + Tricotage/Ennoblissement order creation +
+Expédition tab + quick-ship** (`apps/api/src/routes/commandes-client.ts`, `commandes-sous-traitant.ts`,
+`apps/web/src/pages/ClientsCommandes.tsx`). **(1) Supply semantics fixed against legacy (commande 3686,
+validated to the cent)**: Ennoblissement "affecté" counts only écru rolls reserved to THIS client line;
+the Tricotage grid reads the `affectation_cmd_tricotage` planning table (affecté = allocation to this
+line, dispo = quantité − ALL allocations, métrage = affecté × rendement) instead of produced stock_ecru;
+the "Stock de fil disponible" panel subtracts yarn still needed by open `ordre_fabrication`s
+(`asso_fil_of`, `est_termine=0`: remaining × pourcentage — factored as `openOfPendingByLot`). Legacy
+WinDev sources are PCS-compressed — all formulas reverse-engineered from HFSQL data. **(2) Combined
+affecté gauge**: `lineReservationAggregates` now sums stock_fini rolls + stock_ecru rolls × rendement +
+tricotage allocations (fixes 0/800 → 854,5/800 Ml); exposed as `affecte_total` on the `/pieces` payload
+and used by the line bar, drawer, and modal footers (shared `AffecteGauge` w/ full-width progress bar).
+"Ml" (mètres linéaires) capitalized app-wide. **(3) Knit-order creation** (legacy "Commande de Tricotage
+Malterre" modal): per-tricoteur "Nouvelle commande" launcher on the stock-fil location bands
+(`is_tricoteur` flag via IDtype_sst=1); modal has affecté/stock kg inputs with live Ml hints, net yarn
+stock + pending yarn orders (`ref_fil_commande.etat=0`) tables; POST creates commande + line (unite=1,
+prix via `trmLinePrix`) via exported `createKnitOrder` — TRM gets Attente_Delai + cross-ledger mirror,
+external tricoteurs get Non_Envoye and no mirror — plus `affectation_cmd_tricotage` (input may be
+negative, legacy parity) and one `asso_fil_lignecmdsst` per composition yarn against the knitter's lot.
+**(4) Tricotage row-click modal** adjusts the (sst line, client line) allocation via new
+`PUT …/supply/tricotage/:sstLineId/affectation` (over-allocation guarded). **(5) Expédition tab**:
+expeditions carrying the line (`ligne_expedition`) with Facturée/Non facturée pill, per-expedition roll
+list + transporteur/adresse info via new `GET …/lignes/:ligneId/expeditions`. **(6) Quick-ship**:
+checkbox-select affected unshipped rolls in the Affectation tab → Expédier (ConfirmDialog) → new
+`POST …/lignes/:ligneId/expedier` creates the expedition (address from commande, carrier from client,
+est_valide=0) + `ligne_expedition` + points the rolls at it, then jumps to the Expédition tab.
+**(7) Terminée = read-only Affectation tab**: lock banner, no available pool / affect / remove / ship /
+observation edits (obs endpoint gained the missing `refuseIfSoldee`). All flows exercised end-to-end
+against live HFSQL with test rows cleaned up afterwards; probe scripts under `apps/api/src/scripts/`.
+
 ## 2026-07-02 — feat/expe
 Clients › Expéditions — filter + labelling + pagination pass (`apps/web/src/pages/ClientsExpeditions.tsx`,
 `apps/api/src/routes/expeditions.ts`). **(1) Bucket labels**: the two category tabs "Formelles"/"Diverses"

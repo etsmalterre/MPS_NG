@@ -295,7 +295,7 @@ async function loadSousTraitantType(IDsous_traitant: number): Promise<{ IDtype_s
 /** Identity of the sister-company knitter. Hardcoded as IDsous_traitant=1
  *  in the legacy DB. If TRM is ever rekeyed, this is the single point of
  *  update; do not scatter "= 1" comparisons through the file. */
-const TRICOTAGE_MALTERRE_ID = 1
+export const TRICOTAGE_MALTERRE_ID = 1
 
 /** True if the commande_sst's sous-traitant has IDtype_sst=1 (Tricoteur).
  *  Used to default line.type / unite / prix for ANY tricoteur — including
@@ -417,6 +417,134 @@ async function refuseIfTrmHasOFs(res: Response, ccLineId: number): Promise<boole
     return true
   }
   return false
+}
+
+// ── Knit-order creation (used by the client-line Tricotage tab) ──
+// Mirrors the legacy "Commande de Tricotage Malterre" modal generalized to any
+// tricoteur: one commande at the knitter with a single tricoteur line.
+// Template validated against legacy-created cst 8582: sst default addresses,
+// empty RTF commentaire, line type=1 / unite=1 / empty dates. Statut and the
+// cross-ledger mirror depend on the knitter:
+//  - Tricotage Malterre (sister company): sstatut Attente_Delai (no
+//    bon-de-commande step) + TRM commande_client mirror.
+//  - External tricoteurs: sstatut Non_Envoye (standard workflow — the bon de
+//    commande is sent from the Sous-traitants screen) and NO mirror.
+// Prix follows the MPS_NG tricoteur convention (trmLinePrix — applies to ALL
+// type=1 knitters) instead of legacy's sst-side 0.
+
+export interface KnitOrderResult {
+  IDcommande_sous_traitant: number
+  IDligne_commande_sous_traitant: number
+  prix: number
+  mirror_status: 'created' | 'failed' | 'skipped'
+}
+
+export async function createKnitOrder(opts: {
+  sstId: number
+  ecruRefId: number
+  coloriEcruId: number
+  quantiteKg: number
+  /** YYYYMMDD; defaults to today. */
+  dateCommande?: string
+}): Promise<KnitOrderResult> {
+  const sstId = opts.sstId
+  const isTrm = sstId === TRICOTAGE_MALTERRE_ID
+  const dateCmd = dateStr(opts.dateCommande) || dateStr(new Date().toISOString().slice(0, 10))
+
+  // The knitter's default addresses (legacy modal uses them for both header
+  // fields — adresse 777 on the TRM reference commande). Fallback to the
+  // first visible one.
+  const adrRows = await query<{ IDadresse: number; est_defaut: number | null; est_defaut_livraison: number | null }>(
+    `SELECT IDadresse, est_defaut, est_defaut_livraison FROM adresse
+      WHERE IDsous_traitant = ${sstId} AND est_visible = 1`,
+  )
+  const defaut = adrRows.find((a) => Number(a.est_defaut) === 1) ?? adrRows[0]
+  const defautLiv = adrRows.find((a) => Number(a.est_defaut_livraison) === 1) ?? defaut
+  const adrId = Number(defaut?.IDadresse) || 0
+  const adrLivId = Number(defautLiv?.IDadresse) || 0
+
+  await query(
+    `INSERT INTO commande_sous_traitant
+     (IDsous_traitant, date_commande, est_soldee, commentaire, journal,
+      IDadresse_sous_traitant, IDadresse_livraison, IDdossier, IDcommande_client, IDligne_commande_client)
+     VALUES (${sstId}, '${dateCmd}', 0, '${esc(wrapRtf(''))}', '',
+             ${adrId}, ${adrLivId}, 0, 0, 0)`,
+  )
+  const hdr = await query<{ IDcommande_sous_traitant: number }>(
+    `SELECT IDcommande_sous_traitant FROM commande_sous_traitant
+      WHERE IDsous_traitant = ${sstId} ORDER BY IDcommande_sous_traitant DESC`,
+  )
+  const cmdId = Number(hdr[0]?.IDcommande_sous_traitant) || 0
+  if (cmdId <= 0) throw new Error('Header insert lookup failed')
+
+  // Mirror header on the TRM ledger — sister company only (numero allocator
+  // with collision retry, same pattern as the standard POST '/').
+  let mirrorStatus: 'created' | 'failed' | 'skipped' = isTrm ? 'failed' : 'skipped'
+  if (isTrm) {
+    try {
+      let inserted = false
+      let lastErr: unknown = null
+      for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
+        const numero = await nextTrmNumero()
+        try {
+          await query(
+            `INSERT INTO commande_client
+             (IDclient, IDsociete, IDcommande_ETM, numero, date_commande,
+              IDadresse_livraison, IDadresse_facturation, IDmode_paiement, IDecheance,
+              ref_client, commentaire, est_soldee, remise, donation,
+              attente_paiement, frais_port, IDdossier)
+             VALUES (1, 2, ${cmdId}, ${numero}, '${dateCmd}',
+                     1, 1, 3, 2,
+                     'commande ${cmdId}', '', 0, 0, 0,
+                     0, 0, 0)`,
+          )
+          inserted = true
+        } catch (e) { lastErr = e }
+      }
+      if (!inserted) throw lastErr ?? new Error('mirror insert failed after 3 attempts')
+      mirrorStatus = 'created'
+    } catch (e) {
+      console.error('[trm-bridge] mirror CREATE failed for knit order', cmdId, e)
+    }
+  }
+
+  // Tricoteur line — prix via the MPS_NG cost model (see pricing-trm.ts).
+  const prix = await trmLinePrix(opts.ecruRefId, opts.quantiteKg)
+  const statut = isTrm ? STATUT_ATTENTE_DELAI : STATUT_NON_ENVOYE
+  await query(
+    `INSERT INTO ligne_commande_sous_traitant
+     (IDcommande_sous_traitant, type, IDreference, IDColoris, quantite, unite, prix,
+      date_livraison, date_delai, sstatut, commentaire)
+     VALUES (${cmdId}, 1, ${opts.ecruRefId}, ${opts.coloriEcruId}, ${n(opts.quantiteKg)}, 1, ${n(prix)},
+             '', '', '${statut}', '')`,
+  )
+  const lineRows = await query<{ IDligne_commande_sous_traitant: number }>(
+    `SELECT IDligne_commande_sous_traitant FROM ligne_commande_sous_traitant
+      WHERE IDcommande_sous_traitant = ${cmdId} ORDER BY IDligne_commande_sous_traitant DESC`,
+  )
+  const lineId = Number(lineRows[0]?.IDligne_commande_sous_traitant) || 0
+  if (lineId <= 0) throw new Error('Line insert lookup failed')
+
+  // Mirror line on the TRM cc (lowercase IDcolori quirk preserved).
+  if (mirrorStatus === 'created') {
+    try {
+      const mirrorId = await getTrmMirror(cmdId)
+      if (mirrorId == null) throw new Error('mirror cc not found')
+      await query(
+        `INSERT INTO ligne_commande_client
+         (IDcommande_client, IDligne_commande_ETM, TYPE, IDreference, IDcolori,
+          quantite, unite, prix, poids, date_livraison, commentaire)
+         VALUES (${mirrorId}, ${lineId}, 1, ${opts.ecruRefId}, ${opts.coloriEcruId},
+                 ${n(opts.quantiteKg)}, 1, ${n(prix)}, 0, '', '')`,
+      )
+      await refreshTrmRefClient(cmdId, mirrorId)
+    } catch (e) {
+      console.error('[trm-bridge] LINE CREATE mirror failed for knit order', cmdId, 'line', lineId, e)
+      mirrorStatus = 'failed'
+    }
+  }
+
+  return { IDcommande_sous_traitant: cmdId, IDligne_commande_sous_traitant: lineId, prix, mirror_status: mirrorStatus }
 }
 
 // ── Validation schemas ───────────────────────────────────
