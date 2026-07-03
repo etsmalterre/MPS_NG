@@ -16,8 +16,21 @@ import path from 'node:path'
 import fs from 'node:fs'
 import {
   allocateSlot, getProject, projectMainCheckout, slotKey, readRegistry, writeRegistry,
-  spawnDetached, isPortInUse, DEV_WEB_ORIGINS, git, reapPending,
+  spawnDetached, isPortInUse, DEV_WEB_ORIGINS, git, reapPending, PROJECTS, mainCheckout,
 } from './lib.mjs'
+
+// Default project = the repo this script is invoked from (so `up.mjs <feature>`
+// makes a TRM worktree when run from the MPS-TRM checkout, an NG one from MPS_NG),
+// overridable by the positional arg. Falls back to ng if the repo is unrecognized.
+function detectDefaultProject() {
+  try {
+    const base = path.basename(mainCheckout()).toLowerCase()
+    const hit = Object.values(PROJECTS).find((p) => p.dirName.toLowerCase() === base)
+    return hit ? hit.key : 'ng'
+  } catch {
+    return 'ng'
+  }
+}
 
 // Sweep any leftover dirs from earlier completions that are now unlocked.
 const swept = reapPending()
@@ -38,7 +51,7 @@ if (apiIdx !== -1) {
   argv.splice(apiIdx, 2)
 }
 const feature = (argv[0] || '').trim()
-const projectKey = (argv[1] || 'ng').trim().toLowerCase()
+const projectKey = (argv[1] || detectDefaultProject()).trim().toLowerCase()
 if (!/^[a-z0-9][a-z0-9-]*$/.test(feature)) {
   console.error('Usage: node scripts/worktree/up.mjs <feature-name> [ng|trm] [--api <port>]  (feature kebab-case)')
   process.exit(1)
