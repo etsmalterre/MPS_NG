@@ -10,6 +10,34 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-03 — feat/expe
+Clients › Expéditions — **facture lock model + Factures tab + Avis d'expédition PDF + email**
+(`apps/api/src/routes/expeditions.ts`, `apps/api/src/lib/pdf/BonLivraisonPdf.tsx`,
+`apps/web/src/pages/ClientsExpeditions.tsx`). **(1) Legacy validé/dévalider RETIRED**: an expedition
+is either "non facturée" (fully editable) or "facturée" (fully locked). Lock = `est_facture=1` OR a
+definitive facture actually references it — formelle via `ligne_facture.IDligne_expedition` →
+`ligne_expedition`, divers via the `facture.IDexpedition_divers` header back-pointer
+(`facture_prov.IDexpedition_divers` deliberately excluded — repurposed as the converted-proforma
+marker). Every write path 409s `expedition_facturee`; `POST /:kind/:id/validate` removed; `est_valide`
+is never read (still zero-filled on INSERT for legacy). UI: status footer pill removed (derived state
+→ header badge Facturée/Non facturée per mps_designer §29.6), list pills recolored, Modifier hidden
+when locked. **(2) Factures tab**: right panel now tabbed Info | Factures; detail returns `factures[]`
+(numero/date/type incl. Avoir) + `locked`. **(3) Legacy-parity line list** (verified vs expedition
+11644 / commande 6677, 12 lines across ~15 expeditions): only lines with a `ligne_expedition` row on
+THIS expedition belong to it; other commande lines render as a collapsed "Autres lignes de la
+commande" candidates group, only while editable — a locked expedition shows exactly the legacy view.
+**(4) Roll icons**: FiniRollIcon / TmRollIcon per stock kind on line cards + roll drawer. **(5) Avis
+d'expédition PDF** (`GET /expeditions/formelle/:id/pdf`, byte-matched vs legacy BL 11645): MalterreDocument
+frame, livraison address + meta cards, the two fixed legacy quality notices, per-article identity block
+(ref - coloris, designation, finition label from the WinDev `gtaFinition` enum {1: OUVERT AU LARGE,
+2/3: TUBULAIRE…}, `V/réf.` from `designation_client`), per-lot pieces tables (obs column gated on
+`affiche_observations`, prints `stock_fini.observations` NOT `observation_sst`), lot/article/avis
+totals; écru lines supported via `IDligne_expedition_ETM`. **(6) Email**: `GET/POST
+/formelle/:id/email-defaults|email` per the §32 pattern — contacts split by `envoi_bl`, Gmail DWD send,
+BL PDF attachment, `envoi_email` audit with `IDtype_doc=14` ("avis expedition"; 16 = divers, reserved);
+`SendEmailDialog` mounted on the Textile bucket (divers keeps placeholders for print + email). Also
+fixed `loadContactName` (missing `IDcontact` in SELECT silently disabled fixEncoding accent repair).
+
 ## 2026-07-03 — feat/cmd-client
 Clients › Commandes — line drawer **supply accuracy pass + Tricotage/Ennoblissement order creation +
 Expédition tab + quick-ship** (`apps/api/src/routes/commandes-client.ts`, `commandes-sous-traitant.ts`,
