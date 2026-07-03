@@ -5,7 +5,7 @@
 
 import React from 'react'
 import { View, Text, StyleSheet } from '@react-pdf/renderer'
-import { MalterreDocument } from './MalterreDocument.js'
+import { MalterreDocument, MessageSquareIcon } from './MalterreDocument.js'
 import { colors, sizes } from './theme.js'
 
 // ── Data shape (built by routes/planning-atelier.ts) ─────
@@ -146,22 +146,61 @@ const styles = StyleSheet.create({
     color: colors.white,
   },
 
-  commentBlock: {
-    marginTop: 18,
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 6,
+  // Bottom block pinned above the footer: optional comment card, then the
+  // always-present production reserve mention. marginTop 'auto' pushes it to
+  // the bottom of the content area regardless of grid height.
+  bottomBlock: {
+    marginTop: 'auto',
+    paddingTop: 14,
+    // Eat into the Page's bottom padding reserve so the block hugs the
+    // footer band instead of floating ~17pt above it.
+    marginBottom: -10,
   },
-  commentLabel: {
-    fontSize: sizes.fontSm,
+  // Comment card — same cream/gold-edge frame as the shared Address/Metadata
+  // cards so the print-time comment matches the brand document language.
+  commentCard: {
+    backgroundColor: colors.bgCream,
+    borderWidth: 0.75,
+    borderColor: colors.borderStrong,
+    borderStyle: 'solid',
+    borderLeftWidth: 2,
+    borderLeftColor: colors.gold,
+    borderLeftStyle: 'solid',
+    borderRadius: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    marginBottom: 8,
+  },
+  commentHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 4,
+  },
+  commentIconBox: {
+    width: 11,
+    height: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  commentTitle: {
+    fontSize: sizes.fontXs,
     fontWeight: 900,
-    color: colors.text,
+    color: colors.primary,
+    letterSpacing: 0.5,
+    lineHeight: 1,
   },
   commentText: {
-    flex: 1,
-    fontSize: sizes.fontSm,
-    color: '#DC2626', // red — matches the legacy report's comment styling
+    fontSize: sizes.fontBase,
+    fontWeight: 700,
+    color: colors.text,
     lineHeight: 1.4,
+  },
+  mention: {
+    fontSize: sizes.fontSm,
+    color: colors.muted,
+    textAlign: 'center',
+    letterSpacing: 0.3,
   },
 })
 
@@ -217,13 +256,24 @@ export function PlanningAtelierPdf({ data }: { data: PlanningAtelierPdfData }) {
         ))}
       </View>
 
-      {/* Print-time comment (legacy renders it in red at the bottom) */}
-      {data.comment.trim() !== '' ? (
-        <View style={styles.commentBlock}>
-          <Text style={styles.commentLabel}>Commentaire :</Text>
-          <Text style={styles.commentText}>{data.comment.trim()}</Text>
-        </View>
-      ) : null}
+      {/* Bottom block — comment card (when present) directly above the
+          production reserve mention, both pinned just above the footer */}
+      <View style={styles.bottomBlock} wrap={false}>
+        {data.comment.trim() !== '' ? (
+          <View style={styles.commentCard}>
+            <View style={styles.commentHeader}>
+              <View style={styles.commentIconBox}>
+                <MessageSquareIcon size={10} />
+              </View>
+              <Text style={styles.commentTitle}>COMMENTAIRE</Text>
+            </View>
+            <Text style={styles.commentText}>{data.comment.trim()}</Text>
+          </View>
+        ) : null}
+        <Text style={styles.mention}>
+          Sous réserves de modifications nécessaires pour la production
+        </Text>
+      </View>
     </MalterreDocument>
   )
 }
