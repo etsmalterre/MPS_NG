@@ -11,7 +11,7 @@
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import {
-  killTree, mainCheckout, readRegistry, writeRegistry, addPending, reapPending, entryProject,
+  killTree, mainCheckout, readRegistry, updateRegistry, addPending, reapPending, entryProject,
 } from './lib.mjs'
 
 /** Synchronous sleep (no async in this short script). */
@@ -54,8 +54,7 @@ killTree(entry.apiPid)
 killTree(entry.webPid)
 
 // Free the slot immediately (ports/registry) regardless of the dir outcome.
-delete reg.slots[slotKey]
-writeRegistry(reg)
+updateRegistry((r) => { delete r.slots[slotKey] })
 
 if (remove) {
   // git ops must run in the repo the worktree belongs to (NG or TRM). Older

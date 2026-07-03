@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 import fs from 'node:fs'
 import {
-  allocateSlot, getProject, projectMainCheckout, slotKey, readRegistry, writeRegistry,
+  allocateSlot, getProject, projectMainCheckout, slotKey, updateRegistry,
   spawnDetached, isPortInUse, DEV_WEB_ORIGINS, git, reapPending, PROJECTS, mainCheckout,
 } from './lib.mjs'
 
@@ -143,15 +143,15 @@ console.log('Starting dev server(s) (detached) …')
 const apiPid = proj.hasApi ? spawnDetached(wt, proj.apiPkg, proj.apiScript(slot), apiLog) : null
 const webPid = spawnDetached(wt, proj.webPkg, proj.webScript(slot), webLog)
 
-const reg = readRegistry()
-reg.slots[slotKey(projectKey, slot)] = {
-  project: projectKey, feature, branch, worktree: wt.replace(/\\/g, '/'),
-  main: main.replace(/\\/g, '/'),
-  apiPort: proj.hasApi ? api : null, apiTarget: proj.hasApi ? null : api,
-  webPort: web, apiPid, webPid,
-  logDir: logDir.replace(/\\/g, '/'), createdAt: new Date().toISOString(),
-}
-writeRegistry(reg)
+updateRegistry((reg) => {
+  reg.slots[slotKey(projectKey, slot)] = {
+    project: projectKey, feature, branch, worktree: wt.replace(/\\/g, '/'),
+    main: main.replace(/\\/g, '/'),
+    apiPort: proj.hasApi ? api : null, apiTarget: proj.hasApi ? null : api,
+    webPort: web, apiPid, webPid,
+    logDir: logDir.replace(/\\/g, '/'), createdAt: new Date().toISOString(),
+  }
+})
 
 // Health check: wait for the web port to accept connections (vite is quick; the
 // API tsx-watch a few seconds). 90s ceiling so a broken start fails loudly.

@@ -13,7 +13,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import {
   MAIN_SLOT, apiPort, webPort, isPortInUse, spawnDetached, killTree,
-  mainCheckout, readRegistry, writeRegistry, git, pidAlive,
+  mainCheckout, readRegistry, updateRegistry, git, pidAlive,
 } from './lib.mjs'
 
 const API_PORT = apiPort(MAIN_SLOT) // 8080
@@ -44,13 +44,11 @@ function reportLine(label, port, pid, up) {
 }
 
 async function down({ quiet } = {}) {
-  const reg = readRegistry()
-  const m = reg.main
+  const m = readRegistry().main
   if (m) {
     killTree(m.apiPid)
     killTree(m.webPid)
-    delete reg.main
-    writeRegistry(reg)
+    updateRegistry((reg) => { delete reg.main })
     if (!quiet) console.log('Stopped master (slot 0). API 8080 / web 3000 freed.')
   } else if (!quiet) {
     console.log('No registered master server. Nothing to stop.')
@@ -88,9 +86,9 @@ async function up() {
   const apiPid = spawnDetached(main, '@mps/api', `dev:${API_PORT}`, apiLog)
   const webPid = spawnDetached(main, '@mps/web', `dev:${WEB_PORT}`, webLog)
 
-  const reg = readRegistry()
-  reg.main = { branch: currentBranch(), apiPid, webPid, api: API_PORT, web: WEB_PORT, startedAt: new Date().toISOString() }
-  writeRegistry(reg)
+  updateRegistry((reg) => {
+    reg.main = { branch: currentBranch(), apiPid, webPid, api: API_PORT, web: WEB_PORT, startedAt: new Date().toISOString() }
+  })
 
   const apiUp = await waitFor(API_PORT, 'API')
   const webUp = await waitFor(WEB_PORT, 'Web')

@@ -106,9 +106,81 @@ export function readRegistry() {
   }
 }
 
+// Atomic write: serialize to a per-PID temp file, then rename over the target.
+// A concurrent reader therefore sees either the whole old file or the whole new
+// one — never a half-written file (that partial-read → JSON.parse throw →
+// readRegistry() falling back to {} → the fallback getting persisted is exactly
+// what wiped every entry during the multi-session incident). rename can transiently
+// EPERM/EBUSY on Windows if a reader (or AV) has the target open; retry briefly.
 export function writeRegistry(reg) {
   fs.mkdirSync(path.dirname(REGISTRY), { recursive: true })
-  fs.writeFileSync(REGISTRY, JSON.stringify(reg, null, 2))
+  const tmp = `${REGISTRY}.${process.pid}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify(reg, null, 2))
+  for (let i = 0; ; i++) {
+    try { fs.renameSync(tmp, REGISTRY); return }
+    catch (e) {
+      if ((e.code === 'EPERM' || e.code === 'EBUSY') && i < 10) { sleepSync(30); continue }
+      try { fs.rmSync(tmp, { force: true }) } catch {}
+      throw e
+    }
+  }
+}
+
+// ── Cross-process registry lock ─────────────────────────────────────────────
+// The registry is shared by every worktree skill across every Claude session /
+// terminal, and each mutation is a read-modify-write. Without serialization two
+// sessions interleave and one clobbers the other's slots. `updateRegistry(fn)`
+// takes an exclusive lockfile, RE-READS the registry fresh, applies fn, writes
+// atomically, then releases — so each mutation merges with whatever landed since.
+const LOCK = `${REGISTRY}.lock`
+const LOCK_STALE_MS = 10_000 // a holder older than this is presumed dead → steal
+const LOCK_TIMEOUT_MS = 8_000 // waited this long → steal to avoid a deadlock
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+function acquireLock() {
+  const start = Date.now()
+  for (;;) {
+    try {
+      const fd = fs.openSync(LOCK, 'wx') // O_CREAT|O_EXCL: fails if held
+      fs.writeSync(fd, `${process.pid} ${Date.now()}`)
+      fs.closeSync(fd)
+      return
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e
+    }
+    // Held by someone. Steal only if it looks abandoned (stale mtime) or we've
+    // waited past the timeout — critical sections are sub-millisecond, so a lock
+    // lingering seconds means the holder died mid-write.
+    let steal = Date.now() - start > LOCK_TIMEOUT_MS
+    if (!steal) {
+      try { steal = Date.now() - fs.statSync(LOCK).mtimeMs > LOCK_STALE_MS } catch { /* vanished */ }
+    }
+    if (steal) { try { fs.rmSync(LOCK, { force: true }) } catch {} }
+    else sleepSync(20)
+  }
+}
+
+function releaseLock() {
+  try { fs.rmSync(LOCK, { force: true }) } catch {}
+}
+
+/** Run `mutator(reg)` as an atomic read-modify-write under the registry lock.
+ *  The reg passed in is read FRESH inside the lock (not a stale snapshot from
+ *  before), so concurrent mutations to other slots are preserved. Returns the
+ *  mutator's return value. Keep the mutator synchronous and quick — no I/O. */
+export function updateRegistry(mutator) {
+  acquireLock()
+  try {
+    const reg = readRegistry()
+    const ret = mutator(reg)
+    writeRegistry(reg)
+    return ret
+  } finally {
+    releaseLock()
+  }
 }
 
 // ── Deferred directory removal ─────────────────────────────────────────────
@@ -124,11 +196,11 @@ export function readPending() {
 }
 
 export function addPending(entry) {
-  const reg = readRegistry()
-  const list = Array.isArray(reg.pendingRemovals) ? reg.pendingRemovals : []
-  if (!list.some((e) => e.worktree === entry.worktree)) list.push(entry)
-  reg.pendingRemovals = list
-  writeRegistry(reg)
+  updateRegistry((reg) => {
+    const list = Array.isArray(reg.pendingRemovals) ? reg.pendingRemovals : []
+    if (!list.some((e) => e.worktree === entry.worktree)) list.push(entry)
+    reg.pendingRemovals = list
+  })
 }
 
 /** Finish removing any worktrees whose directory was locked at completion time.
@@ -161,9 +233,13 @@ export function reapPending() {
       stillBlocked.push(e)
     }
   }
-  const reg = readRegistry()
-  reg.pendingRemovals = stillBlocked
-  writeRegistry(reg)
+  // Drop only the entries we actually reaped — re-reading under the lock so a
+  // pending entry added by another session while we were reaping isn't lost.
+  const reapedWt = new Set(reaped.map((e) => e.worktree))
+  updateRegistry((reg) => {
+    const cur = Array.isArray(reg.pendingRemovals) ? reg.pendingRemovals : []
+    reg.pendingRemovals = cur.filter((e) => !reapedWt.has(e.worktree))
+  })
   return { reaped, stillBlocked }
 }
 
