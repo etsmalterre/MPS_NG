@@ -2,10 +2,12 @@
 
 ## When to use
 
-Invoke with `/worktree-status` to see every active MPS_NG feature worktree at a glance:
-which slot it's on, whether its API + web servers are alive, whether the web port is
-actually serving, how far the branch is ahead/behind `origin/master`, and which slots are
-free. Run it anywhere (it reads the shared registry at `~/.claude/mps-worktrees.json`).
+Invoke with `/worktree-status` to see every active feature worktree at a glance — across
+**both** projects (MPS_NG and MPS-TRM): which slot it's on (TRM slots show as `trm:N`),
+its project, whether its servers are alive, whether the web port is actually serving, how
+far the branch is ahead/behind `origin/master`, and which slots are free per project
+(NG and TRM have disjoint port ranges — `300N`/`808N` vs `517N`). Run it anywhere (it reads
+the shared registry at `~/.claude/mps-worktrees.json`).
 
 ## Steps
 
@@ -13,7 +15,7 @@ free. Run it anywhere (it reads the shared registry at `~/.claude/mps-worktrees.
    ```bash
    node scripts/worktree/status.mjs
    ```
-   (Run an optional `git -C C:/dev/MPS_NG fetch origin -q` first if you want the
+   (Run an optional `git -C C:/dev/etsmalterre/MPS_NG fetch origin -q` first if you want the
    ahead/behind counts to reflect the very latest `master`.)
 
 2. **Relay the output** to the user: the per-slot health (UP / PARTIAL / DOWN), URLs,

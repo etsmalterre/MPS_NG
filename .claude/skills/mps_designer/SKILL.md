@@ -2676,7 +2676,7 @@ Reference: **`apps/web/src/pages/FournisseursCommandes.tsx`** → `StockLinkDraw
 
 When a user clicks a row in the center panel's main list (e.g. an order line), a drawer should slide up inside that same panel — **not** as a full-screen `Sheet` overlay. The rows shrink to make room; the drawer fills the bottom. Nothing outside the center panel is covered.
 
-This pattern already exists in **MFProd** (`C:\dev\mfprod\mfprod_erp` → `src/features/commandes/components/OrderDetail.tsx` + `AffectationPanel.tsx`) and should be used in MPS_NG for the same "drill into a row without losing context" interactions. It is distinct from:
+This pattern already exists in **MFProd** (`C:\dev\etsmalterre\mfprod\mfprod_erp` → `src/features/commandes/components/OrderDetail.tsx` + `AffectationPanel.tsx`) and should be used in MPS_NG for the same "drill into a row without losing context" interactions. It is distinct from:
 - **§27 Table-centric screens** — those use a `fixed` right-side drawer that overlays the table body
 - **§29 Sidebar status footer** — that is a pinned element, never hidden
 - **shadcn `<Sheet>`** — that is a full-screen modal with an overlay backdrop

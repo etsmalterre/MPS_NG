@@ -16,6 +16,49 @@ export const apiPort = (n) => 8080 + n
 export const webPort = (n) => 3000 + n
 export const IS_WIN = process.platform === 'win32'
 
+// ── Projects ────────────────────────────────────────────────────────────────
+// Worktrees can be created for either the MPS_NG repo (API + web) or the sibling
+// MPS-TRM repo (web only — its web dev server talks to an MPS_NG API over HTTP).
+// Each project owns a disjoint port range so an NG slot and a TRM slot with the
+// same number never collide:
+//   ng  slot N → API 808N + web 300N   (packages @mps/api + @mps/web)
+//   trm slot N → web 517N              (package @mps-trm/web, no API of its own)
+// Both repos live side-by-side under the same parent dir (dirName is the folder
+// basename), so a TRM worktree can be driven from the NG checkout (the sibling is
+// resolved by dirName). See claude_doc/worktrees.md.
+export const PROJECTS = {
+  ng: {
+    key: 'ng',
+    label: 'MPS_NG',
+    dirName: 'MPS_NG',
+    hasApi: true,
+    apiPkg: '@mps/api',
+    webPkg: '@mps/web',
+    apiPort: (n) => 8080 + n,
+    webPort: (n) => 3000 + n,
+    apiScript: (n) => `dev:${8080 + n}`,
+    webScript: (n) => `dev:${3000 + n}`,
+  },
+  trm: {
+    key: 'trm',
+    label: 'MPS-TRM',
+    dirName: 'MPS-TRM',
+    hasApi: false,
+    webPkg: '@mps-trm/web',
+    webPort: (n) => 5170 + n, // 5171..5176
+    webScript: (n) => `dev:${5170 + n}`,
+    // TRM web has no API of its own — by default it targets the slot-0 master
+    // MPS_NG API (served via /serve-main). Overridable per worktree (up --api).
+    defaultApiPort: 8080,
+  },
+}
+
+export function getProject(key) {
+  const p = PROJECTS[(key || 'ng').toLowerCase()]
+  if (!p) throw new Error(`Unknown project "${key}". Use "ng" or "trm".`)
+  return p
+}
+
 // Slot 0 is RESERVED for serving the main checkout (master) itself: API 8080 /
 // web 3000. It sits outside the 1..6 feature range, so allocateSlot() never
 // hands it out and a feature worktree can never collide with the running master.
@@ -23,12 +66,37 @@ export const IS_WIN = process.platform === 'win32'
 export const MAIN_SLOT = 0
 
 // Every dev web origin that must be allowed by the API's CORS_ORIGIN so cookie
-// auth works from any slot (plus the two legacy defaults, and slot-0 master).
-export const DEV_WEB_ORIGINS = [5174, 5175, webPort(MAIN_SLOT), ...SLOTS.map(webPort)].map(
-  (p) => `http://localhost:${p}`,
-)
+// auth works from any slot — NG web ports (slot-0 master + 1..6), the two legacy
+// defaults, and the TRM web ports (5171..6) since a TRM worktree's web server
+// calls an MPS_NG API cross-origin. Deduped (5175 == trm slot 5).
+export const DEV_WEB_ORIGINS = [
+  ...new Set([
+    5174,
+    5175,
+    webPort(MAIN_SLOT),
+    ...SLOTS.map(webPort),
+    ...SLOTS.map(PROJECTS.trm.webPort),
+  ]),
+].map((p) => `http://localhost:${p}`)
 
 const REGISTRY = path.join(os.homedir(), '.claude', 'mps-worktrees.json')
+
+// Registry slot keys. NG keeps bare numeric keys ("1".."6") for backward
+// compatibility with entries created before TRM support; TRM entries are
+// namespaced ("trm:1".."trm:6"). A bare-numeric key with no `project` field on
+// its entry is therefore an NG slot.
+export function slotKey(projectKey, n) {
+  return projectKey === 'ng' ? String(n) : `${projectKey}:${n}`
+}
+export function parseSlotKey(key) {
+  if (/^\d+$/.test(key)) return { project: 'ng', slot: Number(key) }
+  const [proj, n] = key.split(':')
+  return { project: proj, slot: Number(n) }
+}
+/** Project key for a registry entry, tolerant of pre-TRM entries with no field. */
+export function entryProject(entry, key) {
+  return entry?.project || parseSlotKey(key).project
+}
 
 export function readRegistry() {
   try {
@@ -69,11 +137,15 @@ export function addPending(entry) {
 export function reapPending() {
   const list = readPending()
   if (list.length === 0) return { reaped: [], stillBlocked: [] }
-  const main = mainCheckout()
-  const tryGit = (args) => { try { git(args, main) } catch {} }
+  // git prune/branch-delete must run in the repo the worktree belongs to. Older
+  // pending entries predate the `main` field — fall back to the current repo's
+  // main checkout (those are always NG, created before TRM support existed).
+  const fallbackMain = mainCheckout()
   const reaped = []
   const stillBlocked = []
   for (const e of list) {
+    const repo = e.main || fallbackMain
+    const tryGit = (args) => { try { git(['-C', repo, ...args], repo) } catch {} }
     if (fs.existsSync(e.worktree)) {
       try {
         fs.rmSync(e.worktree, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
@@ -105,6 +177,23 @@ export function mainCheckout(cwd = process.cwd()) {
   return path.dirname(path.resolve(cwd, common))
 }
 
+/** Main checkout for a given project. When cwd is already that project's repo,
+ *  it's mainCheckout(); otherwise the project repo is a sibling dir (same parent,
+ *  named project.dirName) — which is how a TRM worktree is driven from the NG
+ *  checkout. Throws if the sibling isn't a git repo. */
+export function projectMainCheckout(projectKey, cwd = process.cwd()) {
+  const proj = getProject(projectKey)
+  const here = mainCheckout(cwd)
+  if (path.basename(here).toLowerCase() === proj.dirName.toLowerCase()) return here
+  const sibling = path.join(path.dirname(here), proj.dirName)
+  if (!fs.existsSync(path.join(sibling, '.git'))) {
+    throw new Error(
+      `Cannot find the ${proj.label} checkout at ${sibling} (expected a sibling of ${here}).`,
+    )
+  }
+  return sibling
+}
+
 function probeHost(port, host, timeoutMs) {
   return new Promise((resolve) => {
     const sock = new net.Socket()
@@ -128,17 +217,20 @@ export async function isPortInUse(port, timeoutMs = 500) {
   return v4 || v6
 }
 
-/** Lowest free slot: not in the registry AND both its ports actually free.
- *  Throws if all six are taken. */
-export async function allocateSlot() {
+/** Lowest free slot for a project: no registry entry for that project+slot AND
+ *  the project's port(s) actually free. Projects have disjoint port ranges, so
+ *  an NG slot and a TRM slot with the same number don't collide. Throws if all
+ *  six of the project's slots are taken. */
+export async function allocateSlot(projectKey = 'ng') {
+  const proj = getProject(projectKey)
   const reg = readRegistry()
   for (const n of SLOTS) {
-    if (reg.slots[String(n)]) continue
-    if (await isPortInUse(apiPort(n))) continue
-    if (await isPortInUse(webPort(n))) continue
+    if (reg.slots[slotKey(projectKey, n)]) continue
+    if (proj.hasApi && (await isPortInUse(proj.apiPort(n)))) continue
+    if (await isPortInUse(proj.webPort(n))) continue
     return n
   }
-  throw new Error('All 6 worktree slots are in use (ports 8081-8086 / 3001-3006).')
+  throw new Error(`All 6 ${proj.label} worktree slots are in use.`)
 }
 
 /** PID still exists? (signal 0 probe — may false-positive on a recycled PID, so

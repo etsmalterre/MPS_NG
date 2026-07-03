@@ -2,57 +2,80 @@
 
 ## When to use
 
-Invoke with `/new-feature-worktree <feature-name>` to start work on a new MPS_NG
-screen/feature in an isolated git worktree with its own local dev stack (API + web)
-on a dedicated port slot. Run this from the **main checkout** (`C:\dev\MPS_NG`, which
-stays on `master`). Up to 6 worktrees can run at once.
+Invoke with `/new-feature-worktree <feature-name> [ng|trm]` to start work on a new
+screen/feature in an isolated git worktree with its own local dev stack on a dedicated
+port slot. Run this from the **MPS_NG main checkout** (`C:\dev\etsmalterre\MPS_NG`, which
+stays on `master`). The **project** defaults to `ng`; pass `trm` to spin up an MPS-TRM
+worktree instead. Up to 6 worktrees per project can run at once.
 
 `<feature-name>` is kebab-case (e.g. `clients-commandes`). It produces:
-- branch `feat/<feature-name>`
-- worktree dir `../MPS_NG-<feature-name>`
-- the lowest free slot N (1–6) → API on `808N`, web on `300N`
+
+**`ng` (MPS_NG — API + web):**
+- branch `feat/<feature-name>`, worktree dir `../MPS_NG-<feature-name>`
+- lowest free slot N (1–6) → API on `808N`, web on `300N`
+
+**`trm` (MPS-TRM — web only):**
+- branch `feat/<feature-name>`, worktree dir `../MPS-TRM-<feature-name>`
+- lowest free slot N (1–6) → web on `517N` (no API of its own)
+- The TRM web server talks to an **MPS_NG API over HTTP**. By default it targets the
+  slot-0 master API on `:8080` (start it with `/serve-main`). To point it at a different
+  MPS_NG API (e.g. a running NG worktree's `808N`), pass `--api <port>`.
+
+The two projects have **disjoint port ranges**, so an NG slot and a TRM slot with the
+same number never collide (NG `300N`/`808N`, TRM `517N`).
 
 ## Background
 
 Slot model and merge flow are documented in `claude_doc/worktrees.md`. The heavy
-lifting (slot allocation, worktree creation, `pnpm install`, env/secrets copy,
-starting the detached dev servers, health checks, registry bookkeeping) is done by
-`scripts/worktree/up.mjs`. The registry lives at `~/.claude/mps-worktrees.json`.
+lifting (project resolution, slot allocation, worktree creation, `pnpm install`,
+env/secrets copy, starting the detached dev servers, health checks, registry
+bookkeeping) is done by `scripts/worktree/up.mjs`. The registry lives at
+`~/.claude/mps-worktrees.json` (shared across both projects; TRM entries are keyed
+`trm:N`, NG entries stay bare `N`).
 
 ## Steps
 
-1. **Validate the argument.** If no feature name was given, ask for one. It must match
-   `^[a-z0-9][a-z0-9-]*$` (kebab-case). Reject names with spaces/uppercase/slashes.
+1. **Validate the arguments.** If no feature name was given, ask for one. It must match
+   `^[a-z0-9][a-z0-9-]*$` (kebab-case). Reject names with spaces/uppercase/slashes. The
+   optional project must be `ng` (default) or `trm`.
 
-2. **Run the spin-up script** from the main checkout:
+2. **Run the spin-up script** from the MPS_NG main checkout:
    ```bash
-   node scripts/worktree/up.mjs <feature-name>
+   node scripts/worktree/up.mjs <feature-name> [ng|trm] [--api <port>]
    ```
-   This fetches origin, allocates a free slot, creates the worktree off
-   `origin/master`, installs deps, writes a CORS-correct `.env.development`, copies
-   `secrets/` if present, starts the API (`dev:808N`) and web (`dev:300N`) detached
-   (logs → `<worktree>/.dev-logs/`), and records the slot + PIDs in the registry.
+   This fetches origin (in the target repo — MPS-TRM is resolved as the sibling checkout
+   for `trm`), allocates a free slot, creates the worktree off `origin/master`, installs
+   deps, and:
+   - **ng**: writes a CORS-correct `apps/api/.env.development`, copies `secrets/`, starts
+     the API (`dev:808N`) and web (`dev:300N`) detached.
+   - **trm**: writes `apps/web/.env.development.local` (`VITE_API_URL` → the chosen MPS_NG
+     API, plus the tab label), starts web only (`dev:517N`) detached.
 
-3. **Read the script's summary** (slot, branch, worktree path, the two
-   `http://localhost:...` URLs, log paths). If it reports a server "NOT UP", tail the
-   named log to diagnose before declaring success:
+   Logs → `<worktree>/.dev-logs/`; slot + PIDs recorded in the registry.
+
+3. **Read the script's summary** (project, slot, branch, worktree path, URLs, log paths).
+   If it reports a server "NOT UP", tail the named log before declaring success:
    ```bash
-   tail -n 40 ../MPS_NG-<feature-name>/.dev-logs/web.log
-   tail -n 40 ../MPS_NG-<feature-name>/.dev-logs/api.log
+   tail -n 40 ../MPS_NG-<feature-name>/.dev-logs/web.log      # or MPS-TRM-<name>
+   tail -n 40 ../MPS_NG-<feature-name>/.dev-logs/api.log      # ng only
    ```
+   For **trm**, if the summary says the MPS_NG API isn't reachable, tell the user to run
+   `/serve-main` (master on `:8080`) — the TRM web will 404 its API calls until then.
 
-4. **Report to the user** the worktree path, the web URL (`http://localhost:300N`),
-   and the slot number. Tell them to **open a new Claude Code session in the worktree
-   directory** to do the screen work there — that session will use `/feature-checkpoint`
-   to sync and `/feature-complete` to land it.
+4. **Report to the user** the project, worktree path, the web URL (`http://localhost:300N`
+   for ng, `http://localhost:517N` for trm), and the slot number. Tell them to **open a new
+   Claude Code session in the worktree directory** to do the screen work there — that
+   session will use `/feature-checkpoint` to sync and `/feature-complete` to land it.
 
 ## Notes / failure modes
 
-- "All 6 worktree slots are in use" → run `/worktree-status`; finish or `/feature-down`
-  one before creating another.
+- "All 6 … slots are in use" → run `/worktree-status`; finish or `/feature-down` one of
+  that project's worktrees before creating another.
 - "Branch already exists" / "Worktree dir already exists" → the script aborts to avoid
   clobbering in-progress work. Pick a different name, or clean up the old one with
   `/feature-complete` (if mergeable) or `node scripts/worktree/down.mjs <name> --remove`.
 - The dev servers are **detached** — they keep running after this Claude session ends,
   which is the point. They are stopped by `/feature-complete` or `/feature-down`.
+- **TRM worktrees need an MPS_NG API running** (master via `/serve-main`, or an NG worktree
+  via `--api 808N`). They have no API of their own.
 - Do NOT do feature work in the main checkout; it is the integration tree on `master`.

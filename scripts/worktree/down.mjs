@@ -11,7 +11,7 @@
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import {
-  killTree, mainCheckout, readRegistry, writeRegistry, addPending, reapPending,
+  killTree, mainCheckout, readRegistry, writeRegistry, addPending, reapPending, entryProject,
 } from './lib.mjs'
 
 /** Synchronous sleep (no async in this short script). */
@@ -29,19 +29,22 @@ const target = (process.argv[2] || '').trim()
 const remove = process.argv.includes('--remove')
 if (!target) {
   console.error('Usage: node scripts/worktree/down.mjs <feature|slot> [--remove]')
+  console.error('  slot may be a bare number (NG) or "trm:N" — feature name is unambiguous.')
   process.exit(1)
 }
 
 const reg = readRegistry()
-// Find the slot by number or by feature name.
+// Find the slot by exact registry key ("1", "trm:1") or by feature name.
 let slotKey = null
-if (/^[1-6]$/.test(target) && reg.slots[target]) {
+if (reg.slots[target]) {
   slotKey = target
 } else {
   slotKey = Object.keys(reg.slots).find((k) => reg.slots[k].feature === target) ?? null
 }
 if (!slotKey) {
-  console.error(`No registry entry for "${target}". Active: ${Object.values(reg.slots).map((s) => s.feature).join(', ') || '(none)'}`)
+  const active = Object.entries(reg.slots)
+    .map(([k, s]) => `${s.feature} (${k})`).join(', ') || '(none)'
+  console.error(`No registry entry for "${target}". Active: ${active}`)
   process.exit(1)
 }
 const entry = reg.slots[slotKey]
@@ -55,7 +58,9 @@ delete reg.slots[slotKey]
 writeRegistry(reg)
 
 if (remove) {
-  const main = mainCheckout()
+  // git ops must run in the repo the worktree belongs to (NG or TRM). Older
+  // entries have no `main` field — they're always NG (created pre-TRM support).
+  const main = entry.main || mainCheckout()
   const tryGit = (args, label) => {
     try {
       execFileSync('git', ['-C', main, ...args], { stdio: 'inherit' })
@@ -84,7 +89,10 @@ if (remove) {
     console.log(`Slot ${slotKey} freed. Worktree + branch removed.`)
   } else {
     // Locked by a terminal cwd'd inside (the usual feature-session case). Defer.
-    addPending({ worktree: entry.worktree, branch: entry.branch, feature: entry.feature })
+    addPending({
+      worktree: entry.worktree, branch: entry.branch, feature: entry.feature,
+      project: entryProject(entry, slotKey), main,
+    })
     console.log(`Slot ${slotKey} freed. Servers stopped and merge is done.`)
     console.log(`NOTE: ${entry.worktree} is still open in a terminal, so it can't be deleted yet.`)
     console.log(`      It will be removed automatically the next time you run any worktree`)

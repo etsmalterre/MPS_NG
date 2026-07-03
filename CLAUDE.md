@@ -142,7 +142,7 @@ Full details in `claude_doc/hfsql_odbc.md`. These are the non-negotiable rules f
 
 - **Code**: English. **UI**: French. **Comments**: English.
 - **"check last screenshot"** → read the latest file in `%USERPROFILE%\Pictures\Screenshots` (i.e. `C:\Users\<current-user>\Pictures\Screenshots` — `vince` on the factory PC, `malte` on the laptop)
-- **Related project**: MPS_NG follows the architecture of **MFProd_NG** (`C:\dev\mfprod\mfprod_erp`) — same tech stack, same layout patterns, different branding (gold vs orange) and domain (textile vs fencing).
+- **Related project**: MPS_NG follows the architecture of **MFProd_NG** (`C:\dev\etsmalterre\mfprod\mfprod_erp`) — same tech stack, same layout patterns, different branding (gold vs orange) and domain (textile vs fencing).
 
 ## Quick Start
 

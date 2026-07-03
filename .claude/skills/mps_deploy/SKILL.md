@@ -113,7 +113,7 @@ OPTS="-F none -i $KEY -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=1
 1. **Build locally — use PowerShell, NOT the Bash tool.** `VITE_API_URL=/api`
    MUST be set in the build env:
    ```powershell
-   cd C:\dev\MPS_NG; $env:VITE_API_URL='/api'; pnpm --filter web build   # USE THIS
+   cd C:\dev\etsmalterre\MPS_NG; $env:VITE_API_URL='/api'; pnpm --filter web build   # USE THIS
    ```
    ```bash
    MSYS_NO_PATHCONV=1 VITE_API_URL=/api pnpm --filter web build          # bash ONLY with the guard
