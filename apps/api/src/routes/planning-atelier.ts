@@ -106,14 +106,29 @@ interface BonnetierRow {
   IDrole_employe: number
 }
 
+// The `prénom` column key comes back in unpredictable shapes from the Linux
+// bridge — `pr` (truncated), `pr�nom`, `pr?nom`, or worse — and the shape has
+// been observed to CHANGE mid-process on the same connection (prod, 2026-07-06).
+// Match any `pr…nom`-ish key (`preference` doesn't end in "nom" so it stays
+// out), then fall back to the column physically before `nom` in the legacy
+// table layout, which is always prénom whatever its key got mangled into.
+let prenomKeyWarned = false
+function bonnetierPrenom(raw: Record<string, unknown>): string {
+  const direct = rawGet(raw, /^pr$|^pr.*nom$/i)
+  if (direct !== undefined) return String(direct ?? '')
+  const keys = Object.keys(raw)
+  const i = keys.indexOf('nom')
+  if (!prenomKeyWarned) {
+    prenomKeyWarned = true
+    console.warn(`[planning-atelier] prénom key unrecognizable, using positional fallback; keys=${keys.join(',')}`)
+  }
+  return i > 0 ? String(raw[keys[i - 1]] ?? '') : ''
+}
+
 function normalizeBonnetierRow(raw: Record<string, unknown>): BonnetierRow {
   return {
     IDbonnetier: n(raw.IDbonnetier),
-    // `prénom` arrives as `prénom` (Windows), truncated `pr`, or with the é
-    // mangled to 1–2 junk chars (`pr�nom`, `pr?nom`) depending on how the
-    // Linux bridge connection negotiated its charset — seen varying between
-    // restarts of the same binary. Match all shapes; `preference` stays out.
-    prenom: String(rawGet(raw, /^pr$|^pr.{0,2}nom$/i) ?? ''),
+    prenom: bonnetierPrenom(raw),
     nom: String(raw.nom ?? ''),
     regleur: n(raw.regleur),
     // `archivé` arrives as `archivé` (Windows) or truncated `archiv` (Linux).
