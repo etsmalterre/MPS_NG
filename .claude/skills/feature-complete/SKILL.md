@@ -34,6 +34,33 @@ Below, **`<MAIN>`** = the main checkout for this project. Get it programmaticall
 - `<MAIN>` is on `master` with a clean working tree. (The `apps/api/tsconfig.tsbuildinfo`
   gitignore keeps it clean across builds — if `git -C <MAIN> status --porcelain` is
   non-empty, resolve that first; do not force past it.)
+- **TRM only — shared-API guardrail.** A TRM feature's endpoints live in the **MPS_NG API**
+  (`C:\dev\etsmalterre\MPS_NG\apps\api`), not in this repo. Before landing, check whether
+  API work for this feature is still unlanded:
+  ```bash
+  git -C C:/dev/etsmalterre/MPS_NG status --porcelain -- apps/api
+  ```
+  - If this is **non-empty**, someone edited the API in the NG **main checkout** — STOP and
+    tell the user. Those edits must land via a **paired NG worktree** (see "Shared-API
+    changes" below), never as loose edits in the integration tree. Landing the TRM web
+    branch while its API is uncommitted would strand the feature half-shipped.
+  - If the feature's API changes live in a **paired NG worktree**, land that one FIRST
+    (run `/feature-complete` there), then land this TRM branch.
+
+## Shared-API changes (TRM features)
+
+MPS-TRM is frontend-only; its endpoints are part of the MPS_NG API. The rule:
+**API changes always flow through MPS_NG's own pipeline — worktree → `feat/*` branch →
+NG `master` → NG `/mps_deploy` — regardless of which frontend consumes them.**
+
+For a TRM feature that needs API work, the setup is a **pair of worktrees**:
+- an NG worktree (`../MPS_NG-<name>`) holding the API changes, and
+- this TRM worktree (`../MPS-TRM-<name>`) holding the screen, spun up with
+  `--api 808N` pointing at the NG worktree's API.
+
+Landing order: **NG branch first** (its API lands on NG `master`), then the TRM branch.
+Deploys are separate per repo: `/mps_deploy` from MPS_NG ships the API (+ NG web);
+`/mps_deploy` from MPS-TRM ships the TRM web.
 
 ## Steps
 

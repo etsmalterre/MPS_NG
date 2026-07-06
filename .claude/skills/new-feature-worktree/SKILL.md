@@ -78,4 +78,8 @@ bookkeeping) is done by `scripts/worktree/up.mjs`. The registry lives at
   which is the point. They are stopped by `/feature-complete` or `/feature-down`.
 - **TRM worktrees need an MPS_NG API running** (master via `/serve-main`, or an NG worktree
   via `--api 808N`). They have no API of their own.
+- **TRM feature needing shared-API changes** → spin up a **paired NG worktree** with the
+  same feature name for the API work, and pass `--api 808N` to the TRM worktree so it talks
+  to that API. Never edit the API in this main checkout. Landing order: NG branch first,
+  then TRM. See `claude_doc/worktrees.md` §"Shared-API changes".
 - Do NOT do feature work in the main checkout; it is the integration tree on `master`.

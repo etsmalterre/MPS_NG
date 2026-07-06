@@ -4,6 +4,24 @@
 
 Invoke with `/mps_deploy` to deploy the MPS_NG API and/or webapp to production.
 
+## Deploy ownership — the API is shared with MPS-TRM
+
+The API deployed here serves **two frontends**: MPS_NG (`mpsng.malterre`) and the sister
+app **MPS-TRM** (`mpstrm.malterre`, dist at `/home/debian/mps_trm/dist` on the same web
+server, its nginx site proxies `/api/` to this same `10.10.2.163:8081`).
+
+- **This skill owns**: the MPS_NG web bundle + the **shared API** (including endpoints that
+  only TRM screens use, e.g. `planning-atelier.ts` — they live in this repo and deploy from
+  here).
+- **The MPS-TRM repo's own `/mps_deploy`** owns: the TRM web bundle only. Never deploy the
+  API from there; never deploy the TRM web bundle from here.
+- **After every API deploy, smoke-check BOTH frontends**: `https://mpsng.malterre/api/...`
+  and `http://mpstrm.malterre/api/...` (same API through two proxies — if one fails, it's
+  nginx-side, not the API).
+- Shared-API changes for TRM features land on this repo's `master` via a **paired NG
+  worktree** (see `claude_doc/worktrees.md` §"Shared-API changes") — so deploying `master`
+  here is always sufficient to ship the API side of a TRM feature.
+
 ## Infrastructure Overview
 
 | Component | Server | IP | User | Hostname |
@@ -31,6 +49,18 @@ OPTS="-F none -i $KEY -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=1
 ```
 
 **Important**: The claude_deploy key is only enabled during active sessions. The user enables it before deployment and disables it after for security. `Permission denied (publickey)` = the key isn't enabled right now (normal, not a bug) — ask the user to enable it. A timeout on a `10.10.x.x` address = not on the factory LAN/VPN.
+
+**Key location varies per machine** (verified 2026-07-06): on the **factory PC** (`vince`) the
+Windows-side key path above does **not exist** — the key lives on the WSL side at
+`/home/vincent/.ssh/claude_deploy/claude_deploy`. If the Windows key file is missing
+(`Identity file … not accessible`), fall back to WSL:
+```bash
+wsl bash -c "ssh -i /home/vincent/.ssh/claude_deploy/claude_deploy -o StrictHostKeyChecking=no debian@10.10.2.163 '<command>'"
+wsl bash -c "scp -i /home/vincent/.ssh/claude_deploy/claude_deploy <local> debian@10.10.2.163:<remote>"
+```
+(For WSL scp, local Windows paths are `/mnt/c/...`.) Try `hostname` with one method; if the
+identity file is missing, switch to the other — don't conclude the key isn't enabled until
+an existing key file is refused.
 
 ## API Server (10.10.2.163)
 

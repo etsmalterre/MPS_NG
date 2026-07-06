@@ -37,6 +37,31 @@ targets the **slot-0 master** MPS_NG API on `:8080` (start it with `/serve-main`
 `up.mjs <feature> trm --api 808N` to point at a running NG worktree's API instead. The chosen
 target is written to the TRM worktree's `apps/web/.env.development.local` as `VITE_API_URL`.
 
+## Shared-API changes (TRM features) — the paired-worktree rule
+
+The MPS_NG API serves both frontends; MPS-TRM has none of its own. The invariant:
+**API changes always flow through MPS_NG's own pipeline — NG worktree → `feat/*` branch →
+NG `master` → NG `/mps_deploy` — regardless of which frontend consumes them.** Never edit
+`apps/api` in the MPS_NG main checkout (it's the integration tree, and a dirty tree blocks
+both `/feature-complete` merges and deploys).
+
+A TRM feature that needs endpoints therefore uses a **pair of worktrees** with the same name:
+
+```bash
+node scripts/worktree/up.mjs <name> ng               # NG worktree: the API work (API on 808N)
+node scripts/worktree/up.mjs <name> trm --api 808N   # TRM worktree: the screen, wired to it
+```
+
+- **Landing order**: NG branch first (`/feature-complete` in the NG worktree), then the TRM
+  branch. `/feature-complete` on TRM guards this: it stops if `MPS_NG/apps/api` has
+  uncommitted main-checkout edits.
+- **Deploy ownership**: NG's `/mps_deploy` ships the shared API (+ NG web) to
+  `mpsng.malterre`; TRM's own `/mps_deploy` ships only the TRM web to `mpstrm.malterre`
+  (same servers, `/api/` proxied to the same API). One deploy Claude per repo, each on its
+  own `master`.
+- Purely-web TRM features (no API change) need no pair — the default `:8080` master API
+  via `/serve-main` is enough.
+
 The registry `~/.claude/mps-worktrees.json` maps slot → project/feature/branch/ports/PIDs. NG
 entries keep bare numeric keys (`"1"`); TRM entries are namespaced (`"trm:1"`). Slot allocation
 picks the lowest slot free in the registry **for that project** and whose port(s) are actually

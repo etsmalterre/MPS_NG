@@ -81,7 +81,7 @@ Load these on demand when working on the matching topic:
 | `claude_doc/navigation_mapping.md` | Legacy windows → MPS_NG routes |
 | `claude_doc/business_glossary.md` | Domain vocabulary, production flow |
 | `claude_doc/sous_traitants_status_model.md` | Sst commandes computed-phase model, card urgency frames + pills, Soumission Lot Client flow, Historique tab, Reprise flow, type_doc codes |
-| `claude_doc/worktrees.md` | Parallel dev with git worktrees, **multi-project** (MPS_NG `300N`/`808N` + MPS-TRM `517N`, disjoint slots): slot model (incl. reserved **slot 0** = serve `master` via `/serve-main`), the `/new-feature-worktree [ng\|trm]` · `/feature-checkpoint` · `/feature-complete` · `/worktree-status` skills (project auto-detected from the invoking repo; run TRM worktrees from the MPS-TRM checkout), concurrency-safe shared registry, merge discipline |
+| `claude_doc/worktrees.md` | Parallel dev with git worktrees, **multi-project** (MPS_NG `300N`/`808N` + MPS-TRM `517N`, disjoint slots): slot model (incl. reserved **slot 0** = serve `master` via `/serve-main`), the `/new-feature-worktree [ng\|trm]` · `/feature-checkpoint` · `/feature-complete` · `/worktree-status` skills (project auto-detected from the invoking repo; run TRM worktrees from the MPS-TRM checkout), concurrency-safe shared registry, merge discipline, **§Shared-API changes**: TRM features needing endpoints use a *paired NG worktree* (API lands via NG's pipeline; deploy ownership: NG `/mps_deploy` = shared API + NG web → `mpsng.malterre`, TRM `/mps_deploy` = TRM web only → `mpstrm.malterre`) |
 
 ## HFSQL rules (footguns — always apply)
 
