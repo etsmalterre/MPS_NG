@@ -10,6 +10,19 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-06 — feat/cmd-sst
+Sous-traitants › Commandes — **per-lot tooltip on the totals-footer "Ml reçus"**
+(`apps/api/src/routes/commandes-sous-traitant.ts`, `apps/web/src/pages/SousTraitantsCommandes.tsx`).
+The detail endpoint's received-rolls aggregate now also reads each `stock_fini` roll's `lot`
+(`fixEncoding` keyed on `IDstock_fini`) and returns a per-line `fini_lots: {lot, nb, metrage}[]`
+(lot-less rolls group under `''`). The frontend merges `fini_lots` across lines (`finiLotsMerged`
+useMemo in `LignesSection`); the green "· X Ml reçus" span in the totals footer gains a
+`FiniRollIcon` + `cursor-pointer` and, on hover, the shared `Tooltip` (side top) titled
+"Métrage reçu par lot" listing "Lot <n> — N rouleaux · X Ml" per lot ("Sans lot" for empty).
+Falls back to the plain span when no breakdown exists. Verified against dev commande 8607
+(4 rolls sans lot · 107 Ml + 3 rolls MA1234 · 25 Ml = 132 Ml total, matches
+`total_metrage_fini_recu`).
+
 ## 2026-07-06 — feat/suivilot
 Qualité › Suivi des lots — **"Pièces du lot" table footer now totals Poids & Métrage**
 (`apps/web/src/pages/QualiteSuiviLots.tsx`, `RecapSection`). The read-only per-roll sub-table

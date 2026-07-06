@@ -62,6 +62,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Tooltip } from '@/components/ui/tooltip'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
@@ -167,6 +168,9 @@ interface LigneCommande {
   total_kg_ecru_lie?: number
   nb_fini_recu?: number
   total_metrage_fini_recu?: number
+  /** Per-lot breakdown of the received fini rolls (empty lot groups under
+   *  ''). Feeds the "Ml reçus" tooltip in the totals footer. */
+  fini_lots?: Array<{ lot: string; nb: number; metrage: number }>
 }
 
 interface AdresseLite {
@@ -1799,6 +1803,22 @@ function LignesSection({
     date_livraison: '',
   })
 
+  // Per-lot breakdown of received fini rolls merged across all lines —
+  // feeds the "Ml reçus" tooltip in the totals footer.
+  const finiLotsMerged = useMemo(() => {
+    const map = new Map<string, { lot: string; nb: number; metrage: number }>()
+    for (const l of commande.lignes) {
+      for (const fl of l.fini_lots ?? []) {
+        const key = fl.lot.trim()
+        const acc = map.get(key) ?? { lot: key, nb: 0, metrage: 0 }
+        acc.nb += fl.nb
+        acc.metrage += fl.metrage
+        map.set(key, acc)
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => a.lot.localeCompare(b.lot))
+  }, [commande.lignes])
+
   const linesLocked = commande.est_soldee === 1
   const isEnnoblisseur = isEnnoblisseurType(commande.sous_traitant_type)
   const isTricoteur = (commande.sous_traitant_type ?? '').trim().toLowerCase() === TYPE_TRICOTEUR.toLowerCase()
@@ -2060,9 +2080,37 @@ function LignesSection({
                 </span>
               )}
               {totalMetrageFini > 0 && (
-                <span className="text-green-700 text-xs">
-                  · {fmtNum(totalMetrageFini, 1)} Ml reçus
-                </span>
+                finiLotsMerged.length > 0 ? (
+                  <Tooltip
+                    side="top"
+                    content={
+                      <div className="space-y-1.5 py-0.5">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground whitespace-nowrap">
+                          Métrage reçu par lot
+                        </p>
+                        <ul className="space-y-1">
+                          {finiLotsMerged.map((fl) => (
+                            <li key={fl.lot || '__sans_lot'} className="flex items-baseline justify-between gap-4 whitespace-nowrap">
+                              <span className="font-medium">{fl.lot ? `Lot ${fl.lot}` : 'Sans lot'}</span>
+                              <span className="text-muted-foreground tabular-nums">
+                                {fl.nb} rouleau{fl.nb > 1 ? 'x' : ''} · {fmtNum(fl.metrage, 1)} Ml
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    }
+                  >
+                    <span className="text-green-700 text-xs inline-flex items-center gap-1 cursor-pointer">
+                      · {fmtNum(totalMetrageFini, 1)} Ml reçus
+                      <FiniRollIcon className="h-3.5 w-3.5" />
+                    </span>
+                  </Tooltip>
+                ) : (
+                  <span className="text-green-700 text-xs">
+                    · {fmtNum(totalMetrageFini, 1)} Ml reçus
+                  </span>
+                )
               )}
               <span className="text-accent text-base">{fmtNum(totalEurReal, 2)} €</span>
             </div>

@@ -1583,8 +1583,12 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
       total_kg_ecru_lie: number
       nb_fini_recu: number
       total_metrage_fini_recu: number
+      // Per-lot breakdown of the received fini rolls — feeds the "Ml reçus"
+      // tooltip in the frontend totals footer. Rolls with an empty lot
+      // string group under ''.
+      fini_lots: Array<{ lot: string; nb: number; metrage: number }>
     }
-    const newAgg = (): LineAgg => ({ nb_ecru_lies: 0, total_kg_ecru_lie: 0, nb_fini_recu: 0, total_metrage_fini_recu: 0 })
+    const newAgg = (): LineAgg => ({ nb_ecru_lies: 0, total_kg_ecru_lie: 0, nb_fini_recu: 0, total_metrage_fini_recu: 0, fini_lots: [] })
     const piecesByLine = new Map<number, LineAgg>()
     if (lineIds.length > 0) {
       const [ecruRows, finiRows] = await Promise.all([
@@ -1593,8 +1597,8 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
            FROM stock_ecru
            WHERE IDref_commande_affectation IN (${lineIds.join(',')})`,
         ),
-        query<{ IDref_commande_source: number; metrage: number | null }>(
-          `SELECT IDref_commande_source, metrage
+        query<{ IDstock_fini: number; IDref_commande_source: number; metrage: number | null; lot: string | null }>(
+          `SELECT IDstock_fini, IDref_commande_source, metrage, lot
            FROM stock_fini
            WHERE IDref_commande_source IN (${lineIds.join(',')})`,
         ),
@@ -1607,12 +1611,21 @@ commandesSousTraitantRouter.get('/:id', async (req: Request, res: Response) => {
         acc.total_kg_ecru_lie += Number(r.poids) || 0
         piecesByLine.set(lid, acc)
       }
-      for (const r of finiRows) {
+      const fixedFini = await fixEncoding(finiRows, 'stock_fini', 'IDstock_fini', ['lot'])
+      for (const r of fixedFini) {
         const lid = Number(r.IDref_commande_source) || 0
         if (lid === 0) continue
         const acc = piecesByLine.get(lid) ?? newAgg()
         acc.nb_fini_recu += 1
         acc.total_metrage_fini_recu += Number(r.metrage) || 0
+        const lotKey = String(r.lot ?? '').trim()
+        let lotAgg = acc.fini_lots.find((x) => x.lot === lotKey)
+        if (!lotAgg) {
+          lotAgg = { lot: lotKey, nb: 0, metrage: 0 }
+          acc.fini_lots.push(lotAgg)
+        }
+        lotAgg.nb += 1
+        lotAgg.metrage += Number(r.metrage) || 0
         piecesByLine.set(lid, acc)
       }
     }
