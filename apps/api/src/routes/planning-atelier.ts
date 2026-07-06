@@ -109,8 +109,11 @@ interface BonnetierRow {
 function normalizeBonnetierRow(raw: Record<string, unknown>): BonnetierRow {
   return {
     IDbonnetier: n(raw.IDbonnetier),
-    // `prénom` arrives as `prénom` (Windows) or truncated `pr` (Linux bridge).
-    prenom: String(rawGet(raw, /^pr(é|e)?n?o?m?$/i) ?? ''),
+    // `prénom` arrives as `prénom` (Windows), truncated `pr`, or with the é
+    // mangled to 1–2 junk chars (`pr�nom`, `pr?nom`) depending on how the
+    // Linux bridge connection negotiated its charset — seen varying between
+    // restarts of the same binary. Match all shapes; `preference` stays out.
+    prenom: String(rawGet(raw, /^pr$|^pr.{0,2}nom$/i) ?? ''),
     nom: String(raw.nom ?? ''),
     regleur: n(raw.regleur),
     // `archivé` arrives as `archivé` (Windows) or truncated `archiv` (Linux).
@@ -344,12 +347,16 @@ function frLongDate(dateIso: string): string {
   return `${d.getUTCDate()} ${MONTH_NAMES_FR[d.getUTCMonth()]} ${d.getUTCFullYear()}`
 }
 
-async function buildPlanningPdfData(from: string, comment: string): Promise<PlanningAtelierPdfData> {
+async function buildPlanningPdfData(
+  from: string,
+  comment: string,
+  excludeIds: Set<number>,
+): Promise<PlanningAtelierPdfData> {
   const days = Array.from({ length: 7 }, (_, i) => addDays(from, i))
   const to = days[6]
   const [allBonnetiers, entries] = await Promise.all([selectBonnetiers(), selectEntries(from, to)])
   const bonnetiers = allBonnetiers
-    .filter((b) => b.archive === 0 && b.regleur === 0)
+    .filter((b) => b.archive === 0 && b.regleur === 0 && !excludeIds.has(b.IDbonnetier))
     .sort((a, b) => a.prenom.localeCompare(b.prenom, 'fr'))
 
   const byCell = new Map<string, { debut: string; fin: string }>()
@@ -374,8 +381,9 @@ async function buildPlanningPdfData(from: string, comment: string): Promise<Plan
   }
 }
 
-// GET /api/planning-atelier/pdf?from=YYYY-MM-DD&comment=...
-// `from` is the visible week's Sunday; `comment` is the print-time free text.
+// GET /api/planning-atelier/pdf?from=YYYY-MM-DD&comment=...&exclude=1,2,3
+// `from` is the visible week's Sunday; `comment` is the print-time free text;
+// `exclude` lists bonnetier ids hidden on screen, left off the document too.
 planningAtelierRouter.get('/pdf', async (req: Request, res: Response) => {
   try {
     const from = String(req.query.from ?? '')
@@ -384,8 +392,14 @@ planningAtelierRouter.get('/pdf', async (req: Request, res: Response) => {
       return
     }
     const comment = String(req.query.comment ?? '').slice(0, 500)
+    const excludeIds = new Set(
+      String(req.query.exclude ?? '')
+        .split(',')
+        .map((s) => parseInt(s, 10))
+        .filter((n) => Number.isInteger(n) && n > 0),
+    )
 
-    const data = await buildPlanningPdfData(from, comment)
+    const data = await buildPlanningPdfData(from, comment, excludeIds)
     const buffer = await renderToBuffer(
       React.createElement(PlanningAtelierPdf, { data }) as unknown as React.ReactElement<
         import('@react-pdf/renderer').DocumentProps
