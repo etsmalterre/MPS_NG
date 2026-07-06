@@ -10,6 +10,15 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-06 — feat/suivilot
+Qualité › Suivi des lots — **"Pièces du lot" table footer now totals Poids & Métrage**
+(`apps/web/src/pages/QualiteSuiviLots.tsx`, `RecapSection`). The read-only per-roll sub-table
+previously showed only a single "Moyenne" row spanning the first 4 columns with the average Rdt.
+It now shows a `Total` label with the summed `poids` (` Kg`) and `metrage` (` Ml`) in their own
+columns (client-side `pieces.reduce`, `p.poids || 0` / `p.metrage || 0` guards), while the
+existing average Rdt is preserved — its "Moyenne" label moved to the Magasin column, right-aligned
+before the Rdt value in `text-accent`. Presentation-only; no API/data changes.
+
 ## 2026-07-03 — feat/expe
 Clients › Expéditions — **facture lock model + Factures tab + Avis d'expédition PDF + email**
 (`apps/api/src/routes/expeditions.ts`, `apps/api/src/lib/pdf/BonLivraisonPdf.tsx`,

@@ -1260,7 +1260,14 @@ function RecapSection({ detail }: { detail: SuiviLotDetail }) {
               </tbody>
               <tfoot>
                 <tr className="text-xs font-semibold border-t border-border/60">
-                  <td className="px-2 py-2 text-muted-foreground" colSpan={4}>Moyenne</td>
+                  <td className="px-2 py-2 text-muted-foreground">Total</td>
+                  <td className="px-2 py-2 text-right tabular-nums">
+                    {fmtNum(detail.pieces.reduce((s, p) => s + (p.poids || 0), 0), 2)} Kg
+                  </td>
+                  <td className="px-2 py-2 text-right tabular-nums">
+                    {fmtNum(detail.pieces.reduce((s, p) => s + (p.metrage || 0), 0), 2)} Ml
+                  </td>
+                  <td className="px-2 py-2 text-right text-muted-foreground">Moyenne</td>
                   <td className="px-2 py-2 text-right tabular-nums text-accent">
                     {detail.moyenne_rdt != null ? fmtNum(detail.moyenne_rdt, 2) : '—'}
                   </td>
