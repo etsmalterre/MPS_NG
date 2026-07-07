@@ -24,8 +24,10 @@ import { Router, type Request, type Response, type Router as RouterType } from '
 import { z } from 'zod'
 import React from 'react'
 import { renderToBuffer } from '@react-pdf/renderer'
-import { query, fixEncoding } from '../lib/hfsql-auto.js'
+import { query, queryB64Text, fixEncoding } from '../lib/hfsql-auto.js'
 import { IS_WINDOWS, esc } from '../lib/sst-shared.js'
+import { userHasPermission } from '../lib/permissions.js'
+import { isEffectiveAdmin } from '../lib/auth.js'
 import { calcTarifRefFini } from '../lib/pricing-fini-tarif.js'
 import { TarifsClientPdf, type TarifsClientPdfData, type TarifsSectionData } from '../lib/pdf/TarifsClientPdf.js'
 import { sendMail } from '../lib/gmail.js'
@@ -296,6 +298,19 @@ clientsRouter.get('/:id', async (req: Request, res: Response) => {
     const fixed = await fixEncoding(rawRows, 'client', 'IDclient', CLIENT_TEXT_FIELDS)
     const client = shapeClient(fixed[0])
 
+    // archive flag — `archivé` is accented: Windows reads it via a separate
+    // WHERE-only query (same trick as the list endpoint), Linux picks the
+    // truncated key off the SELECT * row.
+    let archive = 0
+    if (IS_WINDOWS) {
+      const arch = await query<{ IDclient: number }>(
+        `SELECT IDclient FROM client WHERE IDclient = ${id} AND archivé = 1`,
+      )
+      archive = arch.length > 0 ? 1 : 0
+    } else {
+      archive = numOf(pick(rawRows[0], 'archivé', 'archiv')) ? 1 : 0
+    }
+
     // contact / adresse — SELECT * works on these two tables (no accented names).
     const [adresses, contacts] = await Promise.all([
       query(`SELECT * FROM adresse WHERE IDclient = ${id} ORDER BY est_defaut DESC, IDadresse`),
@@ -306,6 +321,7 @@ clientsRouter.get('/:id', async (req: Request, res: Response) => {
 
     res.json({
       ...client,
+      archive,
       adresses: fixedAdresses,
       contacts: fixedContacts,
     })
@@ -398,12 +414,152 @@ clientsRouter.put('/:id', async (req: Request, res: Response) => {
   }
 })
 
-// DELETE /api/clients/:id
+// ── Delete / archive (permission-gated: delete_client) ──
+
+/** 401/403 guard shared by DELETE and the archive endpoints. Returns true when
+ *  the request may proceed (response already sent otherwise). */
+async function requireDeleteClientPermission(req: Request, res: Response): Promise<boolean> {
+  if (req.userId === undefined) {
+    res.status(401).json({ error: 'not authenticated' })
+    return false
+  }
+  const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'delete_client')
+  if (!allowed) {
+    res.status(403).json({ error: 'permission denied: delete_client' })
+    return false
+  }
+  return true
+}
+
+/** A client with commandes or marchandise (client-owned finished rolls) can
+ *  never be hard-deleted — only archived. Marchandise shipped to the client
+ *  always hangs off a commande_client, so the two counts cover everything the
+ *  Historique / Marchandise sub-views show. */
+async function countClientActivity(id: number): Promise<{ commandes: number; marchandises: number }> {
+  const [cc, sf] = await Promise.all([
+    query<{ nb: number }>(`SELECT COUNT(*) AS nb FROM commande_client WHERE IDclient = ${id}`),
+    query<{ nb: number }>(`SELECT COUNT(*) AS nb FROM stock_fini WHERE IDProprietaire = ${id}`),
+  ])
+  return { commandes: numOf(cc[0]?.nb), marchandises: numOf(sf[0]?.nb) }
+}
+
+// GET /api/clients/:id/deletability — drives the delete-vs-archive confirm dialog.
+clientsRouter.get('/:id/deletability', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id) || id <= 0) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const activity = await countClientActivity(id)
+    res.json({ ...activity, deletable: activity.commandes === 0 && activity.marchandises === 0 })
+  } catch (err) {
+    console.error('Error checking client deletability:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+/** Physical text/blob columns of `client` (from ODBC column metadata). Only the
+ *  Linux archive path needs this typing — the reinsert order itself comes from
+ *  the runtime SELECT * key order. All text/blob columns of `client` have ASCII
+ *  names; the two accented columns (archivé, bloqué) are numeric flags. */
+const CLIENT_TEXT_COLS = new Set([
+  'nom', 'tel', 'fax', 'num_tva', 'commentaire', 'compte', 'rib', 'domiciliation',
+  'login', 'mot_de_passe', 'date_creation', 'dernier_contact', 'journal_commercial',
+])
+const CLIENT_BLOB_COLS = new Set(['CleComp'])
+
+/** Flip client.archivé. Windows: named UPDATE (accented identifiers work there).
+ *  Linux: the bridge rejects any accented identifier, so — same pattern as
+ *  references-ecru.ts setArchive — read the row via SELECT * (values arrive in
+ *  physical column order; queryB64Text keeps accented VALUES lossless as
+ *  Latin-1), flip the archive slot, then delete + positional reinsert
+ *  preserving the PK (FKs stay valid). Returns false when the row is missing. */
+async function setClientArchive(id: number, value: 0 | 1): Promise<boolean> {
+  if (IS_WINDOWS) {
+    const exists = await query<{ IDclient: number }>(`SELECT IDclient FROM client WHERE IDclient = ${id}`)
+    if (exists.length === 0) return false
+    await query(`UPDATE client SET archivé = ${value} WHERE IDclient = ${id}`)
+    return true
+  }
+  const rows = await queryB64Text<Record<string, unknown>>(`SELECT * FROM client WHERE IDclient = ${id}`)
+  if (rows.length === 0) return false
+  const keys = Object.keys(rows[0])
+  const vals = Object.values(rows[0])
+  const archIdx = keys.findIndex((k) => /^archiv/i.test(k))
+  if (archIdx === -1) throw new Error('client.archivé column not found — refusing positional reinsert')
+  vals[archIdx] = value
+  const literals = vals.map((v, i) => {
+    const key = keys[i]
+    if (CLIENT_BLOB_COLS.has(key)) {
+      if (v == null) return "''"
+      const buf = Buffer.isBuffer(v) ? v
+        : v instanceof ArrayBuffer ? Buffer.from(v)
+        : Buffer.from(String(v), 'latin1')
+      return buf.length > 0 ? `x'${buf.toString('hex')}'` : "''"
+    }
+    if (CLIENT_TEXT_COLS.has(key)) {
+      if (v == null) return "''"
+      const s = v instanceof ArrayBuffer ? Buffer.from(v).toString('latin1') : String(v)
+      return sqlText(s)
+    }
+    const n = Number(v)
+    return Number.isFinite(n) ? String(n) : '0'
+  })
+  await query(`DELETE FROM client WHERE IDclient = ${id}`)
+  await query(`INSERT INTO client VALUES (${literals.join(', ')})`)
+  return true
+}
+
+// POST /api/clients/:id/archive — the fallback when deletion is blocked.
+clientsRouter.post('/:id/archive', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id) || id <= 0) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (!(await requireDeleteClientPermission(req, res))) return
+    const found = await setClientArchive(id, 1)
+    if (!found) { res.status(404).json({ error: 'Client not found' }); return }
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error archiving client:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// POST /api/clients/:id/unarchive
+clientsRouter.post('/:id/unarchive', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id) || id <= 0) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (!(await requireDeleteClientPermission(req, res))) return
+    const found = await setClientArchive(id, 0)
+    if (!found) { res.status(404).json({ error: 'Client not found' }); return }
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error unarchiving client:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// DELETE /api/clients/:id — hard delete, only for clients with zero activity.
 clientsRouter.delete('/:id', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10)
-    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    // id <= 0 must be rejected: contact/adresse are polymorphic and store
+    // IDclient = 0 for rows belonging to other parents — a WHERE IDclient = 0
+    // cleanup below would wipe them all.
+    if (isNaN(id) || id <= 0) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (!(await requireDeleteClientPermission(req, res))) return
+    const activity = await countClientActivity(id)
+    if (activity.commandes > 0 || activity.marchandises > 0) {
+      res.status(409).json({
+        error: 'client_has_activity',
+        message: 'Ce client a des commandes ou de la marchandise et ne peut pas être supprimé. Archivez-le à la place.',
+        ...activity,
+      })
+      return
+    }
     await query(`DELETE FROM client WHERE IDclient = ${id}`)
+    // Orphan cleanup: contacts/adresses belong exclusively to this client.
+    await query(`DELETE FROM contact WHERE IDclient = ${id}`)
+    await query(`DELETE FROM adresse WHERE IDclient = ${id}`)
     res.json({ ok: true })
   } catch (err) {
     console.error('Error deleting client:', err)

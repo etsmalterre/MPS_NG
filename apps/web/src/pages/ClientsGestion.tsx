@@ -30,6 +30,8 @@ import {
   Tag,
   History,
   Truck,
+  Archive,
+  ArchiveRestore,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -43,6 +45,7 @@ import { cn } from '@/lib/utils'
 import { hfsqlDateToInput, inputDateToHfsql, formatHfsqlDate } from '@/lib/dates'
 import { fmtNum } from '@/lib/format'
 import { apiFetch, API_URL } from '@/lib/api'
+import { useHasPermission } from '@/contexts/PermissionsContext'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -104,6 +107,7 @@ interface ClientDetail {
   inclureRapportQualite: number
   dernier_contact: string | null
   date_creation: string | null
+  archive: number
   adresses: Adresse[]
   contacts: Contact[]
 }
@@ -212,8 +216,9 @@ export function ClientsGestion() {
   const [subFormsDirty, setSubFormsDirty] = useState(false)
   const [autoEditForId, setAutoEditForId] = useState<number | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState(false)
-  const [printOpen, setPrintOpen] = useState(false)
-  const [emailOpen, setEmailOpen] = useState(false)
+  // Tarifs selector modal — opened by both the Print and Email header buttons;
+  // the mode drives its title and which footer action is primary.
+  const [tarifsSelector, setTarifsSelector] = useState<'print' | 'email' | null>(null)
   // Non-null while the tarifs SendEmailDialog is open — holds the selected
   // ref_client_colori ids so the PDF preview/attachment matches the selection.
   const [tarifsEmailItems, setTarifsEmailItems] = useState<number[] | null>(null)
@@ -222,6 +227,17 @@ export function ClientsGestion() {
 
   const { data: clients, isLoading, isError, error } = useClients()
   const { data: detail, isLoading: detailLoading } = useClientDetail(selectedId)
+
+  // Deletability is fetched as soon as edit mode opens so the header can show
+  // the right icon upfront (bin = deletable, archive = has commandes /
+  // marchandise) instead of explaining after the click. Same query key as the
+  // confirm dialog, so the dialog reads it from cache.
+  const canDelete = useHasPermission('delete_client')
+  const { data: deletability } = useQuery<Deletability>({
+    queryKey: ['client-deletability', selectedId],
+    queryFn: () => apiFetch(`/clients/${selectedId}/deletability`),
+    enabled: canDelete && isEditing && selectedId !== null,
+  })
 
   // Lookups (shared across edit + view-mode label resolution)
   const secteurs = useLookup('secteurs', 'secteurs', (r) => ({ id: r.IDsecteur_activite, label: r.nom }))
@@ -298,6 +314,23 @@ export function ClientsGestion() {
     },
   })
 
+  // Archive keeps the row (it just moves to the « Archivés » filter) — the
+  // keep-selection-valid effect re-targets the list if it drops out of view.
+  const archiveMutation = useMutation({
+    mutationFn: (id: number) => apiFetch(`/clients/${id}/archive`, { method: 'POST' }),
+    onSuccess: () => {
+      invalidateAll()
+      setIsEditing(false)
+      setDraft(null)
+      setDeleteConfirm(false)
+    },
+  })
+
+  const unarchiveMutation = useMutation({
+    mutationFn: (id: number) => apiFetch(`/clients/${id}/unarchive`, { method: 'POST' }),
+    onSuccess: invalidateAll,
+  })
+
   // Auto-enter edit mode once the freshly-created client's detail loads.
   useEffect(() => {
     if (autoEditForId !== null && detail?.IDclient === autoEditForId) {
@@ -329,7 +362,11 @@ export function ClientsGestion() {
         detailHeader={<DetailHeader client={detail ?? null} isLoading={detailLoading && selectedId !== null}
           isEditing={isEditing} draft={draft} onPatch={patch}
           onStartEdit={startEdit} onCancelEdit={cancelEdit} onSave={() => saveMutation.mutate()} isSaving={saveMutation.isPending}
-          onDelete={() => setDeleteConfirm(true)} onPrint={() => setPrintOpen(true)} onEmail={() => setEmailOpen(true)} />}
+          canDelete={canDelete} deletable={deletability?.deletable}
+          onDelete={() => setDeleteConfirm(true)}
+          onUnarchive={() => { if (selectedId !== null) unarchiveMutation.mutate(selectedId) }}
+          isUnarchiving={unarchiveMutation.isPending}
+          onPrint={() => setTarifsSelector('print')} onEmail={() => setTarifsSelector('email')} />}
         detail={<DetailMain client={detail ?? null} isLoading={detailLoading && selectedId !== null}
           hasSelection={selectedId !== null} />}
         sidebar={selectedId !== null ? <DetailSidebar client={detail ?? null} isLoading={detailLoading}
@@ -340,20 +377,22 @@ export function ClientsGestion() {
         onBack={() => guard.guardAction(() => { setIsEditing(false); setDraft(null); setSelectedId(null) })}
       />
       <UnsavedChangesDialog open={guard.showDialog} onAction={guard.handleAction} isSaving={guard.isSaving} />
-      <ConfirmDialog
+      <DeleteOrArchiveDialog
         open={deleteConfirm}
-        title="Supprimer le client"
-        description="Cette action supprimera le client. Elle est irréversible."
-        isPending={deleteMutation.isPending}
+        clientId={selectedId}
+        isDeleting={deleteMutation.isPending}
+        isArchiving={archiveMutation.isPending}
         onCancel={() => setDeleteConfirm(false)}
-        onConfirm={() => { if (selectedId !== null) deleteMutation.mutate(selectedId) }}
+        onDelete={() => { if (selectedId !== null) deleteMutation.mutate(selectedId) }}
+        onArchive={() => { if (selectedId !== null) archiveMutation.mutate(selectedId) }}
       />
       {selectedId !== null && (
         <TarifsSelectionDialog
-          open={printOpen}
+          open={tarifsSelector !== null}
+          mode={tarifsSelector ?? 'print'}
           clientId={selectedId}
-          onClose={() => setPrintOpen(false)}
-          onEmail={(items) => { setPrintOpen(false); setTarifsEmailItems(items) }}
+          onClose={() => setTarifsSelector(null)}
+          onEmail={(items) => { setTarifsSelector(null); setTarifsEmailItems(items) }}
         />
       )}
       {selectedId !== null && (
@@ -368,35 +407,55 @@ export function ClientsGestion() {
           onSend={(p) => postEmail(`${API_URL}/clients/${selectedId}/tarifs/email?items=${(tarifsEmailItems ?? []).join(',')}`, p, { includeAttachPdf: true })}
         />
       )}
-      <PlaceholderDialog open={emailOpen} onClose={() => setEmailOpen(false)} title="Envoyer un email" Icon={AtSign} CenterIcon={Mail} />
     </>
   )
 }
 
-// ── "En developpement" placeholder dialog ──────────────
+// ── Delete-or-archive confirm flow ─────────────────────
+// A client with commandes or marchandise can never be hard-deleted. The header
+// button already shows the matching icon (bin vs archive box) from the shared
+// deletability query, so this dialog goes straight to the right confirm — no
+// "deletion impossible" explanation. The API enforces the same rule
+// server-side (409 client_has_activity).
 
-function PlaceholderDialog({ open, onClose, title, Icon, CenterIcon }: {
-  open: boolean; onClose: () => void; title: string; Icon: React.ElementType; CenterIcon: React.ElementType
+interface Deletability { commandes: number; marchandises: number; deletable: boolean }
+
+function DeleteOrArchiveDialog({ open, clientId, isDeleting, isArchiving, onCancel, onDelete, onArchive }: {
+  open: boolean; clientId: number | null; isDeleting: boolean; isArchiving: boolean
+  onCancel: () => void; onDelete: () => void; onArchive: () => void
 }) {
+  // Same query key as the page-level fetch — resolved from cache instantly.
+  const { data } = useQuery<Deletability>({
+    queryKey: ['client-deletability', clientId],
+    queryFn: () => apiFetch(`/clients/${clientId}/deletability`),
+    enabled: open && clientId !== null,
+  })
+  const checking = !data
+  const deletable = data?.deletable ?? false
+  const archiveMode = !checking && !deletable
+
   return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
-      <DialogContent onClose={onClose}>
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2"><Icon className="h-5 w-5 text-accent" />{title}</DialogTitle>
-        </DialogHeader>
-        <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-          <CenterIcon className="h-12 w-12 mb-3 opacity-40" />
-          <p className="text-sm font-medium">En developpement</p>
-          <p className="text-xs mt-1">Cette fonctionnalite sera disponible prochainement.</p>
-        </div>
-      </DialogContent>
-    </Dialog>
+    <ConfirmDialog
+      open={open}
+      title={archiveMode ? 'Archiver le client' : 'Supprimer le client'}
+      description={archiveMode
+        ? 'Le client n’apparaîtra plus dans la liste « En cours ». Vous pourrez le désarchiver à tout moment.'
+        : 'Cette action supprimera le client, ses contacts et ses adresses. Elle est irréversible.'}
+      variant={archiveMode ? 'default' : 'destructive'}
+      confirmLabel={archiveMode ? 'Archiver' : 'Supprimer'}
+      isPending={checking || isDeleting || isArchiving}
+      onCancel={onCancel}
+      onConfirm={() => { if (checking) return; if (deletable) onDelete(); else onArchive() }}
+    />
   )
 }
 
 // ── Tarifs: sélection réfs × coloris → PDF / email ─────
 // Port of the legacy Choix_Matiere_Tarif modal: pick the (référence, coloris)
 // pairs to include in the Fiche Tarifs, then print the PDF or email it.
+// Opened by both the Print and Email header buttons — `mode` only changes the
+// title and which footer action is the primary one; the email path hands the
+// selection to the standard SendEmailDialog with the PDF attached.
 
 interface TarifRow {
   rccId: number
@@ -406,8 +465,8 @@ interface TarifRow {
   priceable: boolean
 }
 
-function TarifsSelectionDialog({ open, clientId, onClose, onEmail }: {
-  open: boolean; clientId: number; onClose: () => void; onEmail: (items: number[]) => void
+function TarifsSelectionDialog({ open, mode, clientId, onClose, onEmail }: {
+  open: boolean; mode: 'print' | 'email'; clientId: number; onClose: () => void; onEmail: (items: number[]) => void
 }) {
   const { data, isLoading } = useQuery<ClientReference[]>({
     queryKey: ['client-references', clientId],
@@ -455,7 +514,9 @@ function TarifsSelectionDialog({ open, clientId, onClose, onEmail }: {
       <DialogContent className="max-w-2xl" onClose={onClose}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Printer className="h-5 w-5 text-accent" />Imprimer les tarifs
+            {mode === 'email'
+              ? <><AtSign className="h-5 w-5 text-accent" />Envoyer les tarifs par email</>
+              : <><Printer className="h-5 w-5 text-accent" />Imprimer les tarifs</>}
           </DialogTitle>
         </DialogHeader>
 
@@ -520,12 +581,20 @@ function TarifsSelectionDialog({ open, clientId, onClose, onEmail }: {
             {selected.size} coloris sélectionné{selected.size > 1 ? 's' : ''}
           </span>
           <Button variant="outline" onClick={onClose}>Annuler</Button>
-          <Button variant="outline" disabled={selected.size === 0} onClick={() => onEmail(items)}>
-            <AtSign className="h-3.5 w-3.5 mr-1.5" />Envoyer par email
-          </Button>
-          <Button disabled={selected.size === 0} onClick={() => { window.open(pdfUrl, '_blank'); onClose() }}>
-            <Printer className="h-3.5 w-3.5 mr-1.5" />Imprimer
-          </Button>
+          {mode === 'email' ? (
+            <Button disabled={selected.size === 0} onClick={() => onEmail(items)}>
+              <AtSign className="h-3.5 w-3.5 mr-1.5" />Envoyer par email
+            </Button>
+          ) : (
+            <>
+              <Button variant="outline" disabled={selected.size === 0} onClick={() => onEmail(items)}>
+                <AtSign className="h-3.5 w-3.5 mr-1.5" />Envoyer par email
+              </Button>
+              <Button disabled={selected.size === 0} onClick={() => { window.open(pdfUrl, '_blank'); onClose() }}>
+                <Printer className="h-3.5 w-3.5 mr-1.5" />Imprimer
+              </Button>
+            </>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -594,10 +663,11 @@ function ClientList({ clients, total, isLoading, isError, error, selectedId, onS
 
 // ── Center: Detail Header ──────────────────────────────
 
-function DetailHeader({ client, isLoading, isEditing, draft, onPatch, onStartEdit, onCancelEdit, onSave, isSaving, onDelete, onPrint, onEmail }: {
+function DetailHeader({ client, isLoading, isEditing, draft, onPatch, onStartEdit, onCancelEdit, onSave, isSaving, canDelete, deletable, onDelete, onUnarchive, isUnarchiving, onPrint, onEmail }: {
   client: ClientDetail | null; isLoading: boolean; isEditing: boolean; draft: Draft | null; onPatch: (p: Partial<Draft>) => void
   onStartEdit: () => void; onCancelEdit: () => void; onSave: () => void; isSaving: boolean
-  onDelete: () => void; onPrint: () => void; onEmail: () => void
+  canDelete: boolean; deletable: boolean | undefined
+  onDelete: () => void; onUnarchive: () => void; isUnarchiving: boolean; onPrint: () => void; onEmail: () => void
 }) {
   if (!client && !isLoading) return null
   return (
@@ -615,13 +685,37 @@ function DetailHeader({ client, isLoading, isEditing, draft, onPatch, onStartEdi
               <Badge className="bg-accent text-accent-foreground flex-shrink-0 gap-1 shadow-sm"><Pencil className="h-3 w-3" />Mode edition</Badge>
             </div>
           ) : (
-            <h1 className="text-2xl font-heading font-bold tracking-tight truncate">{client?.nom || '—'}</h1>
+            <>
+              <h1 className="text-2xl font-heading font-bold tracking-tight truncate">{client?.nom || '—'}</h1>
+              {!!client?.archive && (
+                <div className="flex gap-1.5 mt-1 flex-wrap">
+                  <Badge variant="outline" className="text-xs">Archivé</Badge>
+                </div>
+              )}
+            </>
           )}
         </div>
         {!isLoading && client && (
           <div className="flex items-center gap-2 flex-shrink-0">
             {isEditing ? (
               <>
+                {/* Delete/archive is an edit-mode-only, permission-gated action.
+                    The icon reflects what will actually happen: bin when the
+                    client is deletable, archive box when it has commandes /
+                    marchandise (deletion impossible → archive instead). */}
+                {canDelete && (client?.archive ? (
+                  <Button variant="outline" size="icon" className="h-9 w-9" title="Désarchiver" onClick={onUnarchive} disabled={isUnarchiving}>
+                    {isUnarchiving ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArchiveRestore className="h-4 w-4" />}
+                  </Button>
+                ) : deletable === false ? (
+                  <Button variant="outline" size="icon" className="h-9 w-9" title="Archiver" onClick={onDelete}>
+                    <Archive className="h-4 w-4" />
+                  </Button>
+                ) : (
+                  <Button variant="outline" size="icon" className="h-9 w-9 text-destructive hover:text-destructive" title="Supprimer" onClick={onDelete} disabled={deletable === undefined}>
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                ))}
                 <Button variant="outline" size="sm" onClick={onCancelEdit}><X className="h-3.5 w-3.5 mr-1.5" />Annuler</Button>
                 <Button size="sm" onClick={onSave} disabled={isSaving}>
                   <Save className="h-3.5 w-3.5 mr-1.5" />{isSaving ? 'Enregistrement...' : 'Enregistrer'}
@@ -631,7 +725,6 @@ function DetailHeader({ client, isLoading, isEditing, draft, onPatch, onStartEdi
               <>
                 <Button variant="outline" size="icon" className="h-9 w-9" title="Imprimer les tarifs" onClick={onPrint}><Printer className="h-4 w-4" /></Button>
                 <Button variant="outline" size="icon" className="h-9 w-9" title="Envoyer un email" onClick={onEmail}><AtSign className="h-4 w-4" /></Button>
-                <Button variant="outline" size="icon" className="h-9 w-9 text-destructive hover:text-destructive" title="Supprimer" onClick={onDelete}><Trash2 className="h-4 w-4" /></Button>
                 <Button variant="gold" size="sm" onClick={onStartEdit}><Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier</Button>
               </>
             )}
@@ -733,11 +826,11 @@ function DetailSidebar({ client, isLoading, isEditing, clientId, onMutationSucce
   )
   if (!client) return null
 
-  const tabs: { key: SidebarTab; label: string; icon: React.ElementType; count: number | null }[] = [
-    { key: 'info', label: 'Info', icon: Briefcase, count: null },
-    { key: 'commercial', label: 'Commercial', icon: CalendarClock, count: null },
-    { key: 'contacts', label: 'Contacts', icon: User, count: client.contacts.length },
-    { key: 'adresses', label: 'Adresses', icon: MapPin, count: client.adresses.length },
+  const tabs: { key: SidebarTab; label: string; icon: React.ElementType }[] = [
+    { key: 'info', label: 'Info', icon: Briefcase },
+    { key: 'commercial', label: 'Commercial', icon: CalendarClock },
+    { key: 'contacts', label: 'Contacts', icon: User },
+    { key: 'adresses', label: 'Adresses', icon: MapPin },
   ]
 
   return (
@@ -750,11 +843,6 @@ function DetailSidebar({ client, isLoading, isEditing, clientId, onMutationSucce
               className={cn('flex-1 min-w-0 flex items-center justify-center gap-1 px-1.5 py-2 text-xs font-medium rounded-md transition-colors',
                 activeTab === tab.key ? 'bg-accent text-accent-foreground shadow-sm' : 'text-muted-foreground hover:bg-accent/10')}>
               <Icon className="h-3.5 w-3.5 flex-shrink-0" /><span className="truncate">{tab.label}</span>
-              {tab.count !== null && (
-                <span className={cn('text-[10px] tabular-nums flex-shrink-0', activeTab === tab.key ? 'text-accent-foreground/75' : 'text-muted-foreground')}>
-                  {tab.count}
-                </span>
-              )}
             </button>
           )
         })}

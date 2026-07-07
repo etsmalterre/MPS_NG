@@ -11,6 +11,39 @@ other worktrees see what changed when they rebase. Format:
 <!-- entries below -->
 
 
+## 2026-07-07 — feat/gestion-client (delete/archive + tarifs email + PDF redesign)
+Clients › Gestion — a second round on the same screen: **delete-or-archive a client**, the
+tarifs **email** path, a sidebar tidy-up, and a **Fiche Tarifs PDF redesign**.
+**(1) Delete / archive** (`apps/api/src/lib/permission-keys.ts`, `apps/api/src/routes/clients.ts`,
+`apps/web/src/pages/ClientsGestion.tsx`). New permission `delete_client` ("Supprimer / archiver
+un client") in a new **"Gestion client"** category (renders below "Commandes client" in
+Paramètres › Utilisateurs). The bin moved out of the view-mode header into **edit mode only** and
+is permission-gated; its icon now reflects deletability fetched on entering edit mode — a **bin**
+(destructive) when the client has no commandes/marchandise, an **archive box** when it has activity
+(deletion impossible → archive instead), and an **unarchive** button when already archived. The
+confirm dialog goes straight to the matching action (no "deletion impossible" explanation). New API:
+`GET /clients/:id/deletability` (counts `commande_client` by `IDclient` + `stock_fini` by
+`IDProprietaire` — verified those are client ids), `POST /clients/:id/archive` + `/unarchive`, and
+`DELETE /clients/:id` now permission-gated, re-checks activity server-side (**409
+`client_has_activity`**), and cascades `contact`/`adresse` cleanup (guarded on `id > 0` since those
+tables store `IDclient = 0` for other parents). Archiving flips `client.archivé`: a named `UPDATE`
+on Windows, and on the Linux bridge a `queryB64Text` `SELECT *` → flip → delete + positional
+reinsert preserving the PK (the accented column can't be named on the bridge — same shape as
+`references-ecru.ts setArchive`; **the Linux path is untested from Windows** — smoke-test one
+archive/unarchive after deploy). The detail endpoint now returns an `archive` flag; the header shows
+an "Archivé" badge. **(2) Tarifs email**: the header "Envoyer un email" button now opens the same
+(référence × coloris) selector as Print (mode-aware title/footer) → **Envoyer par email** hands the
+generated PDF to the shared `SendEmailDialog` pre-attached; the "En développement" placeholder was
+removed. **(3) Sidebar**: dropped the count numbers next to the Contacts/Adresses tabs. **(4) Fiche
+Tarifs PDF redesign** (`apps/api/src/lib/pdf/TarifsClientPdf.tsx`, new dev preview
+`apps/api/src/scripts/dump-tarifs-pdf.ts`) to the MPS_NG document design language shared with
+Devis/Commande/Facture: cream gold-left **section header cards** (Tag icon + French-blue reference +
+muted contexture, with right-aligned Laize/Poids metric tiles and the BIO chip), a consolidated
+top **conditions card** (HT · €/mètre linéaire + validity — replacing the per-section repetition and
+the fixed bottom note), and **tinted quantity "axis" columns** in the price grid so the tranche axis
+reads apart from the price matrix. Data builder untouched (both Print and Email paths get the new
+look); verified end-to-end against live data (client THUASNE, 3 pages).
+
 ## 2026-07-07 — feat/gestion-client
 Clients › Gestion — **Fiche Tarifs: selection-driven print & email** (`apps/api/src/lib/pdf/TarifsClientPdf.tsx`
 [new], `apps/api/src/routes/clients.ts`, `apps/api/src/lib/pricing-fini-tarif.ts`,

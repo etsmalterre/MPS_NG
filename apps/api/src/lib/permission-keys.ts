@@ -34,6 +34,15 @@ export const PERMISSION_KEYS = [
       'Affiche l’interrupteur « Donation » et autorise à marquer une commande comme donation dans Clients > Commandes.',
     category: 'Commandes client',
   },
+  // Gestion client — rendered directly below "Commandes client" in
+  // Paramètres > Utilisateurs (sections follow catalog insertion order).
+  {
+    key: 'delete_client',
+    label: 'Supprimer / archiver un client',
+    description:
+      'Affiche l’icône corbeille ou archive en mode édition et autorise la suppression d’un client — ou son archivage lorsqu’il a des commandes ou de la marchandise — dans Clients > Gestion.',
+    category: 'Gestion client',
+  },
   {
     key: 'create_stock_fil',
     label: 'Créer un lot de fil',
