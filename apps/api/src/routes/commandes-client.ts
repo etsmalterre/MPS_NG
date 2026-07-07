@@ -39,6 +39,8 @@ import { userHasPermission } from '../lib/permissions.js'
 import { isEffectiveAdmin } from '../lib/auth.js'
 import { IS_WINDOWS, esc, n, dateDigits as dateStr, addWorkingDays } from '../lib/sst-shared.js'
 import { createKnitOrder, TRICOTAGE_MALTERRE_ID } from './commandes-sous-traitant.js'
+import { repairAliased, repairAllJoins } from './stock-fini.js'
+import { fetchDefectsByEcru, defautSummary } from './stock-ecru.js'
 
 const upload = multer({ storage: multer.memoryStorage() })
 export const commandesClientRouter: RouterType = Router()
@@ -1052,6 +1054,17 @@ commandesClientRouter.get('/:id', async (req: Request, res: Response) => {
       }
     })
 
+    // Donation orders attach stock pieces instead of lignes; the count drives
+    // the UI lock on the Donation toggle (can't untick while pieces remain).
+    let nbDonationPieces = 0
+    if (Number(h.donation) === 1) {
+      const [pe, pf] = await Promise.all([
+        query<{ nb: number }>(`SELECT COUNT(*) AS nb FROM stock_ecru WHERE IDcommande_donation = ${id}`),
+        query<{ nb: number }>(`SELECT COUNT(*) AS nb FROM stock_fini WHERE IDcommande_donation = ${id}`),
+      ])
+      nbDonationPieces = (Number(pe[0]?.nb) || 0) + (Number(pf[0]?.nb) || 0)
+    }
+
     const phase = (await computePhasesBatch([{ id, est_soldee: Number(h.est_soldee) || 0 }])).get(id) ?? 'a_affecter'
     const tombe_metier = await computeTombeMetier(lignesFixed.map((l) => ({
       type_kind: Number(l.type_kind) || 0,
@@ -1078,6 +1091,7 @@ commandesClientRouter.get('/:id', async (req: Request, res: Response) => {
       observations_facturation: h.observations_facturation ?? null,
       est_soldee: Number(h.est_soldee) || 0,
       donation: Number(h.donation) || 0,
+      nb_donation_pieces: nbDonationPieces,
       remise: Number(h.remise) || 0,
       frais_port: Number(h.frais_port) || 0,
       IDdossier: Number(h.IDdossier) || 0,
@@ -1179,6 +1193,32 @@ commandesClientRouter.put('/:id', async (req: Request, res: Response) => {
         if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
         const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'donation_commande_client')
         if (!allowed) { res.status(403).json({ error: 'permission denied: donation_commande_client' }); return }
+        // The flag rewires the whole order model (lignes ↔ donation pieces),
+        // so it can only flip while the commande is still empty on both sides.
+        if (d.donation === 1) {
+          const lr = await query<{ nb: number }>(
+            `SELECT COUNT(*) AS nb FROM ligne_commande_client WHERE IDcommande_client = ${id}`,
+          )
+          if ((Number(lr[0]?.nb) || 0) > 0) {
+            res.status(409).json({
+              error: 'donation_has_lines',
+              message: 'Impossible d’activer la donation : la commande a déjà des lignes.',
+            })
+            return
+          }
+        } else {
+          const [pe, pf] = await Promise.all([
+            query<{ nb: number }>(`SELECT COUNT(*) AS nb FROM stock_ecru WHERE IDcommande_donation = ${id}`),
+            query<{ nb: number }>(`SELECT COUNT(*) AS nb FROM stock_fini WHERE IDcommande_donation = ${id}`),
+          ])
+          if ((Number(pe[0]?.nb) || 0) + (Number(pf[0]?.nb) || 0) > 0) {
+            res.status(409).json({
+              error: 'donation_has_pieces',
+              message: 'Impossible de désactiver la donation : des pièces sont encore attachées à la commande.',
+            })
+            return
+          }
+        }
         sets.push(`donation = ${d.donation}`)
       }
     }
@@ -1220,11 +1260,243 @@ commandesClientRouter.delete('/:id', async (req: Request, res: Response) => {
       await query(`UPDATE stock_ecru SET IDligne_commande_client = 0 WHERE IDligne_commande_client IN (${inList})`)
       await query(`UPDATE stock_fini SET IDligne_commande_client = 0 WHERE IDligne_commande_client IN (${inList})`)
     }
+    // Release donation pieces too (stock reserved via IDcommande_donation).
+    await query(`UPDATE stock_ecru SET IDcommande_donation = 0 WHERE IDcommande_donation = ${id}`)
+    await query(`UPDATE stock_fini SET IDcommande_donation = 0 WHERE IDcommande_donation = ${id}`)
     await query(`DELETE FROM ligne_commande_client WHERE IDcommande_client = ${id}`)
     await query(`DELETE FROM commande_client WHERE IDcommande_client = ${id}`)
     res.json({ ok: true })
   } catch (err) {
     console.error('Error deleting commande-client:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ════════════════════════════════════════════════════════
+//  DONATION PIECES — stock attached directly to a donation commande.
+//  Legacy model (WinDev "Donation" tab): a donation commande has NO
+//  ligne_commande_client rows. Instead individual stock pieces point at the
+//  commande via stock_ecru.IDcommande_donation / stock_fini.IDcommande_donation.
+//  The picker offers the full in-stock population: not shipped, not reserved
+//  to a client line, not affected to a dyer (écru), not attached to another
+//  donation. stock_divers has no IDcommande_donation column — only tombé de
+//  métier (écru) and fini participate, matching the legacy dialog.
+// ════════════════════════════════════════════════════════
+
+interface DonationPiece {
+  id: number
+  ref_label: string | null
+  coloris_reference: string | null
+  numero: string | null
+  poids: number
+  metrage: number
+  lot: string | null
+  date_saisie: string | null
+  second_choix: number
+  observations: string | null
+  /** Écru only — defect summary from defaut_qualite ("Maille 100 cm; Trou"). */
+  defauts: string | null
+  /** Candidates only — piece already attached to THIS commande. */
+  attached: 0 | 1
+}
+
+// Eligibility fragments shared by the candidates list and the attach
+// validation. HFSQL stores "no FK" as 0 (not NULL) — always guard both.
+// `donationScope` widens IDcommande_donation to "free OR mine".
+function ecruDonationWhere(commandeId: number): string {
+  return `se.IDsociete = 1
+    AND (se.IDligne_expedition_ETM IS NULL OR se.IDligne_expedition_ETM = 0)
+    AND (se.IDligne_commande_client IS NULL OR se.IDligne_commande_client = 0)
+    AND (se.IDref_commande_affectation IS NULL OR se.IDref_commande_affectation = 0)
+    AND (se.IDcommande_donation IS NULL OR se.IDcommande_donation = 0 OR se.IDcommande_donation = ${commandeId})
+    AND NOT EXISTS (SELECT 1 FROM stock_fini sfx WHERE sfx.IDstock_ecru = se.IDstock_ecru)`
+}
+function finiDonationWhere(commandeId: number): string {
+  return `(sf.IDligne_expedition IS NULL OR sf.IDligne_expedition = 0)
+    AND (sf.IDetat_stock_fini IS NULL OR sf.IDetat_stock_fini <> 4)
+    AND (sf.IDligne_commande_client IS NULL OR sf.IDligne_commande_client = 0)
+    AND (sf.IDcommande_donation IS NULL OR sf.IDcommande_donation = 0 OR sf.IDcommande_donation = ${commandeId})`
+}
+
+const ECRU_DONATION_SELECT = `SELECT se.IDstock_ecru, se.IDref_ecru, se.IDcolori_ecru, se.IDcommande_donation,
+    se.numero, se.lot, se.poids, se.metrage, se.second_choix, se.observations, se.date_saisie,
+    re.reference AS ref_label, ce.reference AS coloris_reference
+  FROM stock_ecru se
+  LEFT JOIN ref_ecru re ON se.IDref_ecru = re.IDref_ecru
+  LEFT JOIN colori_ecru ce ON se.IDcolori_ecru = ce.IDcolori_ecru`
+
+// Coloris is polymorphic by ref_fini.avec_teinture (0 = wash → colori_ecru,
+// 1/2 = dyed → ref_fini_colori); select both labels and let repairAllJoins
+// collapse them to coloris_reference (same pattern as stock-fini.ts).
+const FINI_DONATION_SELECT = `SELECT sf.IDstock_fini, sf.IDref_fini, sf.IDColoris, sf.IDetat_stock_fini, sf.IDcommande_donation,
+    sf.numero, sf.lot, sf.poids, sf.metrage, sf.second_choix, sf.observations, sf.date_saisie,
+    rf.reference AS ref_fini, rf.avec_teinture, rfc.reference AS coloris_dyed, ce.reference AS coloris_wash
+  FROM stock_fini sf
+  LEFT JOIN ref_fini rf ON sf.IDref_fini = rf.IDref_fini
+  LEFT JOIN ref_fini_colori rfc ON sf.IDColoris = rfc.IDref_fini_colori
+  LEFT JOIN colori_ecru ce ON sf.IDColoris = ce.IDcolori_ecru`
+
+async function hydrateDonationEcru(rows: any[], commandeId: number): Promise<DonationPiece[]> {
+  let fixed = await repairAliased(rows, 'stock_ecru', 'IDstock_ecru', {
+    numero: 'numero', lot: 'lot', observations: 'observations',
+  })
+  fixed = await repairAliased(fixed, 'ref_ecru', 'IDref_ecru', { ref_label: 'reference' })
+  fixed = await repairAliased(fixed, 'colori_ecru', 'IDcolori_ecru', { coloris_reference: 'reference' })
+  const defectsByEcru = await fetchDefectsByEcru(fixed.map((r: any) => Number(r.IDstock_ecru) || 0))
+  return fixed.map((r: any) => ({
+    id: Number(r.IDstock_ecru),
+    ref_label: (r.ref_label ?? '').toString().trim() || null,
+    coloris_reference: (r.coloris_reference ?? '').toString().trim() || null,
+    numero: (r.numero ?? '').toString().trim() || null,
+    poids: Number(r.poids) || 0,
+    metrage: Number(r.metrage) || 0,
+    lot: (r.lot ?? '').toString().trim() || null,
+    date_saisie: r.date_saisie ?? null,
+    second_choix: Number(r.second_choix) || 0,
+    observations: (r.observations ?? '').toString().trim() || null,
+    defauts: defautSummary(defectsByEcru.get(Number(r.IDstock_ecru) || 0) ?? []) || null,
+    attached: Number(r.IDcommande_donation) === commandeId ? 1 : 0,
+  }))
+}
+
+async function hydrateDonationFini(rows: any[], commandeId: number): Promise<DonationPiece[]> {
+  let fixed = await repairAliased(rows, 'stock_fini', 'IDstock_fini', {
+    numero: 'numero', lot: 'lot', observations: 'observations',
+  })
+  // Repairs ref_fini/coloris labels and collapses coloris_dyed/coloris_wash →
+  // coloris_reference per avec_teinture. Missing aliases (etat, magasin) are
+  // simply skipped by repairAliased.
+  fixed = await repairAllJoins(fixed)
+  return fixed.map((r: any) => ({
+    id: Number(r.IDstock_fini),
+    ref_label: (r.ref_fini ?? '').toString().trim() || null,
+    coloris_reference: (r.coloris_reference ?? '').toString().trim() || null,
+    numero: (r.numero ?? '').toString().trim() || null,
+    poids: Number(r.poids) || 0,
+    metrage: Number(r.metrage) || 0,
+    lot: (r.lot ?? '').toString().trim() || null,
+    date_saisie: r.date_saisie ?? null,
+    second_choix: Number(r.second_choix) || 0,
+    observations: (r.observations ?? '').toString().trim() || null,
+    defauts: null,
+    attached: Number(r.IDcommande_donation) === commandeId ? 1 : 0,
+  }))
+}
+
+/** Attached pieces of both kinds — shared by the GET and the PUT response. */
+async function buildDonationPieces(commandeId: number): Promise<{ ecru: DonationPiece[]; fini: DonationPiece[] }> {
+  const [ecruRaw, finiRaw] = await Promise.all([
+    query<any>(`${ECRU_DONATION_SELECT} WHERE se.IDcommande_donation = ${commandeId} ORDER BY re.reference, se.numero`),
+    query<any>(`${FINI_DONATION_SELECT} WHERE sf.IDcommande_donation = ${commandeId} ORDER BY rf.reference, sf.numero`),
+  ])
+  const [ecru, fini] = await Promise.all([
+    hydrateDonationEcru(ecruRaw, commandeId),
+    hydrateDonationFini(finiRaw, commandeId),
+  ])
+  return { ecru, fini }
+}
+
+// GET /:id/donation-pieces — pieces currently attached to this commande.
+commandesClientRouter.get('/:id/donation-pieces', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    res.json(await buildDonationPieces(id))
+  } catch (err) {
+    console.error('Error fetching donation pieces:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /:id/donation-candidates?kind=ecru|fini — the full eligible stock for
+// the picker dialog. Pieces already attached to THIS commande are included
+// with attached=1 (they render pre-checked).
+commandesClientRouter.get('/:id/donation-candidates', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const kind = req.query.kind === 'fini' ? 'fini' : 'ecru'
+    // Pieces already attached to THIS commande are always listed (pre-checked),
+    // even when no longer "available" stock — e.g. état Expédié after the
+    // donation shipped — so the user can still see and detach them.
+    if (kind === 'ecru') {
+      const rows = await query<any>(
+        `${ECRU_DONATION_SELECT} WHERE (se.IDcommande_donation = ${id} OR (${ecruDonationWhere(id)})) ORDER BY re.reference, se.numero`,
+      )
+      res.json(await hydrateDonationEcru(rows, id))
+    } else {
+      const rows = await query<any>(
+        `${FINI_DONATION_SELECT} WHERE (sf.IDcommande_donation = ${id} OR (${finiDonationWhere(id)})) ORDER BY rf.reference, sf.numero`,
+      )
+      res.json(await hydrateDonationFini(rows, id))
+    }
+  } catch (err) {
+    console.error('Error fetching donation candidates:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// PUT /:id/donation-pieces { kind: 'ecru'|'fini', ids: number[] } —
+// replace-set semantics per kind: `ids` becomes the attached set (the picker's
+// Valider sends the full checked list). Adds are re-validated against the
+// eligibility filters; pieces claimed elsewhere since the dialog opened are
+// skipped, never stolen. Returns the refreshed attached payload (§31.6).
+commandesClientRouter.put('/:id/donation-pieces', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const kind = req.body?.kind === 'fini' ? 'fini' : req.body?.kind === 'ecru' ? 'ecru' : null
+    if (!kind) { res.status(400).json({ error: 'kind must be ecru or fini' }); return }
+    const ids: number[] = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+      .map((x: unknown) => parseInt(String(x), 10))
+      .filter((x: number) => Number.isInteger(x) && x > 0)
+    if (ids.length > 5000) { res.status(400).json({ error: 'too many ids' }); return }
+
+    const head = await query<{ donation: number | null; est_soldee: number | null }>(
+      `SELECT donation, est_soldee FROM commande_client WHERE IDcommande_client = ${id}`,
+    )
+    if (head.length === 0) { res.status(404).json({ error: 'Commande not found' }); return }
+    if (refuseIfSoldee(res, Number(head[0].est_soldee) || 0)) return
+    if (Number(head[0].donation) !== 1) {
+      res.status(409).json({ error: 'not_donation', message: 'Cette commande n’est pas une donation.' })
+      return
+    }
+
+    const table = kind === 'ecru' ? 'stock_ecru' : 'stock_fini'
+    const pk = kind === 'ecru' ? 'IDstock_ecru' : 'IDstock_fini'
+    const currentRows = await query<any>(
+      `SELECT ${pk} AS pid FROM ${table} WHERE IDcommande_donation = ${id}`,
+    )
+    const current = new Set(currentRows.map((r: any) => Number(r.pid)).filter((x: number) => x > 0))
+    const wanted = new Set(ids)
+    const toAdd = ids.filter((x) => !current.has(x))
+    const toRemove = Array.from(current).filter((x) => !wanted.has(x))
+
+    let added = 0
+    if (toAdd.length > 0) {
+      // Re-validate adds so a piece shipped / reserved / claimed by another
+      // donation since the dialog opened is silently skipped.
+      const alias = kind === 'ecru' ? 'se' : 'sf'
+      const eligWhere = kind === 'ecru' ? ecruDonationWhere(id) : finiDonationWhere(id)
+      const eligRows = await query<any>(
+        `SELECT ${alias}.${pk} AS pid FROM ${table} ${alias}
+         WHERE ${alias}.${pk} IN (${toAdd.join(',')}) AND ${eligWhere}`,
+      )
+      const eligible = eligRows.map((r: any) => Number(r.pid)).filter((x: number) => x > 0)
+      if (eligible.length > 0) {
+        await query(`UPDATE ${table} SET IDcommande_donation = ${id} WHERE ${pk} IN (${eligible.join(',')})`)
+        added = eligible.length
+      }
+    }
+    if (toRemove.length > 0) {
+      await query(
+        `UPDATE ${table} SET IDcommande_donation = 0 WHERE ${pk} IN (${toRemove.join(',')}) AND IDcommande_donation = ${id}`,
+      )
+    }
+
+    res.json({ ok: true, added, removed: toRemove.length, skipped: toAdd.length - added, ...(await buildDonationPieces(id)) })
+  } catch (err) {
+    console.error('Error updating donation pieces:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -1238,6 +1510,18 @@ commandesClientRouter.post('/:id/lignes', async (req: Request, res: Response) =>
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
     if (refuseIfSoldee(res, await loadCommandeSoldee(id))) return
+    // Donation orders carry stock pieces, not lignes — refuse so the two
+    // models can never mix on one commande.
+    const donRows = await query<{ donation: number | null }>(
+      `SELECT donation FROM commande_client WHERE IDcommande_client = ${id}`,
+    )
+    if (Number(donRows[0]?.donation) === 1) {
+      res.status(409).json({
+        error: 'commande_donation',
+        message: 'Commande en donation — les pièces s’attachent via l’onglet Donation, pas par des lignes.',
+      })
+      return
+    }
     const parsed = ligneBody.safeParse(req.body)
     if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
     const d = parsed.data

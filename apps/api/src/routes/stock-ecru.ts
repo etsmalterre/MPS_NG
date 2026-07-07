@@ -54,7 +54,7 @@ const STOCK_ECRU_JOINS = `FROM stock_ecru se LEFT JOIN ref_ecru re ON se.IDref_e
 
 const TEXT_FIELDS = ['numero', 'lot', 'observations', 'visiteur']
 
-interface DefautQualite {
+export interface DefautQualite {
   IDdefaut_qualite: number
   description: string | null
   type_defaut: string | null
@@ -64,7 +64,7 @@ interface DefautQualite {
 /** Build the per-roll défauts summary string shown in the table column:
  *  "Maille 200 cm; Trou" etc. Each defect is `type_defaut [taille cm]`, falling
  *  back to its free-text description when there's no structured type. */
-function defautSummary(defects: DefautQualite[]): string {
+export function defautSummary(defects: DefautQualite[]): string {
   return defects
     .map((d) => {
       const type = (d.type_defaut ?? '').toString().trim()
@@ -80,7 +80,7 @@ function defautSummary(defects: DefautQualite[]): string {
  *  polymorphic: Type_Reference=2 with reference (string) = stringified
  *  IDstock_ecru (pattern: commandes-sous-traitant.ts). Returns a Map keyed by
  *  IDstock_ecru. */
-async function fetchDefectsByEcru(ecruIds: number[]): Promise<Map<number, DefautQualite[]>> {
+export async function fetchDefectsByEcru(ecruIds: number[]): Promise<Map<number, DefautQualite[]>> {
   const out = new Map<number, DefautQualite[]>()
   const ids = Array.from(new Set(ecruIds.filter((x) => Number.isInteger(x) && x > 0)))
   if (ids.length === 0) return out

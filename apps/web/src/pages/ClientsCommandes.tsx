@@ -36,6 +36,7 @@ import {
   Mail,
   ClipboardList,
   Truck,
+  Gift,
 } from 'lucide-react'
 import { KnitIcon } from '@/components/icons/KnitIcon'
 import { TmRollIcon } from '@/components/icons/TmRollIcon'
@@ -204,6 +205,8 @@ interface CommandeDetail {
   observations_facturation: string | null
   est_soldee: number
   donation: number
+  /** Stock pieces attached via IDcommande_donation (donation orders only). */
+  nb_donation_pieces: number
   remise: number
   frais_port: number
   IDdossier: number
@@ -215,6 +218,24 @@ interface CommandeDetail {
 }
 
 interface TombeMetierRow { IDref_ecru: number; ref_label: string; coloris_label: string; poids_kg: number }
+
+/** A stock piece attached (or attachable) to a donation commande — écru
+ *  (tombé de métier) or fini, keyed by its stock table id. */
+interface DonationPiece {
+  id: number
+  ref_label: string | null
+  coloris_reference: string | null
+  numero: string | null
+  poids: number
+  metrage: number
+  lot: string | null
+  date_saisie: string | null
+  second_choix: number
+  observations: string | null
+  defauts: string | null
+  attached: 0 | 1
+}
+interface DonationPayload { ecru: DonationPiece[]; fini: DonationPiece[] }
 
 interface ClientLite { IDclient: number; nom: string; IDmode_paiement?: number; IDecheance?: number }
 interface ModePaiement { IDmode_paiement: number; libelle: string }
@@ -376,6 +397,8 @@ export function ClientsCommandes() {
     // Supply (tricotage/ennoblissement) disponible/affecté depends on roll
     // affectation, so refresh it after any line/affectation mutation too.
     queryClient.invalidateQueries({ queryKey: ['commande-client-supply'] })
+    // Donation pieces attached to the selected commande (donation orders).
+    queryClient.invalidateQueries({ queryKey: ['commande-client-donation', selectedId] })
   }, [queryClient, selectedId])
 
   const startEdit = useCallback(() => {
@@ -847,6 +870,18 @@ function DetailMain({
   if (isLoading) return <div className="flex-1 flex items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-accent" /></div>
   if (!commande) return null
 
+  // Donation orders carry stock pieces instead of lignes — the whole center
+  // panel swaps to the donation view (mirrors the legacy "Donation" tab).
+  if (commande.donation === 1) {
+    return (
+      <DonationSection
+        commande={commande}
+        isEditing={isEditing}
+        onMutationSuccess={onMutationSuccess}
+      />
+    )
+  }
+
   const totalEur = commande.lignes.reduce((s, l) => s + (Number(l.montant) || 0), 0)
 
   return (
@@ -1029,6 +1064,406 @@ function LignesSection({
         }}
       />
     </>
+  )
+}
+
+// ── Center: Donation Section ───────────────────────────
+// Donation orders (commande_client.donation = 1) have no lignes — instead
+// stock pieces (tombé de métier + fini) point at the commande via
+// IDcommande_donation. This section lists the attached pieces grouped by
+// kind, with the legacy totals footer, and opens the full-stock picker.
+
+const DONATION_COLS: { label: string; width: string; align?: 'right' | 'center' }[] = [
+  { label: 'Référence', width: '10%' },
+  { label: 'Coloris', width: '14%' },
+  { label: 'Numéro', width: '10%' },
+  { label: 'Poids', width: '8%', align: 'right' },
+  { label: 'Métrage', width: '8%', align: 'right' },
+  { label: 'Lot', width: '10%' },
+  { label: 'Saisie', width: '9%' },
+  { label: '2nd', width: '5%', align: 'center' },
+  { label: 'Observations', width: '26%' },
+]
+
+/** The 9 shared cells of a donation piece row (section table + picker table). */
+function DonationPieceCells({ p }: { p: DonationPiece }) {
+  return (
+    <>
+      <td className="px-2.5 py-1.5 truncate font-medium" title={p.ref_label ?? undefined}>{p.ref_label || '—'}</td>
+      <td className="px-2.5 py-1.5 truncate" title={p.coloris_reference ?? undefined}>{p.coloris_reference || '—'}</td>
+      <td className="px-2.5 py-1.5 truncate tabular-nums" title={p.numero ?? undefined}>{p.numero || '—'}</td>
+      <td className="px-2.5 py-1.5 text-right tabular-nums whitespace-nowrap">{p.poids ? `${fmtNum(p.poids, 2)} kg` : '—'}</td>
+      <td className="px-2.5 py-1.5 text-right tabular-nums whitespace-nowrap">{p.metrage ? `${fmtNum(p.metrage, 2)} ml` : '—'}</td>
+      <td className="px-2.5 py-1.5 truncate" title={p.lot ?? undefined}>{p.lot || '—'}</td>
+      <td className="px-2.5 py-1.5 tabular-nums text-xs whitespace-nowrap">{p.date_saisie ? formatHfsqlDate(p.date_saisie) : '—'}</td>
+      <td className="px-2.5 py-1.5 text-center">
+        {!!p.second_choix && <span className="inline-block px-1 rounded bg-amber-400/15 text-amber-700 text-[10px] font-semibold">2nd</span>}
+      </td>
+      <td className="px-2.5 py-1.5">
+        {!!p.observations && <p className="truncate text-xs text-muted-foreground" title={p.observations}>{p.observations}</p>}
+        {!!p.defauts && (
+          <p className="flex items-center gap-1 text-[11px] text-amber-700" title={p.defauts}>
+            <AlertCircle className="h-3 w-3 flex-shrink-0" />
+            <span className="truncate">{p.defauts}</span>
+          </p>
+        )}
+        {!p.observations && !p.defauts && <span className="text-muted-foreground">—</span>}
+      </td>
+    </>
+  )
+}
+
+function DonationSection({
+  commande, isEditing, onMutationSuccess,
+}: {
+  commande: CommandeDetail
+  isEditing: boolean
+  onMutationSuccess: () => void
+}) {
+  const commandeId = commande.IDcommande_client
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const locked = commande.est_soldee === 1
+
+  const { data, isLoading } = useQuery<DonationPayload>({
+    queryKey: ['commande-client-donation', commandeId],
+    queryFn: () => apiFetch(`/commandes-client/${commandeId}/donation-pieces`),
+  })
+
+  useEffect(() => { if (isEditing || locked) setPickerOpen(false) }, [isEditing, locked])
+
+  const ecru = data?.ecru ?? []
+  const fini = data?.fini ?? []
+  const nb = ecru.length + fini.length
+  const totalPoids = ecru.reduce((s, p) => s + (Number(p.poids) || 0), 0)
+    + fini.reduce((s, p) => s + (Number(p.poids) || 0), 0)
+  const totalMetrage = fini.reduce((s, p) => s + (Number(p.metrage) || 0), 0)
+  const colSpan = DONATION_COLS.length
+
+  return (
+    <>
+      <div className="flex-1 min-h-0 flex flex-col">
+        <div className="flex-shrink-0 flex items-center justify-between gap-2 mb-2">
+          <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            <Gift className="h-3.5 w-3.5 text-accent" />
+            Pièces en donation
+          </div>
+          {!isEditing && !locked && nb > 0 && (
+            <Button variant="outline" size="sm" onClick={() => setPickerOpen(true)}>
+              <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter / Modifier
+            </Button>
+          )}
+        </div>
+
+        {isLoading ? (
+          <div className="flex-1 flex items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>
+        ) : nb === 0 ? (
+          <div className="flex-1 flex flex-col items-center justify-center py-12 text-muted-foreground">
+            <Gift className="h-12 w-12 mb-3 opacity-40" />
+            <p className="text-sm">Aucune pièce en donation</p>
+            {!isEditing && !locked && (
+              <Button variant="outline" size="sm" className="mt-3" onClick={() => setPickerOpen(true)}>
+                <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter des pièces
+              </Button>
+            )}
+          </div>
+        ) : (
+          <div className="flex-1 min-h-0 flex flex-col rounded-lg border border-border/60 bg-white shadow-sm overflow-hidden">
+            <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
+              <colgroup>
+                {DONATION_COLS.map((c) => <col key={c.label} style={{ width: c.width }} />)}
+              </colgroup>
+              <thead className="bg-zinc-200/60 border-b border-border/60">
+                <tr className="text-xs uppercase tracking-wide text-muted-foreground">
+                  {DONATION_COLS.map((c) => (
+                    <th key={c.label} className={cn('px-2.5 py-2 font-semibold whitespace-nowrap', c.align === 'right' ? 'text-right' : c.align === 'center' ? 'text-center' : 'text-left')}>
+                      {c.label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+            </table>
+            <div className="flex-1 min-h-0 overflow-auto scrollbar-transparent">
+              <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
+                <colgroup>
+                  {DONATION_COLS.map((c) => <col key={c.label} style={{ width: c.width }} />)}
+                </colgroup>
+                <tbody>
+                  {ecru.length > 0 && <GroupBandRow label={`Pièces tombé de métier (${ecru.length})`} colSpan={colSpan} />}
+                  {ecru.map((p) => (
+                    <tr key={`e${p.id}`} className="border-b border-border/40">
+                      <DonationPieceCells p={p} />
+                    </tr>
+                  ))}
+                  {fini.length > 0 && <GroupBandRow label={`Pièces fini (${fini.length})`} colSpan={colSpan} />}
+                  {fini.map((p) => (
+                    <tr key={`f${p.id}`} className="border-b border-border/40">
+                      <DonationPieceCells p={p} />
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {nb > 0 && (
+          <div className="flex-shrink-0 mt-3 pt-3 border-t border-border/60 flex items-center justify-between text-sm font-medium">
+            <span className="text-muted-foreground text-xs uppercase tracking-wide">
+              Total · {nb} pièce{nb > 1 ? 's' : ''}
+            </span>
+            <div className="flex items-center gap-4 tabular-nums">
+              {totalMetrage > 0 && <span className="text-muted-foreground">{fmtNum(totalMetrage, 1)} ml</span>}
+              <span className="text-accent text-base">{fmtNum(totalPoids, 1)} kg</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <DonationPickerDialog
+        commandeId={commandeId}
+        open={pickerOpen}
+        attached={data}
+        onClose={() => setPickerOpen(false)}
+        onApplied={() => { setPickerOpen(false); onMutationSuccess() }}
+      />
+    </>
+  )
+}
+
+// Full-stock picker — mirrors the legacy "Donation de pièces" dialog: a
+// Tombé de métier / Fini tab pair over the entire eligible stock, checkboxes
+// pre-checked for pieces already attached, Valider applies the new set.
+function DonationPickerDialog({
+  commandeId, open, attached, onClose, onApplied,
+}: {
+  commandeId: number
+  open: boolean
+  attached: DonationPayload | undefined
+  onClose: () => void
+  onApplied: () => void
+}) {
+  const queryClient = useQueryClient()
+  const [kind, setKind] = useState<'ecru' | 'fini'>('ecru')
+  const [search, setSearch] = useState('')
+  // null = candidates for that kind not loaded yet — that kind is left untouched.
+  const [selEcru, setSelEcru] = useState<Set<number> | null>(null)
+  const [selFini, setSelFini] = useState<Set<number> | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const ecruQ = useQuery<DonationPiece[]>({
+    queryKey: ['commande-client-donation-candidates', commandeId, 'ecru'],
+    queryFn: () => apiFetch(`/commandes-client/${commandeId}/donation-candidates?kind=ecru`),
+    enabled: open,
+  })
+  const finiQ = useQuery<DonationPiece[]>({
+    queryKey: ['commande-client-donation-candidates', commandeId, 'fini'],
+    queryFn: () => apiFetch(`/commandes-client/${commandeId}/donation-candidates?kind=fini`),
+    enabled: open && kind === 'fini',
+  })
+
+  // Reset all local state when the dialog closes.
+  useEffect(() => {
+    if (!open) { setKind('ecru'); setSearch(''); setSelEcru(null); setSelFini(null); setError(null) }
+  }, [open])
+  // Hydrate each kind's selection once from the attached flags.
+  useEffect(() => {
+    if (open && ecruQ.data && selEcru === null) setSelEcru(new Set(ecruQ.data.filter((p) => p.attached === 1).map((p) => p.id)))
+  }, [open, ecruQ.data, selEcru])
+  useEffect(() => {
+    if (open && finiQ.data && selFini === null) setSelFini(new Set(finiQ.data.filter((p) => p.attached === 1).map((p) => p.id)))
+  }, [open, finiQ.data, selFini])
+
+  const list = kind === 'ecru' ? ecruQ.data : finiQ.data
+  const sel = kind === 'ecru' ? selEcru : selFini
+  const loading = (kind === 'ecru' ? ecruQ.isLoading : finiQ.isLoading) || sel === null
+
+  const filtered = useMemo(() => {
+    const base = list ?? []
+    const q = search.trim().toLowerCase()
+    if (!q) return base
+    return base.filter((p) =>
+      [p.ref_label, p.coloris_reference, p.numero, p.lot, p.observations, p.defauts]
+        .some((v) => v && v.toLowerCase().includes(q)),
+    )
+  }, [list, search])
+
+  const toggle = (id: number) => {
+    setError(null)
+    const setter = kind === 'ecru' ? setSelEcru : setSelFini
+    setter((prev) => {
+      if (!prev) return prev
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  // Selection summary — kinds not yet visited fall back to the currently
+  // attached pieces (their set is untouched by Valider).
+  const ecruSelPieces = selEcru && ecruQ.data ? ecruQ.data.filter((p) => selEcru.has(p.id)) : attached?.ecru ?? []
+  const finiSelPieces = selFini && finiQ.data ? finiQ.data.filter((p) => selFini.has(p.id)) : attached?.fini ?? []
+  const nbSel = ecruSelPieces.length + finiSelPieces.length
+  const selPoids = ecruSelPieces.reduce((s, p) => s + (Number(p.poids) || 0), 0)
+    + finiSelPieces.reduce((s, p) => s + (Number(p.poids) || 0), 0)
+
+  const applyMut = useMutation({
+    mutationFn: async () => {
+      const jobs: Array<{ k: 'ecru' | 'fini'; sel: Set<number>; list: DonationPiece[] }> = []
+      if (selEcru && ecruQ.data) jobs.push({ k: 'ecru', sel: selEcru, list: ecruQ.data })
+      if (selFini && finiQ.data) jobs.push({ k: 'fini', sel: selFini, list: finiQ.data })
+      let last: DonationPayload | null = null
+      for (const { k, sel: s, list: l } of jobs) {
+        const attachedIds = new Set(l.filter((p) => p.attached === 1).map((p) => p.id))
+        const changed = s.size !== attachedIds.size || Array.from(s).some((x) => !attachedIds.has(x))
+        if (!changed) continue
+        last = await apiFetch(`/commandes-client/${commandeId}/donation-pieces`, {
+          method: 'PUT',
+          body: JSON.stringify({ kind: k, ids: Array.from(s) }),
+        })
+      }
+      return last
+    },
+    onSuccess: (payload) => {
+      // The PUT returns the refreshed attached payload — hydrate directly
+      // (no refetch flicker), and drop the candidates cache so the next open
+      // re-reads fresh attached flags.
+      if (payload) {
+        queryClient.setQueryData(['commande-client-donation', commandeId], { ecru: payload.ecru, fini: payload.fini })
+      }
+      queryClient.removeQueries({ queryKey: ['commande-client-donation-candidates', commandeId] })
+      onApplied()
+    },
+    onError: (e) => setError(e instanceof Error ? e.message : 'Erreur lors de l’enregistrement'),
+  })
+
+  const pickerCols = [
+    { label: '', width: '4%', align: 'center' as const },
+    ...DONATION_COLS.map((c) => (c.label === 'Observations' ? { ...c, width: '22%' } : c)),
+  ]
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { if (!v && !applyMut.isPending) onClose() }}>
+      <DialogContent className="max-w-6xl w-[92vw] h-[85vh] flex flex-col" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Gift className="h-5 w-5 text-accent" />
+            Pièces en donation
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="mt-3 flex-shrink-0 flex items-center gap-3">
+          <div className="flex items-center gap-1 p-1 rounded-lg bg-zinc-200/50">
+            {([
+              { key: 'ecru' as const, label: 'Tombé de métier', Icon: TmRollIcon, count: ecruQ.data?.length },
+              { key: 'fini' as const, label: 'Fini', Icon: FiniRollIcon, count: finiQ.data?.length },
+            ]).map((t) => (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => setKind(t.key)}
+                className={cn(
+                  'flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer',
+                  kind === t.key ? 'bg-accent text-accent-foreground shadow-sm' : 'text-muted-foreground hover:bg-accent/10',
+                )}
+              >
+                <t.Icon className="h-3.5 w-3.5" />
+                <span>{t.label}{t.count != null ? ` (${t.count})` : ''}</span>
+              </button>
+            ))}
+          </div>
+          <div className="relative flex-1 min-w-0">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Rechercher (référence, coloris, numéro, lot, observations)"
+              className="h-9 w-full pl-8 pr-3 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+        </div>
+
+        <div className="mt-2 flex-1 min-h-0 flex flex-col rounded-lg border border-border/60 bg-white overflow-hidden">
+          <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
+            <colgroup>
+              {pickerCols.map((c, i) => <col key={`${c.label}${i}`} style={{ width: c.width }} />)}
+            </colgroup>
+            <thead className="bg-zinc-200/60 border-b border-border/60">
+              <tr className="text-xs uppercase tracking-wide text-muted-foreground">
+                {pickerCols.map((c, i) => (
+                  <th key={`${c.label}${i}`} className={cn('px-2.5 py-2 font-semibold whitespace-nowrap', c.align === 'right' ? 'text-right' : c.align === 'center' ? 'text-center' : 'text-left')}>
+                    {c.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+          </table>
+          <div className="flex-1 min-h-0 overflow-auto scrollbar-transparent">
+            {loading ? (
+              <div className="h-full flex items-center justify-center py-12">
+                <Loader2 className="h-6 w-6 animate-spin text-accent" />
+              </div>
+            ) : filtered.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center py-12 text-muted-foreground">
+                <Package className="h-10 w-10 mb-2 opacity-40" />
+                <p className="text-sm">{search.trim() ? 'Aucune pièce ne correspond à la recherche' : 'Aucune pièce disponible en stock'}</p>
+              </div>
+            ) : (
+              <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
+                <colgroup>
+                  {pickerCols.map((c, i) => <col key={`${c.label}${i}`} style={{ width: c.width }} />)}
+                </colgroup>
+                <tbody>
+                  {filtered.map((p) => {
+                    const checked = sel?.has(p.id) ?? false
+                    return (
+                      <tr
+                        key={p.id}
+                        onClick={() => toggle(p.id)}
+                        className={cn('border-b border-border/40 cursor-pointer transition-colors', checked ? 'bg-accent/10' : 'hover:bg-accent/5')}
+                      >
+                        <td className="px-2.5 py-1.5 text-center">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggle(p.id)}
+                            onClick={(e) => e.stopPropagation()}
+                            className="h-4 w-4 rounded border-input text-accent focus:ring-2 focus:ring-ring cursor-pointer"
+                          />
+                        </td>
+                        <DonationPieceCells p={p} />
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+          <div className="flex-shrink-0 border-t border-border/60 bg-zinc-200/50 px-3 py-1.5 text-xs text-muted-foreground flex items-center justify-between tabular-nums">
+            <span>Nombre de pièces : {list?.length ?? '—'}</span>
+            {search.trim() && <span>{filtered.length} affichée{filtered.length > 1 ? 's' : ''}</span>}
+          </div>
+        </div>
+
+        <DialogFooter className="mt-3 flex items-center gap-2">
+          {error ? (
+            <p className="text-xs text-destructive mr-auto">{error}</p>
+          ) : (
+            <p className="text-xs text-muted-foreground mr-auto tabular-nums">
+              Sélection : {nbSel} pièce{nbSel > 1 ? 's' : ''} · {fmtNum(selPoids, 1)} kg
+            </p>
+          )}
+          <Button variant="outline" onClick={onClose} disabled={applyMut.isPending}>Annuler</Button>
+          <Button onClick={() => applyMut.mutate()} disabled={applyMut.isPending || (selEcru === null && selFini === null)}>
+            {applyMut.isPending
+              ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              : <CheckCircle2 className="h-4 w-4 mr-1.5" />}
+            Valider
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -3449,13 +3884,29 @@ function InfoTab({
         ) : (commande.frais_port ? fmtNum(commande.frais_port, 2) : '—')} />
         {/* Donation — material shipped from this order must never generate a
             proforma; the flag propagates to expeditions created from it.
-            Visible only with the donation_commande_client permission. */}
-        {canMarkDonation && (
-          <div className="pt-1">
-            <TogglePill label="Donation" checked={isEditing ? editDonation : !!commande.donation}
-              disabled={!isEditing} onChange={onEditDonationChange} />
-          </div>
-        )}
+            Visible only with the donation_commande_client permission.
+            The flag rewires the whole order model (lignes ↔ donation pieces),
+            so it locks as soon as the commande has content on either side:
+            can't turn ON once lignes exist, can't turn OFF while stock pieces
+            are still attached. Mirrors the API 409 guards. */}
+        {canMarkDonation && (() => {
+          const donationLocked = commande.donation === 1
+            ? commande.nb_donation_pieces > 0
+            : commande.lignes.length > 0
+          return (
+            <div className="pt-1">
+              <TogglePill label="Donation" checked={isEditing ? editDonation : !!commande.donation}
+                disabled={!isEditing || donationLocked} onChange={onEditDonationChange} />
+              {isEditing && donationLocked && (
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  {commande.donation === 1
+                    ? 'Retirez d’abord les pièces en donation pour pouvoir désactiver.'
+                    : 'Disponible uniquement sur une commande sans ligne.'}
+                </p>
+              )}
+            </div>
+          )
+        })()}
       </div>
 
       {/* Fiche client — customer-specific handling notes (client.commentaire),

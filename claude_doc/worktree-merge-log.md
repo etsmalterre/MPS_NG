@@ -10,6 +10,33 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-07 — feat/cmd-client
+Clients › Commandes — **Donation orders: attach stock pieces instead of lignes**
+(`apps/api/src/routes/commandes-client.ts`, `apps/api/src/routes/stock-ecru.ts`,
+`apps/web/src/pages/ClientsCommandes.tsx`). Ports the legacy WinDev "Donation" tab: a donation
+commande (`commande_client.donation = 1`) carries no `ligne_commande_client` rows — individual
+stock pieces point at it via `stock_ecru.IDcommande_donation` / `stock_fini.IDcommande_donation`
+(only tombé-de-métier écru + fini participate; `stock_divers` has no such column). **(1) API**:
+`GET /:id/donation-pieces` (attached écru+fini, polymorphic coloris via `avec_teinture`, écru
+défauts summary); `GET /:id/donation-candidates?kind=ecru|fini` (full eligible stock — in stock,
+not shipped, not reserved to a client line, not at a dyer, not claimed by another donation — plus
+pieces already attached to THIS commande so they stay visible/detachable even once shipped);
+`PUT /:id/donation-pieces {kind, ids}` replace-set semantics per kind, re-validating adds so a
+piece claimed elsewhere since the dialog opened is skipped not stolen, returning the refreshed
+attached payload. Guards: the `donation` flag can only flip ON while the order has no lignes and
+OFF while no pieces remain (both 409); `POST /:id/lignes` refuses on a donation order (409);
+commande DELETE releases attached pieces (`IDcommande_donation = 0`) alongside line rolls; detail
+now returns `nb_donation_pieces`. Exported `DefautQualite` / `defautSummary` / `fetchDefectsByEcru`
+from `stock-ecru.ts`, reused `repairAliased` / `repairAllJoins` from `stock-fini.ts`. **(2) UI**:
+`DetailMain` swaps the lignes panel for a `DonationSection` when `donation = 1` — a grouped
+"Pièces tombé de métier" / "Pièces fini" table (legacy columns + totals footer, kg/ml) with an
+"Ajouter / Modifier" button opening `DonationPickerDialog` (gold-pill Tombé/Fini tabs over the
+full stock, search, pre-checked checkboxes, selection totals, Valider applies the replace-set
+PUTs and hydrates the attached cache directly). The permission-gated Donation toggle in the Info
+tab now locks (with an explanatory hint) once the order has lignes (can't turn ON) or attached
+pieces (can't turn OFF), mirroring the API guards. Dev scripts: `probe-donation-stock.ts` /
+`probe-donation-stock2.ts` (schema + eligibility investigation).
+
 ## 2026-07-07 — feat/expe
 Clients › Expéditions — **Bon de Livraison PDF pagination/layout hardening + candidate-line
 simplification** (`apps/api/src/lib/pdf/BonLivraisonPdf.tsx`, `apps/api/src/lib/pdf/MalterreDocument.tsx`,
