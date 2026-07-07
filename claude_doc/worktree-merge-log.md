@@ -10,6 +10,23 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-07 — feat/facturation
+Clients › Facturation — **pick-and-delete proformas + cross-screen expedition cache sync**
+(`apps/api/src/routes/factures.ts`, `apps/web/src/pages/ClientsFacturation.tsx`).
+**(1) "Supprimer des factures" selection dialog** replaces the blanket "Supprimer toutes les
+factures" confirm: lists every OPEN proforma (converted ones excluded; independent of the panel's
+search/type filters), checkbox per row + "Tout sélectionner" header (indeterminate on partial),
+rows show N°/client/date/type-chip/TTC; the destructive "Supprimer (N)" footer button IS the
+confirmation. **(2) API `POST /prov/delete-batch`** (`{ids}`, zod, ≤500): the old delete-all body
+is factored into a shared `wipeOpenProformas()` used by both `/prov/all` and the new endpoint,
+upgraded for subset deletes — an expedition only reopens (`est_facture=0`) when none of its lines
+remain referenced by a definitive `ligne_facture` OR a *surviving* proforma's `ligne_facture_prov`.
+Converted/unknown ids are skipped (counted in `kept_converted`), never errors. **(3) Cache sync**:
+generate + batch-delete mutations now invalidate the `['expeditions']` / `['expedition']` query
+families, so Clients › Expéditions reflects `est_facture` flips without a hard reload (the global
+5-min staleTime kept it stale before); post-delete selection is recomputed from the pre-invalidation
+cache (§25.2) so the detail pane never points at a deleted proforma.
+
 ## 2026-07-07 — feat/cmd-client
 Clients › Commandes — **Donation orders: attach stock pieces instead of lignes**
 (`apps/api/src/routes/commandes-client.ts`, `apps/api/src/routes/stock-ecru.ts`,

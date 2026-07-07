@@ -176,9 +176,9 @@ export function ClientsFacturation() {
   const [convertConfirmOpen, setConvertConfirmOpen] = useState(false)
   const [convertResult, setConvertResult] = useState<{ numero: number } | null>(null)
   // Batch actions on the proforma list panel (generate from expeditions /
-  // wipe all open proformas).
+  // pick-and-delete open proformas).
   const [generateConfirmOpen, setGenerateConfirmOpen] = useState(false)
-  const [deleteAllConfirmOpen, setDeleteAllConfirmOpen] = useState(false)
+  const [deleteBatchOpen, setDeleteBatchOpen] = useState(false)
   const [batchResult, setBatchResult] = useState<BatchResult | null>(null)
 
   // Edit-mode header draft.
@@ -296,22 +296,42 @@ export function ClientsFacturation() {
     },
   })
 
+  // Batch generate / wipe flip expedition.est_facture, which drives the
+  // "non facturée" filter and status pill on Clients › Expéditions. Invalidate
+  // both expedition query families so that screen refetches on next mount
+  // instead of sitting on the 5-minute-staleTime cache (see lib/cache-sync.ts
+  // for the pattern rationale).
+  const invalidateExpeditions = () => {
+    queryClient.invalidateQueries({ queryKey: ['expeditions'] }) // list (état pills, filter buckets)
+    queryClient.invalidateQueries({ queryKey: ['expedition'] }) // any open detail (facturée state)
+  }
+
   const generateMut = useMutation({
     mutationFn: (): Promise<GenerateSummary> => apiFetch('/factures/prov/generate', { method: 'POST' }),
     onSuccess: (r) => {
       setGenerateConfirmOpen(false)
       queryClient.invalidateQueries({ queryKey: ['factures'] })
+      invalidateExpeditions()
       setBatchResult({ action: 'generate', ...r })
     },
   })
 
-  const deleteAllMut = useMutation({
-    mutationFn: (): Promise<DeleteAllSummary> => apiFetch('/factures/prov/all', { method: 'DELETE' }),
-    onSuccess: (r) => {
-      setDeleteAllConfirmOpen(false)
+  const deleteBatchMut = useMutation({
+    mutationFn: (ids: number[]): Promise<DeleteAllSummary> =>
+      apiFetch('/factures/prov/delete-batch', { method: 'POST', body: JSON.stringify({ ids }) }),
+    onSuccess: (r, ids) => {
+      // Read the cache BEFORE invalidating so the next selection is computed
+      // against the post-delete list, not the stale one (§25.2 pattern).
+      const deletedSet = new Set(ids)
+      const cached = queryClient.getQueryData<FactureListRow[]>(['factures', bucket, typeFilter, debouncedQuery]) ?? []
+      const remaining = cached.filter((f) => !deletedSet.has(f.id))
       queryClient.invalidateQueries({ queryKey: ['factures'] })
+      invalidateExpeditions()
       setIsEditing(false)
-      setSelectedId(null)
+      if (bucket === 'prov' && selectedId !== null && deletedSet.has(selectedId)) {
+        setSelectedId(remaining.length > 0 ? remaining[0].id : null)
+      }
+      setDeleteBatchOpen(false)
       setBatchResult({ action: 'deleteAll', ...r })
     },
   })
@@ -375,7 +395,7 @@ export function ClientsFacturation() {
             onTypeFilterChange={handleTypeFilterChange}
             onNew={() => setCreateOpen(true)}
             onGenerate={() => setGenerateConfirmOpen(true)}
-            onDeleteAll={() => setDeleteAllConfirmOpen(true)}
+            onDeleteBatch={() => setDeleteBatchOpen(true)}
             isEditing={isEditing}
           />
         }
@@ -472,14 +492,11 @@ export function ClientsFacturation() {
         onConfirm={() => generateMut.mutate()}
       />
 
-      <ConfirmDialog
-        open={deleteAllConfirmOpen}
-        title="Supprimer toutes les factures proforma"
-        description="Tous les proformas non convertis seront supprimés et leurs expéditions redeviendront facturables. Les proformas déjà convertis en facture définitive sont conservés."
-        confirmLabel="Supprimer"
-        isPending={deleteAllMut.isPending}
-        onCancel={() => setDeleteAllConfirmOpen(false)}
-        onConfirm={() => deleteAllMut.mutate()}
+      <DeleteProformasDialog
+        open={deleteBatchOpen}
+        isPending={deleteBatchMut.isPending}
+        onClose={() => setDeleteBatchOpen(false)}
+        onConfirm={(ids) => deleteBatchMut.mutate(ids)}
       />
 
       <BatchResultDialog result={batchResult} onClose={() => setBatchResult(null)} />
@@ -592,6 +609,134 @@ function BatchResultDialog({ result, onClose }: { result: BatchResult | null; on
   )
 }
 
+// ── Delete proformas (pick-and-delete) ─────────────────
+
+/** Selection dialog for the "Supprimer des factures" batch action: lists every
+ *  OPEN proforma (converted ones are locked history and excluded) with
+ *  checkboxes, a select-all header, and a destructive confirm. The dialog
+ *  itself is the confirmation surface — no second ConfirmDialog. */
+function DeleteProformasDialog({ open, isPending, onClose, onConfirm }: {
+  open: boolean
+  isPending: boolean
+  onClose: () => void
+  onConfirm: (ids: number[]) => void
+}) {
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+
+  // Independent of the list panel's search/type filters — the user picks from
+  // ALL open proformas. Key shares the ['factures'] root so the existing
+  // batch-mutation invalidations refresh it too.
+  const { data, isLoading } = useQuery<FactureListRow[]>({
+    queryKey: ['factures', 'prov-deletable'],
+    queryFn: () => apiFetch('/factures?status=prov&type=all&q=&limit=200'),
+    enabled: open,
+  })
+  const rows = useMemo(() => (data ?? []).filter((r) => !r.converted), [data])
+
+  // Fresh selection every time the dialog opens.
+  useEffect(() => { if (open) setSelected(new Set()) }, [open])
+
+  const allSelected = rows.length > 0 && selected.size === rows.length
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(rows.map((r) => r.id)))
+  const toggleOne = (id: number) => setSelected((prev) => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  })
+
+  const checkboxClass = 'h-4 w-4 rounded border-input text-accent focus:ring-2 focus:ring-ring cursor-pointer'
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o && !isPending) onClose() }}>
+      <DialogContent className="max-w-lg" onClose={() => { if (!isPending) onClose() }}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Trash2 className="h-5 w-5 text-destructive" />Supprimer des factures proforma
+          </DialogTitle>
+        </DialogHeader>
+        <div className="mt-4">
+          {isLoading ? (
+            <div className="flex items-center justify-center py-8"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>
+          ) : rows.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-8 text-muted-foreground text-center">
+              <Receipt className="h-12 w-12 mb-3 opacity-40" />
+              <p className="text-sm font-medium">Aucun proforma à supprimer</p>
+              <p className="text-xs mt-1">Les proformas convertis en facture définitive sont conservés.</p>
+            </div>
+          ) : (
+            <>
+              <p className="text-sm text-muted-foreground">
+                Sélectionnez les proformas à supprimer — leurs expéditions redeviendront facturables.
+              </p>
+              <label className="flex items-center gap-2 mt-3 px-2 py-1.5 text-sm font-medium cursor-pointer select-none rounded-md hover:bg-accent/5">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  ref={(el) => { if (el) el.indeterminate = selected.size > 0 && !allSelected }}
+                  onChange={toggleAll}
+                  disabled={isPending}
+                  className={checkboxClass}
+                />
+                Tout sélectionner
+                <span className="ml-auto text-xs font-normal text-muted-foreground tabular-nums">
+                  {selected.size}/{rows.length}
+                </span>
+              </label>
+              <div className="mt-1.5 space-y-1.5 max-h-72 overflow-y-auto scrollbar-transparent p-0.5">
+                {rows.map((row) => {
+                  const isChecked = selected.has(row.id)
+                  const chip = typeChip(row.type)
+                  const ttc = signed(row.total_ttc, row.type)
+                  return (
+                    <label
+                      key={row.id}
+                      className={cn(
+                        'flex items-center gap-2.5 p-2 rounded-md border text-sm cursor-pointer select-none transition-colors',
+                        isChecked ? 'border-accent/50 bg-accent/[0.06]' : 'border-border/60 bg-zinc-100/80 hover:border-accent/40',
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => toggleOne(row.id)}
+                        disabled={isPending}
+                        className={cn(checkboxClass, 'flex-shrink-0')}
+                      />
+                      <Receipt className="h-4 w-4 text-amber-500 flex-shrink-0" />
+                      <span className="font-medium flex-shrink-0">N° {row.numero ?? row.id}</span>
+                      <span className="text-muted-foreground truncate flex-1">{row.client_nom || '—'}</span>
+                      {row.date && (
+                        <span className="text-xs text-muted-foreground flex-shrink-0">{formatHfsqlDate(row.date)}</span>
+                      )}
+                      <span className={cn('px-1.5 py-0.5 rounded text-[10px] font-medium flex-shrink-0', chip.classes)}>{chip.label}</span>
+                      <span className={cn('text-xs font-medium tabular-nums flex-shrink-0', row.type === 2 ? 'text-red-600' : 'text-foreground')}>
+                        {fmtNum(ttc, 2)} €
+                      </span>
+                    </label>
+                  )
+                })}
+              </div>
+            </>
+          )}
+        </div>
+        <DialogFooter className="mt-4">
+          <Button variant="outline" onClick={onClose} disabled={isPending}>Annuler</Button>
+          <Button
+            variant="destructive"
+            disabled={selected.size === 0 || isPending}
+            onClick={() => onConfirm(Array.from(selected))}
+          >
+            {isPending
+              ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              : <Trash2 className="h-3.5 w-3.5 mr-1.5" />}
+            Supprimer{selected.size > 0 ? ` (${selected.size})` : ''}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // ── Left Panel: List ───────────────────────────────────
 
 function FactureList({
@@ -600,7 +745,7 @@ function FactureList({
   searchQuery, onSearchChange,
   bucket, onBucketChange,
   typeFilter, onTypeFilterChange,
-  onNew, onGenerate, onDeleteAll, isEditing,
+  onNew, onGenerate, onDeleteBatch, isEditing,
 }: {
   rows: FactureListRow[]
   isLoading: boolean
@@ -616,7 +761,7 @@ function FactureList({
   onTypeFilterChange: (t: 'all' | 'facture' | 'avoir') => void
   onNew: () => void
   onGenerate: () => void
-  onDeleteAll: () => void
+  onDeleteBatch: () => void
   isEditing: boolean
 }) {
   return (
@@ -749,11 +894,11 @@ function FactureList({
           <Button
             size="sm"
             variant="outline"
-            onClick={onDeleteAll}
+            onClick={onDeleteBatch}
             disabled={isEditing}
             className="w-full text-destructive border-destructive/30 hover:bg-destructive/10 hover:text-destructive"
           >
-            <Trash2 className="h-3.5 w-3.5 mr-1.5" />Supprimer toutes les factures
+            <Trash2 className="h-3.5 w-3.5 mr-1.5" />Supprimer des factures
           </Button>
         </div>
       )}

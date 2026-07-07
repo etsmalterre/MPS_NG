@@ -829,6 +829,69 @@ facturesRouter.post('/prov/generate', async (_req: Request, res: Response) => {
   }
 })
 
+/** Delete the given OPEN proformas (headers + lines) and reset est_facture = 0
+ *  on expeditions no longer referenced by any surviving invoice line — neither
+ *  a DEFINITIVE ligne_facture (e.g. via a converted proforma) nor a
+ *  ligne_facture_prov belonging to a proforma outside the deleted set (matters
+ *  when the caller deletes a subset). Callers must pass verified-open ids. */
+async function wipeOpenProformas(targetIds: number[]): Promise<{ deleted: number; expeditions_reouvertes: number }> {
+  if (targetIds.length === 0) return { deleted: 0, expeditions_reouvertes: 0 }
+  const targetSet = new Set(targetIds)
+
+  // Expeditions referenced by the lines we're about to delete.
+  const leIds = new Set<number>()
+  for (const chunk of chunks(targetIds)) {
+    const rows = await query<any>(
+      `SELECT IDligne_expedition FROM ligne_facture_prov WHERE IDfacture_prov IN (${chunk.join(',')}) AND IDligne_expedition > 0`,
+    )
+    for (const r of rows) leIds.add(Number(r.IDligne_expedition))
+  }
+  const expIds = new Set<number>()
+  for (const chunk of chunks(Array.from(leIds))) {
+    const rows = await query<any>(
+      `SELECT IDexpedition FROM ligne_expedition WHERE IDligne_expedition IN (${chunk.join(',')})`,
+    )
+    for (const r of rows) expIds.add(Number(r.IDexpedition))
+  }
+
+  // Keep est_facture=1 on expeditions still covered by a surviving line —
+  // only reset the truly un-invoiced ones.
+  let reopened = 0
+  if (expIds.size > 0) {
+    const allLe = new Map<number, number>() // every le of the affected expeditions → exp
+    for (const chunk of chunks(Array.from(expIds))) {
+      const rows = await query<any>(
+        `SELECT IDligne_expedition, IDexpedition FROM ligne_expedition WHERE IDexpedition IN (${chunk.join(',')})`,
+      )
+      for (const r of rows) allLe.set(Number(r.IDligne_expedition), Number(r.IDexpedition))
+    }
+    const stillLinked = new Set<number>()
+    for (const chunk of chunks(Array.from(allLe.keys()))) {
+      const defRows = await query<any>(
+        `SELECT IDligne_expedition FROM ligne_facture WHERE IDligne_expedition IN (${chunk.join(',')})`,
+      )
+      for (const r of defRows) stillLinked.add(allLe.get(Number(r.IDligne_expedition)) ?? 0)
+      const provRows = await query<any>(
+        `SELECT IDfacture_prov, IDligne_expedition FROM ligne_facture_prov WHERE IDligne_expedition IN (${chunk.join(',')})`,
+      )
+      for (const r of provRows) {
+        if (!targetSet.has(Number(r.IDfacture_prov))) stillLinked.add(allLe.get(Number(r.IDligne_expedition)) ?? 0)
+      }
+    }
+    const toReopen = Array.from(expIds).filter((e) => !stillLinked.has(e))
+    for (const chunk of chunks(toReopen)) {
+      await query(`UPDATE expedition SET est_facture = 0 WHERE IDexpedition IN (${chunk.join(',')})`)
+    }
+    reopened = toReopen.length
+  }
+
+  for (const chunk of chunks(targetIds)) {
+    await query(`DELETE FROM ligne_facture_prov WHERE IDfacture_prov IN (${chunk.join(',')})`)
+    await query(`DELETE FROM facture_prov WHERE IDfacture_prov IN (${chunk.join(',')})`)
+  }
+  return { deleted: targetIds.length, expeditions_reouvertes: reopened }
+}
+
 /** DELETE /prov/all — wipe every OPEN proforma (converted ones are locked
  *  history and are kept). Expeditions whose lines were only referenced by the
  *  deleted proformas get est_facture reset to 0 so the next generation run
@@ -840,64 +903,38 @@ facturesRouter.delete('/prov/all', async (_req: Request, res: Response) => {
       .filter((h: any) => (Number(h.IDexpedition_divers) || 0) === 0)
       .map((h: any) => Number(h.IDfacture_prov))
     const keptConverted = heads.length - openIds.length
-    if (openIds.length === 0) {
-      res.json({ deleted: 0, kept_converted: keptConverted, expeditions_reouvertes: 0 })
-      return
-    }
-
-    // Expeditions referenced by the lines we're about to delete.
-    const leIds = new Set<number>()
-    for (const chunk of chunks(openIds)) {
-      const rows = await query<any>(
-        `SELECT IDligne_expedition FROM ligne_facture_prov WHERE IDfacture_prov IN (${chunk.join(',')}) AND IDligne_expedition > 0`,
-      )
-      for (const r of rows) leIds.add(Number(r.IDligne_expedition))
-    }
-    const expIds = new Set<number>()
-    const leToExp = new Map<number, number>()
-    for (const chunk of chunks(Array.from(leIds))) {
-      const rows = await query<any>(
-        `SELECT IDligne_expedition, IDexpedition FROM ligne_expedition WHERE IDligne_expedition IN (${chunk.join(',')})`,
-      )
-      for (const r of rows) {
-        leToExp.set(Number(r.IDligne_expedition), Number(r.IDexpedition))
-        expIds.add(Number(r.IDexpedition))
-      }
-    }
-
-    // Keep est_facture=1 on expeditions that also have a DEFINITIVE facture
-    // (e.g. via a converted proforma) — only reset the truly un-invoiced ones.
-    let reopened = 0
-    if (expIds.size > 0) {
-      const allLe = new Map<number, number>() // every le of the affected expeditions → exp
-      for (const chunk of chunks(Array.from(expIds))) {
-        const rows = await query<any>(
-          `SELECT IDligne_expedition, IDexpedition FROM ligne_expedition WHERE IDexpedition IN (${chunk.join(',')})`,
-        )
-        for (const r of rows) allLe.set(Number(r.IDligne_expedition), Number(r.IDexpedition))
-      }
-      const defLinked = new Set<number>()
-      for (const chunk of chunks(Array.from(allLe.keys()))) {
-        const rows = await query<any>(
-          `SELECT IDligne_expedition FROM ligne_facture WHERE IDligne_expedition IN (${chunk.join(',')})`,
-        )
-        for (const r of rows) defLinked.add(allLe.get(Number(r.IDligne_expedition)) ?? 0)
-      }
-      const toReopen = Array.from(expIds).filter((e) => !defLinked.has(e))
-      for (const chunk of chunks(toReopen)) {
-        await query(`UPDATE expedition SET est_facture = 0 WHERE IDexpedition IN (${chunk.join(',')})`)
-      }
-      reopened = toReopen.length
-    }
-
-    for (const chunk of chunks(openIds)) {
-      await query(`DELETE FROM ligne_facture_prov WHERE IDfacture_prov IN (${chunk.join(',')})`)
-      await query(`DELETE FROM facture_prov WHERE IDfacture_prov IN (${chunk.join(',')})`)
-    }
-
-    res.json({ deleted: openIds.length, kept_converted: keptConverted, expeditions_reouvertes: reopened })
+    const r = await wipeOpenProformas(openIds)
+    res.json({ deleted: r.deleted, kept_converted: keptConverted, expeditions_reouvertes: r.expeditions_reouvertes })
   } catch (err) {
     console.error('Error deleting proformas:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+/** POST /prov/delete-batch — delete a user-selected set of OPEN proformas.
+ *  Converted (locked) or unknown ids in the payload are skipped rather than
+ *  erroring: the list the user picked from may be stale. Registered near the
+ *  other /prov/* batch routes; the generic POST /:kind only matches a single
+ *  path segment so there is no routing conflict. */
+const deleteBatchBody = z.object({ ids: z.array(z.number().int().positive()).min(1).max(500) })
+facturesRouter.post('/prov/delete-batch', async (req: Request, res: Response) => {
+  try {
+    const parsed = deleteBatchBody.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
+    const requested = Array.from(new Set(parsed.data.ids))
+    const openIds: number[] = []
+    for (const chunk of chunks(requested)) {
+      const heads = await query<any>(
+        `SELECT IDfacture_prov, IDexpedition_divers FROM facture_prov WHERE IDfacture_prov IN (${chunk.join(',')}) AND IDsociete = 1`,
+      )
+      for (const h of heads) {
+        if ((Number(h.IDexpedition_divers) || 0) === 0) openIds.push(Number(h.IDfacture_prov))
+      }
+    }
+    const r = await wipeOpenProformas(openIds)
+    res.json({ deleted: r.deleted, kept_converted: requested.length - openIds.length, expeditions_reouvertes: r.expeditions_reouvertes })
+  } catch (err) {
+    console.error('Error batch-deleting proformas:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
