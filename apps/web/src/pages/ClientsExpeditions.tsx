@@ -27,7 +27,6 @@ import {
   FileText,
   Lock,
   Receipt,
-  ChevronDown,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -794,21 +793,18 @@ function FormelleLignesSection({
   const lignes = expedition.lignes as FormelleLigne[]
   const drawerOpen = rollDrawerLcc !== null && !isEditing
   const drawerLigne = drawerOpen ? lignes.find((l) => l.IDligne_commande_client === rollDrawerLcc) ?? null : null
-  const [showOthers, setShowOthers] = useState(false)
 
   // Legacy parity: an expedition only "owns" the commande lines that have a
   // ligne_expedition row on it (big orders ship line-by-line across many
-  // expeditions). The remaining lines are mere candidates for roll picking —
-  // shown in a collapsed secondary group, and ONLY while the expedition is
-  // still editable. On a facturée (locked) expedition you see exactly the
-  // shipped lines, like the legacy screen.
+  // expeditions). The remaining lines are candidates for roll picking, shown
+  // only while the expedition owns nothing yet (they're the entry point for
+  // the first rolls), or when the roll drawer is open on one (it drops back
+  // to candidate after its last roll is unassigned).
   const onExpLines = lignes.filter((l) => l.IDligne_expedition > 0)
-  const otherLines = editable ? lignes.filter((l) => l.IDligne_expedition === 0 && l.stock_kind !== 'none') : []
-  // Keep candidates visible when nothing is shipped yet, or when the roll
-  // drawer is open on a candidate line (it drops back here after its last
-  // roll is unassigned).
-  const othersExpanded = showOthers || onExpLines.length === 0
-    || (drawerLigne !== null && drawerLigne.IDligne_expedition === 0)
+  const candidates = editable ? lignes.filter((l) => l.IDligne_expedition === 0 && l.stock_kind !== 'none') : []
+  const visibleCandidates = onExpLines.length === 0
+    ? candidates
+    : candidates.filter((l) => drawerOpen && l.IDligne_commande_client === rollDrawerLcc)
 
   const totalRolls = onExpLines.reduce((s, l) => s + l.nb_rolls_exp, 0)
   const totalPoids = onExpLines.reduce((s, l) => s + l.poids_exp, 0)
@@ -828,7 +824,7 @@ function FormelleLignesSection({
   return (
     <div className="flex-1 min-h-0 flex flex-col">
       <div className={cn('overflow-auto space-y-2 p-1 scrollbar-transparent', drawerOpen ? 'flex-shrink-0 max-h-[40%]' : 'flex-1 min-h-0')}>
-        {onExpLines.length === 0 && otherLines.length === 0 ? (
+        {onExpLines.length === 0 && visibleCandidates.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
             <Layers className="h-12 w-12 mb-3 opacity-40" />
             <p className="text-sm">Aucune ligne sur l'expédition</p>
@@ -836,19 +832,7 @@ function FormelleLignesSection({
         ) : (
           <>
             {onExpLines.map(renderLine)}
-            {otherLines.length > 0 && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setShowOthers((v) => !v)}
-                  className="w-full flex items-center gap-1.5 px-1 pt-2 text-xs text-muted-foreground hover:text-foreground transition-colors select-none"
-                >
-                  <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', othersExpanded && 'rotate-180')} />
-                  Autres lignes de la commande ({otherLines.length})
-                </button>
-                {othersExpanded && otherLines.map(renderLine)}
-              </>
-            )}
+            {visibleCandidates.map(renderLine)}
           </>
         )}
       </div>

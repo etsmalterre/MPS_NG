@@ -108,12 +108,14 @@ const styles = StyleSheet.create({
     borderLeftColor: colors.gold,
     borderLeftStyle: 'solid',
     borderRadius: 6,
-    padding: 14,
+    padding: 10,
   },
-  metaRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingVertical: 3 },
+  // Tight explicit lineHeight — rows otherwise inherit the body's 1.45 and
+  // the top cards balloon vertically.
+  metaRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingVertical: 1.5 },
   metaIconBox: { width: 14, height: 14, alignItems: 'center', justifyContent: 'center', marginTop: 1 },
-  metaLabel: { width: 88, fontSize: sizes.fontBase, color: colors.muted, fontWeight: 700 },
-  metaValue: { flex: 1, fontSize: sizes.fontBase, color: colors.text, fontWeight: 700, textAlign: 'right' },
+  metaLabel: { width: 88, fontSize: sizes.fontBase, color: colors.muted, fontWeight: 700, lineHeight: 1.25 },
+  metaValue: { flex: 1, fontSize: sizes.fontBase, color: colors.text, fontWeight: 700, textAlign: 'right', lineHeight: 1.25 },
 
   // Quality notices block
   notices: { marginBottom: 14 },
@@ -152,8 +154,13 @@ const styles = StyleSheet.create({
     borderBottomStyle: 'solid',
     paddingVertical: 6,
     paddingHorizontal: 10,
+    // Explicit height: the `fixed` repeat on continuation pages otherwise
+    // stretches the header box, leaving a blank gap above the gold rule.
+    height: 24,
   },
-  tableHeaderCell: { fontSize: sizes.fontXs, color: colors.text, fontWeight: 900, letterSpacing: 0.5 },
+  // lineHeight must stay tight and explicit: with the inherited 1.45 the text
+  // box overflows the fixed-height header and react-pdf drops the labels.
+  tableHeaderCell: { fontSize: sizes.fontXs, color: colors.text, fontWeight: 900, letterSpacing: 0.5, lineHeight: 1.2 },
   tableRow: {
     flexDirection: 'row',
     paddingVertical: 4,
@@ -220,15 +227,18 @@ const styles = StyleSheet.create({
 function buildDeliveryAddress(data: BonLivraisonPdfData): AddressBlockData {
   const a = data.adresseLivraison
   const lines: string[] = []
+  // Legacy address columns can hold whitespace-only values — trim before the
+  // emptiness check or they render as blank lines in the card.
+  const clean = (v: string | null | undefined) => (v ?? '').trim()
   if (a) {
-    if (a.adresse1) lines.push(a.adresse1)
-    if (a.adresse2) lines.push(a.adresse2)
-    if (a.adresse3) lines.push(a.adresse3)
-    const cityLine = [a.cp, a.ville].filter(Boolean).join(' ')
+    if (clean(a.adresse1)) lines.push(clean(a.adresse1))
+    if (clean(a.adresse2)) lines.push(clean(a.adresse2))
+    if (clean(a.adresse3)) lines.push(clean(a.adresse3))
+    const cityLine = [clean(a.cp), clean(a.ville)].filter(Boolean).join(' ')
     if (cityLine) lines.push(cityLine)
-    if (a.pays) lines.push(a.pays)
+    if (clean(a.pays)) lines.push(clean(a.pays))
   }
-  return { title: 'Adresse de livraison', name: a?.nom || data.clientNom, lines, icon: 'truck' }
+  return { title: 'Adresse de livraison', name: clean(a?.nom) || data.clientNom, lines, icon: 'truck' }
 }
 
 function MetaRow({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
@@ -281,8 +291,9 @@ export function BonLivraisonPdf({ data }: { data: BonLivraisonPdfData }) {
             {data.refClient ? (
               <MetaRow icon={<MessageSquareIcon />} label="Réf. client" value={data.refClient} />
             ) : null}
+            {/* Raw number — it's an identifier, no thousands separator. */}
             {data.commandeNumero != null ? (
-              <MetaRow icon={<TagIcon />} label="N° commande" value={fmtNum(data.commandeNumero, 0)} />
+              <MetaRow icon={<TagIcon />} label="N° commande" value={String(data.commandeNumero)} />
             ) : null}
             {data.transporteurNom ? (
               <MetaRow icon={<TruckIcon />} label="Transporteur" value={data.transporteurNom} />
@@ -328,8 +339,21 @@ export function BonLivraisonPdf({ data }: { data: BonLivraisonPdfData }) {
 
             {article.lots.map((lot, li) => {
               const t = lotAgg(lot)
+              const pieceRow = (p: BlPiece, pi: number) => (
+                <View key={pi} style={styles.tableRow}>
+                  <Text style={[styles.cellBase, showObs ? styles.colPiece : styles.colPieceWide]}>{p.numero || '—'}</Text>
+                  <Text style={[styles.cellBase, styles.colNum]}>{fmtNum(p.poids)}</Text>
+                  <Text style={[styles.cellBase, styles.colNum]}>{fmtNum(p.metrage)}</Text>
+                  {showObs ? (
+                    <Text style={[styles.cellBase, styles.colObs]}>{p.observations?.trim() || ''}</Text>
+                  ) : null}
+                </View>
+              )
               return (
-                <View key={li} style={styles.lotBlock}>
+                // minPresenceAhead: if less than ~a label + header + one data
+                // row fits before the page break, push the whole lot block to
+                // the next page instead of stranding a bare header.
+                <View key={li} style={styles.lotBlock} minPresenceAhead={70}>
                   <Text style={styles.lotLabel}>{`Lot : ${lot.lot || '—'}`}</Text>
                   <View style={styles.table}>
                     <View style={styles.tableHeader} fixed>
@@ -338,23 +362,20 @@ export function BonLivraisonPdf({ data }: { data: BonLivraisonPdfData }) {
                       <Text style={[styles.tableHeaderCell, styles.colNum]}>MÉTRAGE (M)</Text>
                       {showObs ? <Text style={[styles.tableHeaderCell, styles.colObs]}>OBSERVATIONS</Text> : null}
                     </View>
-                    {lot.pieces.map((p, pi) => (
-                      <View key={pi} style={styles.tableRow}>
-                        <Text style={[styles.cellBase, showObs ? styles.colPiece : styles.colPieceWide]}>{p.numero || '—'}</Text>
-                        <Text style={[styles.cellBase, styles.colNum]}>{fmtNum(p.poids)}</Text>
-                        <Text style={[styles.cellBase, styles.colNum]}>{fmtNum(p.metrage)}</Text>
-                        {showObs ? (
-                          <Text style={[styles.cellBase, styles.colObs]}>{p.observations?.trim() || ''}</Text>
-                        ) : null}
+                    {lot.pieces.slice(0, -1).map(pieceRow)}
+                    {/* Last piece row + totals row are glued together so a page
+                        break can never leave the total orphaned under a bare
+                        repeated header. */}
+                    <View wrap={false}>
+                      {lot.pieces.length > 0 ? pieceRow(lot.pieces[lot.pieces.length - 1], lot.pieces.length - 1) : null}
+                      <View style={styles.lotTotalRow}>
+                        <Text style={[styles.lotTotalLabel, showObs ? styles.colPiece : styles.colPieceWide]}>
+                          {`Total lot — ${t.nb} pièce${t.nb > 1 ? 's' : ''}`}
+                        </Text>
+                        <Text style={[styles.lotTotalCell, styles.colNum]}>{fmtNum(t.poids)}</Text>
+                        <Text style={[styles.lotTotalCell, styles.colNum]}>{fmtNum(t.metrage)}</Text>
+                        {showObs ? <Text style={styles.colObs} /> : null}
                       </View>
-                    ))}
-                    <View style={styles.lotTotalRow} wrap={false}>
-                      <Text style={[styles.lotTotalLabel, showObs ? styles.colPiece : styles.colPieceWide]}>
-                        {`Total lot — ${t.nb} pièce${t.nb > 1 ? 's' : ''}`}
-                      </Text>
-                      <Text style={[styles.lotTotalCell, styles.colNum]}>{fmtNum(t.poids)}</Text>
-                      <Text style={[styles.lotTotalCell, styles.colNum]}>{fmtNum(t.metrage)}</Text>
-                      {showObs ? <Text style={styles.colObs} /> : null}
                     </View>
                   </View>
                 </View>

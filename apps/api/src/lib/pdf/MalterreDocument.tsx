@@ -201,8 +201,8 @@ const styles = StyleSheet.create({
   header: {
     backgroundColor: colors.gold,
     paddingHorizontal: 36,
-    paddingTop: 18,
-    paddingBottom: 14,
+    paddingTop: 14,
+    paddingBottom: 12,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
@@ -247,7 +247,7 @@ const styles = StyleSheet.create({
   },
   headerDocDateRow: {
     width: '100%',
-    marginTop: 8,
+    marginTop: 4,
   },
   headerDocDate: {
     width: '100%',
@@ -317,7 +317,7 @@ const styles = StyleSheet.create({
     borderLeftColor: colors.gold,
     borderLeftStyle: 'solid',
     borderRadius: 6,
-    padding: 14,
+    padding: 10,
   },
   // Applied when the card sits inside a flex row that needs equal heights —
   // the card grows to fill the slot's available space.
@@ -328,7 +328,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    marginBottom: 6,
+    marginBottom: 4,
   },
   cardTitle: {
     fontSize: sizes.fontXs,
@@ -345,19 +345,22 @@ const styles = StyleSheet.create({
     fontWeight: 900,
     color: colors.text,
     marginBottom: 1,
+    lineHeight: 1.3,
   },
   cardLine: {
     fontSize: sizes.fontBase,
     color: colors.text,
-    lineHeight: 1.4,
+    lineHeight: 1.3,
   },
 
-  // Metadata card rows: icon · label · value, vertically stacked
+  // Metadata card rows: icon · label · value, vertically stacked.
+  // Explicit tight lineHeight — the rows would otherwise inherit the body's
+  // 1.45 and make the top cards needlessly tall.
   metaRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingVertical: 3,
+    paddingVertical: 1.5,
   },
   metaIconBox: {
     width: 14,
@@ -370,14 +373,14 @@ const styles = StyleSheet.create({
     color: colors.muted,
     fontWeight: 700,
     flex: 1,
-    lineHeight: 1,
+    lineHeight: 1.25,
   },
   metaValue: {
     fontSize: sizes.fontBase,
     color: colors.text,
     fontWeight: 700,
     textAlign: 'right',
-    lineHeight: 1,
+    lineHeight: 1.25,
   },
   // ── Footer ──────────────────────────────────────────
   // Full-width gray band at the bottom of every page. A thin tricolore strip
@@ -466,9 +469,11 @@ const styles = StyleSheet.create({
   },
 })
 
-// Height (pt) of the branded header band + dark bar. Used as the Page-level
-// paddingTop on a continuation page so flow content clears the fixed header.
-const HEADER_HEIGHT = 92
+// Page-level paddingTop reserving the branded header band + dark bar. The
+// band's real height is driven by the right-side title block (~85pt after
+// the 2026-07 tightening); 96 keeps a safety gap so repeated fixed table
+// headers on continuation pages can never paint into the band.
+const HEADER_HEIGHT = 96
 
 // Page-level paddingTop for a `withHeader` continuation page: the header band
 // height plus a breathing gap, so flow content (and especially the first row

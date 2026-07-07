@@ -10,6 +10,24 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-07 — feat/expe
+Clients › Expéditions — **Bon de Livraison PDF pagination/layout hardening + candidate-line
+simplification** (`apps/api/src/lib/pdf/BonLivraisonPdf.tsx`, `apps/api/src/lib/pdf/MalterreDocument.tsx`,
+`apps/api/src/routes/expeditions.ts`, `apps/web/src/pages/ClientsExpeditions.tsx`).
+**(1) BL PDF**: tighter meta cards (padding 14→10, row padding 3→1.5, explicit lineHeights so rows
+stop inheriting the body's 1.45); fixed-height table header (24pt, lineHeight 1.2) fixing two
+`fixed`-repeat artifacts on continuation pages (blank gap above the gold rule, dropped column
+labels); `clean()` trims whitespace-only legacy address columns; `N° commande` rendered raw (no
+thousands separator); lot pagination hardened — `minPresenceAhead={70}` per lot block and last
+piece row glued to the totals row in `wrap={false}` so totals are never orphaned. **(2) Shared
+`MalterreDocument`**: header band + card/meta spacing tightened (consumed by BL / CmdSst / Facture
+PDFs); `HEADER_HEIGHT` 92→96 so repeated fixed table headers never paint into the band.
+**(3) API**: pieces sorted with natural-numeric `Intl.Collator('fr')` ("3386/87" before
+"3386/100"); embedded CR/LF in legacy `ref_client` collapsed to spaces. **(4) UI**: the
+collapsible "Autres lignes de la commande" group is replaced by derived `visibleCandidates` —
+unshipped lines show only when the expedition owns no lines yet, or for the line whose roll
+drawer is open. Dev script: `dump-bl-pdf.ts` (renders a synthetic multi-page BL to eyeball layout).
+
 ## 2026-07-07 — feat/facturation
 Clients › Facturation — **batch proforma generation & wipe from expeditions**
 (`apps/api/src/routes/factures.ts`, `apps/web/src/pages/ClientsFacturation.tsx`).

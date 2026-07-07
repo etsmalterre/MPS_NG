@@ -1178,7 +1178,9 @@ const FINITION_LABELS: Record<number, string> = {
 }
 
 /** Group shipped pieces (already ORDER BY lot, numero) into per-lot buckets —
- *  Map preserves the SQL ordering. */
+ *  Map preserves the SQL lot ordering. Pieces are re-sorted naturally in JS:
+ *  numero is a string column, so SQL sorts "3386/100" before "3386/87". */
+const pieceCollator = new Intl.Collator('fr', { numeric: true, sensitivity: 'base' })
 function groupByLot(rows: any[]): BlLot[] {
   const byLot = new Map<string, BlPiece[]>()
   for (const p of rows) {
@@ -1192,7 +1194,10 @@ function groupByLot(rows: any[]): BlLot[] {
     })
     byLot.set(lot, arr)
   }
-  return Array.from(byLot, ([lot, pieces]) => ({ lot, pieces }))
+  return Array.from(byLot, ([lot, pieces]) => ({
+    lot,
+    pieces: pieces.sort((a, b) => pieceCollator.compare(a.numero, b.numero)),
+  }))
 }
 
 export async function buildBlPdfData(id: number): Promise<BonLivraisonPdfData | null> {
@@ -1308,7 +1313,9 @@ export async function buildBlPdfData(id: number): Promise<BonLivraisonPdfData | 
     numero: id,
     dateLong: formatHfsqlDateLongFr(h.dexp),
     clientNom: clientNames.get(IDclient) ?? '',
-    refClient: (cmd?.ref_client ?? '').toString().trim() || null,
+    // Legacy ref_client can embed CR/LF — collapse to plain spaces so the
+    // metadata card wraps naturally instead of showing blank gaps.
+    refClient: (cmd?.ref_client ?? '').toString().replace(/\s+/g, ' ').trim() || null,
     commandeNumero: cmd?.numero != null ? Number(cmd.numero) : null,
     transporteurNom: transNames.get(Number(h.IDtransporteur)) || null,
     contactNom,
