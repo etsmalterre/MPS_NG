@@ -98,9 +98,40 @@ interface FormelleLigne {
   metrage_exp: number
   nb_rolls_dispo: number
 }
+interface DiversItem {
+  IDref_divers_expedie: number
+  IDref_divers: number
+  ref_designation: string
+  designation: string
+  IDVariation1: number
+  variation1_label: string | null
+  IDVariation2: number
+  variation2_label: string | null
+  quantite: number
+  unite: number
+  unite_label: string
+  prix: number
+}
 interface DiversLigne {
   IDligne_expedition_divers: number
   detail_ligne: string
+  items: DiversItem[]
+}
+interface RefDiversLookup {
+  IDref_divers: number
+  designation: string
+  prix_unitaire: number
+  unite: number
+  unite_label: string
+  archive: number
+  sTypeVariation1: string
+  sTypeVariation2: string
+}
+interface RefDiversVariation {
+  IDref_divers_variation: number
+  designation: string
+  niveau: number
+  prix: number
 }
 
 interface FactureRef {
@@ -594,7 +625,7 @@ function ExpeditionListPanel({
                     {row.nb_rolls ?? 0} rlx · {fmtNum(row.total_poids ?? 0, 0)} kg
                   </span>
                 ) : (
-                  <span className="ml-auto text-muted-foreground/80 tabular-nums">{row.nb_lignes ?? 0} ligne{(row.nb_lignes ?? 0) > 1 ? 's' : ''}</span>
+                  <span className="ml-auto text-muted-foreground/80 tabular-nums">{row.nb_lignes ?? 0} carton{(row.nb_lignes ?? 0) > 1 ? 's' : ''}</span>
                 )}
               </div>
             </div>
@@ -1072,7 +1103,14 @@ function RollRow({
   )
 }
 
-// ── Divers: free-text lines ────────────────────────────
+// ── Divers: cartons (lignes) + articles (ref_divers_expedie) ──
+
+/** Display label for a carton item: legacy free-text override wins, else the
+ *  catalog designation. */
+function diversItemLabel(it: DiversItem): string {
+  if (it.designation.trim()) return it.designation.trim()
+  return it.ref_designation || `Réf #${it.IDref_divers}`
+}
 
 function DiversLignesSection({
   expedition, isEditing, onMutationSuccess, onLinesDirtyChange,
@@ -1086,19 +1124,31 @@ function DiversLignesSection({
   const [lineDialogOpen, setLineDialogOpen] = useState(false)
   const [editingLine, setEditingLine] = useState<DiversLigne | null>(null)
   const [deleteLineId, setDeleteLineId] = useState<number | null>(null)
+  // Item dialog: which carton it targets + the item being edited (null = create)
+  const [itemDialog, setItemDialog] = useState<{ ligneId: number; item: DiversItem | null } | null>(null)
+  const [deleteItem, setDeleteItem] = useState<DiversItem | null>(null)
 
   useEffect(() => {
-    if (!isEditing) { setLineDialogOpen(false); setEditingLine(null) }
+    if (!isEditing) { setLineDialogOpen(false); setEditingLine(null); setItemDialog(null) }
   }, [isEditing])
-  useEffect(() => { onLinesDirtyChange(lineDialogOpen) }, [lineDialogOpen, onLinesDirtyChange])
+  useEffect(() => {
+    onLinesDirtyChange(lineDialogOpen || itemDialog !== null)
+  }, [lineDialogOpen, itemDialog, onLinesDirtyChange])
 
   const deleteLineMut = useMutation({
     mutationFn: (lineId: number) => apiFetch(`/expeditions/divers/lignes/${lineId}`, { method: 'DELETE' }),
     onSuccess: onMutationSuccess,
   })
+  const deleteItemMut = useMutation({
+    mutationFn: (itemId: number) => apiFetch(`/expeditions/divers/items/${itemId}`, { method: 'DELETE' }),
+    onSuccess: onMutationSuccess,
+  })
 
   const startAdd = () => { setEditingLine(null); setLineDialogOpen(true) }
   const startEditLine = (l: DiversLigne) => { setEditingLine(l); setLineDialogOpen(true) }
+
+  const allItems = lignes.flatMap((l) => l.items)
+  const totalEuros = allItems.reduce((s, it) => s + it.quantite * it.prix, 0)
 
   return (
     <>
@@ -1106,27 +1156,52 @@ function DiversLignesSection({
         <div className="flex-1 min-h-0 overflow-auto space-y-2 p-1 scrollbar-transparent">
           {lignes.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
-              <Layers className="h-12 w-12 mb-3 opacity-40" />
-              <p className="text-sm">Aucune ligne</p>
+              <Package className="h-12 w-12 mb-3 opacity-40" />
+              <p className="text-sm">Aucun carton</p>
               {isEditing && (
                 <Button variant="outline" size="sm" className="mt-3" onClick={startAdd}>
-                  <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter une ligne
+                  <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter un carton
                 </Button>
               )}
             </div>
           ) : (
             lignes.map((l) => (
-              <DiversLineCard key={l.IDligne_expedition_divers} line={l} isEditing={isEditing}
-                onEdit={() => startEditLine(l)} onDelete={() => setDeleteLineId(l.IDligne_expedition_divers)} />
+              <DiversCartonCard key={l.IDligne_expedition_divers} ligne={l} isEditing={isEditing}
+                onEdit={() => startEditLine(l)}
+                onDelete={() => setDeleteLineId(l.IDligne_expedition_divers)}
+                onAddItem={() => setItemDialog({ ligneId: l.IDligne_expedition_divers, item: null })}
+                onEditItem={(it) => setItemDialog({ ligneId: l.IDligne_expedition_divers, item: it })}
+                onDeleteItem={(it) => setDeleteItem(it)} />
             ))
           )}
           {isEditing && lignes.length > 0 && (
             <Button variant="ghost" size="sm" onClick={startAdd}
               className="w-full text-muted-foreground hover:text-accent hover:bg-accent/5 border border-dashed border-border/60 hover:border-accent/40">
-              <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter une ligne
+              <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter un carton
             </Button>
           )}
         </div>
+
+        {allItems.length > 0 && (
+          <div className="flex-shrink-0 mt-3 pt-3 border-t border-border/60">
+            <div className="flex flex-col items-end gap-1 text-sm tabular-nums">
+              <div className="flex items-center gap-6">
+                <span className="text-muted-foreground text-xs uppercase tracking-wide">Cartons</span>
+                <span className="w-32 text-right font-medium">{lignes.length}</span>
+              </div>
+              <div className="flex items-center gap-6">
+                <span className="text-muted-foreground text-xs uppercase tracking-wide">Articles</span>
+                <span className="w-32 text-right">{allItems.length}</span>
+              </div>
+              {totalEuros > 0 && (
+                <div className="flex items-center gap-6">
+                  <span className="text-muted-foreground text-xs uppercase tracking-wide">Total</span>
+                  <span className="w-32 text-right font-medium">{fmtNum(totalEuros, 2)} €</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       <DiversLineDialog
@@ -1137,36 +1212,56 @@ function DiversLignesSection({
         onSuccess={() => { setLineDialogOpen(false); setEditingLine(null); onMutationSuccess() }}
       />
 
+      <DiversItemDialog
+        target={itemDialog}
+        onClose={() => setItemDialog(null)}
+        onSuccess={() => { setItemDialog(null); onMutationSuccess() }}
+      />
+
       <ConfirmDialog
         open={deleteLineId !== null}
-        title="Supprimer la ligne"
-        description="Cette ligne sera définitivement supprimée."
+        title="Supprimer le carton"
+        description="Le carton et tous ses articles seront définitivement supprimés."
         confirmLabel="Supprimer"
         isPending={deleteLineMut.isPending}
         onCancel={() => setDeleteLineId(null)}
         onConfirm={() => { if (deleteLineId !== null) deleteLineMut.mutate(deleteLineId, { onSuccess: () => setDeleteLineId(null) }) }}
       />
+
+      <ConfirmDialog
+        open={deleteItem !== null}
+        title="Supprimer l'article"
+        description={deleteItem ? `${diversItemLabel(deleteItem)} sera supprimé du carton.` : undefined}
+        confirmLabel="Supprimer"
+        isPending={deleteItemMut.isPending}
+        onCancel={() => setDeleteItem(null)}
+        onConfirm={() => { if (deleteItem) deleteItemMut.mutate(deleteItem.IDref_divers_expedie, { onSuccess: () => setDeleteItem(null) }) }}
+      />
     </>
   )
 }
 
-function DiversLineCard({
-  line, isEditing, onEdit, onDelete,
+function DiversCartonCard({
+  ligne, isEditing, onEdit, onDelete, onAddItem, onEditItem, onDeleteItem,
 }: {
-  line: DiversLigne
+  ligne: DiversLigne
   isEditing: boolean
   onEdit: () => void
   onDelete: () => void
+  onAddItem: () => void
+  onEditItem: (it: DiversItem) => void
+  onDeleteItem: (it: DiversItem) => void
 }) {
-  const lines = String(line.detail_ligne ?? '').split(/\r?\n/).filter((s) => s.trim().length > 0)
+  const lines = String(ligne.detail_ligne ?? '').split(/\r?\n/).filter((s) => s.trim().length > 0)
   const title = lines[0] || '—'
   const rest = lines.slice(1)
+  const totalEuros = ligne.items.reduce((s, it) => s + it.quantite * it.prix, 0)
   return (
     <div className={cn('group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3', 'border-l-amber-400/60')}>
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-start gap-2 min-w-0">
           <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-amber-400/10 mt-0.5">
-            <Layers className="h-3.5 w-3.5 text-amber-600" />
+            <Package className="h-3.5 w-3.5 text-amber-600" />
           </div>
           <div className="min-w-0">
             <p className="text-sm font-medium whitespace-pre-line">{title}</p>
@@ -1180,6 +1275,52 @@ function DiversLineCard({
           </div>
         )}
       </div>
+
+      {/* Items in this carton */}
+      {ligne.items.length > 0 ? (
+        <div className="mt-2 ml-9 space-y-0.5">
+          {ligne.items.map((it) => {
+            const variations = [it.variation1_label, it.variation2_label].filter(Boolean).join(' · ')
+            return (
+              <div key={it.IDref_divers_expedie} className="group/item flex items-center gap-3 text-[11px] py-0.5">
+                <span className="flex-1 min-w-0 truncate">
+                  <span className="text-foreground">{diversItemLabel(it)}</span>
+                  {variations && <span className="text-muted-foreground"> · {variations}</span>}
+                </span>
+                <span className="tabular-nums text-muted-foreground w-24 text-right flex-shrink-0">
+                  {fmtNum(it.quantite)}{it.unite_label ? ` ${it.unite_label}${it.unite === 4 && it.quantite > 1 ? 's' : ''}` : ''}
+                </span>
+                <span className="tabular-nums text-muted-foreground w-16 text-right flex-shrink-0">{fmtNum(it.prix, 2)} €</span>
+                <span className="tabular-nums w-20 text-right font-medium flex-shrink-0">{fmtNum(it.quantite * it.prix, 2)} €</span>
+                {isEditing && (
+                  <span className="flex gap-0.5 flex-shrink-0 opacity-0 group-hover/item:opacity-100 transition-opacity">
+                    <Button variant="ghost" size="icon" className="h-5 w-5" onClick={() => onEditItem(it)}><Pencil className="h-2.5 w-2.5" /></Button>
+                    <Button variant="ghost" size="icon" className="h-5 w-5 text-destructive hover:text-destructive" onClick={() => onDeleteItem(it)}><Trash2 className="h-2.5 w-2.5" /></Button>
+                  </span>
+                )}
+              </div>
+            )
+          })}
+          {(ligne.items.length > 1 || totalEuros > 0) && (
+            <div className="flex items-center gap-3 text-[11px] pt-1 mt-1 border-t border-border/50">
+              <span className="flex-1 text-muted-foreground">{ligne.items.length} article{ligne.items.length > 1 ? 's' : ''}</span>
+              <span className="tabular-nums text-right font-semibold">{fmtNum(totalEuros, 2)} €</span>
+              {isEditing && <span className="w-[3.25rem] flex-shrink-0" />}
+            </div>
+          )}
+        </div>
+      ) : (
+        <p className="mt-2 ml-9 text-[11px] text-muted-foreground italic">Aucun article</p>
+      )}
+
+      {isEditing && (
+        <div className="mt-2 ml-9">
+          <Button variant="ghost" size="sm" onClick={onAddItem}
+            className="h-6 px-2 text-[11px] text-muted-foreground hover:text-accent hover:bg-accent/5 border border-dashed border-border/60 hover:border-accent/40">
+            <Plus className="h-3 w-3 mr-1" />Ajouter un article
+          </Button>
+        </div>
+      )}
     </div>
   )
 }
@@ -1234,6 +1375,179 @@ function DiversLineDialog({
               className="w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-y"
             />
           </div>
+          {error && (
+            <div className="flex items-start gap-1.5 text-xs text-destructive">
+              <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" /><span>{error}</span>
+            </div>
+          )}
+        </div>
+        <DialogFooter className="mt-4">
+          <Button variant="outline" onClick={onClose}>Annuler</Button>
+          <Button onClick={() => saveMut.mutate()} disabled={!canSave || saveMut.isPending}>
+            {saveMut.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Save className="h-3.5 w-3.5 mr-1.5" />}Enregistrer
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** Create/edit an article inside a carton: catalog ref + up to two variation
+ *  axes (labels from ref_divers.sTypeVariation1/2), quantity, unit price
+ *  auto-resolved from the tarif_divers grid (editable). */
+function DiversItemDialog({
+  target, onClose, onSuccess,
+}: {
+  target: { ligneId: number; item: DiversItem | null } | null
+  onClose: () => void
+  onSuccess: () => void
+}) {
+  const open = target !== null
+  const item = target?.item ?? null
+  const isNew = item === null
+  const [refId, setRefId] = useState(0)
+  const [v1, setV1] = useState(0)
+  const [v2, setV2] = useState(0)
+  const [qty, setQty] = useState('')
+  const [prix, setPrix] = useState('')
+  // Once the user types a price manually, stop auto-filling from the grid.
+  const [prixTouched, setPrixTouched] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    setRefId(item?.IDref_divers ?? 0)
+    setV1(item?.IDVariation1 ?? 0)
+    setV2(item?.IDVariation2 ?? 0)
+    setQty(item ? String(item.quantite) : '')
+    setPrix(item ? String(item.prix) : '')
+    setPrixTouched(item !== null) // keep the stored price until ref/variation changes
+    setError(null)
+  }, [open, item])
+
+  const { data: refs, isLoading: refsLoading } = useQuery<RefDiversLookup[]>({
+    queryKey: ['exp-divers-refs'],
+    queryFn: () => apiFetch('/expeditions/divers/lookups/refs'),
+    enabled: open,
+    staleTime: 5 * 60 * 1000,
+  })
+  // Hide archived refs from the picker, but keep the one an existing item points at.
+  const refOptions = useMemo(
+    () => (refs ?? []).filter((r) => !r.archive || r.IDref_divers === (item?.IDref_divers ?? 0)),
+    [refs, item],
+  )
+  const selRef = (refs ?? []).find((r) => r.IDref_divers === refId) ?? null
+
+  const { data: variations } = useQuery<RefDiversVariation[]>({
+    queryKey: ['exp-divers-vars', refId],
+    queryFn: () => apiFetch(`/expeditions/divers/lookups/refs/${refId}/variations`),
+    enabled: open && refId > 0,
+    staleTime: 5 * 60 * 1000,
+  })
+  // niveau 1 ↔ sTypeVariation1 axis (0 = pre-axis legacy rows), niveau 2 ↔ axis 2.
+  const vars1 = (variations ?? []).filter((v) => v.niveau <= 1)
+  const vars2 = (variations ?? []).filter((v) => v.niveau === 2)
+
+  const { data: prixData } = useQuery<{ prix: number }>({
+    queryKey: ['exp-divers-prix', refId, v1, v2],
+    queryFn: () => apiFetch(`/expeditions/divers/lookups/prix?ref=${refId}&v1=${v1}&v2=${v2}`),
+    enabled: open && refId > 0,
+  })
+  useEffect(() => {
+    if (!open || prixTouched || !prixData) return
+    setPrix(prixData.prix > 0 ? String(prixData.prix) : '')
+  }, [open, prixTouched, prixData])
+
+  const qtyNum = Number(qty.replace(',', '.'))
+  const prixNum = Number(prix.replace(',', '.'))
+  const canSave = refId > 0 && Number.isFinite(qtyNum) && qtyNum > 0 && (prix === '' || Number.isFinite(prixNum))
+
+  const saveMut = useMutation({
+    mutationFn: () => {
+      const body = JSON.stringify({
+        IDref_divers: refId,
+        IDVariation1: v1,
+        IDVariation2: v2,
+        quantite: qtyNum,
+        prix: Number.isFinite(prixNum) && prix !== '' ? prixNum : 0,
+      })
+      return isNew
+        ? apiFetch(`/expeditions/divers/lignes/${target!.ligneId}/items`, { method: 'POST', body })
+        : apiFetch(`/expeditions/divers/items/${item!.IDref_divers_expedie}`, { method: 'PUT', body })
+    },
+    onSuccess,
+    onError: (e: unknown) => setError(e instanceof Error ? e.message : 'Erreur'),
+  })
+
+  const inputClass = 'w-full h-9 px-2.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring'
+
+  if (!open) return null
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent className="max-w-md" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Package className="h-5 w-5 text-accent" />{isNew ? 'Ajouter un article' : "Modifier l'article"}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="mt-4 space-y-3">
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Référence</label>
+            <SearchableCombobox
+              options={refOptions}
+              value={refId}
+              onChange={(id) => { setRefId(id); setV1(0); setV2(0); setPrixTouched(false) }}
+              getId={(r) => r.IDref_divers}
+              getPrimary={(r) => r.designation}
+              getSecondary={(r) => r.unite_label || undefined}
+              placeholder="Rechercher une référence"
+              loading={refsLoading}
+            />
+          </div>
+          {refId > 0 && vars1.length > 0 && (
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">
+                {selRef && selRef.sTypeVariation1 !== 'Aucun' ? selRef.sTypeVariation1 : 'Variation'}
+              </label>
+              <PopoverSelect
+                options={vars1.map((v) => ({ id: v.IDref_divers_variation, primary: v.designation }))}
+                value={v1}
+                onChange={(id) => { setV1(id); setPrixTouched(false) }}
+                emptyLabel="— aucune —"
+              />
+            </div>
+          )}
+          {refId > 0 && vars2.length > 0 && (
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">
+                {selRef && selRef.sTypeVariation2 !== 'Aucun' ? selRef.sTypeVariation2 : 'Variation 2'}
+              </label>
+              <PopoverSelect
+                options={vars2.map((v) => ({ id: v.IDref_divers_variation, primary: v.designation }))}
+                value={v2}
+                onChange={(id) => { setV2(id); setPrixTouched(false) }}
+                emptyLabel="— aucune —"
+              />
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-2">
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">
+                Quantité{selRef?.unite_label ? ` (${selRef.unite_label})` : ''}
+              </label>
+              <input type="text" inputMode="decimal" value={qty} onChange={(e) => setQty(e.target.value)} className={inputClass} />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Prix unitaire (€)</label>
+              <input type="text" inputMode="decimal" value={prix}
+                onChange={(e) => { setPrix(e.target.value); setPrixTouched(true) }} className={inputClass} />
+            </div>
+          </div>
+          {Number.isFinite(qtyNum) && qtyNum > 0 && Number.isFinite(prixNum) && prixNum > 0 && (
+            <p className="text-sm text-right tabular-nums text-muted-foreground">
+              Total : <span className="font-medium text-foreground">{fmtNum(qtyNum * prixNum, 2)} €</span>
+            </p>
+          )}
           {error && (
             <div className="flex items-start gap-1.5 text-xs text-destructive">
               <AlertCircle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" /><span>{error}</span>

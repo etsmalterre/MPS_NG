@@ -6,6 +6,22 @@
 //   kind 'divers'   → expedition_divers / ligne_expedition_divers  (free-text
 //                     miscellaneous shipment, no stock link)
 //
+// DIVERS carton model (verified against live data, e.g. expedition 597):
+//   ligne_expedition_divers is a CARTON/COLIS — detail_ligne is its free-text
+//   label ("CARTON 3", "enveloppe"). The actual content lives in
+//   ref_divers_expedie (FK IDligne_expedition_divers): one row per article =
+//   IDref_divers (catalog `ref_divers`) + up to two variation axes
+//   (IDVariation1/IDVariation2 → ref_divers_variation, niveau 1/2 matching
+//   ref_divers.sTypeVariation1/sTypeVariation2 ∈ Couleur|Taille|Reference|Aucun)
+//   + quantite/unite + prix (unit price frozen at ship time). `designation` is
+//   a legacy free-text override — modern rows leave it empty and display
+//   ref + variations. Prices come from the tarif_divers grid keyed on
+//   (IDref_divers, IDVariation1, IDVariation2) with (0,0) = base price;
+//   fallback ref_divers.prix_unitaire. stock_divers is NOT touched by MPS_NG
+//   (legacy stock semantics unverified — managed via FEN_Gestion_Stock_Divers).
+//   ref_divers has an ACCENTED column `archivé` → SELECT * + pickKey, never
+//   name it in SQL.
+//
 // FORMELLE roll model (verified against MPS.xdd + clients.ts marchandise JOIN):
 //   expedition ──< ligne_expedition (one per shipped order line, FK
 //   IDligne_commande_client) ──< the rolls themselves point BACK via
@@ -41,6 +57,7 @@ import { z } from 'zod'
 import React from 'react'
 import { renderToBuffer } from '@react-pdf/renderer'
 import { query, fixEncoding } from '../lib/hfsql-auto.js'
+import { repairAliased } from './stock-fini.js'
 import { esc, n, dateDigits as dateStr, IS_WINDOWS } from '../lib/sst-shared.js'
 import { stripRtf, wrapRtf } from '../lib/rtf-utils.js'
 import { BonLivraisonPdf, type BonLivraisonPdfData, type BlArticle, type BlLot, type BlPiece } from '../lib/pdf/BonLivraisonPdf.js'
@@ -737,9 +754,11 @@ expeditionsRouter.get('/:kind/:id', async (req: Request, res: Response) => {
       query<any>(`SELECT IDligne_expedition_divers, detail_ligne FROM ligne_expedition_divers WHERE IDexpedition_divers = ${id} ORDER BY IDligne_expedition_divers`),
     ])
     const lignesFixed = await fixEncoding(lignesRaw, 'ligne_expedition_divers', 'IDligne_expedition_divers', ['detail_ligne'])
+    const itemsByLigne = await loadDiversItems((lignesFixed as any[]).map((l) => Number(l.IDligne_expedition_divers) || 0))
     const lignes = (lignesFixed as any[]).map((l) => ({
       IDligne_expedition_divers: Number(l.IDligne_expedition_divers),
       detail_ligne: stripRtf(l.detail_ligne) || '',
+      items: itemsByLigne.get(Number(l.IDligne_expedition_divers)) ?? [],
     }))
     res.json({
       id, kind,
@@ -894,6 +913,14 @@ expeditionsRouter.delete('/:kind/:id', async (req: Request, res: Response) => {
       await query(`DELETE FROM ligne_expedition WHERE IDexpedition = ${id}`)
       await query(`DELETE FROM expedition WHERE IDexpedition = ${id} AND IDsociete = 1`)
     } else {
+      // Cascade: carton items first, then the cartons, then the header.
+      const lineRows = await query<{ IDligne_expedition_divers: number }>(
+        `SELECT IDligne_expedition_divers FROM ligne_expedition_divers WHERE IDexpedition_divers = ${id}`,
+      )
+      const lineIds = lineRows.map((r) => Number(r.IDligne_expedition_divers)).filter((x) => x > 0)
+      if (lineIds.length > 0) {
+        await query(`DELETE FROM ref_divers_expedie WHERE IDligne_expedition_divers IN (${lineIds.join(',')})`)
+      }
       await query(`DELETE FROM ligne_expedition_divers WHERE IDexpedition_divers = ${id}`)
       await query(`DELETE FROM expedition_divers WHERE IDexpedition_divers = ${id}`)
     }
@@ -1144,10 +1171,273 @@ expeditionsRouter.delete('/divers/lignes/:lineId', async (req: Request, res: Res
     const parent = await diversLineParent(lineId)
     if (parent === 0) { res.status(404).json({ error: 'Line not found' }); return }
     if (await isLocked('divers', parent)) { res.status(409).json(FACTURE_LOCK); return }
+    // Cascade: the carton's items go with it.
+    await query(`DELETE FROM ref_divers_expedie WHERE IDligne_expedition_divers = ${lineId}`)
     await query(`DELETE FROM ligne_expedition_divers WHERE IDligne_expedition_divers = ${lineId}`)
     res.json({ ok: true })
   } catch (err) {
     console.error('Error deleting divers line:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ════════════════════════════════════════════════════════
+//  DIVERS — carton items (ref_divers_expedie)
+// ════════════════════════════════════════════════════════
+
+/** Kill HFSQL REAL artifacts (69.440002 → 69.44). Prices/qty keep 4 decimals. */
+const r4 = (v: unknown): number => Math.round((Number(v) || 0) * 10000) / 10000
+
+export interface DiversItem {
+  IDref_divers_expedie: number
+  IDref_divers: number
+  ref_designation: string
+  designation: string
+  IDVariation1: number
+  variation1_label: string | null
+  IDVariation2: number
+  variation2_label: string | null
+  quantite: number
+  unite: number
+  unite_label: string
+  prix: number
+}
+
+/** Load ref_divers_expedie items for a set of cartons, with ref + variation
+ *  labels resolved (batched — one query per table, one CONVERT per column). */
+async function loadDiversItems(ligneIds: number[]): Promise<Map<number, DiversItem[]>> {
+  const out = new Map<number, DiversItem[]>()
+  const ids = ligneIds.filter((x) => Number.isInteger(x) && x > 0)
+  if (ids.length === 0) return out
+
+  const raw = await query<any>(
+    `SELECT IDref_divers_expedie, IDligne_expedition_divers, designation, quantite, unite, prix, IDref_divers, IDVariation1, IDVariation2 ` +
+      `FROM ref_divers_expedie WHERE IDligne_expedition_divers IN (${ids.join(',')}) ORDER BY IDref_divers_expedie`,
+  )
+  if (raw.length === 0) return out
+  const items = await repairAliased(raw, 'ref_divers_expedie', 'IDref_divers_expedie', { designation: 'designation' })
+
+  const refIds = [...new Set(items.map((i: any) => Number(i.IDref_divers) || 0).filter((x) => x > 0))]
+  const varIds = [
+    ...new Set(
+      items
+        .flatMap((i: any) => [Number(i.IDVariation1) || 0, Number(i.IDVariation2) || 0])
+        .filter((x) => x > 0),
+    ),
+  ]
+  const [refRows, varRows] = await Promise.all([
+    refIds.length
+      ? query<any>(`SELECT IDref_divers, designation FROM ref_divers WHERE IDref_divers IN (${refIds.join(',')})`)
+      : Promise.resolve([]),
+    varIds.length
+      ? query<any>(`SELECT IDref_divers_variation, designation FROM ref_divers_variation WHERE IDref_divers_variation IN (${varIds.join(',')})`)
+      : Promise.resolve([]),
+  ])
+  const refFixed = await repairAliased(refRows as any[], 'ref_divers', 'IDref_divers', { designation: 'designation' })
+  const varFixed = await repairAliased(varRows as any[], 'ref_divers_variation', 'IDref_divers_variation', { designation: 'designation' })
+  const refName = new Map<number, string>()
+  for (const r of refFixed as any[]) refName.set(Number(r.IDref_divers), (r.designation ?? '').toString())
+  const varName = new Map<number, string>()
+  for (const v of varFixed as any[]) varName.set(Number(v.IDref_divers_variation), (v.designation ?? '').toString())
+
+  for (const i of items as any[]) {
+    const ligneId = Number(i.IDligne_expedition_divers) || 0
+    const v1 = Number(i.IDVariation1) || 0
+    const v2 = Number(i.IDVariation2) || 0
+    const item: DiversItem = {
+      IDref_divers_expedie: Number(i.IDref_divers_expedie) || 0,
+      IDref_divers: Number(i.IDref_divers) || 0,
+      ref_designation: refName.get(Number(i.IDref_divers) || 0) ?? '',
+      designation: (i.designation ?? '').toString(),
+      IDVariation1: v1,
+      variation1_label: v1 > 0 ? (varName.get(v1) ?? null) : null,
+      IDVariation2: v2,
+      variation2_label: v2 > 0 ? (varName.get(v2) ?? null) : null,
+      quantite: r4(i.quantite),
+      unite: Number(i.unite) || 0,
+      unite_label: uniteLabel(i.unite),
+      prix: r4(i.prix),
+    }
+    if (!out.has(ligneId)) out.set(ligneId, [])
+    out.get(ligneId)!.push(item)
+  }
+  return out
+}
+
+/** Resolve the tarif_divers grid price for a (ref, v1, v2) combo:
+ *  exact combo → (v1, 0) → base (0, 0) → ref_divers.prix_unitaire. */
+async function resolveDiversPrix(refId: number, v1: number, v2: number): Promise<number> {
+  const rows = await query<any>(
+    `SELECT prix, IDVariation1, IDVariation2 FROM tarif_divers WHERE IDref_divers = ${refId}`,
+  )
+  const grid = (rows as any[]).map((r) => ({ v1: Number(r.IDVariation1) || 0, v2: Number(r.IDVariation2) || 0, prix: r4(r.prix) }))
+  const pick = (a: number, b: number) => grid.find((g) => g.v1 === a && g.v2 === b && g.prix > 0)
+  const hit = pick(v1, v2) ?? (v2 > 0 ? pick(v1, 0) : undefined) ?? pick(0, 0)
+  if (hit) return hit.prix
+  const ref = await query<any>(`SELECT prix_unitaire FROM ref_divers WHERE IDref_divers = ${refId}`)
+  return r4(ref[0]?.prix_unitaire)
+}
+
+async function diversItemParentLigne(itemId: number): Promise<number> {
+  const rows = await query<{ IDligne_expedition_divers: number }>(
+    `SELECT IDligne_expedition_divers FROM ref_divers_expedie WHERE IDref_divers_expedie = ${itemId}`,
+  )
+  return Number(rows[0]?.IDligne_expedition_divers) || 0
+}
+
+const diversItemBody = z.object({
+  IDref_divers: z.number().int().positive(),
+  IDVariation1: z.number().int().nonnegative().optional(),
+  IDVariation2: z.number().int().nonnegative().optional(),
+  quantite: z.number().nonnegative(),
+  prix: z.number().nonnegative().optional(),
+  designation: z.string().optional(),
+})
+
+expeditionsRouter.post('/divers/lignes/:lineId/items', async (req: Request, res: Response) => {
+  try {
+    const lineId = parseInt(req.params.lineId, 10)
+    if (isNaN(lineId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const parent = await diversLineParent(lineId)
+    if (parent === 0) { res.status(404).json({ error: 'Line not found' }); return }
+    if (await isLocked('divers', parent)) { res.status(409).json(FACTURE_LOCK); return }
+    const parsed = diversItemBody.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
+    const d = parsed.data
+    const refRows = await query<any>(`SELECT IDref_divers, unite FROM ref_divers WHERE IDref_divers = ${n(d.IDref_divers)}`)
+    if (refRows.length === 0) { res.status(400).json({ error: 'Référence introuvable' }); return }
+    const unite = Number(refRows[0].unite) || 0
+    const v1 = d.IDVariation1 ?? 0
+    const v2 = d.IDVariation2 ?? 0
+    const prix = d.prix ?? (await resolveDiversPrix(d.IDref_divers, v1, v2))
+    await query(
+      `INSERT INTO ref_divers_expedie (IDligne_expedition_divers, designation, quantite, unite, prix, IDref_divers, IDVariation1, IDVariation2) ` +
+        `VALUES (${lineId}, ${sqlText(d.designation ?? '')}, ${r4(d.quantite)}, ${unite}, ${r4(prix)}, ${n(d.IDref_divers)}, ${n(v1)}, ${n(v2)})`,
+    )
+    res.status(201).json({ ok: true })
+  } catch (err) {
+    console.error('Error adding divers item:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+expeditionsRouter.put('/divers/items/:itemId', async (req: Request, res: Response) => {
+  try {
+    const itemId = parseInt(req.params.itemId, 10)
+    if (isNaN(itemId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const ligneId = await diversItemParentLigne(itemId)
+    if (ligneId === 0) { res.status(404).json({ error: 'Item not found' }); return }
+    const parent = await diversLineParent(ligneId)
+    if (parent === 0) { res.status(404).json({ error: 'Line not found' }); return }
+    if (await isLocked('divers', parent)) { res.status(409).json(FACTURE_LOCK); return }
+    const parsed = diversItemBody.partial().safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
+    const d = parsed.data
+    const sets: string[] = []
+    if (d.IDref_divers !== undefined) {
+      const refRows = await query<any>(`SELECT IDref_divers, unite FROM ref_divers WHERE IDref_divers = ${n(d.IDref_divers)}`)
+      if (refRows.length === 0) { res.status(400).json({ error: 'Référence introuvable' }); return }
+      sets.push(`IDref_divers = ${n(d.IDref_divers)}`, `unite = ${Number(refRows[0].unite) || 0}`)
+    }
+    if (d.IDVariation1 !== undefined) sets.push(`IDVariation1 = ${n(d.IDVariation1)}`)
+    if (d.IDVariation2 !== undefined) sets.push(`IDVariation2 = ${n(d.IDVariation2)}`)
+    if (d.quantite !== undefined) sets.push(`quantite = ${r4(d.quantite)}`)
+    if (d.prix !== undefined) sets.push(`prix = ${r4(d.prix)}`)
+    if (d.designation !== undefined) sets.push(`designation = ${sqlText(d.designation)}`)
+    if (sets.length === 0) { res.status(400).json({ error: 'No fields to update' }); return }
+    await query(`UPDATE ref_divers_expedie SET ${sets.join(', ')} WHERE IDref_divers_expedie = ${itemId}`)
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error updating divers item:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+expeditionsRouter.delete('/divers/items/:itemId', async (req: Request, res: Response) => {
+  try {
+    const itemId = parseInt(req.params.itemId, 10)
+    if (isNaN(itemId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const ligneId = await diversItemParentLigne(itemId)
+    if (ligneId === 0) { res.status(404).json({ error: 'Item not found' }); return }
+    const parent = await diversLineParent(ligneId)
+    if (parent === 0) { res.status(404).json({ error: 'Line not found' }); return }
+    if (await isLocked('divers', parent)) { res.status(409).json(FACTURE_LOCK); return }
+    await query(`DELETE FROM ref_divers_expedie WHERE IDref_divers_expedie = ${itemId}`)
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error deleting divers item:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Divers lookups: ref catalog / variations / price ──
+
+/** Accented identifiers come back truncated on the Linux bridge (archivé →
+ *  archiv) and verbatim on Windows — resolve by prefix regex, never by name. */
+function pickKey(row: Record<string, unknown>, re: RegExp): unknown {
+  const k = Object.keys(row).find((key) => re.test(key))
+  return k === undefined ? undefined : row[k]
+}
+
+expeditionsRouter.get('/divers/lookups/refs', async (_req: Request, res: Response) => {
+  try {
+    // SELECT * on purpose — `archivé` is accented and must never be named in SQL.
+    const raw = await query<any>(`SELECT * FROM ref_divers`)
+    const fixed = await repairAliased(raw, 'ref_divers', 'IDref_divers', { designation: 'designation' })
+    const refs = (fixed as any[])
+      .map((r) => ({
+        IDref_divers: Number(r.IDref_divers) || 0,
+        designation: (r.designation ?? '').toString(),
+        prix_unitaire: r4(r.prix_unitaire),
+        unite: Number(r.unite) || 0,
+        unite_label: uniteLabel(r.unite),
+        archive: Number(pickKey(r, /^archiv/i)) ? 1 : 0,
+        sTypeVariation1: (r.sTypeVariation1 ?? 'Aucun').toString(),
+        sTypeVariation2: (r.sTypeVariation2 ?? 'Aucun').toString(),
+      }))
+      .sort((a, b) => a.designation.localeCompare(b.designation, 'fr'))
+    res.json(refs)
+  } catch (err) {
+    console.error('Error fetching ref_divers lookup:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+expeditionsRouter.get('/divers/lookups/refs/:refId/variations', async (req: Request, res: Response) => {
+  try {
+    const refId = parseInt(req.params.refId, 10)
+    if (isNaN(refId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const raw = await query<any>(
+      `SELECT IDref_divers_variation, designation, niveau, prix, unite FROM ref_divers_variation WHERE IDref_divers = ${refId}`,
+    )
+    const fixed = await repairAliased(raw, 'ref_divers_variation', 'IDref_divers_variation', { designation: 'designation' })
+    // niveau 1 ↔ sTypeVariation1, niveau 2 ↔ sTypeVariation2 (verified: every
+    // IDVariation1 in ref_divers_expedie is niveau 1, every IDVariation2 niveau 2;
+    // niveau 0 = pre-axis legacy rows, exposed on axis 1).
+    const vars = (fixed as any[])
+      .map((v) => ({
+        IDref_divers_variation: Number(v.IDref_divers_variation) || 0,
+        designation: (v.designation ?? '').toString(),
+        niveau: Number(v.niveau) || 0,
+        prix: r4(v.prix),
+      }))
+      .sort((a, b) => a.designation.localeCompare(b.designation, 'fr'))
+    res.json(vars)
+  } catch (err) {
+    console.error('Error fetching ref_divers variations:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+expeditionsRouter.get('/divers/lookups/prix', async (req: Request, res: Response) => {
+  try {
+    const refId = parseInt(String(req.query.ref ?? ''), 10)
+    if (isNaN(refId) || refId <= 0) { res.status(400).json({ error: 'Invalid ref' }); return }
+    const v1 = parseInt(String(req.query.v1 ?? '0'), 10) || 0
+    const v2 = parseInt(String(req.query.v2 ?? '0'), 10) || 0
+    res.json({ prix: await resolveDiversPrix(refId, v1, v2) })
+  } catch (err) {
+    console.error('Error resolving divers price:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

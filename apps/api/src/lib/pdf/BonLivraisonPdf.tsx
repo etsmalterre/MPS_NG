@@ -328,7 +328,10 @@ export function BonLivraisonPdf({ data }: { data: BonLivraisonPdfData }) {
         )
         return (
           <View key={ai} style={styles.article}>
-            <View wrap={false}>
+            {/* Keep the article identity glued to the start of its first lot
+                (label + header + a row) instead of stranding it at a page
+                bottom — same "keep with next" semantics as the lot label. */}
+            <View wrap={false} minPresenceAhead={100}>
               <Text style={styles.articleTitre}>{article.titre}</Text>
               {article.sousTitre ? <Text style={styles.articleLine}>{article.sousTitre}</Text> : null}
               {article.finition ? <Text style={styles.articleFinition}>{article.finition}</Text> : null}
@@ -350,11 +353,13 @@ export function BonLivraisonPdf({ data }: { data: BonLivraisonPdfData }) {
                 </View>
               )
               return (
-                // minPresenceAhead: if less than ~a label + header + one data
-                // row fits before the page break, push the whole lot block to
-                // the next page instead of stranding a bare header.
-                <View key={li} style={styles.lotBlock} minPresenceAhead={70}>
-                  <Text style={styles.lotLabel}>{`Lot : ${lot.lot || '—'}`}</Text>
+                // minPresenceAhead goes on the LABEL, not the block: react-pdf
+                // pushes the whole element to the next page when less than N pt
+                // of the NEXT sibling fits below it — on the block that blanked
+                // out page bottoms whenever a lot fit snugly (BL 12112). On the
+                // label it just keeps "Lot : …" glued to the header + ~2 rows.
+                <View key={li} style={styles.lotBlock}>
+                  <Text style={styles.lotLabel} minPresenceAhead={70}>{`Lot : ${lot.lot || '—'}`}</Text>
                   <View style={styles.table}>
                     <View style={styles.tableHeader} fixed>
                       <Text style={[styles.tableHeaderCell, showObs ? styles.colPiece : styles.colPieceWide]}>PIÈCE</Text>

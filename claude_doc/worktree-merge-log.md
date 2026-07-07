@@ -11,6 +11,35 @@ other worktrees see what changed when they rebase. Format:
 <!-- entries below -->
 
 
+## 2026-07-07 — feat/expe
+Clients › Expéditions — **Diverses: carton contents (ref_divers_expedie)** + a Bon de Livraison
+PDF pagination fix (`apps/api/src/routes/expeditions.ts`, `apps/web/src/pages/ClientsExpeditions.tsx`,
+`apps/api/src/lib/pdf/BonLivraisonPdf.tsx`).
+**(1) Divers cartons model.** A divers expedition's `ligne_expedition_divers` rows are **cartons/colis**
+(`detail_ligne` = label, e.g. "CARTON 3"), and their real content lives in **`ref_divers_expedie`**
+(FK `IDligne_expedition_divers`): one row per article = `ref_divers` catalog ref + up to two variation
+axes (`IDVariation1/2` → `ref_divers_variation`, niveau 1↔`sTypeVariation1`, niveau 2↔`sTypeVariation2`,
+∈ Couleur|Taille|Reference|Aucun) + quantite/unite + prix (frozen at ship time from the `tarif_divers`
+grid keyed on (ref, v1, v2), (0,0)=base, fallback `ref_divers.prix_unitaire`). Verified against live
+expedition 597 (4 cartons, 12 items). The previous code treated these lignes as free-text only — it
+surfaced none of the article data. **API**: divers detail GET now returns each carton's `items[]` with
+resolved ref + variation labels (batched `repairAliased`); new item CRUD
+(`POST /divers/lignes/:id/items`, `PUT`/`DELETE /divers/items/:id`, all honoring the facturée lock)
+and lookups (`GET /divers/lookups/refs` [`SELECT *` + `pickKey` for the accented `archivé` col],
+`.../refs/:refId/variations`, `.../prix?ref&v1&v2`). Carton and expedition deletes now cascade to
+`ref_divers_expedie` (previously orphaned rows). `stock_divers` intentionally untouched (legacy
+movement semantics unverified). **UI**: each carton card lists its articles (désignation · variations
+| qté | PU | total €) with a per-carton total; a pinned footer totals cartons/articles/€ for the
+expedition; edit mode adds add/edit/delete per item via a dialog with a searchable ref picker,
+variation dropdowns labeled by the ref's own axis names, and grid-auto-filled (editable) unit price.
+List cards now read "N cartons". **(2) BL PDF fix**: `minPresenceAhead={70}` moved off the whole lot
+`View` onto the "Lot :" label — on the block, react-pdf's keep-with-next semantics pushed an entire
+snugly-fitting lot to the next page, blanking page bottoms (seen on prod BL 12112, whose first lot fell
+on a nearly-empty page 1). On the label it just keeps the header + ~2 rows together; also added
+`minPresenceAhead={100}` to the article identity block so a heading can't be stranded. Verified with a
+12112-shaped render (6 pages → 4, first lot now on page 1).
+
+
 ## 2026-07-07 — feat/facturation
 Clients › Facturation — **Facture/Proforma PDF redesign + proforma print & email**
 (`apps/api/src/lib/pdf/FacturePdf.tsx`, `MalterreDocument.tsx`, `theme.ts`,
