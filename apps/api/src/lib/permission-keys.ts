@@ -25,6 +25,15 @@ export const PERMISSION_KEYS = [
     description: 'Affiche le widget « Stock La Gentle » (export Excel) sur le tableau de bord.',
     category: 'Tableau de bord',
   },
+  // Commandes client — kept right after the dashboard keys so the section
+  // renders directly below "Tableau de bord" in Paramètres > Utilisateurs.
+  {
+    key: 'donation_commande_client',
+    label: 'Marquer une commande comme donation',
+    description:
+      'Affiche l’interrupteur « Donation » et autorise à marquer une commande comme donation dans Clients > Commandes.',
+    category: 'Commandes client',
+  },
   {
     key: 'create_stock_fil',
     label: 'Créer un lot de fil',

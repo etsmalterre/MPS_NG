@@ -10,6 +10,26 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-07 — feat/cmd-client
+Clients › Commandes — **permission-gated Donation flag + CommandeClient PDF layout rework**
+(`apps/api/src/lib/permission-keys.ts`, `apps/api/src/routes/commandes-client.ts`,
+`apps/api/src/routes/expeditions.ts`, `apps/web/src/pages/ClientsCommandes.tsx`,
+`apps/api/src/lib/pdf/CommandeClientPdf.tsx`, `apps/api/src/lib/pdf/MalterreDocument.tsx`).
+**(1) Donation**: new `donation_commande_client` permission key (category "Commandes client");
+`GET /:id` returns `donation`, `PUT /:id` accepts it but enforces the permission only when the
+value actually changes (echoing the unchanged flag is fine). The UI shows a `TogglePill`
+"Donation" switch in the Info tab (edit mode, permission-gated; field omitted from the save
+payload when unprivileged). Donation propagates downstream: `POST /:id/lignes/:ligneId/expedier`
+and formelle expedition creation now default the shipment's `donation` to the parent order's flag
+(previously hardcoded 0 / explicit-only), so donation orders never spawn proformas.
+**(2) PDF**: the acknowledgement's right "combo" card is split — payment terms move to the top
+row next to the client card; the livraison address becomes its own card pinned to the bottom of
+the last page (`wrap={false}`, grows into leftover space). Shared compact cream `card` style,
+`lineHeight: 1` on icon-adjacent text (also in `MalterreDocument` card title/meta styles),
+and a `pushLine` helper that trims HFSQL single-space "empty" address columns. Dev scripts:
+`render-cc-pdf.ts` (render a commande's PDF to file by numero), `probe-donation-flag.ts`
+(one-off donation-column probe).
+
 ## 2026-07-06 — feat/cmd-sst
 Sous-traitants › Commandes — **per-lot tooltip on the totals-footer "Ml reçus"**
 (`apps/api/src/routes/commandes-sous-traitant.ts`, `apps/web/src/pages/SousTraitantsCommandes.tsx`).

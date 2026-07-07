@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tansta
 import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { useUnsavedGuard } from '@/hooks/useUnsavedGuard'
+import { useHasPermission } from '@/contexts/PermissionsContext'
 import {
   ShoppingCart,
   Search,
@@ -202,6 +203,7 @@ interface CommandeDetail {
   commentaire_interne: string | null
   observations_facturation: string | null
   est_soldee: number
+  donation: number
   remise: number
   frais_port: number
   IDdossier: number
@@ -317,6 +319,7 @@ function lineCardColors(line: LigneCommande) {
 
 export function ClientsCommandes() {
   const queryClient = useQueryClient()
+  const canMarkDonation = useHasPermission('donation_commande_client')
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [debouncedQuery, setDebouncedQuery] = useState('')
@@ -337,6 +340,7 @@ export function ClientsCommandes() {
   const [editIDEcheance, setEditIDEcheance] = useState(0)
   const [editRemise, setEditRemise] = useState('')
   const [editFraisPort, setEditFraisPort] = useState('')
+  const [editDonation, setEditDonation] = useState(false)
   const [editIDAdresseFacturation, setEditIDAdresseFacturation] = useState(0)
   const [editIDAdresseLivraison, setEditIDAdresseLivraison] = useState(0)
 
@@ -385,6 +389,7 @@ export function ClientsCommandes() {
       IDecheance: detail.IDecheance ?? 0,
       remise: detail.remise ? String(detail.remise) : '',
       fraisPort: detail.frais_port ? String(detail.frais_port) : '',
+      donation: detail.donation ? 1 : 0,
       IDadresseFact: detail.IDadresse_facturation ?? 0,
       IDadresseLiv: detail.IDadresse_livraison ?? 0,
     }
@@ -396,6 +401,7 @@ export function ClientsCommandes() {
     setEditIDEcheance(snapshot.IDecheance)
     setEditRemise(snapshot.remise)
     setEditFraisPort(snapshot.fraisPort)
+    setEditDonation(snapshot.donation === 1)
     setEditIDAdresseFacturation(snapshot.IDadresseFact)
     setEditIDAdresseLivraison(snapshot.IDadresseLiv)
     originalDraftRef.current = snapshot
@@ -417,11 +423,12 @@ export function ClientsCommandes() {
     if (editIDEcheance !== o.IDecheance) return true
     if (editRemise !== o.remise) return true
     if (editFraisPort !== o.fraisPort) return true
+    if ((editDonation ? 1 : 0) !== o.donation) return true
     if (editIDAdresseFacturation !== o.IDadresseFact) return true
     if (editIDAdresseLivraison !== o.IDadresseLiv) return true
     if (linesDirty) return true
     return false
-  }, [isEditing, editDateCommande, editRefClient, editCommentaire, editCommentaireInterne, editIDModePaiement, editIDEcheance, editRemise, editFraisPort, editIDAdresseFacturation, editIDAdresseLivraison, linesDirty])
+  }, [isEditing, editDateCommande, editRefClient, editCommentaire, editCommentaireInterne, editIDModePaiement, editIDEcheance, editRemise, editFraisPort, editDonation, editIDAdresseFacturation, editIDAdresseLivraison, linesDirty])
 
   const saveHeaderMut = useMutation({
     mutationFn: () => apiFetch(`/commandes-client/${selectedId}`, {
@@ -435,6 +442,8 @@ export function ClientsCommandes() {
         IDecheance: editIDEcheance || 0,
         remise: Number(editRemise) || 0,
         frais_port: Number(editFraisPort) || 0,
+        // Permission-gated field — omit entirely when the user can't set it.
+        ...(canMarkDonation ? { donation: editDonation ? 1 : 0 } : {}),
         IDadresse_facturation: editIDAdresseFacturation || 0,
         IDadresse_livraison: editIDAdresseLivraison || 0,
       }),
@@ -554,6 +563,7 @@ export function ClientsCommandes() {
             editIDEcheance={editIDEcheance} onEditIDEcheanceChange={setEditIDEcheance}
             editRemise={editRemise} onEditRemiseChange={setEditRemise}
             editFraisPort={editFraisPort} onEditFraisPortChange={setEditFraisPort}
+            editDonation={editDonation} onEditDonationChange={setEditDonation}
             editIDAdresseFacturation={editIDAdresseFacturation} onEditIDAdresseFacturationChange={setEditIDAdresseFacturation}
             editIDAdresseLivraison={editIDAdresseLivraison} onEditIDAdresseLivraisonChange={setEditIDAdresseLivraison}
             onToggleEtat={() => toggleEtatMut.mutate(detail?.est_soldee === 1 ? 0 : 1)}
@@ -3246,6 +3256,7 @@ function DetailSidebar({
   editIDEcheance, onEditIDEcheanceChange,
   editRemise, onEditRemiseChange,
   editFraisPort, onEditFraisPortChange,
+  editDonation, onEditDonationChange,
   editIDAdresseFacturation, onEditIDAdresseFacturationChange,
   editIDAdresseLivraison, onEditIDAdresseLivraisonChange,
   onToggleEtat, isTogglingEtat,
@@ -3261,6 +3272,7 @@ function DetailSidebar({
   editIDEcheance: number; onEditIDEcheanceChange: (v: number) => void
   editRemise: string; onEditRemiseChange: (v: string) => void
   editFraisPort: string; onEditFraisPortChange: (v: string) => void
+  editDonation: boolean; onEditDonationChange: (v: boolean) => void
   editIDAdresseFacturation: number; onEditIDAdresseFacturationChange: (v: number) => void
   editIDAdresseLivraison: number; onEditIDAdresseLivraisonChange: (v: number) => void
   onToggleEtat: () => void
@@ -3334,6 +3346,7 @@ function DetailSidebar({
               editIDEcheance={editIDEcheance} onEditIDEcheanceChange={onEditIDEcheanceChange}
               editRemise={editRemise} onEditRemiseChange={onEditRemiseChange}
               editFraisPort={editFraisPort} onEditFraisPortChange={onEditFraisPortChange}
+              editDonation={editDonation} onEditDonationChange={onEditDonationChange}
             />
           )}
           {activeTab === 'adresses' && (
@@ -3389,6 +3402,7 @@ function InfoTab({
   editIDEcheance, onEditIDEcheanceChange,
   editRemise, onEditRemiseChange,
   editFraisPort, onEditFraisPortChange,
+  editDonation, onEditDonationChange,
 }: {
   commande: CommandeDetail
   isEditing: boolean
@@ -3402,7 +3416,9 @@ function InfoTab({
   editIDEcheance: number; onEditIDEcheanceChange: (v: number) => void
   editRemise: string; onEditRemiseChange: (v: string) => void
   editFraisPort: string; onEditFraisPortChange: (v: string) => void
+  editDonation: boolean; onEditDonationChange: (v: boolean) => void
 }) {
+  const canMarkDonation = useHasPermission('donation_commande_client')
   const modeLabel = modesPaiement.find((m) => m.IDmode_paiement === commande.IDmode_paiement)?.libelle
   const echeanceLabel = echeances.find((e) => e.IDecheance === commande.IDecheance)?.libelle
   const smallInput = 'h-7 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring text-right w-[120px]'
@@ -3431,6 +3447,15 @@ function InfoTab({
         <KV label="Frais de port (€)" value={isEditing ? (
           <input type="number" value={editFraisPort} onChange={(e) => onEditFraisPortChange(e.target.value)} className={smallInput} />
         ) : (commande.frais_port ? fmtNum(commande.frais_port, 2) : '—')} />
+        {/* Donation — material shipped from this order must never generate a
+            proforma; the flag propagates to expeditions created from it.
+            Visible only with the donation_commande_client permission. */}
+        {canMarkDonation && (
+          <div className="pt-1">
+            <TogglePill label="Donation" checked={isEditing ? editDonation : !!commande.donation}
+              disabled={!isEditing} onChange={onEditDonationChange} />
+          </div>
+        )}
       </div>
 
       {/* Fiche client — customer-specific handling notes (client.commentaire),
@@ -4073,6 +4098,25 @@ function KV({ label, value }: { label: string; value: React.ReactNode }) {
     <div className="flex items-baseline justify-between gap-2">
       <span className="text-xs text-muted-foreground">{label}</span>
       <span className="text-sm text-right truncate">{value}</span>
+    </div>
+  )
+}
+
+// Same inline switch as the "Client interne" toggle in ClientsGestion.tsx.
+function TogglePill({ label, checked, disabled, onChange }: {
+  label: string; checked: boolean; disabled: boolean; onChange: (v: boolean) => void
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg border border-border/60 bg-white shadow-sm">
+      <span className="text-xs font-medium">{label}</span>
+      <button type="button" role="switch" aria-checked={checked} disabled={disabled} onClick={() => onChange(!checked)}
+        className={cn('relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full transition-colors',
+          'focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+          'disabled:opacity-60 disabled:cursor-not-allowed',
+          checked ? 'bg-accent shadow-inner' : 'bg-zinc-300 hover:bg-zinc-400/80')}>
+        <span className={cn('inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200 ease-out',
+          checked ? 'translate-x-[18px]' : 'translate-x-0.5')} />
+      </button>
     </div>
   )
 }

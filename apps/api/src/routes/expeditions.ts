@@ -789,20 +789,22 @@ expeditionsRouter.post('/:kind', async (req: Request, res: Response) => {
 
     if (kind === 'formelle') {
       if (!d.IDcommande_client) { res.status(400).json({ error: 'IDcommande_client is required' }); return }
-      const cmdRows = await query<{ IDclient: number; IDadresse_livraison: number }>(
-        `SELECT IDclient, IDadresse_livraison FROM commande_client WHERE IDcommande_client = ${n(d.IDcommande_client)} AND IDsociete = 1`,
+      const cmdRows = await query<{ IDclient: number; IDadresse_livraison: number; donation: number | null }>(
+        `SELECT IDclient, IDadresse_livraison, donation FROM commande_client WHERE IDcommande_client = ${n(d.IDcommande_client)} AND IDsociete = 1`,
       )
       if (cmdRows.length === 0) { res.status(400).json({ error: 'Commande introuvable' }); return }
       const IDclient = Number(cmdRows[0].IDclient) || 0
-      // Auto-fill: livraison address from the order, carrier from the client.
+      // Auto-fill: livraison address from the order, carrier from the client,
+      // donation flag from the order (donation shipments never get a proforma).
       const clientRows = await query<{ IDtransporteur: number }>(`SELECT IDtransporteur FROM client WHERE IDclient = ${IDclient}`)
       const idAdresse = d.IDadresse ?? (Number(cmdRows[0].IDadresse_livraison) || 0)
       const idTrans = d.IDtransporteur ?? (Number(clientRows[0]?.IDtransporteur) || 0)
+      const donation = d.donation ?? (Number(cmdRows[0].donation) === 1 ? 1 : 0)
 
       const before = await maxId('expedition', 'IDexpedition')
       await query(
         `INSERT INTO expedition (IDsociete, IDcommande_client, IDadresse, IDtransporteur, IDcontact, DATE, donation, affiche_observations, est_valide, est_facture, inclureRapportQualite) ` +
-          `VALUES (1, ${n(d.IDcommande_client)}, ${n(idAdresse)}, ${n(idTrans)}, 0, '${date}', ${d.donation ? 1 : 0}, 1, 0, 0, 0)`,
+          `VALUES (1, ${n(d.IDcommande_client)}, ${n(idAdresse)}, ${n(idTrans)}, 0, '${date}', ${donation ? 1 : 0}, 1, 0, 0, 0)`,
       )
       const newId = await newIdAfterInsert('expedition', 'IDexpedition', before)
       res.status(201).json({ id: newId, kind })

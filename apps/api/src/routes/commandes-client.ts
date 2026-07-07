@@ -35,6 +35,8 @@ import { calcTarifSST } from '../lib/pricing-sst.js'
 import { sendMail } from '../lib/gmail.js'
 import { getUserEmail } from '../lib/user-emails.js'
 import { stripRtf } from '../lib/rtf-utils.js'
+import { userHasPermission } from '../lib/permissions.js'
+import { isEffectiveAdmin } from '../lib/auth.js'
 import { IS_WINDOWS, esc, n, dateDigits as dateStr, addWorkingDays } from '../lib/sst-shared.js'
 import { createKnitOrder, TRICOTAGE_MALTERRE_ID } from './commandes-sous-traitant.js'
 
@@ -268,6 +270,7 @@ const commandeBody = z.object({
   remise: z.number().optional(),
   frais_port: z.number().optional(),
   est_soldee: z.number().int().min(0).max(1).optional(),
+  donation: z.number().int().min(0).max(1).optional(),
 })
 
 const ligneBody = z.object({
@@ -1074,6 +1077,7 @@ commandesClientRouter.get('/:id', async (req: Request, res: Response) => {
       commentaire_interne: h.commentaire_interne ?? null,
       observations_facturation: h.observations_facturation ?? null,
       est_soldee: Number(h.est_soldee) || 0,
+      donation: Number(h.donation) || 0,
       remise: Number(h.remise) || 0,
       frais_port: Number(h.frais_port) || 0,
       IDdossier: Number(h.IDdossier) || 0,
@@ -1164,6 +1168,20 @@ commandesClientRouter.put('/:id', async (req: Request, res: Response) => {
     if (d.remise !== undefined) sets.push(`remise = ${Number(d.remise) || 0}`)
     if (d.frais_port !== undefined) sets.push(`frais_port = ${Number(d.frais_port) || 0}`)
     if (d.est_soldee !== undefined) sets.push(`est_soldee = ${d.est_soldee}`)
+    if (d.donation !== undefined) {
+      // Permission-gated: only 403 when the value actually changes, so a
+      // client echoing the current flag alongside other header edits passes.
+      const cur = await query<{ donation: number | null }>(
+        `SELECT donation FROM commande_client WHERE IDcommande_client = ${id}`,
+      )
+      const currentDonation = Number(cur[0]?.donation) === 1 ? 1 : 0
+      if (d.donation !== currentDonation) {
+        if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
+        const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'donation_commande_client')
+        if (!allowed) { res.status(403).json({ error: 'permission denied: donation_commande_client' }); return }
+        sets.push(`donation = ${d.donation}`)
+      }
+    }
     if (sets.length === 0) { res.status(400).json({ error: 'No fields to update' }); return }
 
     await query(`UPDATE commande_client SET ${sets.join(', ')} WHERE IDcommande_client = ${id}`)
@@ -3022,9 +3040,11 @@ commandesClientRouter.post('/:id/lignes/:ligneId/expedier', async (req: Request,
     const usable = rollRows.filter((r: any) => Number(r.lcc) === ligneId && (Number(r.le) || 0) === 0)
     if (usable.length === 0) { res.status(400).json({ error: 'Aucun rouleau expédiable dans la sélection' }); return }
 
-    // Header defaults: livraison address from the commande, carrier from the client.
-    const cmdRows = await query<{ IDclient: number; IDadresse_livraison: number }>(
-      `SELECT IDclient, IDadresse_livraison FROM commande_client WHERE IDcommande_client = ${commandeId} AND IDsociete = 1`,
+    // Header defaults: livraison address from the commande, carrier from the
+    // client. donation inherits the commande's flag so material shipped from a
+    // donation order never generates a proforma downstream (legacy behavior).
+    const cmdRows = await query<{ IDclient: number; IDadresse_livraison: number; donation: number | null }>(
+      `SELECT IDclient, IDadresse_livraison, donation FROM commande_client WHERE IDcommande_client = ${commandeId} AND IDsociete = 1`,
     )
     if (cmdRows.length === 0) { res.status(400).json({ error: 'Commande introuvable' }); return }
     const clientRows = await query<{ IDtransporteur: number }>(
@@ -3033,7 +3053,7 @@ commandesClientRouter.post('/:id/lignes/:ligneId/expedier', async (req: Request,
     const today = dateStr(new Date().toISOString().slice(0, 10))
     await query(
       `INSERT INTO expedition (IDsociete, IDcommande_client, IDadresse, IDtransporteur, IDcontact, DATE, donation, affiche_observations, est_valide, est_facture, inclureRapportQualite)
-       VALUES (1, ${commandeId}, ${Number(cmdRows[0].IDadresse_livraison) || 0}, ${Number(clientRows[0]?.IDtransporteur) || 0}, 0, '${today}', 0, 1, 0, 0, 0)`,
+       VALUES (1, ${commandeId}, ${Number(cmdRows[0].IDadresse_livraison) || 0}, ${Number(clientRows[0]?.IDtransporteur) || 0}, 0, '${today}', ${Number(cmdRows[0].donation) === 1 ? 1 : 0}, 1, 0, 0, 0)`,
     )
     const expRows = await query<{ IDexpedition: number }>(
       `SELECT IDexpedition FROM expedition WHERE IDcommande_client = ${commandeId} ORDER BY IDexpedition DESC`,

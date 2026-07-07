@@ -9,12 +9,11 @@ import React from 'react'
 import { View, Text, StyleSheet } from '@react-pdf/renderer'
 import {
   MalterreDocument,
-  AddressCard,
+  UserIcon,
   CreditCardIcon,
   CalendarIcon,
   TruckIcon,
   MessageSquareIcon,
-  type AddressBlockData,
 } from './MalterreDocument.js'
 import { colors, sizes } from './theme.js'
 
@@ -65,11 +64,12 @@ function fmtNum(value: number | null | undefined, decimals = 0): string {
 }
 
 const styles = StyleSheet.create({
-  topRow: { flexDirection: 'row', gap: 14, marginBottom: 16, alignItems: 'stretch' },
+  topRow: { flexDirection: 'row', gap: 14, marginBottom: 14, alignItems: 'stretch' },
   topRowSlot: { flex: 1, flexDirection: 'column' },
-  // Combo card (right slot): metadata rows + a divider + the livraison address.
-  comboCard: {
-    flexGrow: 1,
+  // Compact cream card — shared by the two header slots and the bottom
+  // livraison card. Tighter padding than the stock AddressCard on purpose:
+  // the header row must stay short so the lines table starts high.
+  card: {
     backgroundColor: colors.bgCream,
     borderWidth: 0.75,
     borderColor: colors.borderStrong,
@@ -78,17 +78,29 @@ const styles = StyleSheet.create({
     borderLeftColor: colors.gold,
     borderLeftStyle: 'solid',
     borderRadius: 6,
-    padding: 14,
+    padding: 10,
   },
-  comboMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 3 },
-  comboMetaIconBox: { width: 14, height: 14, alignItems: 'center', justifyContent: 'center' },
-  comboMetaLabel: { fontSize: sizes.fontBase, color: colors.muted, fontWeight: 700, flex: 1 },
-  comboMetaValue: { fontSize: sizes.fontBase, color: colors.text, fontWeight: 700, textAlign: 'right' },
-  comboDivider: { height: 0.75, backgroundColor: colors.borderStrong, marginVertical: 10 },
-  comboCardHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
-  comboCardTitle: { fontSize: sizes.fontXs, color: colors.primary, fontWeight: 900, letterSpacing: 0.5 },
-  comboCardName: { fontSize: sizes.fontBase, fontWeight: 900, color: colors.text, marginBottom: 1 },
-  comboCardLine: { fontSize: sizes.fontBase, color: colors.text, lineHeight: 1.4 },
+  cardStretch: { flexGrow: 1 },
+  // lineHeight 1 on every text that sits in a row next to an icon — the
+  // inherited 1.45 adds leading above the glyphs, which pushes the text down
+  // and leaves the center-aligned icon visually too high/low.
+  metaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 2.5 },
+  metaIconBox: { width: 14, height: 14, alignItems: 'center', justifyContent: 'center' },
+  metaLabel: { fontSize: sizes.fontBase, color: colors.muted, fontWeight: 700, flex: 1, lineHeight: 1 },
+  metaValue: { fontSize: sizes.fontBase, color: colors.text, fontWeight: 700, textAlign: 'right', lineHeight: 1 },
+  cardHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 5 },
+  cardTitle: { fontSize: sizes.fontXs, color: colors.primary, fontWeight: 900, letterSpacing: 0.5, lineHeight: 1 },
+  cardName: { fontSize: sizes.fontBase, fontWeight: 900, color: colors.text, marginBottom: 1 },
+  cardLine: { fontSize: sizes.fontBase, color: colors.text, lineHeight: 1.4 },
+  // Livraison card is pinned to the bottom of the last page: the wrapper
+  // grows to fill the leftover space and bottom-aligns the card just above
+  // the footer. wrap={false} on the wrapper (not just the card) so when the
+  // card doesn't fit under the totals, the whole pin block moves to a fresh
+  // page and fills it — the card still lands at the bottom, never at the top.
+  bottomPin: { flexGrow: 1, flexDirection: 'column', justifyContent: 'flex-end' },
+  // marginBottom lifts the card off the flow floor (paddingBottom 80) so the
+  // "Page X/Y" line (bottom: 72) keeps clear air under the card border.
+  livraisonBottom: { marginTop: 16, marginBottom: 10 },
 
   table: {
     marginBottom: 8,
@@ -166,38 +178,42 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   commentaireHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
-  commentaireTitle: { fontSize: sizes.fontXs, color: colors.primary, fontWeight: 900, letterSpacing: 0.5 },
+  commentaireTitle: { fontSize: sizes.fontXs, color: colors.primary, fontWeight: 900, letterSpacing: 0.5, lineHeight: 1 },
   commentaireText: { fontSize: sizes.fontBase, color: colors.text, lineHeight: 1.45 },
 })
 
-function buildClientAddress(data: CommandeClientPdfData): AddressBlockData {
+// HFSQL keeps ' ' (a single space) in empty text columns — trim before the
+// truthiness check or blank address parts render as empty lines in the card.
+function pushLine(lines: string[], raw: string | null) {
+  const t = raw?.trim()
+  if (t) lines.push(t)
+}
+
+function buildClientAddress(data: CommandeClientPdfData): { name: string; lines: string[] } {
   const a = data.adresseFacturation
   const lines: string[] = []
   if (a) {
-    if (a.nom && a.nom !== data.clientNom) lines.push(a.nom)
-    if (a.adresse1) lines.push(a.adresse1)
-    if (a.adresse2) lines.push(a.adresse2)
-    if (a.adresse3) lines.push(a.adresse3)
-    const cityLine = [a.cp, a.ville].filter(Boolean).join(' ')
-    if (cityLine) lines.push(cityLine)
-    if (a.pays) lines.push(a.pays)
+    const nom = a.nom?.trim()
+    if (nom && nom !== data.clientNom) lines.push(nom)
+    pushLine(lines, a.adresse1)
+    pushLine(lines, a.adresse2)
+    pushLine(lines, a.adresse3)
+    pushLine(lines, [a.cp?.trim(), a.ville?.trim()].filter(Boolean).join(' '))
+    pushLine(lines, a.pays)
   }
-  return { title: 'Client', name: data.clientNom, lines, icon: 'user' }
+  return { name: data.clientNom, lines }
 }
 
 function buildLivraisonLines(data: CommandeClientPdfData): { name: string; lines: string[] } {
   const a = data.adresseLivraison
   const lines: string[] = []
-  let name = ''
+  let name = data.clientNom
   if (a) {
-    name = a.nom ?? data.clientNom
-    if (a.adresse1) lines.push(a.adresse1)
-    if (a.adresse2) lines.push(a.adresse2)
-    const cityLine = [a.cp, a.ville].filter(Boolean).join(' ')
-    if (cityLine) lines.push(cityLine)
-    if (a.pays) lines.push(a.pays)
-  } else {
-    name = data.clientNom
+    name = a.nom?.trim() || data.clientNom
+    pushLine(lines, a.adresse1)
+    pushLine(lines, a.adresse2)
+    pushLine(lines, [a.cp?.trim(), a.ville?.trim()].filter(Boolean).join(' '))
+    pushLine(lines, a.pays)
   }
   return { name, lines }
 }
@@ -221,44 +237,45 @@ export function CommandeClientPdf({ data }: { data: CommandeClientPdfData }) {
       documentDate={data.dateCommande || ''}
       title={`Accusé de réception commande ${data.numero}`}
     >
-      {/* Top row: client (billing) on the left; a combo card on the right with
-          payment terms + delivery address. */}
+      {/* Top row: client (billing) on the left; payment terms on the right.
+          The delivery address lives in its own card at the bottom of the
+          last page (just above the footer). */}
       <View style={styles.topRow}>
         <View style={styles.topRowSlot}>
-          <AddressCard data={clientAddress} stretch />
+          <View style={[styles.card, styles.cardStretch]}>
+            <View style={styles.cardHeaderRow}>
+              <UserIcon />
+              <Text style={styles.cardTitle}>CLIENT</Text>
+            </View>
+            {clientAddress.name ? <Text style={styles.cardName}>{clientAddress.name}</Text> : null}
+            {clientAddress.lines.map((l, i) => (
+              <Text key={i} style={styles.cardLine}>{l}</Text>
+            ))}
+          </View>
         </View>
         <View style={styles.topRowSlot}>
-          <View style={styles.comboCard}>
+          <View style={[styles.card, styles.cardStretch]}>
             {data.refClient ? (
-              <View style={styles.comboMetaRow}>
-                <View style={styles.comboMetaIconBox}><MessageSquareIcon /></View>
-                <Text style={styles.comboMetaLabel}>Réf. client</Text>
-                <Text style={styles.comboMetaValue}>{data.refClient}</Text>
+              <View style={styles.metaRow}>
+                <View style={styles.metaIconBox}><MessageSquareIcon /></View>
+                <Text style={styles.metaLabel}>Réf. client</Text>
+                <Text style={styles.metaValue}>{data.refClient}</Text>
               </View>
             ) : null}
             {data.modePaiement ? (
-              <View style={styles.comboMetaRow}>
-                <View style={styles.comboMetaIconBox}><CreditCardIcon /></View>
-                <Text style={styles.comboMetaLabel}>Mode de paiement</Text>
-                <Text style={styles.comboMetaValue}>{data.modePaiement}</Text>
+              <View style={styles.metaRow}>
+                <View style={styles.metaIconBox}><CreditCardIcon /></View>
+                <Text style={styles.metaLabel}>Mode de paiement</Text>
+                <Text style={styles.metaValue}>{data.modePaiement}</Text>
               </View>
             ) : null}
             {data.echeance ? (
-              <View style={styles.comboMetaRow}>
-                <View style={styles.comboMetaIconBox}><CalendarIcon /></View>
-                <Text style={styles.comboMetaLabel}>Échéance</Text>
-                <Text style={styles.comboMetaValue}>{data.echeance}</Text>
+              <View style={styles.metaRow}>
+                <View style={styles.metaIconBox}><CalendarIcon /></View>
+                <Text style={styles.metaLabel}>Échéance</Text>
+                <Text style={styles.metaValue}>{data.echeance}</Text>
               </View>
             ) : null}
-            <View style={styles.comboDivider} />
-            <View style={styles.comboCardHeader}>
-              <TruckIcon />
-              <Text style={styles.comboCardTitle}>ADRESSE DE LIVRAISON</Text>
-            </View>
-            {livraison.name ? <Text style={styles.comboCardName}>{livraison.name}</Text> : null}
-            {livraison.lines.map((l, i) => (
-              <Text key={i} style={styles.comboCardLine}>{l}</Text>
-            ))}
           </View>
         </View>
       </View>
@@ -325,6 +342,21 @@ export function CommandeClientPdf({ data }: { data: CommandeClientPdfData }) {
           <Text style={styles.commentaireText}>{data.commentaire.trim()}</Text>
         </View>
       )}
+
+      {/* Delivery address — pinned to the bottom of the last page, just above
+          the footer band. */}
+      <View style={styles.bottomPin} wrap={false}>
+        <View style={[styles.card, styles.livraisonBottom]}>
+          <View style={styles.cardHeaderRow}>
+            <TruckIcon />
+            <Text style={styles.cardTitle}>ADRESSE DE LIVRAISON</Text>
+          </View>
+          {livraison.name ? <Text style={styles.cardName}>{livraison.name}</Text> : null}
+          {livraison.lines.map((l, i) => (
+            <Text key={i} style={styles.cardLine}>{l}</Text>
+          ))}
+        </View>
+      </View>
     </MalterreDocument>
   )
 }

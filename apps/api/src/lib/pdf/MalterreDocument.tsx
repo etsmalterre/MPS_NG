@@ -335,6 +335,10 @@ const styles = StyleSheet.create({
     color: colors.primary,
     fontWeight: 900,
     letterSpacing: 0.5,
+    // lineHeight 1 so the text box hugs the glyphs — the inherited body
+    // lineHeight adds leading that pushes the label down relative to the
+    // center-aligned icon sitting next to it.
+    lineHeight: 1,
   },
   cardName: {
     fontSize: sizes.fontBase,
@@ -366,12 +370,14 @@ const styles = StyleSheet.create({
     color: colors.muted,
     fontWeight: 700,
     flex: 1,
+    lineHeight: 1,
   },
   metaValue: {
     fontSize: sizes.fontBase,
     color: colors.text,
     fontWeight: 700,
     textAlign: 'right',
+    lineHeight: 1,
   },
   // ── Footer ──────────────────────────────────────────
   // Full-width gray band at the bottom of every page. A thin tricolore strip
