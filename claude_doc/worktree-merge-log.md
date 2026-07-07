@@ -10,6 +10,25 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-07 — feat/facturation
+Clients › Facturation — **batch proforma generation & wipe from expeditions**
+(`apps/api/src/routes/factures.ts`, `apps/web/src/pages/ClientsFacturation.tsx`).
+**(1) `POST /prov/generate`** ports legacy `FI_Facturation_ETM`: scans formelle ETM expeditions
+(`IDsociete=1`, `est_facture` null/0), groups by client, creates one proforma per client. Lines
+mirror expedition lines — designation from the article catalog (fini vs écru honoring
+`avec_teinture`), `V/ref` / commande / `Avis` lines, quantity = summed shipped Kg/Ml from rolls,
+price+unit from `ligne_commande_client`; contributing expeditions flip `est_facture=1`. Skips
+clients internes, donations, and roll-less expeditions (left open); returns `{created, skipped}`.
+Chunked `IN` lookups (500), catalog caches, `fixEncoding`, numero-collision retry ×3.
+**(2) `DELETE /prov/all`** deletes every OPEN proforma (`IDexpedition_divers=0`) + lines, keeps
+converted proformas as history, resets `est_facture=0` only on expeditions without a definitive
+`ligne_facture` link; registered before the generic `/:kind/:id` route. Shared
+`clientBillingDefaults()` extracted (used by manual create + generator). **(3) UI**: two batch
+buttons pinned above the proforma list footer ("Générer les factures" / "Supprimer toutes les
+factures", prov bucket only, disabled in edit mode), each behind a `ConfirmDialog`, with a
+`BatchResultDialog` summarizing created proformas and skip counts (internes / donations / sans
+marchandise) or deletion results.
+
 ## 2026-07-07 — feat/cmd-client
 Clients › Commandes — **permission-gated Donation flag + CommandeClient PDF layout rework**
 (`apps/api/src/lib/permission-keys.ts`, `apps/api/src/routes/commandes-client.ts`,

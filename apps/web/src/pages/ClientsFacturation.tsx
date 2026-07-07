@@ -23,6 +23,7 @@ import {
   FileCheck,
   Lock,
   FileText,
+  FilePlus2,
   ArrowRight,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -116,6 +117,15 @@ interface FactureDetail {
   total_ttc: number
 }
 
+interface GenerateSummary {
+  created: Array<{ id: number; numero: number; client_nom: string; nb_lignes: number; nb_expeditions: number }>
+  skipped: { internes: number; donations: number; vides: number }
+}
+interface DeleteAllSummary { deleted: number; kept_converted: number; expeditions_reouvertes: number }
+type BatchResult =
+  | ({ action: 'generate' } & GenerateSummary)
+  | ({ action: 'deleteAll' } & DeleteAllSummary)
+
 interface ClientLite { IDclient: number; nom: string }
 interface ModePaiement { IDmode_paiement: number; libelle: string }
 interface Echeance { IDecheance: number; libelle: string }
@@ -165,6 +175,11 @@ export function ClientsFacturation() {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [convertConfirmOpen, setConvertConfirmOpen] = useState(false)
   const [convertResult, setConvertResult] = useState<{ numero: number } | null>(null)
+  // Batch actions on the proforma list panel (generate from expeditions /
+  // wipe all open proformas).
+  const [generateConfirmOpen, setGenerateConfirmOpen] = useState(false)
+  const [deleteAllConfirmOpen, setDeleteAllConfirmOpen] = useState(false)
+  const [batchResult, setBatchResult] = useState<BatchResult | null>(null)
 
   // Edit-mode header draft.
   const [editDate, setEditDate] = useState('')
@@ -281,6 +296,26 @@ export function ClientsFacturation() {
     },
   })
 
+  const generateMut = useMutation({
+    mutationFn: (): Promise<GenerateSummary> => apiFetch('/factures/prov/generate', { method: 'POST' }),
+    onSuccess: (r) => {
+      setGenerateConfirmOpen(false)
+      queryClient.invalidateQueries({ queryKey: ['factures'] })
+      setBatchResult({ action: 'generate', ...r })
+    },
+  })
+
+  const deleteAllMut = useMutation({
+    mutationFn: (): Promise<DeleteAllSummary> => apiFetch('/factures/prov/all', { method: 'DELETE' }),
+    onSuccess: (r) => {
+      setDeleteAllConfirmOpen(false)
+      queryClient.invalidateQueries({ queryKey: ['factures'] })
+      setIsEditing(false)
+      setSelectedId(null)
+      setBatchResult({ action: 'deleteAll', ...r })
+    },
+  })
+
   useEffect(() => {
     if (autoEditForId !== null && detail?.id === autoEditForId && detail.kind === 'prov' && !detail.converted) {
       startEdit()
@@ -339,6 +374,8 @@ export function ClientsFacturation() {
             typeFilter={typeFilter}
             onTypeFilterChange={handleTypeFilterChange}
             onNew={() => setCreateOpen(true)}
+            onGenerate={() => setGenerateConfirmOpen(true)}
+            onDeleteAll={() => setDeleteAllConfirmOpen(true)}
             isEditing={isEditing}
           />
         }
@@ -424,6 +461,29 @@ export function ClientsFacturation() {
         onConfirm={() => { if (selectedId !== null) convertMut.mutate(selectedId) }}
       />
 
+      <ConfirmDialog
+        open={generateConfirmOpen}
+        variant="default"
+        title="Générer les factures"
+        description="Un proforma sera créé par client à partir de toutes les expéditions non facturées. Les clients internes et les donations sont exclus."
+        confirmLabel="Générer"
+        isPending={generateMut.isPending}
+        onCancel={() => setGenerateConfirmOpen(false)}
+        onConfirm={() => generateMut.mutate()}
+      />
+
+      <ConfirmDialog
+        open={deleteAllConfirmOpen}
+        title="Supprimer toutes les factures proforma"
+        description="Tous les proformas non convertis seront supprimés et leurs expéditions redeviendront facturables. Les proformas déjà convertis en facture définitive sont conservés."
+        confirmLabel="Supprimer"
+        isPending={deleteAllMut.isPending}
+        onCancel={() => setDeleteAllConfirmOpen(false)}
+        onConfirm={() => deleteAllMut.mutate()}
+      />
+
+      <BatchResultDialog result={batchResult} onClose={() => setBatchResult(null)} />
+
       <Dialog open={convertResult !== null} onOpenChange={(o) => { if (!o) setConvertResult(null) }}>
         <DialogContent className="max-w-sm" onClose={() => setConvertResult(null)}>
           <DialogHeader>
@@ -455,6 +515,83 @@ export function ClientsFacturation() {
   )
 }
 
+// ── Batch result summary (generate / delete-all) ───────
+
+function BatchResultDialog({ result, onClose }: { result: BatchResult | null; onClose: () => void }) {
+  const skippedText = (s: GenerateSummary['skipped']): string | null => {
+    const parts: string[] = []
+    if (s.internes > 0) parts.push(`${s.internes} client interne`)
+    if (s.donations > 0) parts.push(`${s.donations} donation`)
+    if (s.vides > 0) parts.push(`${s.vides} sans marchandise`)
+    return parts.length > 0 ? `Expéditions ignorées : ${parts.join(' · ')}` : null
+  }
+  return (
+    <Dialog open={result !== null} onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent className="max-w-md" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            {result?.action === 'deleteAll'
+              ? <><Trash2 className="h-5 w-5 text-accent" />Proformas supprimés</>
+              : <><FilePlus2 className="h-5 w-5 text-accent" />Factures générées</>}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="mt-4">
+          {result?.action === 'generate' && (
+            result.created.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-6 text-muted-foreground text-center">
+                <Receipt className="h-12 w-12 mb-3 opacity-40" />
+                <p className="text-sm font-medium">Aucune expédition à facturer</p>
+                {skippedText(result.skipped) && <p className="text-xs mt-1">{skippedText(result.skipped)}</p>}
+              </div>
+            ) : (
+              <>
+                <p className="text-sm text-muted-foreground mb-3">
+                  {result.created.length} proforma{result.created.length > 1 ? 's' : ''} créé{result.created.length > 1 ? 's' : ''} :
+                </p>
+                <div className="space-y-1.5 max-h-64 overflow-y-auto scrollbar-transparent p-0.5">
+                  {result.created.map((c) => (
+                    <div key={c.id} className="flex items-center gap-2 p-2 rounded-md border border-border/60 bg-zinc-100/80 text-sm">
+                      <Receipt className="h-4 w-4 text-amber-500 flex-shrink-0" />
+                      <span className="font-medium flex-shrink-0">N° {c.numero}</span>
+                      <span className="text-muted-foreground truncate flex-1">{c.client_nom || '—'}</span>
+                      <span className="text-xs text-muted-foreground flex-shrink-0 tabular-nums">
+                        {c.nb_lignes} ligne{c.nb_lignes > 1 ? 's' : ''}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {skippedText(result.skipped) && (
+                  <p className="text-xs text-muted-foreground mt-3">{skippedText(result.skipped)}</p>
+                )}
+              </>
+            )
+          )}
+          {result?.action === 'deleteAll' && (
+            <div className="flex flex-col items-center justify-center py-6 text-center">
+              <div className="icon-box-gold h-14 w-14 mb-3 flex items-center justify-center"><CheckCircle2 className="h-7 w-7" /></div>
+              <p className="text-sm text-muted-foreground">
+                {result.deleted === 0
+                  ? 'Aucun proforma à supprimer.'
+                  : `${result.deleted} proforma${result.deleted > 1 ? 's' : ''} supprimé${result.deleted > 1 ? 's' : ''}.`}
+              </p>
+              {result.expeditions_reouvertes > 0 && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  {result.expeditions_reouvertes} expédition{result.expeditions_reouvertes > 1 ? 's' : ''} à nouveau facturable{result.expeditions_reouvertes > 1 ? 's' : ''}.
+                </p>
+              )}
+              {result.kept_converted > 0 && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  {result.kept_converted} proforma{result.kept_converted > 1 ? 's' : ''} converti{result.kept_converted > 1 ? 's' : ''} conservé{result.kept_converted > 1 ? 's' : ''}.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // ── Left Panel: List ───────────────────────────────────
 
 function FactureList({
@@ -463,7 +600,7 @@ function FactureList({
   searchQuery, onSearchChange,
   bucket, onBucketChange,
   typeFilter, onTypeFilterChange,
-  onNew, isEditing,
+  onNew, onGenerate, onDeleteAll, isEditing,
 }: {
   rows: FactureListRow[]
   isLoading: boolean
@@ -478,6 +615,8 @@ function FactureList({
   typeFilter: 'all' | 'facture' | 'avoir'
   onTypeFilterChange: (t: 'all' | 'facture' | 'avoir') => void
   onNew: () => void
+  onGenerate: () => void
+  onDeleteAll: () => void
   isEditing: boolean
 }) {
   return (
@@ -594,6 +733,30 @@ function FactureList({
           )
         })}
       </div>
+
+      {/* Batch actions — proforma bucket only: definitive invoices are
+          immutable once created (the API 409s any mutation on them), so
+          batch generate/delete only ever operates on proformas. Pinned
+          above the footer (flex sibling of the scrollable list, so they
+          stay visible however long the list is). Disabled during edit
+          mode rather than hidden: batch operations while a proforma edit
+          is in flight would be destructive. */}
+      {bucket === 'prov' && (
+        <div className="flex-shrink-0 p-3 border-t bg-zinc-200/50 space-y-1.5">
+          <Button size="sm" className="w-full" onClick={onGenerate} disabled={isEditing}>
+            <FilePlus2 className="h-3.5 w-3.5 mr-1.5" />Générer les factures
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={onDeleteAll}
+            disabled={isEditing}
+            className="w-full text-destructive border-destructive/30 hover:bg-destructive/10 hover:text-destructive"
+          >
+            <Trash2 className="h-3.5 w-3.5 mr-1.5" />Supprimer toutes les factures
+          </Button>
+        </div>
+      )}
 
       <div className="p-3 border-t text-xs text-muted-foreground flex items-center justify-between rounded-b-lg bg-zinc-200/50">
         <span>{rows.length} document{rows.length !== 1 ? 's' : ''}</span>

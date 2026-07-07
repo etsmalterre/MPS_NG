@@ -13,10 +13,13 @@
 //
 // CONVERTED-PROFORMA MARKER (no schema change) — facture_prov has no spare
 // boolean/link column, so we REPURPOSE `facture_prov.IDexpedition_divers`
-// (always 0, unused by MPS_NG — the legacy auto-gen-from-expeditions flow that
-// would populate it is deferred) as a back-pointer to the resulting definitive:
+// (always 0, unused by MPS_NG) as a back-pointer to the resulting definitive:
 //   IDexpedition_divers = 0          → open proforma (editable / deletable)
 //   IDexpedition_divers = <IDfacture> → converted; locked; links to facture #N
+// The batch generator (POST /prov/generate) therefore NEVER writes this column
+// — generated proformas link to their expeditions per-line via
+// ligne_facture_prov.IDligne_expedition, and expedition.est_facture carries
+// the "already invoiced" state both apps read.
 //
 // Hard rules baked in (verified against live data + the XDD + CLAUDE.md):
 //  - ETM scope: every read/write is IDsociete = 1 (IDsociete=2 rows are TRM).
@@ -233,6 +236,59 @@ async function lineTotals(kind: Kind, factureIds: number[]): Promise<Map<number,
     acc.nb_lignes += 1
     out.set(id, acc)
   }
+  return out
+}
+
+/** Legacy auto-fill: billing defaults from the client row (num_tva, IDtva,
+ *  IDmode_paiement, IDecheance, IDcode_comptable + the est_defaut_facturation
+ *  address), with the société-wide TVA / code comptable rows as backstop.
+ *  Shared by the manual POST and the batch generator. */
+async function clientBillingDefaults(IDclient: number): Promise<{
+  idAdresse: number; idTva: number; idMode: number; idEcheance: number; idCode: number; numTva: string
+}> {
+  const clientRows = await query<{
+    num_tva: string | null; IDtva: number | null; IDmode_paiement: number | null
+    IDecheance: number | null; IDcode_comptable: number | null
+  }>(
+    `SELECT num_tva, IDtva, IDmode_paiement, IDecheance, IDcode_comptable FROM client WHERE IDclient = ${IDclient}`,
+  )
+  const c = clientRows[0] ?? {}
+  const adrRows = await query<{ IDadresse: number }>(
+    `SELECT IDadresse FROM adresse
+     WHERE IDclient = ${IDclient} AND (est_visible IS NULL OR est_visible = 1)
+     ORDER BY est_defaut_facturation DESC, est_defaut DESC, IDadresse`,
+  )
+  const tvaDefaultRows = await query<{ IDtva: number }>(
+    `SELECT IDtva FROM tva WHERE IDsociete = 1 AND est_defaut = 1`,
+  )
+  const codeDefaultRows = await query<{ IDcode_comptable: number }>(
+    `SELECT IDcode_comptable FROM code_comptable WHERE IDsociete = 1 AND est_defaut = 1`,
+  )
+  return {
+    idAdresse: Number(adrRows[0]?.IDadresse) || 0,
+    idTva: Number(c.IDtva) || Number(tvaDefaultRows[0]?.IDtva) || 0,
+    idMode: Number(c.IDmode_paiement) || 0,
+    idEcheance: Number(c.IDecheance) || 0,
+    idCode: Number(c.IDcode_comptable) || Number(codeDefaultRows[0]?.IDcode_comptable) || 0,
+    numTva: (c.num_tva ?? '').toString(),
+  }
+}
+
+/** ligne_commande_client.unite enum → the free-text unite stored on facture
+ *  lines (mirrors expeditions.ts / the legacy generated invoices). */
+function uniteLabel(u: number | null | undefined): string {
+  switch (Number(u)) {
+    case 1: return 'Kg'
+    case 3: return 'Ml'
+    case 4: return 'unité'
+    case 5: return 'm²'
+    default: return ''
+  }
+}
+
+function chunks<T>(arr: T[], size = 500): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
   return out
 }
 
@@ -526,6 +582,327 @@ facturesRouter.get('/:kind/:id', async (req: Request, res: Response) => {
 })
 
 // ════════════════════════════════════════════════════════
+//  BATCH  (proforma ledger only — the definitive ledger is immutable)
+// ════════════════════════════════════════════════════════
+
+/** POST /prov/generate — port of the legacy FI_Facturation_ETM auto-generation.
+ *  For every formelle expedition not yet invoiced (est_facture = 0), grouped by
+ *  client: create ONE proforma per client whose lines mirror the expedition
+ *  lines (designation = article + V/ref + N°/V/commande + Avis, quantite =
+ *  shipped Kg/Ml from the rolls, prix from the commande line). Contributing
+ *  expeditions are marked est_facture = 1 (the flag legacy reads).
+ *  Skipped: clients internes (client.client_interne = 1), donations
+ *  (expedition.donation = 1 OR commande_client.donation = 1), and expeditions
+ *  with no shipped rolls (left unmarked so a later run picks them up). */
+facturesRouter.post('/prov/generate', async (_req: Request, res: Response) => {
+  try {
+    // 1. Candidate expeditions (formelle, ETM, not yet invoiced).
+    const expRows = await query<any>(
+      `SELECT IDexpedition, IDcommande_client, donation FROM expedition
+       WHERE IDsociete = 1 AND (est_facture IS NULL OR est_facture = 0)`,
+    )
+    let skippedDonation = 0
+    let skippedInterne = 0
+    let skippedVide = 0
+    const candidates: Array<{ id: number; cmdId: number }> = []
+    for (const e of expRows) {
+      if ((Number(e.donation) || 0) === 1) { skippedDonation++; continue }
+      candidates.push({ id: Number(e.IDexpedition), cmdId: Number(e.IDcommande_client) || 0 })
+    }
+
+    // 2. Their commandes (donation flag + client + the N°/V/Commande strings).
+    const cmdMap = new Map<number, { IDclient: number; numero: number | null; ref_client: string; donation: number }>()
+    for (const chunk of chunks(Array.from(new Set(candidates.map((e) => e.cmdId).filter((x) => x > 0))))) {
+      const rows = await query<any>(
+        `SELECT IDcommande_client, IDclient, numero, ref_client, donation FROM commande_client WHERE IDcommande_client IN (${chunk.join(',')})`,
+      )
+      for (const r of await fixEncoding(rows, 'commande_client', 'IDcommande_client', ['ref_client'])) {
+        cmdMap.set(Number(r.IDcommande_client), {
+          IDclient: Number(r.IDclient) || 0,
+          numero: r.numero != null ? Number(r.numero) : null,
+          ref_client: (r.ref_client ?? '').toString().trim(),
+          donation: Number(r.donation) || 0,
+        })
+      }
+    }
+
+    // 3. Their clients (interne flag + name for the summary).
+    const clientMap = new Map<number, { nom: string; interne: number }>()
+    for (const chunk of chunks(Array.from(new Set(Array.from(cmdMap.values()).map((c) => c.IDclient).filter((x) => x > 0))))) {
+      const rows = await query<any>(
+        `SELECT IDclient, nom, client_interne FROM client WHERE IDclient IN (${chunk.join(',')})`,
+      )
+      for (const r of await fixEncoding(rows, 'client', 'IDclient', ['nom'])) {
+        clientMap.set(Number(r.IDclient), { nom: (r.nom ?? '').toString().trim(), interne: Number(r.client_interne) || 0 })
+      }
+    }
+
+    // 4. Partition: skip internes / donations, group the rest by client.
+    const byClient = new Map<number, Array<{ id: number; cmdId: number }>>()
+    for (const e of candidates) {
+      const cmd = cmdMap.get(e.cmdId)
+      if (!cmd || !(cmd.IDclient > 0) || !clientMap.has(cmd.IDclient)) { skippedVide++; continue }
+      if (cmd.donation === 1) { skippedDonation++; continue }
+      if (clientMap.get(cmd.IDclient)!.interne === 1) { skippedInterne++; continue }
+      const arr = byClient.get(cmd.IDclient) ?? []
+      arr.push(e)
+      byClient.set(cmd.IDclient, arr)
+    }
+
+    // Per-request catalog caches for the designation builder.
+    const refFiniCache = new Map<number, { reference: string; designation: string; avec: number }>()
+    const refEcruCache = new Map<number, { reference: string; designation: string }>()
+    const coloriEcruCache = new Map<number, string>()
+    const refFiniColoriCache = new Map<number, string>()
+    const desigClientCache = new Map<number, string>()
+
+    async function coloriEcruRef(id: number): Promise<string> {
+      if (!(id > 0)) return ''
+      if (!coloriEcruCache.has(id)) {
+        const rows = await query<any>(`SELECT IDcolori_ecru, reference FROM colori_ecru WHERE IDcolori_ecru = ${id}`)
+        const c = (await fixEncoding(rows, 'colori_ecru', 'IDcolori_ecru', ['reference']))[0] as any
+        coloriEcruCache.set(id, (c?.reference ?? '').toString().trim())
+      }
+      return coloriEcruCache.get(id)!
+    }
+
+    interface GenLine { leId: number; designation: string; quantite: number; unite: string; prix: number }
+
+    /** One facture line for one ligne_expedition — null when nothing shipped. */
+    async function lineFor(leId: number, lccId: number, expId: number, cmd: { numero: number | null; ref_client: string }): Promise<GenLine | null> {
+      if (!(leId > 0 && lccId > 0)) return null
+      const lccRows = await query<any>(
+        `SELECT IDligne_commande_client, IDdesignation_client, TYPE AS type_kind, IDreference, IDcolori, unite, prix
+         FROM ligne_commande_client WHERE IDligne_commande_client = ${lccId}`,
+      )
+      if (lccRows.length === 0) return null
+      const lcc = lccRows[0]
+      const typeKind = Number(lcc.type_kind) || 0
+      const kind = typeKind === 1 ? 'ecru' : typeKind === 2 ? 'fini' : 'none'
+      if (kind === 'none') return null
+      const refId = Number(lcc.IDreference) || 0
+      const colId = Number(lcc.IDcolori) || 0
+
+      // Shipped quantity = Σ of the rolls' poids (Kg) or metrage (Ml).
+      const dim = Number(lcc.unite) === 3 ? 'metrage' : 'poids'
+      const rollRows = kind === 'fini'
+        ? await query<any>(`SELECT poids, metrage FROM stock_fini WHERE IDligne_expedition = ${leId}`)
+        : await query<any>(`SELECT poids, metrage FROM stock_ecru WHERE IDligne_expedition_ETM = ${leId}`)
+      if (rollRows.length === 0) return null
+      const qty = Math.round(rollRows.reduce((s: number, r: any) => s + (Number(r[dim]) || 0), 0) * 100) / 100
+
+      // Article label — mirrors the legacy generated designations:
+      //   fini → "REF - COLORIS DESIGNATION", écru → "REF COLORIS".
+      let artLabel = ''
+      if (kind === 'fini') {
+        if (refId > 0 && !refFiniCache.has(refId)) {
+          const rows = await query<any>(`SELECT IDref_fini, reference, designation, avec_teinture FROM ref_fini WHERE IDref_fini = ${refId}`)
+          const rf = (await fixEncoding(rows, 'ref_fini', 'IDref_fini', ['reference', 'designation']))[0] as any
+          refFiniCache.set(refId, {
+            reference: (rf?.reference ?? '').toString().trim(),
+            designation: (rf?.designation ?? '').toString().trim(),
+            avec: Number(rf?.avec_teinture) || 0,
+          })
+        }
+        const rf = refFiniCache.get(refId)
+        let coloris = ''
+        if (colId > 0) {
+          if ((rf?.avec ?? 0) === 0) {
+            // Wash-only fini → coloris lives in the écru catalog (avec_teinture rule).
+            coloris = await coloriEcruRef(colId)
+          } else {
+            if (!refFiniColoriCache.has(colId)) {
+              const rows = await query<any>(`SELECT IDref_fini_colori, reference FROM ref_fini_colori WHERE IDref_fini_colori = ${colId}`)
+              const c = (await fixEncoding(rows, 'ref_fini_colori', 'IDref_fini_colori', ['reference']))[0] as any
+              refFiniColoriCache.set(colId, (c?.reference ?? '').toString().trim())
+            }
+            coloris = refFiniColoriCache.get(colId)!
+          }
+        }
+        artLabel = [rf?.reference ?? '', [coloris, rf?.designation ?? ''].filter(Boolean).join(' ')].filter(Boolean).join(' - ')
+      } else {
+        if (refId > 0 && !refEcruCache.has(refId)) {
+          const rows = await query<any>(`SELECT IDref_ecru, reference, designation FROM ref_ecru WHERE IDref_ecru = ${refId}`)
+          const re = (await fixEncoding(rows, 'ref_ecru', 'IDref_ecru', ['reference', 'designation']))[0] as any
+          refEcruCache.set(refId, { reference: (re?.reference ?? '').toString().trim(), designation: (re?.designation ?? '').toString().trim() })
+        }
+        const re = refEcruCache.get(refId)
+        const coloris = await coloriEcruRef(colId)
+        artLabel = [re?.reference ?? '', coloris].filter(Boolean).join(' ')
+      }
+
+      // "V/ref : …" — the client-side article reference.
+      const desigId = Number(lcc.IDdesignation_client) || 0
+      if (desigId > 0 && !desigClientCache.has(desigId)) {
+        const rows = await query<any>(`SELECT IDdesignation_client, designation FROM designation_client WHERE IDdesignation_client = ${desigId}`)
+        const dc = (await fixEncoding(rows, 'designation_client', 'IDdesignation_client', ['designation']))[0] as any
+        desigClientCache.set(desigId, (dc?.designation ?? '').toString().trim())
+      }
+      const vref = desigId > 0 ? desigClientCache.get(desigId)! : ''
+
+      const parts = [artLabel || `Ligne ${lccId}`]
+      if (vref) parts.push(`V/ref : ${vref}`)
+      let cmdLine = cmd.numero != null ? `N/Commande : ${cmd.numero}` : ''
+      if (cmd.ref_client) cmdLine += `${cmdLine ? ' ' : ''}V/Commande : ${cmd.ref_client}`
+      if (cmdLine) parts.push(cmdLine)
+      parts.push(`Avis : ${expId}`)
+
+      return {
+        leId,
+        designation: parts.join('\r\n'),
+        quantite: qty,
+        unite: uniteLabel(lcc.unite),
+        prix: Number(lcc.prix) || 0,
+      }
+    }
+
+    // 5. One proforma per client.
+    const created: Array<{ id: number; numero: number; client_nom: string; nb_lignes: number; nb_expeditions: number }> = []
+    for (const [clientId, group] of byClient) {
+      group.sort((a, b) => a.id - b.id)
+      const lines: GenLine[] = []
+      const contributing = new Set<number>()
+      for (const e of group) {
+        const cmd = cmdMap.get(e.cmdId)!
+        const leRows = await query<any>(
+          `SELECT IDligne_expedition, IDligne_commande_client FROM ligne_expedition WHERE IDexpedition = ${e.id} ORDER BY IDligne_expedition`,
+        )
+        for (const le of leRows) {
+          const line = await lineFor(Number(le.IDligne_expedition) || 0, Number(le.IDligne_commande_client) || 0, e.id, cmd)
+          if (line) { lines.push(line); contributing.add(e.id) }
+        }
+      }
+      // Nothing shipped for this client → no proforma, expeditions stay open.
+      skippedVide += group.length - contributing.size
+      if (lines.length === 0) continue
+
+      const bd = await clientBillingDefaults(clientId)
+      const date = todayDigits()
+      let newNumero = 0
+      let inserted = false
+      let lastErr: unknown = null
+      for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
+        newNumero = await nextNumero('prov')
+        try {
+          await query(
+            `INSERT INTO facture_prov
+               (IDsociete, numero, IDclient, IDadresse, IDmode_paiement, IDecheance,
+                DATE, IDtva, num_tva, TYPE, IDcode_comptable, IDexpedition_divers)
+             VALUES
+               (1, ${newNumero}, ${clientId}, ${bd.idAdresse}, ${bd.idMode}, ${bd.idEcheance},
+                '${date}', ${bd.idTva}, ${sqlText(bd.numTva)}, 1, ${bd.idCode}, 0)`,
+          )
+          inserted = true
+        } catch (e) { lastErr = e }
+      }
+      if (!inserted) throw lastErr ?? new Error('insert failed after 3 attempts')
+      const newRows = await query<any>(
+        `SELECT IDfacture_prov FROM facture_prov WHERE IDsociete = 1 AND numero = ${newNumero} ORDER BY IDfacture_prov DESC`,
+      )
+      const newId = Number(newRows[0]?.IDfacture_prov) || 0
+      if (!newId) throw new Error('could not resolve new facture_prov id')
+
+      for (const l of lines) {
+        await query(
+          `INSERT INTO ligne_facture_prov (IDfacture_prov, IDligne_expedition, designation, quantite, unite, prix)
+           VALUES (${newId}, ${l.leId}, ${sqlText(l.designation)}, ${l.quantite}, ${sqlText(l.unite)}, ${l.prix})`,
+        )
+      }
+      // Mark the expeditions invoiced (the flag both apps read).
+      for (const eid of contributing) {
+        await query(`UPDATE expedition SET est_facture = 1 WHERE IDexpedition = ${eid}`)
+      }
+
+      created.push({
+        id: newId,
+        numero: newNumero,
+        client_nom: clientMap.get(clientId)?.nom ?? '',
+        nb_lignes: lines.length,
+        nb_expeditions: contributing.size,
+      })
+    }
+
+    res.json({ created, skipped: { internes: skippedInterne, donations: skippedDonation, vides: skippedVide } })
+  } catch (err) {
+    console.error('Error generating proformas:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+/** DELETE /prov/all — wipe every OPEN proforma (converted ones are locked
+ *  history and are kept). Expeditions whose lines were only referenced by the
+ *  deleted proformas get est_facture reset to 0 so the next generation run
+ *  picks them up again. Must register BEFORE the generic /:kind/:id delete. */
+facturesRouter.delete('/prov/all', async (_req: Request, res: Response) => {
+  try {
+    const heads = await query<any>(`SELECT IDfacture_prov, IDexpedition_divers FROM facture_prov WHERE IDsociete = 1`)
+    const openIds = heads
+      .filter((h: any) => (Number(h.IDexpedition_divers) || 0) === 0)
+      .map((h: any) => Number(h.IDfacture_prov))
+    const keptConverted = heads.length - openIds.length
+    if (openIds.length === 0) {
+      res.json({ deleted: 0, kept_converted: keptConverted, expeditions_reouvertes: 0 })
+      return
+    }
+
+    // Expeditions referenced by the lines we're about to delete.
+    const leIds = new Set<number>()
+    for (const chunk of chunks(openIds)) {
+      const rows = await query<any>(
+        `SELECT IDligne_expedition FROM ligne_facture_prov WHERE IDfacture_prov IN (${chunk.join(',')}) AND IDligne_expedition > 0`,
+      )
+      for (const r of rows) leIds.add(Number(r.IDligne_expedition))
+    }
+    const expIds = new Set<number>()
+    const leToExp = new Map<number, number>()
+    for (const chunk of chunks(Array.from(leIds))) {
+      const rows = await query<any>(
+        `SELECT IDligne_expedition, IDexpedition FROM ligne_expedition WHERE IDligne_expedition IN (${chunk.join(',')})`,
+      )
+      for (const r of rows) {
+        leToExp.set(Number(r.IDligne_expedition), Number(r.IDexpedition))
+        expIds.add(Number(r.IDexpedition))
+      }
+    }
+
+    // Keep est_facture=1 on expeditions that also have a DEFINITIVE facture
+    // (e.g. via a converted proforma) — only reset the truly un-invoiced ones.
+    let reopened = 0
+    if (expIds.size > 0) {
+      const allLe = new Map<number, number>() // every le of the affected expeditions → exp
+      for (const chunk of chunks(Array.from(expIds))) {
+        const rows = await query<any>(
+          `SELECT IDligne_expedition, IDexpedition FROM ligne_expedition WHERE IDexpedition IN (${chunk.join(',')})`,
+        )
+        for (const r of rows) allLe.set(Number(r.IDligne_expedition), Number(r.IDexpedition))
+      }
+      const defLinked = new Set<number>()
+      for (const chunk of chunks(Array.from(allLe.keys()))) {
+        const rows = await query<any>(
+          `SELECT IDligne_expedition FROM ligne_facture WHERE IDligne_expedition IN (${chunk.join(',')})`,
+        )
+        for (const r of rows) defLinked.add(allLe.get(Number(r.IDligne_expedition)) ?? 0)
+      }
+      const toReopen = Array.from(expIds).filter((e) => !defLinked.has(e))
+      for (const chunk of chunks(toReopen)) {
+        await query(`UPDATE expedition SET est_facture = 0 WHERE IDexpedition IN (${chunk.join(',')})`)
+      }
+      reopened = toReopen.length
+    }
+
+    for (const chunk of chunks(openIds)) {
+      await query(`DELETE FROM ligne_facture_prov WHERE IDfacture_prov IN (${chunk.join(',')})`)
+      await query(`DELETE FROM facture_prov WHERE IDfacture_prov IN (${chunk.join(',')})`)
+    }
+
+    res.json({ deleted: openIds.length, kept_converted: keptConverted, expeditions_reouvertes: reopened })
+  } catch (err) {
+    console.error('Error deleting proformas:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ════════════════════════════════════════════════════════
 //  HEADER CRUD
 // ════════════════════════════════════════════════════════
 
@@ -543,31 +920,13 @@ facturesRouter.post('/:kind', async (req: Request, res: Response) => {
 
     // Auto-fill billing defaults from the client row (explicit cols — SELECT *
     // fails on client). The société TVA/code default backstops a blank client.
-    const clientRows = await query<{
-      num_tva: string | null; IDtva: number | null; IDmode_paiement: number | null
-      IDecheance: number | null; IDcode_comptable: number | null
-    }>(
-      `SELECT num_tva, IDtva, IDmode_paiement, IDecheance, IDcode_comptable FROM client WHERE IDclient = ${n(d.IDclient)}`,
-    )
-    const c = clientRows[0] ?? {}
-    const adrRows = await query<{ IDadresse: number }>(
-      `SELECT IDadresse FROM adresse
-       WHERE IDclient = ${n(d.IDclient)} AND (est_visible IS NULL OR est_visible = 1)
-       ORDER BY est_defaut_facturation DESC, est_defaut DESC, IDadresse`,
-    )
-    const tvaDefaultRows = await query<{ IDtva: number }>(
-      `SELECT IDtva FROM tva WHERE IDsociete = 1 AND est_defaut = 1`,
-    )
-    const codeDefaultRows = await query<{ IDcode_comptable: number }>(
-      `SELECT IDcode_comptable FROM code_comptable WHERE IDsociete = 1 AND est_defaut = 1`,
-    )
-
-    const idAdresse = d.IDadresse ?? (Number(adrRows[0]?.IDadresse) || 0)
-    const idTva = d.IDtva ?? (Number(c.IDtva) || Number(tvaDefaultRows[0]?.IDtva) || 0)
-    const idMode = d.IDmode_paiement ?? (Number(c.IDmode_paiement) || 0)
-    const idEcheance = d.IDecheance ?? (Number(c.IDecheance) || 0)
-    const idCode = Number(c.IDcode_comptable) || Number(codeDefaultRows[0]?.IDcode_comptable) || 0
-    const numTva = d.num_tva ?? (c.num_tva ?? '').toString()
+    const bd = await clientBillingDefaults(n(d.IDclient))
+    const idAdresse = d.IDadresse ?? bd.idAdresse
+    const idTva = d.IDtva ?? bd.idTva
+    const idMode = d.IDmode_paiement ?? bd.idMode
+    const idEcheance = d.IDecheance ?? bd.idEcheance
+    const idCode = bd.idCode
+    const numTva = d.num_tva ?? bd.numTva
 
     // numero allocator with collision retry. DATE / TYPE written uppercase
     // (reserved words). IDexpedition_divers defaults to 0 (= open proforma).
