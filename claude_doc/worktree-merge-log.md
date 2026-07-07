@@ -11,6 +11,32 @@ other worktrees see what changed when they rebase. Format:
 <!-- entries below -->
 
 
+## 2026-07-07 — feat/facturation
+Clients › Facturation — **Facture/Proforma PDF redesign + proforma print & email**
+(`apps/api/src/lib/pdf/FacturePdf.tsx`, `MalterreDocument.tsx`, `theme.ts`,
+`apps/api/src/routes/factures.ts`, `apps/web/src/pages/ClientsFacturation.tsx`,
+`apps/api/src/scripts/dump-facture-pdf.ts` [new], `mps_designer` SKILL §38).
+**(1) PDF body redesign**: the facture/avoir lines table is now a squared ledger — muted
+header band with a 2pt gold rule beneath, hairline row separators, and a matching 2pt gold
+rule closing the table (no rounded box, no navy fills). The totalizer is condensed (tight
+3.5pt rows, hairline between HT and TVA) with TOTAL TTC on the light `bgTotal` band, gold
+top-rule, navy bold text. **(2) Header icon alignment fix**: the top-right meta-card labels
+(N° TVA / Mode de paiement / Échéance) were floating above their center-aligned SVG icons
+because the Text inherited the content area's `lineHeight: 1.45`; fixed with a tight
+per-Text `lineHeight` (same latent bug fixed in `CommandeSoustraitantPdf.tsx`). Codified as
+`mps_designer` §38 (meta-row icon alignment rule + financial-document ledger conventions).
+**(3) Proforma print & email**: proformas can now be emailed as well as printed (previously
+definitive-only). `GET/POST /factures/:kind/:id/email(-defaults)` accept both kinds; the
+proforma attachment is named `proforma-<n>.pdf` and the subject/body say "Facture proforma".
+`envoi_email` history stays definitive-only (prov/def share an id space on the same
+`IDtype_doc`) — proforma sends are simply not logged, and their `/historique` returns [].
+**(4) Bank card (proforma only)**: the proforma PDF prints a "COORDONNÉES BANCAIRES" card
+(Titulaire / IBAN / BIC, from `company.bank` in `theme.ts`) pinned to the bottom of the last
+page just above the footer via a flex spacer + `wrap={false}`, new `LandmarkIcon` in the
+shared frame. Verified with `dump-facture-pdf.ts` (renders both a definitive and a proforma
+variant with synthetic data, no DB).
+
+
 ## 2026-07-07 — feat/gestion-client (delete/archive + tarifs email + PDF redesign)
 Clients › Gestion — a second round on the same screen: **delete-or-archive a client**, the
 tarifs **email** path, a sidebar tidy-up, and a **Fiche Tarifs PDF redesign**.
@@ -43,6 +69,7 @@ top **conditions card** (HT · €/mètre linéaire + validity — replacing the
 the fixed bottom note), and **tinted quantity "axis" columns** in the price grid so the tranche axis
 reads apart from the price matrix. Data builder untouched (both Print and Email paths get the new
 look); verified end-to-end against live data (client THUASNE, 3 pages).
+
 
 ## 2026-07-07 — feat/gestion-client
 Clients › Gestion — **Fiche Tarifs: selection-driven print & email** (`apps/api/src/lib/pdf/TarifsClientPdf.tsx`

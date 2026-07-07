@@ -45,6 +45,12 @@ export const company = {
   vat: 'FR 78430 382 135',
   naf: '4641Z',
   legalJurisdiction: 'TOUTE CONTESTATION SERA JUGEE PAR LE TRIBUNAL DE COMMERCE D\'AMIENS (SOMME)',
+  // Bank coordinates — shown on proforma invoices (payment before delivery).
+  bank: {
+    holder: 'ETS MALTERRE SARL',
+    iban: 'FR76 3000 3035 8100 0200 0249 485',
+    bic: 'SOGEFRPP',
+  },
 } as const
 
 export const sizes = {

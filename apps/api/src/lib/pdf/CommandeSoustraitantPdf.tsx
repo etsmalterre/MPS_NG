@@ -451,17 +451,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  // Tight lineHeight so the text box hugs the glyphs — the inherited 1.45
+  // pushes the label visually below the center-aligned icon (§38 mps_designer).
   comboMetaLabel: {
     fontSize: sizes.fontBase,
     color: colors.muted,
     fontWeight: 700,
     flex: 1,
+    lineHeight: 1.25,
   },
   comboMetaValue: {
     fontSize: sizes.fontBase,
     color: colors.text,
     fontWeight: 700,
     textAlign: 'right',
+    lineHeight: 1.25,
   },
   comboDivider: {
     height: 0.75,

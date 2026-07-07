@@ -15,9 +15,10 @@ import {
   CreditCardIcon,
   CalendarIcon,
   MessageSquareIcon,
+  LandmarkIcon,
   type AddressBlockData,
 } from './MalterreDocument.js'
-import { colors, sizes } from './theme.js'
+import { colors, company, sizes } from './theme.js'
 
 interface AddrLite {
   nom: string | null
@@ -79,16 +80,20 @@ const styles = StyleSheet.create({
   },
   comboMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 3 },
   comboMetaIconBox: { width: 14, height: 14, alignItems: 'center', justifyContent: 'center' },
-  comboMetaLabel: { fontSize: sizes.fontBase, color: colors.muted, fontWeight: 700, flex: 1 },
-  comboMetaValue: { fontSize: sizes.fontBase, color: colors.text, fontWeight: 700, textAlign: 'right' },
+  // Tight lineHeight so the text box hugs the glyphs — the content area's
+  // inherited 1.45 inflates the line box and pushes the label visually below
+  // the center-aligned icon next to it (same fix as MalterreDocument metaLabel).
+  comboMetaLabel: { fontSize: sizes.fontBase, color: colors.muted, fontWeight: 700, flex: 1, lineHeight: 1.25 },
+  comboMetaValue: { fontSize: sizes.fontBase, color: colors.text, fontWeight: 700, textAlign: 'right', lineHeight: 1.25 },
 
+  // ── Lines table — formal ledger styling ──────────────
+  // No rounded outer box: a muted header band with a gold rule beneath, thin
+  // hairline rules between rows, and a matching gold rule closing the table.
   table: {
-    marginBottom: 8,
-    borderWidth: 0.75,
-    borderColor: colors.borderStrong,
-    borderStyle: 'solid',
-    borderRadius: 6,
-    overflow: 'hidden',
+    marginBottom: 16,
+    borderBottomWidth: 2,
+    borderBottomColor: colors.gold,
+    borderBottomStyle: 'solid',
   },
   tableHeader: {
     flexDirection: 'row',
@@ -96,54 +101,92 @@ const styles = StyleSheet.create({
     borderBottomWidth: 2,
     borderBottomColor: colors.gold,
     borderBottomStyle: 'solid',
-    paddingVertical: 9,
+    paddingVertical: 8,
     paddingHorizontal: 12,
+    alignItems: 'center',
   },
-  tableHeaderCell: { fontSize: sizes.fontSm, color: colors.text, fontWeight: 900, letterSpacing: 0.5 },
+  tableHeaderCell: { fontSize: sizes.fontSm, color: colors.text, fontWeight: 900, letterSpacing: 0.8, lineHeight: 1 },
   tableRow: {
     flexDirection: 'row',
-    paddingVertical: 9,
+    paddingVertical: 8,
     paddingHorizontal: 12,
     borderBottomWidth: 0.75,
-    borderBottomColor: '#EEEEEE',
+    borderBottomColor: colors.border,
     borderBottomStyle: 'solid',
     alignItems: 'flex-start',
   },
+  tableRowLast: { borderBottomWidth: 0 },
   colDesc: { flex: 1, paddingRight: 8 },
   colQty: { width: 80, textAlign: 'right', paddingHorizontal: 4 },
   colPU: { width: 75, textAlign: 'right', paddingHorizontal: 4 },
   colMontant: { width: 85, textAlign: 'right', paddingHorizontal: 4 },
-  cellBase: { fontSize: 11, color: colors.text },
-  descLine: { fontSize: 11, color: colors.text, lineHeight: 1.35 },
-  descFirst: { fontSize: 11.5, color: colors.primary, fontWeight: 700, lineHeight: 1.35 },
+  cellBase: { fontSize: 10, color: colors.text },
+  cellMontant: { fontSize: 10, color: colors.text, fontWeight: 700 },
+  descFirst: { fontSize: 10.5, color: colors.text, fontWeight: 700, lineHeight: 1.35 },
+  descLine: { fontSize: 9, color: colors.muted, lineHeight: 1.4 },
 
+  // ── Totals — compact ruled rows, gold-ruled TTC row ──
+  // Values share the MONTANT column's right inset (12 row padding + 4 cell
+  // padding) so every figure on the page lines up in one column. Rows are
+  // deliberately tight (3.5pt vertical) — the block should read as a small
+  // arithmetic recap, not a second table.
   totalsWrapper: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 0 },
-  totals: {
-    width: '52%',
-    borderWidth: 0.75,
-    borderColor: colors.borderStrong,
-    borderStyle: 'solid',
-    borderRadius: 6,
-    overflow: 'hidden',
+  totals: { width: '45%' },
+  totalRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 3.5,
+    paddingLeft: 14,
+    paddingRight: 16,
   },
-  totalRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 6, paddingHorizontal: 14 },
-  totalLabel: { fontSize: 11, color: colors.text, fontWeight: 700 },
-  totalValue: { fontSize: 11, color: colors.text, textAlign: 'right' },
+  totalRowDivided: {
+    borderTopWidth: 0.75,
+    borderTopColor: colors.border,
+    borderTopStyle: 'solid',
+  },
+  totalLabel: { fontSize: 10, color: colors.muted, fontWeight: 700, letterSpacing: 0.3, lineHeight: 1.25 },
+  totalValue: { fontSize: 10, color: colors.text, fontWeight: 700, textAlign: 'right', lineHeight: 1.25 },
   grandRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 14,
+    marginTop: 3,
+    paddingVertical: 6,
+    paddingLeft: 14,
+    paddingRight: 16,
+    backgroundColor: colors.bgTotal,
     borderTopWidth: 2,
     borderTopColor: colors.gold,
     borderTopStyle: 'solid',
-    backgroundColor: colors.bgTotal,
   },
-  grandLabel: { fontSize: sizes.fontLg, color: colors.primary, fontWeight: 900, letterSpacing: 0.4 },
-  grandValue: { fontSize: sizes.fontLg, color: colors.primary, fontWeight: 900, textAlign: 'right' },
+  grandLabel: { fontSize: sizes.fontLg, color: colors.primary, fontWeight: 900, letterSpacing: 0.6, lineHeight: 1.25 },
+  grandValue: { fontSize: sizes.fontLg, color: colors.primary, fontWeight: 900, textAlign: 'right', lineHeight: 1.25 },
 
   proformaMention: { marginTop: 10, fontSize: sizes.fontSm, color: colors.muted, fontWeight: 700, letterSpacing: 0.3 },
+
+  // ── Bank coordinates card (proforma only) ────────────
+  // Pinned to the bottom of the last page, just above the footer band: the
+  // spacer soaks up the remaining vertical space, the card never splits.
+  bottomSpacer: { flexGrow: 1, minHeight: 14 },
+  bankCard: {
+    alignSelf: 'flex-start',
+    minWidth: '55%',
+    backgroundColor: colors.bgCream,
+    borderWidth: 0.75,
+    borderColor: colors.borderStrong,
+    borderStyle: 'solid',
+    borderLeftWidth: 2,
+    borderLeftColor: colors.gold,
+    borderLeftStyle: 'solid',
+    borderRadius: 6,
+    padding: 10,
+  },
+  bankHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 5 },
+  bankTitle: { fontSize: sizes.fontXs, color: colors.primary, fontWeight: 900, letterSpacing: 0.5, lineHeight: 1 },
+  bankRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 1.5 },
+  bankLabel: { width: 110, fontSize: sizes.fontBase, color: colors.muted, fontWeight: 700, lineHeight: 1.25 },
+  bankValue: { fontSize: sizes.fontBase, color: colors.text, fontWeight: 700, lineHeight: 1.25 },
 })
 
 function buildClientAddress(data: FacturePdfData): AddressBlockData {
@@ -220,8 +263,9 @@ export function FacturePdf({ data }: { data: FacturePdfData }) {
         </View>
         {data.lignes.map((l, i) => {
           const descLines = String(l.designation || '').split(/\r?\n/).filter((s) => s.length > 0)
+          const isLast = i === data.lignes.length - 1
           return (
-            <View key={i} style={styles.tableRow}>
+            <View key={i} style={isLast ? [styles.tableRow, styles.tableRowLast] : styles.tableRow}>
               <View style={styles.colDesc}>
                 {descLines.length === 0 ? (
                   <Text style={styles.descFirst}>—</Text>
@@ -233,7 +277,7 @@ export function FacturePdf({ data }: { data: FacturePdfData }) {
                 {fmtNum(l.quantite, 1)}{l.unite ? ` ${l.unite}` : ''}
               </Text>
               <Text style={[styles.cellBase, styles.colPU]}>{`${fmtNum(l.prix, 2)} €`}</Text>
-              <Text style={[styles.cellBase, styles.colMontant]}>{`${fmtNum(l.montant, 2)} €`}</Text>
+              <Text style={[styles.cellMontant, styles.colMontant]}>{`${fmtNum(l.montant, 2)} €`}</Text>
             </View>
           )
         })}
@@ -245,7 +289,7 @@ export function FacturePdf({ data }: { data: FacturePdfData }) {
             <Text style={styles.totalLabel}>Total HT</Text>
             <Text style={styles.totalValue}>{`${fmtNum(totalHT, 2)} €`}</Text>
           </View>
-          <View style={styles.totalRow}>
+          <View style={[styles.totalRow, styles.totalRowDivided]}>
             <Text style={styles.totalLabel}>{`TVA (${fmtNum(tvaRate, tvaRate % 1 === 0 ? 0 : 1)} %)`}</Text>
             <Text style={styles.totalValue}>{`${fmtNum(tva, 2)} €`}</Text>
           </View>
@@ -260,6 +304,32 @@ export function FacturePdf({ data }: { data: FacturePdfData }) {
         <Text style={styles.proformaMention}>
           Document non contractuel — ne tient pas lieu de facture.
         </Text>
+      ) : null}
+
+      {/* Proforma only: bank coordinates at the bottom of the last page,
+          just above the footer — proformas are paid before delivery. */}
+      {isProforma ? (
+        <>
+          <View style={styles.bottomSpacer} />
+          <View style={styles.bankCard} wrap={false}>
+            <View style={styles.bankHeaderRow}>
+              <LandmarkIcon />
+              <Text style={styles.bankTitle}>COORDONNÉES BANCAIRES</Text>
+            </View>
+            <View style={styles.bankRow}>
+              <Text style={styles.bankLabel}>Titulaire du compte</Text>
+              <Text style={styles.bankValue}>{company.bank.holder}</Text>
+            </View>
+            <View style={styles.bankRow}>
+              <Text style={styles.bankLabel}>IBAN</Text>
+              <Text style={styles.bankValue}>{company.bank.iban}</Text>
+            </View>
+            <View style={styles.bankRow}>
+              <Text style={styles.bankLabel}>BIC</Text>
+              <Text style={styles.bankValue}>{company.bank.bic}</Text>
+            </View>
+          </View>
+        </>
       ) : null}
     </MalterreDocument>
   )

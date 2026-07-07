@@ -39,9 +39,12 @@
 //  - On create, billing defaults are auto-filled from the client row
 //    (num_tva, IDtva, IDmode_paiement, IDecheance, IDcode_comptable + the
 //    est_defaut_facturation address), matching the legacy auto-fill.
-//  - Email + historique are DEFINITIVE-ONLY: prov and def share a numeric id
-//    space but the same envoi_email IDtype_doc, so emailing a proforma would
-//    collide histories. Proforma still prints (proforma PDF).
+//  - Email works for BOTH kinds (print too), but envoi_email HISTORY is
+//    definitive-only: prov and def share a numeric id space on the same
+//    envoi_email IDtype_doc, so logging a proforma send would collide with a
+//    definitive facture's history. Proforma sends are therefore NOT logged
+//    (their /historique returns []); the proforma PDF carries the bank
+//    coordinates card (payment before delivery).
 
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
 import { z } from 'zod'
@@ -1264,23 +1267,25 @@ facturesRouter.get('/:kind/:id/pdf', async (req: Request, res: Response) => {
 })
 
 // ════════════════════════════════════════════════════════
-//  EMAIL  (definitive only — see header note)
+//  EMAIL  (both kinds — proforma sends are not logged; see header note)
 // ════════════════════════════════════════════════════════
 
 interface EmailRecipientPayload { email: string; name?: string; source: 'contact'; contactId: number }
 
-async function buildEmailDefaults(id: number): Promise<{
+async function buildEmailDefaults(kind: Kind, id: number): Promise<{
   recipients: { selected: EmailRecipientPayload[]; suggestions: EmailRecipientPayload[] }
   subject: string; body: string; clientNom: string; numero: string
 } | null> {
+  const t = TBL[kind]
   const rows = await query<{ IDclient: number; numero: number | null; TYPE: number | null }>(
-    `SELECT IDclient, numero, TYPE FROM facture WHERE IDfacture = ${id}`,
+    `SELECT IDclient, numero, TYPE FROM ${t.table} WHERE ${t.pk} = ${id}`,
   )
   if (rows.length === 0) return null
   const IDclient = Number(rows[0].IDclient) || 0
   const numero = String(rows[0].numero ?? id)
   const isAvoir = Number(rows[0].TYPE) === 2
-  const docWord = isAvoir ? 'avoir' : 'facture'
+  const isProforma = kind === 'prov'
+  const docWord = (isAvoir ? 'avoir' : 'facture') + (isProforma ? ' proforma' : '')
 
   const [clientNames, contactRows] = await Promise.all([
     resolveClientNames([IDclient]),
@@ -1308,7 +1313,7 @@ async function buildEmailDefaults(id: number): Promise<{
     else suggestions.push(recipient)
   }
 
-  const docCap = isAvoir ? 'Avoir' : 'Facture'
+  const docCap = (isAvoir ? 'Avoir' : 'Facture') + (isProforma ? ' proforma' : '')
   const subject = `${docCap} N°${numero} — ETS Malterre`
   const body =
     `Bonjour,\n\n` +
@@ -1322,10 +1327,10 @@ async function buildEmailDefaults(id: number): Promise<{
 facturesRouter.get('/:kind/:id/email-defaults', async (req: Request, res: Response) => {
   try {
     const kind = parseKind(req.params.kind)
-    if (kind !== 'def') { res.status(400).json({ error: 'email_definitive_only' }); return }
+    if (!kind) { res.status(404).json({ error: 'Not found' }); return }
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
-    const defaults = await buildEmailDefaults(id)
+    const defaults = await buildEmailDefaults(kind, id)
     if (!defaults) { res.status(404).json({ error: 'Facture not found' }); return }
     res.json(defaults)
   } catch (err) {
@@ -1377,7 +1382,7 @@ async function logEnvoiEmails(idReference: number, recipients: string[], societe
 facturesRouter.post('/:kind/:id/email', async (req: Request, res: Response) => {
   try {
     const kind = parseKind(req.params.kind)
-    if (kind !== 'def') { res.status(400).json({ error: 'email_definitive_only' }); return }
+    if (!kind) { res.status(404).json({ error: 'Not found' }); return }
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
     if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
@@ -1408,10 +1413,10 @@ facturesRouter.post('/:kind/:id/email', async (req: Request, res: Response) => {
 
       const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
       if (parsed.data.attach_pdf !== false) {
-        const data = await buildFacturePdfData('def', id)
+        const data = await buildFacturePdfData(kind, id)
         if (!data) { res.status(404).json({ error: 'Facture not found' }); return }
         const buffer = await renderFacturePdfBuffer(data)
-        const word = data.type === 2 ? 'avoir' : 'facture'
+        const word = data.isProforma ? 'proforma' : (data.type === 2 ? 'avoir' : 'facture')
         attachments.push({ filename: `${word}-${data.numero}.pdf`, content: buffer, contentType: 'application/pdf' })
       }
       for (const a of parsed.data.extra_attachments ?? []) {
@@ -1424,14 +1429,19 @@ facturesRouter.post('/:kind/:id/email', async (req: Request, res: Response) => {
       })
     }
 
-    const allRecipients = [...parsed.data.to, ...(parsed.data.cc ?? [])]
-    let societe = ''
-    try {
-      const cr = await query<{ IDclient: number }>(`SELECT IDclient FROM facture WHERE IDfacture = ${id}`)
-      const names = await resolveClientNames([Number(cr[0]?.IDclient) || 0])
-      societe = names.get(Number(cr[0]?.IDclient) || 0) ?? ''
-    } catch { /* informational */ }
-    await logEnvoiEmails(id, allRecipients, societe)
+    // envoi_email history is definitive-only: prov and def share a numeric id
+    // space on the same IDtype_doc, so logging a proforma send would collide
+    // with a definitive facture's history (see file header note).
+    if (kind === 'def') {
+      const allRecipients = [...parsed.data.to, ...(parsed.data.cc ?? [])]
+      let societe = ''
+      try {
+        const cr = await query<{ IDclient: number }>(`SELECT IDclient FROM facture WHERE IDfacture = ${id}`)
+        const names = await resolveClientNames([Number(cr[0]?.IDclient) || 0])
+        societe = names.get(Number(cr[0]?.IDclient) || 0) ?? ''
+      } catch { /* informational */ }
+      await logEnvoiEmails(id, allRecipients, societe)
+    }
 
     res.json({ ok: true, messageId })
   } catch (err) {

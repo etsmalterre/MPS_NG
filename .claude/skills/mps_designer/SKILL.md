@@ -3166,7 +3166,7 @@ The shared `SendEmailDialog` covers every email-enabled screen. Apply to:
 - Sous-traitants → Commandes — contact flag `envoi_commande`
 - Clients → Commandes — contact flag `envoi_commande`
 - Clients → Devis — contact flag `envoi_soumission`
-- Clients → Facturation — contact flag `envoi_facture`
+- Clients → Facturation ✅ implemented (proforma + définitive; proforma sends are NOT logged to `envoi_email` — id-space collision with definitive ids on the shared `IDtype_doc` — and the proforma PDF carries the bank-coordinates card)
 - Transport → Expéditions / Livraisons — contact flag `envoi_bl`
 
 A new document screen needs:
@@ -3710,4 +3710,37 @@ Conventions — do not deviate:
 - **Matching is substring-based on the French libellé** (case-insensitive, accent-tolerant for contrôle/prêt). New états added to the `etat_stock_fini` catalog that deserve their own colour get added to `etatPillClass` in the shared module — never a per-screen override.
 - This pill is a **read-only category/status display** — it is NOT the §29 user-controlled status footer (état changes go through their own workflows, e.g. Qualité/Suivi lots), and NOT the §36 sous-traitant type chip (different palette, different domain).
 - **History**: the Clients/Commandes Affectation drawer originally rendered the état as a plain outline Badge (grey, regardless of state) — exactly the drift this rule prevents. If you find another surface showing a roll état without `EtatPill`, fix it as part of your change.
+
+---
+
+## 38. Branded PDF documents (`MalterreDocument`) — meta-row icon alignment + financial-document body
+
+References: **`apps/api/src/lib/pdf/MalterreDocument.tsx`** (shared frame, `AddressCard`, `MetadataCard`, inline SVG icons), **`apps/api/src/lib/pdf/theme.ts`** (PDF palette + company info), **`apps/api/src/lib/pdf/FacturePdf.tsx`** (reference financial-document body).
+
+### 38.1 Icon + label rows: ALWAYS set a tight `lineHeight` on the Text
+
+In `@react-pdf/renderer`, a `Text` inherits the content area's `lineHeight: 1.45`, which inflates its line box (the extra leading goes **below** the glyphs). In a `flexDirection: 'row', alignItems: 'center'` meta row, the sibling `Svg` icon centers against that inflated box, so the icon visually sits **below** the label — the "icons not aligned with their labels" bug (shipped on the first Facture PDF, July 2026).
+
+**Rule**: every `Text` that sits beside a center-aligned icon in a PDF meta row MUST declare its own tight `lineHeight` (`1` for single-line caps labels, `1.25` for label/value rows). The shared `metaLabel`/`metaValue`/`cardTitle` styles in `MalterreDocument.tsx` already do this — **prefer reusing `MetadataCard`/`AddressCard` over re-rolling per-document meta rows**. If a document must roll its own row (conditional rows, custom padding), copy the `lineHeight` along with the rest of the style, not just the colors.
+
+```tsx
+// WRONG — inherits lineHeight 1.45, label glyphs float above the centered icon
+metaLabel: { fontSize: sizes.fontBase, color: colors.muted, fontWeight: 700, flex: 1 },
+
+// RIGHT
+metaLabel: { fontSize: sizes.fontBase, color: colors.muted, fontWeight: 700, flex: 1, lineHeight: 1.25 },
+```
+
+### 38.2 Financial documents (facture / avoir) — formal ledger body
+
+Factures and avoirs use a more formal body than the softer rounded-box tables on devis/commandes. Reference: `FacturePdf.tsx`.
+
+- **Lines table**: **squared** — no rounded outer box, no outer border. Header band keeps the family treatment (`colors.bgMuted` bg, `colors.text` `fontWeight: 900` uppercase labels, `letterSpacing: 0.8`, `lineHeight: 1`, 2pt **gold** rule beneath). Rows separated by 0.75 hairlines (`colors.border`); the last row drops its hairline and the table container closes with a 2pt **gold** bottom rule matching the header's.
+- **No solid navy fills, no navy rules**: do NOT use a `colors.primary`-filled header band or totals band, and structural rules (under the table header, closing the table, above the TTC row) are all 2pt **gold** — the user rejected both filled blue bands and a blue table-closing rule. Navy appears only as text color.
+- **Designation cell**: first line `colors.text` bold 10.5 (**never** `colors.primary` blue — reads as a web link); detail lines 9pt `colors.muted`.
+- **Numeric cells**: 10pt; the MONTANT column is bold.
+- **Totals block**: right-aligned, `width: '45%'`, **no bordered rounded box, compact** — it should read as a small arithmetic recap, not a second table. Rows at `paddingVertical: 3.5` (muted bold 10pt label left, bold 10pt value right, tight `lineHeight: 1.25`), hairline between HT and TVA, then the grand total row: `colors.bgTotal` bg, 2pt gold **top** rule, `colors.primary` `fontWeight: 900` text at `sizes.fontLg`, `paddingVertical: 6`.
+- **Column discipline**: totals values share the MONTANT column's right inset (12pt row padding + 4pt cell padding = `paddingRight: 16`) so every figure on the page aligns in a single column.
+
+Visual verification: mirror `apps/api/src/scripts/dump-facture-pdf.ts` — a synthetic-data render script (no DB) whose output PDF you can open/inspect directly.
 

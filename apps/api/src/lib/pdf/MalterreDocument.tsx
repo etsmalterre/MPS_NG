@@ -98,6 +98,19 @@ export function TagIcon({ size = 11, color = colors.primary, strokeWidth = 1.8 }
   )
 }
 
+export function LandmarkIcon({ size = 11, color = colors.primary, strokeWidth = 1.8 }: IconProps) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      <Path d="M3 22h18" stroke={color} strokeWidth={strokeWidth} fill="none" />
+      <Path d="M6 18v-7" stroke={color} strokeWidth={strokeWidth} fill="none" />
+      <Path d="M10 18v-7" stroke={color} strokeWidth={strokeWidth} fill="none" />
+      <Path d="M14 18v-7" stroke={color} strokeWidth={strokeWidth} fill="none" />
+      <Path d="M18 18v-7" stroke={color} strokeWidth={strokeWidth} fill="none" />
+      <Path d="M12 2l8 5H4z" stroke={color} strokeWidth={strokeWidth} fill="none" />
+    </Svg>
+  )
+}
+
 export function UserIcon({ size = 12, color = colors.primary, strokeWidth = 1.8 }: IconProps) {
   return (
     <Svg width={size} height={size} viewBox="0 0 24 24">

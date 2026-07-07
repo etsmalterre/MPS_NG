@@ -516,16 +516,16 @@ export function ClientsFacturation() {
         </DialogContent>
       </Dialog>
 
-      {selectedId !== null && bucket === 'def' && (
+      {selectedId !== null && (
         <SendEmailDialog
           open={emailModalOpen}
           onClose={() => setEmailModalOpen(false)}
           contextLabel={detail?.client_nom ?? undefined}
-          queryKey={['facture-email-defaults', selectedId]}
-          loadDefaults={() => apiFetch(`/factures/def/${selectedId}/email-defaults`)}
-          pdfUrl={`${API_URL}/factures/def/${selectedId}/pdf`}
-          pdfAttachmentLabel={`${detail?.type === 2 ? 'avoir' : 'facture'}-${detail?.numero ?? selectedId}.pdf`}
-          onSend={(p) => postEmail(`${API_URL}/factures/def/${selectedId}/email`, p, { includeAttachPdf: true })}
+          queryKey={['facture-email-defaults', bucket, selectedId]}
+          loadDefaults={() => apiFetch(`/factures/${bucket}/${selectedId}/email-defaults`)}
+          pdfUrl={`${API_URL}/factures/${bucket}/${selectedId}/pdf`}
+          pdfAttachmentLabel={`${bucket === 'prov' ? 'proforma' : detail?.type === 2 ? 'avoir' : 'facture'}-${detail?.numero ?? selectedId}.pdf`}
+          onSend={(p) => postEmail(`${API_URL}/factures/${bucket}/${selectedId}/email`, p, { includeAttachPdf: true })}
         />
       )}
     </>
@@ -1005,12 +1005,9 @@ function DetailHeader({
                 <Button variant="outline" size="icon" className="h-9 w-9" title="Imprimer" onClick={onPrintClick}>
                   <Printer className="h-4 w-4" />
                 </Button>
-                {/* Email is definitive-only */}
-                {!isProforma && (
-                  <Button variant="outline" size="icon" className="h-9 w-9" title="Envoyer un email" onClick={onEmailClick}>
-                    <AtSign className="h-4 w-4" />
-                  </Button>
-                )}
+                <Button variant="outline" size="icon" className="h-9 w-9" title="Envoyer un email" onClick={onEmailClick}>
+                  <AtSign className="h-4 w-4" />
+                </Button>
                 {/* Convert proforma → definitive */}
                 {editable && (
                   <Button variant="outline" size="sm" onClick={onConvertClick} title="Convertir le proforma en facture définitive">
@@ -1635,7 +1632,7 @@ function HistoriqueTab({ kind, factureId }: { kind: Kind; factureId: number }) {
       <History className="h-10 w-10 mb-3 opacity-40" />
       <p className="text-sm font-medium">Aucun évènement</p>
       <p className="text-[11px] mt-1 text-center">
-        {kind === 'prov' ? 'Les proformas ne sont pas envoyés par email.' : "Les envois d'emails liés à ce document apparaîtront ici."}
+        {kind === 'prov' ? "Les envois de proformas ne sont pas historisés." : "Les envois d'emails liés à ce document apparaîtront ici."}
       </p>
     </div>
   )
