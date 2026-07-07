@@ -22,8 +22,14 @@
 
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
 import { z } from 'zod'
+import React from 'react'
+import { renderToBuffer } from '@react-pdf/renderer'
 import { query, fixEncoding } from '../lib/hfsql-auto.js'
 import { IS_WINDOWS, esc } from '../lib/sst-shared.js'
+import { calcTarifRefFini } from '../lib/pricing-fini-tarif.js'
+import { TarifsClientPdf, type TarifsClientPdfData, type TarifsSectionData } from '../lib/pdf/TarifsClientPdf.js'
+import { sendMail } from '../lib/gmail.js'
+import { getUserEmail } from '../lib/user-emails.js'
 
 export const clientsRouter: RouterType = Router()
 
@@ -680,5 +686,393 @@ clientsRouter.delete('/:id/adresses/:aid', async (req: Request, res: Response) =
   } catch (err) {
     console.error('Error deleting adresse:', err)
     res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ════════════════════════════════════════════════════════
+//  FICHE TARIFS  — selection-driven PDF + email
+// ════════════════════════════════════════════════════════
+// Port of the legacy Choix_Matiere_Tarif → "Fiche Tarif" report. The client
+// picks (référence × coloris) pairs (= ref_client_colori rows); each pair's
+// €/Ml prices come from calcTarifRefFini (PrixDeVenteV4), keeping only the
+// tranches listed in ref_client_colori.lst_tranche ("0,1,2,3,4,5,6" = indices
+// into the 9-tranche array: <1,1,2,3,4,5,10,15,30 rolls).
+//
+//   GET  /:id/tarifs/pdf?items=<IDref_client_colori,...>   — inline PDF
+//   GET  /:id/tarifs/email-defaults                        — recipients + subject/body
+//   POST /:id/tarifs/email?items=...                       — send with PDF attached
+//
+// The selection travels as a query param in all cases (the email POST body is
+// the shared SendPayload shape, which has no room for screen-specific fields).
+
+/** Parse the ?items= query into a bounded list of ref_client_colori ids. */
+function parseTarifItems(raw: unknown): number[] {
+  const ids = String(raw ?? '')
+    .split(',')
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => Number.isInteger(n) && n > 0)
+  return [...new Set(ids)].slice(0, 80)
+}
+
+function formatDateShortFr(d: Date): string {
+  const p = (x: number) => String(x).padStart(2, '0')
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`
+}
+
+const MOIS_FR = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre']
+function formatDateLongFr(d: Date): string {
+  return `${d.getDate()} ${MOIS_FR[d.getMonth()]} ${d.getFullYear()}`
+}
+
+/** Fetch the client's display name (nom is ASCII-named — safe on both
+ *  platforms; accent repair via fixEncoding). Returns null if not found. */
+async function fetchClientNom(id: number): Promise<string | null> {
+  const rows = await query<Record<string, unknown>>(`SELECT IDclient, nom FROM client WHERE IDclient = ${id}`)
+  if (rows.length === 0) return null
+  const fixed = await fixEncoding(rows, 'client', 'IDclient', ['nom'])
+  return (strOf(fixed[0]?.nom) ?? '').trim() || `Client ${id}`
+}
+
+/** Build the Fiche Tarifs PDF data for a client + a ref_client_colori
+ *  selection. Returns null when the client doesn't exist; sections may be
+ *  empty when nothing in the selection is priceable (caller decides). */
+async function buildTarifsPdfData(clientId: number, rccIds: number[]): Promise<TarifsClientPdfData | null> {
+  const clientNom = await fetchClientNom(clientId)
+  if (clientNom === null) return null
+
+  // Selected coloris rows → their designations (scope-checked to the client).
+  const rccRows = await query<Record<string, unknown>>(
+    `SELECT * FROM ref_client_colori WHERE IDref_client_colori IN (${rccIds.join(',')})`,
+  )
+  const desigIds = [...new Set(rccRows.map((r) => numOf(r.IDdesignation_client)).filter((n) => n > 0))]
+  if (desigIds.length === 0) return { clientNom, dateDocument: '', validUntil: '', sections: [] }
+
+  const dRows = await query<Record<string, unknown>>(
+    `SELECT * FROM designation_client WHERE IDdesignation_client IN (${desigIds.join(',')})`,
+  )
+  const dFixed = await fixEncoding(dRows, 'designation_client', 'IDdesignation_client', ['designation'])
+  // Scope guard: drop any selection row whose designation belongs to another client.
+  const desigById = new Map<number, Record<string, unknown>>()
+  for (const d of dFixed) {
+    if (numOf(d.IDclient) === clientId) desigById.set(numOf(d.IDdesignation_client), d)
+  }
+
+  // ref_fini context (laize / poids / écru) + ref_ecru (contexture / bio).
+  const finiIds = [...new Set([...desigById.values()].map((d) => numOf(d.IDref_fini)).filter((n) => n > 0))]
+  const finiById = new Map<number, { IDref_ecru: number; avec_teinture: number; laize: number | null; poids: number | null }>()
+  if (finiIds.length > 0) {
+    const fRows = await query<Record<string, unknown>>(
+      `SELECT IDref_fini, IDref_ecru, avec_teinture, laizeHT_Moy, poids_Moy FROM ref_fini WHERE IDref_fini IN (${finiIds.join(',')})`,
+    )
+    for (const f of fRows) {
+      finiById.set(numOf(f.IDref_fini), {
+        IDref_ecru: numOf(f.IDref_ecru),
+        avec_teinture: numOf(f.avec_teinture),
+        laize: f.laizeHT_Moy == null ? null : Math.round(numOf(f.laizeHT_Moy)),
+        poids: f.poids_Moy == null ? null : Math.round(numOf(f.poids_Moy)),
+      })
+    }
+  }
+  const ecruIds = [...new Set([...finiById.values()].map((f) => f.IDref_ecru).filter((n) => n > 0))]
+  const ecruById = new Map<number, { IDcontexture: number; bio: boolean }>()
+  if (ecruIds.length > 0) {
+    const eRows = await query<Record<string, unknown>>(
+      `SELECT IDref_ecru, IDcontexture, bio FROM ref_ecru WHERE IDref_ecru IN (${ecruIds.join(',')})`,
+    )
+    for (const e of eRows) {
+      ecruById.set(numOf(e.IDref_ecru), { IDcontexture: numOf(e.IDcontexture), bio: numOf(e.bio) === 1 })
+    }
+  }
+  const ctxIds = [...new Set([...ecruById.values()].map((e) => e.IDcontexture).filter((n) => n > 0))]
+  const ctxById = new Map<number, string>()
+  if (ctxIds.length > 0) {
+    const cRows = await query<Record<string, unknown>>(
+      `SELECT IDcontexture, nom FROM contexture WHERE IDcontexture IN (${ctxIds.join(',')})`,
+    )
+    const cFixed = await fixEncoding(cRows, 'contexture', 'IDcontexture', ['nom'])
+    for (const c of cFixed) ctxById.set(numOf(c.IDcontexture), strOf(c.nom) ?? '')
+  }
+
+  // Coloris labels (dye vs wash catalog per avec_teinture).
+  const ceMap = await mapSimpleRef('colori_ecru', 'IDcolori_ecru', rccRows.map((r) => numOf(r.IDcolori_ecru)))
+  const rfcMap = await mapSimpleRef('ref_fini_colori', 'IDref_fini_colori', rccRows.map((r) => numOf(r.IDref_fini_colori)))
+
+  // Group the selection by designation, keeping the request's item order for
+  // columns and ordering sections by ref label.
+  interface ColSel { rccId: number; colorisId: number; label: string; trancheIdx: number[] }
+  const colsByDesig = new Map<number, ColSel[]>()
+  const rccById = new Map<number, Record<string, unknown>>(rccRows.map((r) => [numOf(r.IDref_client_colori), r]))
+  for (const rccId of rccIds) {
+    const r = rccById.get(rccId)
+    if (!r) continue
+    const did = numOf(r.IDdesignation_client)
+    const desig = desigById.get(did)
+    if (!desig) continue
+    if (numOf(pick(r, 'archivé', 'archiv'))) continue
+    const finiId = numOf(desig.IDref_fini)
+    if (!(finiId > 0)) continue // écru-only designations have no fini tarif
+    const fini = finiById.get(finiId)
+    if (!fini) continue
+    const finiColId = numOf(r.IDref_fini_colori)
+    const ecruColId = numOf(r.IDcolori_ecru)
+    const colorisId = fini.avec_teinture !== 0 ? finiColId : ecruColId
+    if (!(colorisId > 0)) continue
+    const label = (finiColId > 0 ? rfcMap.get(finiColId) : ceMap.get(ecruColId)) ?? ''
+    const trancheIdx = [...new Set(
+      (strOf(r.lst_tranche) ?? '')
+        .split(',')
+        .map((s) => parseInt(s.trim(), 10))
+        .filter((n) => Number.isInteger(n) && n >= 0 && n <= 8),
+    )].sort((a, b) => a - b)
+    const arr = colsByDesig.get(did) ?? []
+    arr.push({ rccId, colorisId, label, trancheIdx: trancheIdx.length > 0 ? trancheIdx : [0, 1, 2, 3, 4, 5, 6] })
+    colsByDesig.set(did, arr)
+  }
+
+  // Price every (fini, coloris) pair.
+  const sections: TarifsSectionData[] = []
+  const sortedDesigs = [...colsByDesig.keys()].sort((a, b) => {
+    const ra = strOf(desigById.get(a)?.designation) ?? ''
+    const rb = strOf(desigById.get(b)?.designation) ?? ''
+    return ra.localeCompare(rb, 'fr')
+  })
+  for (const did of sortedDesigs) {
+    const desig = desigById.get(did)!
+    const cols = colsByDesig.get(did)!
+    const finiId = numOf(desig.IDref_fini)
+    const fini = finiById.get(finiId)!
+    const ecru = ecruById.get(fini.IDref_ecru)
+
+    const tarifs = await Promise.all(cols.map((c) => calcTarifRefFini(finiId, c.colorisId)))
+
+    // Union of the selected coloris' tranche indices, ascending.
+    const idxUnion = [...new Set(cols.flatMap((c) => c.trancheIdx))].sort((a, b) => a - b)
+    const rows: TarifsSectionData['rows'] = []
+    for (const i of idxUnion) {
+      // qte_ml / rolls come from any tarif that actually has tranches (same
+      // ref → identical quantities across coloris).
+      const anyTranche = tarifs.find((t) => t.tranches.length > i)?.tranches[i]
+      if (!anyTranche) continue
+      rows.push({
+        rlx: anyTranche.isMetrage ? '< 1' : String(anyTranche.rolls),
+        ml: anyTranche.isMetrage ? `< ${anyTranche.qte_ml}` : String(anyTranche.qte_ml),
+        prices: cols.map((c, ci) => {
+          if (!c.trancheIdx.includes(i)) return null
+          const t = tarifs[ci].tranches[i]
+          return t && t.moPrixDeVenteAuMl > 0 ? t.moPrixDeVenteAuMl : null
+        }),
+      })
+    }
+    if (rows.length === 0) continue
+
+    sections.push({
+      ref: strOf(desig.designation) ?? '',
+      contexture: ecru ? (ctxById.get(ecru.IDcontexture) ?? null) : null,
+      laize: fini.laize,
+      poids: fini.poids,
+      bio: ecru?.bio ?? false,
+      colorisLabels: cols.map((c) => c.label),
+      rows,
+    })
+  }
+
+  const now = new Date()
+  const validUntil = new Date(now)
+  validUntil.setFullYear(validUntil.getFullYear() + 1)
+
+  return {
+    clientNom,
+    dateDocument: formatDateLongFr(now),
+    validUntil: formatDateShortFr(validUntil),
+    sections,
+  }
+}
+
+async function renderTarifsPdfBuffer(data: TarifsClientPdfData): Promise<Buffer> {
+  return renderToBuffer(
+    React.createElement(TarifsClientPdf, { data }) as unknown as React.ReactElement<
+      import('@react-pdf/renderer').DocumentProps
+    >,
+  )
+}
+
+/** ASCII-safe filename chunk from the client name. */
+function tarifsFilename(clientNom: string): string {
+  const slug = clientNom
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+  return `tarifs-${slug || 'client'}.pdf`
+}
+
+clientsRouter.get('/:id/tarifs/pdf', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const items = parseTarifItems(req.query.items)
+    if (items.length === 0) { res.status(400).json({ error: 'No items selected' }); return }
+
+    const data = await buildTarifsPdfData(id, items)
+    if (!data) { res.status(404).json({ error: 'Client not found' }); return }
+    if (data.sections.length === 0) { res.status(400).json({ error: 'No priceable reference in the selection' }); return }
+
+    const buffer = await renderTarifsPdfBuffer(data)
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `inline; filename="${tarifsFilename(data.clientNom)}"`)
+    // Strip helmet's restrictive headers so the web app can iframe the PDF.
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.send(buffer)
+  } catch (err) {
+    console.error('Error rendering tarifs PDF:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+clientsRouter.get('/:id/tarifs/email-defaults', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const clientNom = await fetchClientNom(id)
+    if (clientNom === null) { res.status(404).json({ error: 'Client not found' }); return }
+
+    const contactRows = await query<Record<string, unknown>>(
+      `SELECT IDcontact, nom, prenom, mail, envoi_soumission, est_defaut, est_visible FROM contact WHERE IDclient = ${id}`,
+    )
+    const fixed = await fixEncoding(contactRows, 'contact', 'IDcontact', ['nom', 'prenom', 'mail'])
+
+    interface Recipient { email: string; name?: string; source: 'contact'; contactId: number }
+    const flagged: Recipient[] = []
+    const defaults: Recipient[] = []
+    const others: Recipient[] = []
+    const seen = new Set<string>()
+    for (const c of fixed) {
+      if (numOf(c.est_visible) === 0 && c.est_visible != null) continue
+      const raw = (strOf(c.mail) ?? '').trim()
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) continue
+      const key = raw.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      const displayName = [strOf(c.prenom), strOf(c.nom)]
+        .map((s) => (s ?? '').trim())
+        .filter((s) => s.length > 0)
+        .join(' ')
+      const r: Recipient = { email: raw, source: 'contact', contactId: numOf(c.IDcontact) }
+      if (displayName) r.name = displayName
+      if (numOf(c.envoi_soumission) === 1) flagged.push(r)
+      else if (numOf(c.est_defaut) === 1) defaults.push(r)
+      else others.push(r)
+    }
+    // Pre-check the soumission-flagged contacts; fall back to the default
+    // contact when nobody carries the flag (tarifs ≈ commercial/soumission).
+    const selected = flagged.length > 0 ? flagged : defaults
+    const suggestions = flagged.length > 0 ? [...defaults, ...others] : others
+
+    const subject = `Fiche tarifs — ETS Malterre`
+    const body =
+      `Bonjour,\n\n` +
+      `Veuillez trouver ci-joint notre fiche tarifs.\n\n` +
+      `Nous restons à votre disposition pour toute information complémentaire.\n\n` +
+      `Cordialement,\n` +
+      `ETS Malterre`
+
+    res.json({ recipients: { selected, suggestions }, subject, body, clientNom })
+  } catch (err) {
+    console.error('Error building tarifs email defaults:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+const tarifExtraAttachmentSchema = z.object({
+  filename: z.string().min(1).max(255),
+  content_base64: z.string().min(1),
+  content_type: z.string().min(1).max(100),
+})
+
+const tarifEmailBody = z.object({
+  to: z.array(z.string().email()).min(1, 'At least one recipient is required'),
+  cc: z.array(z.string().email()).optional(),
+  subject: z.string().min(1).max(500),
+  body: z.string().min(1).max(20000),
+  attach_pdf: z.boolean().optional(),
+  extra_attachments: z.array(tarifExtraAttachmentSchema).optional(),
+})
+
+clientsRouter.post('/:id/tarifs/email', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    if (req.userId === undefined) {
+      res.status(401).json({ error: 'not authenticated' })
+      return
+    }
+
+    const parsed = tarifEmailBody.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Validation failed', details: parsed.error.issues })
+      return
+    }
+
+    const senderEmail = await getUserEmail(req.userId)
+    if (!senderEmail) {
+      res.status(400).json({
+        error: 'no_sender_email',
+        message:
+          "Aucune adresse email n'est associée à votre compte. Un administrateur doit en définir une dans Paramètres › Utilisateurs.",
+      })
+      return
+    }
+
+    const userRows = await query<Record<string, unknown>>(
+      `SELECT IDutilisateur, prenom, nom FROM utilisateur WHERE IDutilisateur = ${req.userId}`,
+    )
+    const fixedUser = await fixEncoding(userRows, 'utilisateur', 'IDutilisateur', ['prenom', 'nom'])
+    const u = fixedUser[0] ?? null
+    const displayName = u
+      ? [strOf(u.prenom), strOf(u.nom)].map((s) => (s ?? '').trim()).filter((s) => s.length > 0).join(' ')
+      : ''
+    const fromName = displayName ? `${displayName} — ETS Malterre` : 'ETS Malterre'
+
+    const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
+    if (parsed.data.attach_pdf !== false) {
+      const items = parseTarifItems(req.query.items)
+      if (items.length === 0) { res.status(400).json({ error: 'No items selected' }); return }
+      const data = await buildTarifsPdfData(id, items)
+      if (!data) { res.status(404).json({ error: 'Client not found' }); return }
+      if (data.sections.length === 0) { res.status(400).json({ error: 'No priceable reference in the selection' }); return }
+      const buffer = await renderTarifsPdfBuffer(data)
+      attachments.push({
+        filename: tarifsFilename(data.clientNom),
+        content: buffer,
+        contentType: 'application/pdf',
+      })
+    }
+    for (const a of parsed.data.extra_attachments ?? []) {
+      attachments.push({
+        filename: a.filename,
+        content: Buffer.from(a.content_base64, 'base64'),
+        contentType: a.content_type,
+      })
+    }
+
+    const messageId = await sendMail({
+      from: senderEmail,
+      fromName,
+      to: parsed.data.to,
+      cc: parsed.data.cc,
+      subject: parsed.data.subject,
+      body: parsed.data.body,
+      attachments: attachments.length > 0 ? attachments : undefined,
+    })
+
+    res.json({ ok: true, messageId })
+  } catch (err) {
+    console.error('Error sending tarifs email:', err)
+    const message = err instanceof Error ? err.message : 'Internal server error'
+    res.status(500).json({ error: 'send_failed', message })
   }
 })

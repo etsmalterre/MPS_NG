@@ -34,13 +34,15 @@ import {
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { SendEmailDialog } from '@/components/email/SendEmailDialog'
+import { postEmail } from '@/lib/email'
 import { cn } from '@/lib/utils'
 import { hfsqlDateToInput, inputDateToHfsql, formatHfsqlDate } from '@/lib/dates'
 import { fmtNum } from '@/lib/format'
-import { apiFetch } from '@/lib/api'
+import { apiFetch, API_URL } from '@/lib/api'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -212,6 +214,9 @@ export function ClientsGestion() {
   const [deleteConfirm, setDeleteConfirm] = useState(false)
   const [printOpen, setPrintOpen] = useState(false)
   const [emailOpen, setEmailOpen] = useState(false)
+  // Non-null while the tarifs SendEmailDialog is open — holds the selected
+  // ref_client_colori ids so the PDF preview/attachment matches the selection.
+  const [tarifsEmailItems, setTarifsEmailItems] = useState<number[] | null>(null)
 
   const originalDraftRef = useRef<Draft | null>(null)
 
@@ -343,7 +348,26 @@ export function ClientsGestion() {
         onCancel={() => setDeleteConfirm(false)}
         onConfirm={() => { if (selectedId !== null) deleteMutation.mutate(selectedId) }}
       />
-      <PlaceholderDialog open={printOpen} onClose={() => setPrintOpen(false)} title="Imprimer" Icon={Printer} CenterIcon={Printer} />
+      {selectedId !== null && (
+        <TarifsSelectionDialog
+          open={printOpen}
+          clientId={selectedId}
+          onClose={() => setPrintOpen(false)}
+          onEmail={(items) => { setPrintOpen(false); setTarifsEmailItems(items) }}
+        />
+      )}
+      {selectedId !== null && (
+        <SendEmailDialog
+          open={tarifsEmailItems !== null}
+          onClose={() => setTarifsEmailItems(null)}
+          contextLabel={detail?.nom ?? undefined}
+          queryKey={['client-tarifs-email-defaults', selectedId]}
+          loadDefaults={() => apiFetch(`/clients/${selectedId}/tarifs/email-defaults`)}
+          pdfUrl={tarifsEmailItems !== null ? `${API_URL}/clients/${selectedId}/tarifs/pdf?items=${tarifsEmailItems.join(',')}` : undefined}
+          pdfAttachmentLabel="fiche-tarifs.pdf"
+          onSend={(p) => postEmail(`${API_URL}/clients/${selectedId}/tarifs/email?items=${(tarifsEmailItems ?? []).join(',')}`, p, { includeAttachPdf: true })}
+        />
+      )}
       <PlaceholderDialog open={emailOpen} onClose={() => setEmailOpen(false)} title="Envoyer un email" Icon={AtSign} CenterIcon={Mail} />
     </>
   )
@@ -365,6 +389,144 @@ function PlaceholderDialog({ open, onClose, title, Icon, CenterIcon }: {
           <p className="text-sm font-medium">En developpement</p>
           <p className="text-xs mt-1">Cette fonctionnalite sera disponible prochainement.</p>
         </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ── Tarifs: sélection réfs × coloris → PDF / email ─────
+// Port of the legacy Choix_Matiere_Tarif modal: pick the (référence, coloris)
+// pairs to include in the Fiche Tarifs, then print the PDF or email it.
+
+interface TarifRow {
+  rccId: number
+  ref: string
+  refInterne: string
+  coloris: string
+  priceable: boolean
+}
+
+function TarifsSelectionDialog({ open, clientId, onClose, onEmail }: {
+  open: boolean; clientId: number; onClose: () => void; onEmail: (items: number[]) => void
+}) {
+  const { data, isLoading } = useQuery<ClientReference[]>({
+    queryKey: ['client-references', clientId],
+    queryFn: () => apiFetch(`/clients/${clientId}/references`),
+    enabled: open,
+  })
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+
+  // Fresh selection each time the dialog opens (or the client changes).
+  useEffect(() => { setSelected(new Set()) }, [open, clientId])
+
+  const rows = useMemo<TarifRow[]>(() => {
+    if (!data) return []
+    const out: TarifRow[] = []
+    for (const r of data) {
+      for (const c of r.coloris) {
+        out.push({
+          rccId: c.IDref_client_colori,
+          ref: r.client_ref,
+          refInterne: r.ref_interne,
+          coloris: c.label,
+          // Only fini references with a real coloris have a PrixDeVente tarif.
+          priceable: r.IDref_fini > 0 && c.coloris_id > 0,
+        })
+      }
+    }
+    return out
+  }, [data])
+
+  const priceableIds = useMemo(() => rows.filter((r) => r.priceable).map((r) => r.rccId), [rows])
+
+  const toggle = (id: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  const items = [...selected]
+  const pdfUrl = `${API_URL}/clients/${clientId}/tarifs/pdf?items=${items.join(',')}`
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent className="max-w-2xl" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Printer className="h-5 w-5 text-accent" />Imprimer les tarifs
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="mt-4">
+          {isLoading ? (
+            <div className="flex items-center justify-center py-10"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>
+          ) : rows.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-10 text-muted-foreground">
+              <Tag className="h-12 w-12 mb-3 opacity-40" />
+              <p className="text-sm">Aucune référence pour ce client</p>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-border/60 overflow-hidden">
+              {/* Header strip + Tous/Aucun */}
+              <div className="flex items-center gap-2 px-3 py-2 bg-zinc-200/50 border-b border-border/60 text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
+                <span className="w-4" />
+                <span className="w-24">Ref client</span>
+                <span className="w-24">Ref interne</span>
+                <span className="flex-1">Coloris</span>
+                <button type="button" onClick={() => setSelected(new Set(priceableIds))}
+                  className="normal-case tracking-normal text-xs font-medium text-accent hover:bg-accent/10 rounded px-1.5 py-0.5 transition-colors">
+                  Tous
+                </button>
+                <button type="button" onClick={() => setSelected(new Set())}
+                  className="normal-case tracking-normal text-xs font-medium text-muted-foreground hover:bg-accent/10 rounded px-1.5 py-0.5 transition-colors">
+                  Aucun
+                </button>
+              </div>
+              <div className="max-h-[45vh] overflow-y-auto scrollbar-transparent">
+                {rows.map((r) => (
+                  <label
+                    key={r.rccId}
+                    title={r.priceable ? undefined : 'Tarif indisponible pour cette référence'}
+                    className={cn(
+                      'flex items-center gap-2 px-3 py-2 border-b border-border/40 last:border-b-0 text-sm transition-colors',
+                      r.priceable ? 'cursor-pointer hover:bg-accent/5' : 'opacity-50 cursor-not-allowed',
+                      selected.has(r.rccId) && 'bg-accent/10',
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded border-input text-accent focus:ring-2 focus:ring-ring cursor-pointer disabled:cursor-not-allowed"
+                      checked={selected.has(r.rccId)}
+                      disabled={!r.priceable}
+                      onChange={() => toggle(r.rccId)}
+                    />
+                    <span className="w-24 font-medium truncate">{r.ref || '—'}</span>
+                    <span className="w-24 text-muted-foreground truncate">{r.refInterne || '—'}</span>
+                    <span className="flex-1 truncate flex items-center gap-1.5">
+                      <Palette className="h-3 w-3 text-muted-foreground/60 flex-shrink-0" />
+                      {r.coloris || '—'}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <DialogFooter className="mt-4">
+          <span className="text-xs text-muted-foreground mr-auto self-center">
+            {selected.size} coloris sélectionné{selected.size > 1 ? 's' : ''}
+          </span>
+          <Button variant="outline" onClick={onClose}>Annuler</Button>
+          <Button variant="outline" disabled={selected.size === 0} onClick={() => onEmail(items)}>
+            <AtSign className="h-3.5 w-3.5 mr-1.5" />Envoyer par email
+          </Button>
+          <Button disabled={selected.size === 0} onClick={() => { window.open(pdfUrl, '_blank'); onClose() }}>
+            <Printer className="h-3.5 w-3.5 mr-1.5" />Imprimer
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -467,7 +629,7 @@ function DetailHeader({ client, isLoading, isEditing, draft, onPatch, onStartEdi
               </>
             ) : (
               <>
-                <Button variant="outline" size="icon" className="h-9 w-9" title="Imprimer" onClick={onPrint}><Printer className="h-4 w-4" /></Button>
+                <Button variant="outline" size="icon" className="h-9 w-9" title="Imprimer les tarifs" onClick={onPrint}><Printer className="h-4 w-4" /></Button>
                 <Button variant="outline" size="icon" className="h-9 w-9" title="Envoyer un email" onClick={onEmail}><AtSign className="h-4 w-4" /></Button>
                 <Button variant="outline" size="icon" className="h-9 w-9 text-destructive hover:text-destructive" title="Supprimer" onClick={onDelete}><Trash2 className="h-4 w-4" /></Button>
                 <Button variant="gold" size="sm" onClick={onStartEdit}><Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier</Button>
@@ -989,7 +1151,7 @@ function ReferencesSection({ clientId }: { clientId: number }) {
       {isLoading ? <SectionSpinner /> : !data || data.length === 0 ? <SectionEmpty text="Aucune référence client" /> : (
         <div className="space-y-2">
           {data.map((r) => (
-            <div key={r.IDdesignation_client} className="rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3 border-l-amber-400/60">
+            <div key={r.IDdesignation_client} className={cn('rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3', 'border-l-amber-400/60')}>
               <div className="flex items-center gap-2">
                 <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-amber-400/10"><Tag className="h-3.5 w-3.5 text-amber-600" /></div>
                 <p className="text-sm font-medium truncate">{r.client_ref || '—'}</p>

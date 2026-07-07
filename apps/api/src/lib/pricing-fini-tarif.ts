@@ -332,7 +332,10 @@ export async function calcTarifRefFini(
     tranches.push({
       rolls: ROLL_LABEL[i],
       isMetrage: i === 0,
-      qte_ml: Math.round(ROLL_MULT[i] * poidsUnRlx * rdt2),
+      // Display quantity uses the UNROUNDED rendement — legacy's Fiche Tarif
+      // prints 355 Ml for 4 rolls of 124A where the 2dp-rounded rendement
+      // gives 354. Prices keep rdt2 (they match legacy with the rounding).
+      qte_ml: Math.round(ROLL_MULT[i] * poidsUnRlx * rendement),
       poids_ref: poidsRef,
       moFil,
       detailFil,

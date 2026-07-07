@@ -10,6 +10,34 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+
+## 2026-07-07 — feat/gestion-client
+Clients › Gestion — **Fiche Tarifs: selection-driven print & email** (`apps/api/src/lib/pdf/TarifsClientPdf.tsx`
+[new], `apps/api/src/routes/clients.ts`, `apps/api/src/lib/pricing-fini-tarif.ts`,
+`apps/web/src/pages/ClientsGestion.tsx`) + a cross-screen amber-bar design fix.
+**(1) Fiche Tarifs** ports the legacy `Choix_Matiere_Tarif` → "Fiche Tarif" report. The header
+Printer button opens a selection dialog listing every (référence × coloris) pair of the client
+with checkboxes + Tous/Aucun; **Imprimer** opens the PDF, **Envoyer par email** opens the shared
+`SendEmailDialog` with the PDF pre-attached. New API: `GET /clients/:id/tarifs/pdf?items=<rccIds>`,
+`GET /clients/:id/tarifs/email-defaults` (recipients from client contacts — `envoi_soumission`
+flag first, else the default contact), `POST /clients/:id/tarifs/email?items=…`. Prices reuse
+`calcTarifRefFini` (PrixDeVenteV4 port); `ref_client_colori.lst_tranche` selects which of the 9
+quantity tranches print; italic knit label from `contexture.nom` via `ref_ecru.IDcontexture`, BIO
+chip from `ref_ecru.bio`, Laize/Poids from `ref_fini.laizeHT_Moy`/`poids_Moy`. PDF uses
+`MalterreDocument` (no italic face — bundled Lato has none; @react-pdf hard-fails on it), one
+section per référence, two per page via tight explicit lineHeights. Écru-only désignations (no
+`IDref_fini`) are greyed out / skipped (no PrixDeVente tarif). Verified value-for-value against the
+legacy `Fiche Tarif049A.pdf` sample for client 1083. **(2) Shared engine fix**: `calcTarifRefFini`'s
+`qte_ml` now uses the **unrounded** rendement (legacy prints 355 Ml for 4 rolls of 124A where the
+2dp-rounded rendement gave 354; prices keep the rounded value and still match). This also corrects
+the in-app Tarif dialog quantities. **(3) Design fix**: 4 screens
+(`ClientsGestion`, `ClientsExpeditions`, `ClientsFacturation`, `TombeMetierReferences`) rendered
+the neutral item-card left amber edge as a **static** `className` string (`… border-l-4 border …
+border-l-amber-400/60`), which skips twMerge's border-conflict resolution and draws a thick 4px
+bar instead of the standard thin edge. Switched all to `cn(base, 'border-l-amber-400/60')` matching
+the `FilsCommandes.tsx` `LineCard` reference; documented the symptom in `mps_designer` §7.
+
+
 ## 2026-07-07 — feat/facturation
 Clients › Facturation — **pick-and-delete proformas + cross-screen expedition cache sync**
 (`apps/api/src/routes/factures.ts`, `apps/web/src/pages/ClientsFacturation.tsx`).

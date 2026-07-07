@@ -1649,7 +1649,7 @@ function CompositionCard({
                       title="Modifier le fil"
                     />
                   ) : (
-                    <div className="group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3 border-l-amber-400/60">
+                    <div className={cn('group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3', 'border-l-amber-400/60')}>
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-2 min-w-0">
                           <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-amber-400/10">
@@ -1861,7 +1861,7 @@ function ColorisCard({
                   {isRowEditing && isEditing ? (
                     <ColorisFormView form={form} onFormChange={setForm} onCancel={resetForm} onSave={() => updateMut.mutate(c.IDcolori_ecru)} isSaving={updateMut.isPending} title="Modifier le coloris" />
                   ) : (
-                    <div className="group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3 border-l-amber-400/60">
+                    <div className={cn('group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3', 'border-l-amber-400/60')}>
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-2 min-w-0">
                           <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-amber-400/10">

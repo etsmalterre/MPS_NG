@@ -550,7 +550,7 @@ Available competences section: `mt-3 pt-3 border-t border-border/50 flex flex-wr
 
 Cards use a consistent two-row layout with a colored left accent border and an icon box.
 
-**Important**: Use `cn()` to combine the base classes with the border color class. Do NOT use a static className string — `twMerge` inside `cn()` resolves `border` + `border-l-4` in a specific way that produces the correct thin left accent.
+**Important**: Use `cn()` to combine the base classes with the border color class. Do NOT use a static className string — `twMerge` inside `cn()` resolves `border` + `border-l-4` in a specific way that produces the correct thin left accent. A static `className="… border-l-4 border … border-l-amber-400/60"` skips that resolution and renders a **thick 4px amber bar** instead of the standard thin edge (this drift shipped on early Clients/Tombé Métier screens and was swept in July 2026 — `FilsCommandes.tsx` `LineCard` is the reference rendering). If you spot a card whose left amber edge looks thicker than the ones in Fils › Commandes, this is the cause.
 
 #### Card Color Variants
 
