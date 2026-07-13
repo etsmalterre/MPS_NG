@@ -11,6 +11,17 @@ other worktrees see what changed when they rebase. Format:
 <!-- entries below -->
 
 
+## 2026-07-13 — feat/soumission
+Sous-traitants › Commandes — **Soumission Lot email defaults: ref commande client in the body,
+emdash dropped from the subject** (`apps/api/src/routes/commandes-sous-traitant.ts`,
+`buildSoumissionEmailDefaults`). The default body now includes a
+`Réf commande client : <commande_client.ref_client>` line after the opening paragraph — the same
+field the Soumission Lot PDF shows as "Ref commande client" (fetched with the usual `fixEncoding`
+repair; line omitted when the order has no ref_client). The default subject's em dash separator
+(`Soumission Lot X — ref`) became a plain ASCII hyphen (`Soumission Lot X - ref`). Defaults only —
+the send endpoint and PDF are unchanged.
+
+
 ## 2026-07-13 — feat/devis
 Clients › Devis — **Nouvelle ligne dialog: Prix (€) field no longer hidden**
 (`apps/web/src/pages/ClientsDevis.tsx`). The Unité `PopoverSelect` in the 3-column

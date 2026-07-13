@@ -3390,10 +3390,21 @@ async function buildSoumissionEmailDefaults(
     cc.push(raw)
   }
 
-  const subject = `Soumission Lot ${lotString} — ${lot.ref_malterre}${lot.coloris_reference ? ` · ${lot.coloris_reference}` : ''}`
+  // Ref commande client (commande_client.ref_client) — same field the PDF
+  // shows as "Ref commande client"; surfaced in the body so the recipient
+  // can tie the soumission back to the client's own order.
+  const ccRows = await query<{ IDcommande_client: number; ref_client: string | null }>(
+    `SELECT IDcommande_client, ref_client FROM commande_client
+     WHERE IDcommande_client = ${lot.IDcommande_client}`,
+  )
+  const ccFixed = await fixEncoding(ccRows as any[], 'commande_client', 'IDcommande_client', ['ref_client'])
+  const refCommandeClient = ((ccFixed[0] as any)?.ref_client ?? '').toString().trim()
+
+  const subject = `Soumission Lot ${lotString} - ${lot.ref_malterre}${lot.coloris_reference ? ` · ${lot.coloris_reference}` : ''}`
   const body =
     `Bonjour,\n\n` +
     `Veuillez trouver ci-joint la soumission du lot ${lotString} pour la référence ${lot.client_designation || lot.ref_malterre}${lot.coloris_reference ? ` (coloris ${lot.coloris_reference})` : ''}.\n\n` +
+    (refCommandeClient ? `Réf commande client : ${refCommandeClient}\n\n` : '') +
     `Un échantillon est joint au document imprimé.\n\n` +
     `Cordialement,\n` +
     `ETS Malterre`
