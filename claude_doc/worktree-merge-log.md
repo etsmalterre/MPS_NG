@@ -11,6 +11,16 @@ other worktrees see what changed when they rebase. Format:
 <!-- entries below -->
 
 
+## 2026-07-13 — feat/devis
+Clients › Devis — **Nouvelle ligne dialog: Prix (€) field no longer hidden**
+(`apps/web/src/pages/ClientsDevis.tsx`). The Unité `PopoverSelect` in the 3-column
+Quantité/Unité/Prix grid was passed `size="sm"`, whose variant forces a fixed `w-[220px]`
+width (meant for compact right-panel KV rows). Inside the narrow grid cell that 220px button
+overflowed and covered the adjacent Prix input. Dropped the `size="sm"` prop so the select
+is `w-full` and fills its own cell — matching the canonical `ClientsCommandes.tsx` new-line
+dialog. Pure CSS/layout fix, no behavior change.
+
+
 ## 2026-07-07 — feat/expe
 Clients › Expéditions — **Diverses: carton contents (ref_divers_expedie)** + a Bon de Livraison
 PDF pagination fix (`apps/api/src/routes/expeditions.ts`, `apps/web/src/pages/ClientsExpeditions.tsx`,

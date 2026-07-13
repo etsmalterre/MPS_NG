@@ -1130,7 +1130,6 @@ function LineFormDialog({
             <div className="col-span-1 space-y-1">
               <label className="text-xs font-medium text-muted-foreground">Unité</label>
               <PopoverSelect
-                size="sm"
                 options={[{ id: 1, primary: 'Kg' }, { id: 3, primary: 'Ml' }, { id: 4, primary: 'U' }, { id: 5, primary: 'm²' }]}
                 value={form.unite}
                 onChange={(id) => setForm({ ...form, unite: id })}
