@@ -3400,7 +3400,7 @@ async function buildSoumissionEmailDefaults(
   const ccFixed = await fixEncoding(ccRows as any[], 'commande_client', 'IDcommande_client', ['ref_client'])
   const refCommandeClient = ((ccFixed[0] as any)?.ref_client ?? '').toString().trim()
 
-  const subject = `Soumission Lot ${lotString} - ${lot.ref_malterre}${lot.coloris_reference ? ` · ${lot.coloris_reference}` : ''}`
+  const subject = `Soumission Lot ${lotString} - ${lot.ref_malterre}${lot.coloris_reference ? ` · ${lot.coloris_reference}` : ''}${refCommandeClient ? ` · ${refCommandeClient}` : ''}`
   const body =
     `Bonjour,\n\n` +
     `Veuillez trouver ci-joint la soumission du lot ${lotString} pour la référence ${lot.client_designation || lot.ref_malterre}${lot.coloris_reference ? ` (coloris ${lot.coloris_reference})` : ''}.\n\n` +
