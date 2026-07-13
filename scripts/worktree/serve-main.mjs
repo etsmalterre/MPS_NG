@@ -94,7 +94,7 @@ async function up() {
   const webUp = await waitFor(WEB_PORT, 'Web')
 
   console.log('──────────────────────────────────────────')
-  console.log(`Slot 0  main (${reg.main.branch})`)
+  console.log(`Slot 0  main (${currentBranch()})`)
   console.log(`  Checkout : ${main}`)
   reportLine('API', API_PORT, apiPid, apiUp)
   reportLine('Web', WEB_PORT, webPid, webUp)
