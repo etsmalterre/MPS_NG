@@ -53,6 +53,13 @@ export const PERMISSION_KEYS = [
     category: 'Gestion client',
   },
   {
+    key: 'gestion_tarifs',
+    label: 'Gestion des tarifs',
+    description:
+      'Autorise la modification du mode de tarification d’une référence client — standard, coefficient fixe ou contrat — en mode édition dans Clients > Gestion.',
+    category: 'Gestion client',
+  },
+  {
     key: 'create_stock_fil',
     label: 'Créer un lot de fil',
     description: 'Autorise la création de nouvelles entrées dans Fournisseurs > Stock.',

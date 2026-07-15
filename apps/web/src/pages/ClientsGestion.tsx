@@ -27,6 +27,8 @@ import {
   ChevronDown,
   Palette,
   BadgeEuro,
+  Percent,
+  FileSignature,
   Tag,
   History,
   Truck,
@@ -233,6 +235,7 @@ export function ClientsGestion() {
   // marchandise) instead of explaining after the click. Same query key as the
   // confirm dialog, so the dialog reads it from cache.
   const canDelete = useHasPermission('delete_client')
+  const canManageTarifs = useHasPermission('gestion_tarifs')
   const { data: deletability } = useQuery<Deletability>({
     queryKey: ['client-deletability', selectedId],
     queryFn: () => apiFetch(`/clients/${selectedId}/deletability`),
@@ -368,7 +371,7 @@ export function ClientsGestion() {
           isUnarchiving={unarchiveMutation.isPending}
           onPrint={() => setTarifsSelector('print')} onEmail={() => setTarifsSelector('email')} />}
         detail={<DetailMain client={detail ?? null} isLoading={detailLoading && selectedId !== null}
-          hasSelection={selectedId !== null} />}
+          hasSelection={selectedId !== null} isEditing={isEditing} canManageTarifs={canManageTarifs} />}
         sidebar={selectedId !== null ? <DetailSidebar client={detail ?? null} isLoading={detailLoading}
           isEditing={isEditing} clientId={selectedId} onMutationSuccess={invalidateAll}
           onSubFormsDirtyChange={setSubFormsDirty} draft={draft} onPatch={patch}
@@ -463,6 +466,7 @@ interface TarifRow {
   refInterne: string
   coloris: string
   priceable: boolean
+  expired: boolean
 }
 
 function TarifsSelectionDialog({ open, mode, clientId, onClose, onEmail }: {
@@ -488,8 +492,10 @@ function TarifsSelectionDialog({ open, mode, clientId, onClose, onEmail }: {
           ref: r.client_ref,
           refInterne: r.ref_interne,
           coloris: c.label,
-          // Only fini references with a real coloris have a PrixDeVente tarif.
-          priceable: r.IDref_fini > 0 && c.coloris_id > 0,
+          // Only fini references with a real coloris have a PrixDeVente tarif,
+          // and an expired contract makes the ref unavailable (no fallback).
+          priceable: r.IDref_fini > 0 && c.coloris_id > 0 && !c.contrat_expire,
+          expired: c.contrat_expire,
         })
       }
     }
@@ -549,7 +555,7 @@ function TarifsSelectionDialog({ open, mode, clientId, onClose, onEmail }: {
                 {rows.map((r) => (
                   <label
                     key={r.rccId}
-                    title={r.priceable ? undefined : 'Tarif indisponible pour cette référence'}
+                    title={r.priceable ? undefined : r.expired ? 'Contrat expiré — référence indisponible jusqu’à l’établissement d’un nouveau contrat' : 'Tarif indisponible pour cette référence'}
                     className={cn(
                       'flex items-center gap-2 px-3 py-2 border-b border-border/40 last:border-b-0 text-sm transition-colors',
                       r.priceable ? 'cursor-pointer hover:bg-accent/5' : 'opacity-50 cursor-not-allowed',
@@ -568,6 +574,7 @@ function TarifsSelectionDialog({ open, mode, clientId, onClose, onEmail }: {
                     <span className="flex-1 truncate flex items-center gap-1.5">
                       <Palette className="h-3 w-3 text-muted-foreground/60 flex-shrink-0" />
                       {r.coloris || '—'}
+                      {r.expired && <span className="text-[9px] font-semibold px-1 rounded bg-red-500/10 text-red-700 border border-red-500/25 flex-shrink-0">Contrat expiré</span>}
                     </span>
                   </label>
                 ))}
@@ -758,8 +765,8 @@ function TogglePill({ label, checked, disabled, onChange }: {
 
 // ── Center: Detail Main (read-only history views) ──────
 
-function DetailMain({ client, isLoading, hasSelection }: {
-  client: ClientDetail | null; isLoading: boolean; hasSelection: boolean
+function DetailMain({ client, isLoading, hasSelection, isEditing, canManageTarifs }: {
+  client: ClientDetail | null; isLoading: boolean; hasSelection: boolean; isEditing: boolean; canManageTarifs: boolean
 }) {
   if (!hasSelection) return (
     <div className="flex-1 flex items-center justify-center">
@@ -774,8 +781,8 @@ function DetailMain({ client, isLoading, hasSelection }: {
 
   return (
     <div className="flex-1 min-h-0 overflow-auto space-y-4 pr-1">
-      {/* Read-only commercial sub-views */}
-      <ReferencesSection clientId={client.IDclient} />
+      {/* Commercial sub-views (tarif modes editable in edit mode, permission-gated) */}
+      <ReferencesSection clientId={client.IDclient} isEditing={isEditing} canManageTarifs={canManageTarifs} />
       <HistoriqueSection clientId={client.IDclient} />
       <MarchandiseSection clientId={client.IDclient} />
     </div>
@@ -1199,7 +1206,7 @@ function AdressesTab({ adresses, isEditing, clientId, onMutationSuccess, onDirty
 
 // ── Commercial sub-views (read-only collapsible sections) ──
 
-const UNITE_LABEL: Record<number, string> = { 1: 'Kg', 3: 'Ml', 4: 'U', 5: 'm²' }
+const UNITE_LABEL: Record<number, string> = { 1: 'Kg', 3: 'Ml', 4: 'unité', 5: 'm²' }
 
 function CollapsibleShell({ icon, title, badge, open, onToggle, children }: {
   icon: React.ReactNode; title: string; badge?: React.ReactNode; open: boolean; onToggle: () => void; children: React.ReactNode
@@ -1226,13 +1233,38 @@ const thHead = 'bg-zinc-100/80 border-b text-[10px] uppercase tracking-wide text
 
 // ── Références catalogue ───────────────────────────────
 
-interface RefColoris { IDref_client_colori: number; label: string; coloris_id: number; lst_tranche: string; contrat: number }
+interface ContratTarif { IDcontrat_tarif: number; date_debut: string; date_expiration: string; tranches: { nb_rouleaux: number; prix: number }[] }
+type TarifMode = 'standard' | 'coefficient' | 'contrat'
+interface RefColoris {
+  IDref_client_colori: number; label: string; coloris_id: number; lst_tranche: string; contrat: number
+  tarif_mode: TarifMode; coefficient: number; contrats: ContratTarif[]; contrat_actif: ContratTarif | null; contrat_expire: boolean
+}
 interface ClientReference { IDdesignation_client: number; client_ref: string; IDref_fini: number; IDref_ecru: number; ref_interne: string; avec_teinture: number; soumettre: number; unite: number; coloris: RefColoris[] }
 
-function ReferencesSection({ clientId }: { clientId: number }) {
+/** Small category tag showing a coloris' non-standard tarif mode on its chip. */
+function TarifModeTag({ c }: { c: RefColoris }) {
+  if (c.tarif_mode === 'coefficient') {
+    return <span className="text-[9px] font-semibold px-1 rounded bg-sky-500/10 text-sky-700 border border-sky-500/25">Coef {c.coefficient}</span>
+  }
+  if (c.tarif_mode === 'contrat') {
+    return c.contrat_expire ? (
+      <span className="text-[9px] font-semibold px-1 rounded bg-red-500/10 text-red-700 border border-red-500/25">Contrat expiré</span>
+    ) : (
+      <span className="text-[9px] font-semibold px-1 rounded bg-emerald-500/10 text-emerald-700 border border-emerald-500/25">
+        Contrat → {c.contrat_actif ? formatHfsqlDate(c.contrat_actif.date_expiration) : '?'}
+      </span>
+    )
+  }
+  return null
+}
+
+function ReferencesSection({ clientId, isEditing, canManageTarifs }: { clientId: number; isEditing: boolean; canManageTarifs: boolean }) {
   const [open, setOpen] = useState(false)
-  const [tarif, setTarif] = useState<{ IDref_fini: number; colorisId: number; label: string } | null>(null)
+  const [tarif, setTarif] = useState<{ rccId: number; label: string } | null>(null)
+  const [tarifMode, setTarifMode] = useState<{ coloris: RefColoris; label: string } | null>(null)
   const { data, isLoading } = useQuery<ClientReference[]>({ queryKey: ['client-references', clientId], queryFn: () => apiFetch(`/clients/${clientId}/references`), enabled: open })
+  // Edit-mode click edits the tarif mode (permission-gated); view-mode click shows the tarif.
+  const tarifEditable = isEditing && canManageTarifs
   return (
     <CollapsibleShell icon={<Tag className="h-4 w-4 text-accent" />} title="Références" open={open} onToggle={() => setOpen(!open)}
       badge={data ? <Badge variant="secondary" className="text-xs">{data.length}</Badge> : null}>
@@ -1250,14 +1282,24 @@ function ReferencesSection({ clientId }: { clientId: number }) {
                 <div className="mt-2 flex flex-wrap gap-1 ml-9">
                   {r.coloris.map((c) => {
                     const priceable = r.IDref_fini > 0 && c.coloris_id > 0
+                    const label = `${r.client_ref} · ${c.label}`
                     return (
                       <button key={c.IDref_client_colori} type="button" disabled={!priceable}
-                        onClick={() => priceable && setTarif({ IDref_fini: r.IDref_fini, colorisId: c.coloris_id, label: `${r.client_ref} · ${c.label}` })}
-                        title={priceable ? 'Voir le tarif' : undefined}
+                        onClick={() => {
+                          if (!priceable) return
+                          if (tarifEditable) setTarifMode({ coloris: c, label })
+                          else setTarif({ rccId: c.IDref_client_colori, label })
+                        }}
+                        title={priceable ? (tarifEditable ? 'Modifier le tarif' : 'Voir le tarif') : undefined}
                         className={cn('inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border transition-colors',
-                          priceable ? 'border-accent/30 bg-accent/5 hover:bg-accent/15 text-foreground cursor-pointer' : 'border-border bg-muted text-muted-foreground cursor-default')}>
+                          priceable
+                            ? tarifEditable
+                              ? 'border-accent/60 bg-accent/10 hover:bg-accent/20 text-foreground cursor-pointer'
+                              : 'border-accent/30 bg-accent/5 hover:bg-accent/15 text-foreground cursor-pointer'
+                            : 'border-border bg-muted text-muted-foreground cursor-default')}>
                         <Palette className="h-2.5 w-2.5" />{c.label || '—'}
-                        {priceable && <BadgeEuro className="h-2.5 w-2.5 opacity-60" />}
+                        <TarifModeTag c={c} />
+                        {priceable && (tarifEditable ? <Pencil className="h-2.5 w-2.5 opacity-60" /> : <BadgeEuro className="h-2.5 w-2.5 opacity-60" />)}
                       </button>
                     )
                   })}
@@ -1267,12 +1309,13 @@ function ReferencesSection({ clientId }: { clientId: number }) {
           ))}
         </div>
       )}
-      <TarifDialog open={tarif !== null} onClose={() => setTarif(null)} IDref_fini={tarif?.IDref_fini ?? 0} colorisId={tarif?.colorisId ?? 0} label={tarif?.label ?? ''} />
+      <TarifDialog open={tarif !== null} onClose={() => setTarif(null)} clientId={clientId} rccId={tarif?.rccId ?? 0} label={tarif?.label ?? ''} />
+      <TarifModeDialog open={tarifMode !== null} onClose={() => setTarifMode(null)} clientId={clientId} target={tarifMode} />
     </CollapsibleShell>
   )
 }
 
-// ── Tarif dialog (PrixDeVente breakdown — reuses /references-fini/:id/tarif) ──
+// ── Tarif dialog (PrixDeVente breakdown, client tarif mode aware) ──
 
 interface TarifDetailLine { label: string; valueKg: number }
 interface TarifTranche {
@@ -1283,8 +1326,12 @@ interface TarifTranche {
   moTeinte: number; detailTeinture: TarifDetailLine | null
   moRevient: number; rCoeff: number; tauxFraisDePort: number
   moPortAuKg: number; moPortAuMl: number; moPrixDeVenteAuKg: number; moPrixDeVenteAuMl: number
+  prixContrat: number | null
 }
-interface TarifResult { IDref_fini: number; IDcoloris: number; avec_teinture: number; rendement: number; tranches: TarifTranche[] }
+interface TarifResult {
+  IDref_fini: number; IDcoloris: number; avec_teinture: number; rendement: number; tranches: TarifTranche[]
+  tarif_mode: TarifMode; coefficient: number; contrats: ContratTarif[]; contrat_actif: ContratTarif | null; contrat_expire: boolean
+}
 
 function CostSection({ title, total, children }: { title: string; total?: string; children?: React.ReactNode }) {
   return (
@@ -1306,15 +1353,21 @@ function CostLine({ label, value }: { label: string; value: string }) {
   )
 }
 
-function TarifDialog({ open, onClose, IDref_fini, colorisId, label }: { open: boolean; onClose: () => void; IDref_fini: number; colorisId: number; label: string }) {
+function TarifDialog({ open, onClose, clientId, rccId, label }: { open: boolean; onClose: () => void; clientId: number; rccId: number; label: string }) {
   const [selectedTranche, setSelectedTranche] = useState(0)
-  useEffect(() => { if (open) setSelectedTranche(0) }, [open, colorisId])
+  useEffect(() => { if (open) setSelectedTranche(0) }, [open, rccId])
   const { data, isLoading, isError } = useQuery<TarifResult>({
-    queryKey: ['client-tarif', IDref_fini, colorisId],
-    queryFn: () => apiFetch(`/references-fini/${IDref_fini}/tarif?coloris=${colorisId}`),
-    enabled: open && IDref_fini > 0 && colorisId > 0,
+    queryKey: ['client-tarif', clientId, rccId],
+    queryFn: () => apiFetch(`/clients/${clientId}/coloris/${rccId}/tarif`),
+    enabled: open && rccId > 0,
   })
-  const tranches = data?.tranches ?? []
+  // Contrat mode (active contract): the user only ever buys at the negotiated
+  // prices — show exclusively the contracted tranches, like the legacy Tarifs
+  // tab. Standard rows only reappear when the contract has expired (fallback).
+  const allTranches = data?.tranches ?? []
+  const tranches = data?.tarif_mode === 'contrat' && data.contrat_actif
+    ? allTranches.filter((t) => t.prixContrat != null)
+    : allTranches
   const current = tranches[Math.min(selectedTranche, Math.max(tranches.length - 1, 0))] ?? null
   const eurKg = (v: number) => `${fmtNum(v, 2)} €/Kg`
   return (
@@ -1324,10 +1377,34 @@ function TarifDialog({ open, onClose, IDref_fini, colorisId, label }: { open: bo
           <DialogTitle className="flex items-center gap-2"><BadgeEuro className="h-5 w-5 text-accent" /><span className="truncate">Tarif — {label}</span></DialogTitle>
         </DialogHeader>
         <div className="mt-4 space-y-3 max-h-[70vh] overflow-y-auto pr-1 scrollbar-transparent">
-          {isLoading ? <SectionSpinner /> : isError ? <p className="text-sm text-destructive">Erreur lors du calcul du tarif.</p> : tranches.length === 0 ? (
+          {isLoading ? <SectionSpinner /> : isError ? <p className="text-sm text-destructive">Erreur lors du calcul du tarif.</p>
+          : data?.tarif_mode === 'contrat' && data.contrat_expire ? (
+            // Expired contract: the negotiated prices are gone and the ref is
+            // simply not sellable until a new contract is signed — never fall
+            // back to the standard tarif here.
+            <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg border border-red-500/25 bg-red-500/10 text-red-700 text-xs font-medium">
+              <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+              <span>
+                Contrat expiré{data.contrats[0]?.date_expiration ? ` depuis le ${formatHfsqlDate(data.contrats[0].date_expiration)}` : ''} —
+                cette référence n’est plus disponible tant qu’un nouveau contrat n’a pas été établi.
+              </span>
+            </div>
+          ) : tranches.length === 0 ? (
             <p className="text-sm text-muted-foreground italic">Tarif indisponible pour cette référence / ce coloris.</p>
           ) : (
             <>
+              {data?.tarif_mode === 'coefficient' && (
+                <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-sky-500/25 bg-sky-500/10 text-sky-800 text-xs font-medium">
+                  <Percent className="h-3.5 w-3.5 flex-shrink-0" />
+                  Coefficient fixe : {data.coefficient} (appliqué à toutes les tranches)
+                </div>
+              )}
+              {data?.tarif_mode === 'contrat' && data.contrat_actif && (
+                <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-emerald-500/25 bg-emerald-500/10 text-emerald-800 text-xs font-medium">
+                  <FileSignature className="h-3.5 w-3.5 flex-shrink-0" />
+                  Contrat du {formatHfsqlDate(data.contrat_actif.date_debut)} au {formatHfsqlDate(data.contrat_actif.date_expiration)}
+                </div>
+              )}
               <div className="rounded-lg border border-border/60 overflow-hidden bg-card shadow-sm">
                 <table className="w-full text-xs" style={{ tableLayout: 'fixed' }}>
                   <colgroup><col style={{ width: '26%' }} /><col style={{ width: '34%' }} /><col style={{ width: '40%' }} /></colgroup>
@@ -1340,35 +1417,306 @@ function TarifDialog({ open, onClose, IDref_fini, colorisId, label }: { open: bo
                     {tranches.map((t, i) => (
                       <tr key={i} onClick={() => setSelectedTranche(i)}
                         className={cn('border-b border-border/40 last:border-b-0 cursor-pointer transition-colors', selectedTranche === i ? 'bg-accent/10' : 'hover:bg-accent/5')}>
-                        <td className="px-2 py-1.5 tabular-nums">{t.isMetrage ? '< 1' : t.rolls}</td>
+                        <td className="px-2 py-1.5 tabular-nums">{t.isMetrage ? '< 1' : t.prixContrat != null ? `${t.rolls} et plus` : t.rolls}</td>
                         <td className="px-2 py-1.5 text-right tabular-nums">{t.isMetrage ? '< ' : ''}{fmtNum(t.qte_ml)}</td>
-                        <td className="px-2 py-1.5 text-right tabular-nums font-medium">{fmtNum(t.moPrixDeVenteAuMl, 2)} €</td>
+                        <td className="px-2 py-1.5 text-right tabular-nums font-medium">
+                          {t.prixContrat != null ? (
+                            <span className="inline-flex items-center gap-1.5">
+                              <span className="text-[9px] font-semibold px-1 rounded bg-emerald-500/10 text-emerald-700 border border-emerald-500/25">contrat</span>
+                              {fmtNum(t.prixContrat, 2)} €
+                            </span>
+                          ) : (
+                            <>{fmtNum(t.moPrixDeVenteAuMl, 2)} €</>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-              {current && (
+              {current && (() => {
+                // Contract tranche: legacy computes the "Calcul du Tarif" detail
+                // on the 15-roll cost basis (bulk dye/treatment bands, -5%
+                // tricotage) — the coefficient is then DERIVED from the fixed
+                // contract price against those bulk costs ("Coeff Calculé").
+                const isContrat = current.prixContrat != null && (data?.rendement ?? 0) > 0
+                const basis = isContrat ? (allTranches.find((t) => !t.isMetrage && t.rolls === 15) ?? current) : current
+                const rdt = Math.round((data?.rendement ?? 0) * 100) / 100
+                const pvKgContrat = isContrat ? current.prixContrat! * rdt : 0
+                const coefDerive = isContrat
+                  ? Math.round(100 * (1 - basis.moRevient / (pvKgContrat * (1 - basis.tauxFraisDePort))))
+                  : 0
+                return (
                 <div className="p-3 rounded-lg border bg-card shadow-sm space-y-2.5">
-                  <CostSection title="Fil" total={eurKg(current.moFil)}>{current.detailFil.map((l, i) => <CostLine key={i} label={l.label} value={eurKg(l.valueKg)} />)}</CostSection>
-                  <CostSection title="Tricotage" total={eurKg(current.moTricotage)}>{current.detailTricotage && <CostLine label={current.detailTricotage.label} value={eurKg(current.detailTricotage.valueKg)} />}</CostSection>
-                  <CostSection title="Traitement" total={eurKg(current.moTraitements)}>
-                    {current.detailTraitement.length > 0 ? current.detailTraitement.map((l, i) => <CostLine key={i} label={l.label} value={eurKg(l.valueKg)} />) : <p className="text-[11px] text-muted-foreground italic">Aucun traitement</p>}
+                  <CostSection title="Fil" total={eurKg(basis.moFil)}>{basis.detailFil.map((l, i) => <CostLine key={i} label={l.label} value={eurKg(l.valueKg)} />)}</CostSection>
+                  <CostSection title="Tricotage" total={eurKg(basis.moTricotage)}>{basis.detailTricotage && <CostLine label={basis.detailTricotage.label} value={eurKg(basis.detailTricotage.valueKg)} />}</CostSection>
+                  <CostSection title="Traitement" total={eurKg(basis.moTraitements)}>
+                    {basis.detailTraitement.length > 0 ? basis.detailTraitement.map((l, i) => <CostLine key={i} label={l.label} value={eurKg(l.valueKg)} />) : <p className="text-[11px] text-muted-foreground italic">Aucun traitement</p>}
                   </CostSection>
                   {(data?.avec_teinture ?? 0) !== 0 && (
-                    <CostSection title="Teinture" total={eurKg(current.moTeinte)}>{current.detailTeinture && <CostLine label={current.detailTeinture.label} value={eurKg(current.detailTeinture.valueKg)} />}</CostSection>
+                    <CostSection title="Teinture" total={eurKg(basis.moTeinte)}>{basis.detailTeinture && <CostLine label={basis.detailTeinture.label} value={eurKg(basis.detailTeinture.valueKg)} />}</CostSection>
                   )}
                   <CostSection title="Prix de vente">
-                    <CostLine label="Prix de revient au Kg" value={eurKg(current.moRevient)} />
-                    <CostLine label="Coefficient" value={String(Math.round(current.rCoeff * 100))} />
-                    <CostLine label={`Prix de vente au Kg · port ${Math.round(current.tauxFraisDePort * 100)}% inclus`} value={`${fmtNum(current.moPrixDeVenteAuKg, 2)} €/Kg`} />
-                    <CostLine label={`Prix de vente au Ml · port ${Math.round(current.tauxFraisDePort * 100)}% inclus`} value={`${fmtNum(current.moPrixDeVenteAuMl, 2)} €/Ml`} />
+                    <CostLine label="Prix de revient au Kg" value={eurKg(basis.moRevient)} />
+                    {isContrat ? (
+                      <>
+                        <CostLine label="Coefficient (calculé du contrat)" value={String(coefDerive)} />
+                        <CostLine label={`Prix de vente au Kg · port ${Math.round(basis.tauxFraisDePort * 100)}% inclus`} value={`${fmtNum(pvKgContrat, 2)} €/Kg`} />
+                        <CostLine label={`Prix de vente au Ml · port ${Math.round(basis.tauxFraisDePort * 100)}% inclus`} value={`${fmtNum(current.prixContrat!, 2)} €/Ml`} />
+                      </>
+                    ) : (
+                      <>
+                        <CostLine label="Coefficient" value={String(Math.round(current.rCoeff * 100))} />
+                        <CostLine label={`Prix de vente au Kg · port ${Math.round(current.tauxFraisDePort * 100)}% inclus`} value={`${fmtNum(current.moPrixDeVenteAuKg, 2)} €/Kg`} />
+                        <CostLine label={`Prix de vente au Ml · port ${Math.round(current.tauxFraisDePort * 100)}% inclus`} value={`${fmtNum(current.moPrixDeVenteAuMl, 2)} €/Ml`} />
+                      </>
+                    )}
                   </CostSection>
                 </div>
-              )}
+                )
+              })()}
             </>
           )}
         </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ── Tarif mode dialog (edit mode, permission « gestion_tarifs ») ──
+// Switches a référence×coloris between the three legacy tarif modes:
+// standard (marge dégressive), coefficient fixe (marge fixe %), contrat
+// (prix négociés €/Ml par tranche + dates de validité, renouvellements
+// conservés en historique).
+
+const TRANCHE_NB_VALUES = [0, 1, 2, 3, 4, 5, 10, 15, 30]
+const TRANCHE_QTY_OPTIONS = TRANCHE_NB_VALUES.map((nb, i) => ({
+  id: i + 1,
+  primary: nb === 0 ? '< 1 rouleau (métrage)' : nb === 1 ? '1 rouleau' : `${nb} rouleaux`,
+}))
+const nbToOptionId = (nb: number) => {
+  const i = TRANCHE_NB_VALUES.indexOf(nb)
+  return i >= 0 ? i + 1 : 2
+}
+const optionIdToNb = (id: number) => TRANCHE_NB_VALUES[id - 1] ?? 1
+
+interface TrancheDraft { key: number; nb_rouleaux: number; prix: string }
+
+function TarifModeCard({ selected, onSelect, icon: Icon, title, desc, children }: {
+  selected: boolean; onSelect: () => void; icon: React.ElementType; title: string; desc: string; children?: React.ReactNode
+}) {
+  return (
+    <div className={cn('rounded-lg border transition-colors', selected ? 'border-accent ring-1 ring-accent bg-accent/5' : 'border-border hover:border-accent/40')}>
+      <button type="button" className="w-full text-left p-3 flex items-start gap-2.5" onClick={onSelect}>
+        <Icon className="h-4 w-4 mt-0.5 text-accent flex-shrink-0" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium">{title}</p>
+          <p className="text-xs text-muted-foreground">{desc}</p>
+        </div>
+        <span className={cn('mt-1 h-3.5 w-3.5 rounded-full border-2 flex-shrink-0', selected ? 'border-accent bg-accent' : 'border-zinc-300')} />
+      </button>
+      {selected && children && <div className="px-3 pb-3">{children}</div>}
+    </div>
+  )
+}
+
+function TarifModeDialog({ open, onClose, clientId, target }: {
+  open: boolean; onClose: () => void; clientId: number
+  target: { coloris: RefColoris; label: string } | null
+}) {
+  const queryClient = useQueryClient()
+  const [mode, setMode] = useState<TarifMode>('standard')
+  const [coefficient, setCoefficient] = useState('')
+  const [contratId, setContratId] = useState<number | null>(null)
+  const [dateDebut, setDateDebut] = useState('')
+  const [dateExpiration, setDateExpiration] = useState('')
+  const [tranches, setTranches] = useState<TrancheDraft[]>([])
+  const [showHistory, setShowHistory] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const keyRef = useRef(0)
+
+  // Hydrate from the coloris' current mode each time the dialog opens.
+  useEffect(() => {
+    if (!open || !target) return
+    const c = target.coloris
+    setMode(c.tarif_mode)
+    setCoefficient(c.coefficient > 0 ? String(c.coefficient) : '')
+    const base = c.contrat_actif ?? c.contrats[0] ?? null
+    if (base) {
+      setContratId(base.IDcontrat_tarif)
+      setDateDebut(hfsqlDateToInput(base.date_debut))
+      setDateExpiration(hfsqlDateToInput(base.date_expiration))
+      setTranches(base.tranches.map((t) => ({ key: ++keyRef.current, nb_rouleaux: t.nb_rouleaux, prix: String(t.prix) })))
+    } else {
+      setContratId(null)
+      setDateDebut(new Date().toISOString().slice(0, 10))
+      setDateExpiration('')
+      setTranches([{ key: ++keyRef.current, nb_rouleaux: 1, prix: '' }])
+    }
+    setShowHistory(false)
+    setError(null)
+  }, [open, target])
+
+  const rccId = target?.coloris.IDref_client_colori ?? 0
+  const saveMut = useMutation({
+    mutationFn: (body: unknown) => apiFetch(`/clients/${clientId}/coloris/${rccId}/tarif-mode`, { method: 'PUT', body: JSON.stringify(body) }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['client-references', clientId] })
+      queryClient.invalidateQueries({ queryKey: ['client-tarif', clientId, rccId] })
+      onClose()
+    },
+    onError: (err: Error) => setError(err.message || 'Erreur lors de l’enregistrement.'),
+  })
+
+  // Start a fresh contract (renewal) — history is kept server-side.
+  const startNewContrat = () => {
+    setContratId(null)
+    setDateDebut(new Date().toISOString().slice(0, 10))
+    setDateExpiration('')
+  }
+
+  const addTranche = () => {
+    const used = new Set(tranches.map((t) => t.nb_rouleaux))
+    const next = TRANCHE_NB_VALUES.find((nb) => !used.has(nb)) ?? 1
+    setTranches((prev) => [...prev, { key: ++keyRef.current, nb_rouleaux: next, prix: '' }])
+  }
+
+  const save = () => {
+    if (!target) return
+    setError(null)
+    if (mode === 'coefficient') {
+      const n = parseInt(coefficient, 10)
+      if (!Number.isInteger(n) || n < 1 || n > 99) { setError('Coefficient invalide (entier de 1 à 99).'); return }
+      saveMut.mutate({ mode, coefficient: n })
+      return
+    }
+    if (mode === 'contrat') {
+      if (!dateDebut || !dateExpiration) { setError('Les dates de début et d’expiration sont requises.'); return }
+      const d1 = inputDateToHfsql(dateDebut)
+      const d2 = inputDateToHfsql(dateExpiration)
+      if (d2 <= d1) { setError('La date d’expiration doit être postérieure à la date de début.'); return }
+      const rows = tranches
+        .map((t) => ({ nb_rouleaux: t.nb_rouleaux, prix: Number(t.prix.replace(',', '.')) }))
+        .filter((t) => Number.isFinite(t.prix) && t.prix > 0)
+      if (rows.length === 0) { setError('Au moins une tranche avec un prix est requise.'); return }
+      if (new Set(rows.map((r) => r.nb_rouleaux)).size !== rows.length) { setError('Chaque quantité de tranche ne peut apparaître qu’une seule fois.'); return }
+      saveMut.mutate({ mode, contrat: { date_debut: d1, date_expiration: d2, tranches: rows, ...(contratId ? { IDcontrat_tarif: contratId } : {}) } })
+      return
+    }
+    saveMut.mutate({ mode })
+  }
+
+  if (!target) return null
+  const pastContrats = target.coloris.contrats.filter((c) => c.IDcontrat_tarif !== contratId)
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent className="max-w-xl" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><BadgeEuro className="h-5 w-5 text-accent" /><span className="truncate">Mode de tarification — {target.label}</span></DialogTitle>
+        </DialogHeader>
+        <div className="mt-4 space-y-2 max-h-[65vh] overflow-y-auto pr-1 scrollbar-transparent">
+          <TarifModeCard selected={mode === 'standard'} onSelect={() => setMode('standard')} icon={BadgeEuro}
+            title="Standard" desc="Tarif calculé — marge dégressive selon la quantité commandée." />
+
+          <TarifModeCard selected={mode === 'coefficient'} onSelect={() => setMode('coefficient')} icon={Percent}
+            title="Coefficient fixe" desc="Marge fixe appliquée à toutes les tranches à la place de la marge dégressive.">
+            <div className="flex items-center gap-2 pl-6">
+              <label className="text-xs font-medium text-muted-foreground">Coefficient</label>
+              <input value={coefficient} onChange={(e) => setCoefficient(e.target.value.replace(/[^0-9]/g, ''))}
+                inputMode="numeric" placeholder="20" autoComplete="off"
+                className="h-8 w-20 px-2.5 text-sm text-right rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring" />
+              <span className="text-xs text-muted-foreground">(marge en % — ex. 20)</span>
+            </div>
+          </TarifModeCard>
+
+          <TarifModeCard selected={mode === 'contrat'} onSelect={() => setMode('contrat')} icon={FileSignature}
+            title="Contrat" desc="Prix négociés au Ml par tranche, valables sur une période définie.">
+            <div className="pl-6 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-semibold text-accent uppercase tracking-wide">
+                  {contratId ? 'Contrat en cours' : 'Nouveau contrat'}
+                </p>
+                {contratId !== null && (
+                  <Button variant="ghost" size="sm" className="h-7 text-accent hover:text-accent hover:bg-accent/10" onClick={startNewContrat}>
+                    <Plus className="h-3.5 w-3.5 mr-1" />Nouveau contrat
+                  </Button>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-muted-foreground">Début</label>
+                  <input type="date" value={dateDebut} onChange={(e) => setDateDebut(e.target.value)}
+                    className="w-full h-8 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-muted-foreground">Expiration</label>
+                  <input type="date" value={dateExpiration} onChange={(e) => setDateExpiration(e.target.value)}
+                    className="w-full h-8 px-2.5 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring" />
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <p className="text-xs font-medium text-muted-foreground">Prix négociés (€/Ml)</p>
+                {tranches.map((t) => (
+                  <div key={t.key} className="flex items-center gap-2">
+                    <div className="flex-1 min-w-0">
+                      <PopoverSelect size="sm" hideEmpty value={nbToOptionId(t.nb_rouleaux)}
+                        onChange={(id) => setTranches((prev) => prev.map((x) => (x.key === t.key ? { ...x, nb_rouleaux: optionIdToNb(id) } : x)))}
+                        options={TRANCHE_QTY_OPTIONS} />
+                    </div>
+                    <input value={t.prix} inputMode="decimal" placeholder="0,00" autoComplete="off"
+                      onChange={(e) => setTranches((prev) => prev.map((x) => (x.key === t.key ? { ...x, prix: e.target.value } : x)))}
+                      className="h-7 w-24 px-2 text-sm text-right rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring tabular-nums" />
+                    <span className="text-xs text-muted-foreground">€/Ml</span>
+                    <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive hover:text-destructive"
+                      disabled={tranches.length <= 1}
+                      onClick={() => setTranches((prev) => prev.filter((x) => x.key !== t.key))}>
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
+                  </div>
+                ))}
+                {tranches.length < TRANCHE_NB_VALUES.length && (
+                  <Button variant="ghost" size="sm" className="w-full text-muted-foreground hover:text-foreground" onClick={addTranche}>
+                    <Plus className="h-4 w-4 mr-1.5" />Ajouter une tranche
+                  </Button>
+                )}
+              </div>
+              {pastContrats.length > 0 && (
+                <div>
+                  <button type="button" onClick={() => setShowHistory(!showHistory)}
+                    className="text-xs text-muted-foreground hover:text-foreground transition-colors">
+                    {showHistory ? 'Masquer les contrats précédents' : `Afficher les contrats précédents (${pastContrats.length})`}
+                  </button>
+                  {showHistory && (
+                    <div className="mt-1.5 space-y-1">
+                      {pastContrats.map((c) => (
+                        <div key={c.IDcontrat_tarif} className="flex items-center gap-2 text-[11px] text-muted-foreground px-2 py-1 rounded border border-border/50 bg-zinc-100/60">
+                          <CalendarClock className="h-3 w-3 flex-shrink-0" />
+                          <span>{formatHfsqlDate(c.date_debut)} → {formatHfsqlDate(c.date_expiration)}</span>
+                          <span className="ml-auto tabular-nums">
+                            {c.tranches.map((tr) => `${tr.nb_rouleaux === 0 ? '<1' : tr.nb_rouleaux} Rlx : ${fmtNum(tr.prix, 2)} €`).join(' · ')}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </TarifModeCard>
+
+          {error && (
+            <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-red-500/25 bg-red-500/10 text-red-700 text-xs">
+              <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />{error}
+            </div>
+          )}
+        </div>
+        <DialogFooter className="mt-4">
+          <Button variant="outline" onClick={onClose}>Annuler</Button>
+          <Button onClick={save} disabled={saveMut.isPending}>
+            <Save className="h-3.5 w-3.5 mr-1.5" />{saveMut.isPending ? 'Enregistrement...' : 'Enregistrer'}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -1451,7 +1799,7 @@ function MarchandiseSection({ clientId }: { clientId: number }) {
                     <td className="px-2 py-1.5 truncate max-w-[150px]" title={l.coloris}>{l.coloris || '—'}</td>
                     <td className="px-2 py-1.5 whitespace-nowrap">{l.piece || '—'}{!!l.second_choix && <Badge variant="outline" className="ml-1 text-[9px] py-0 px-1">2nd</Badge>}</td>
                     <td className="px-2 py-1.5 text-right tabular-nums whitespace-nowrap">{fmtNum(l.poids, 2)} kg</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums whitespace-nowrap">{fmtNum(l.metrage, 1)} m</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums whitespace-nowrap">{fmtNum(l.metrage, 1)} Ml</td>
                   </tr>
                 ))}
               </tbody>

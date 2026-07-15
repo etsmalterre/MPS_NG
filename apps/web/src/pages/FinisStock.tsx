@@ -602,7 +602,7 @@ export function FinisStock() {
                 <span className="text-muted-foreground/50">·</span>
                 <span className="font-medium tabular-nums">{fmtNum(selPoids, 1)} kg</span>
                 <span className="text-muted-foreground/50">·</span>
-                <span className="font-medium tabular-nums">{fmtNum(selMetrage, 1)} m</span>
+                <span className="font-medium tabular-nums">{fmtNum(selMetrage, 1)} Ml</span>
               </span>
             )}
           </div>
@@ -613,7 +613,7 @@ export function FinisStock() {
             </div>
             <div className="flex items-baseline gap-2 border-l border-border/60 pl-5">
               <span className="text-xs uppercase tracking-wide text-muted-foreground">Métrage total</span>
-              <span className="text-base font-bold tabular-nums">{fmtNum(totalMetrage, 1)} m</span>
+              <span className="text-base font-bold tabular-nums">{fmtNum(totalMetrage, 1)} Ml</span>
             </div>
           </div>
         </div>

@@ -3828,7 +3828,7 @@ function EcruRollRow({
               <span className="font-medium text-foreground">{fmtNum(Number(roll.poids), 1)} kg</span>
             )}
             {Number(roll.metrage) > 0 && (
-              <span>{fmtNum(Number(roll.metrage), 1)} m</span>
+              <span>{fmtNum(Number(roll.metrage), 1)} Ml</span>
             )}
             {roll.date_saisie && (
               <span>entré {formatHfsqlDate(roll.date_saisie)}</span>
@@ -3980,7 +3980,7 @@ function FiniRollRow({
               <span className="font-medium text-foreground">{fmtNum(Number(roll.poids), 1)} kg</span>
             )}
             {Number(roll.metrage) > 0 && (
-              <span>{fmtNum(Number(roll.metrage), 1)} m</span>
+              <span>{fmtNum(Number(roll.metrage), 1)} Ml</span>
             )}
             {roll.date_saisie && (
               <span>reçu {formatHfsqlDate(roll.date_saisie)}</span>
@@ -5131,7 +5131,7 @@ function SelectableEcruRow({
             <span className="font-medium text-foreground">{fmtNum(Number(roll.poids), 1)} kg</span>
           )}
           {Number(roll.metrage) > 0 && (
-            <span>{fmtNum(Number(roll.metrage), 1)} m</span>
+            <span>{fmtNum(Number(roll.metrage), 1)} Ml</span>
           )}
           {roll.date_saisie && (
             <span>entré {formatHfsqlDate(roll.date_saisie)}</span>

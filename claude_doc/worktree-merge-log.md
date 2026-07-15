@@ -11,6 +11,28 @@ other worktrees see what changed when they rebase. Format:
 <!-- entries below -->
 
 
+## 2026-07-15 — feat/gestion-client
+Clients › Gestion — **Tarif modes per référence×coloris (standard / coefficient fixe / contrat)
++ permission « Gestion des tarifs » + historique divers fix + Ml label sweep.**
+Reverse-engineered the legacy model: mode lives on `ref_client_colori` — *coefficient fixe* is a
+`tranche_tarifaire` row (`coefficient` %, `IDcontrat_tarif=0`) replacing the degressive
+COEFFICIENT_V2 margin on every tranche; *contrat* is `rcc.contrat=1` + `contrat_tarif` rows
+(date_debut/date_expiration, renewals kept as history) + `tranche_tarifaire` rows carrying the
+negotiated €/Ml (`prix_saisi`) per `nb_rouleaux` linked via `IDcontrat_tarif`. API: references
+endpoint enriched with per-coloris mode info; `GET /clients/:id/coloris/:rccId/tarif` (mode-aware
+PrixDeVente); `PUT .../tarif-mode` gated by new `gestion_tarifs` permission key;
+`calcTarifRefFini` gained an `opts.coefficient` override. UI: mode tags on coloris chips
+(Coef n / Contrat → date / Contrat expiré), mode-aware TarifDialog (contrat: only contracted
+tranches shown as "N et plus", detail on the legacy 15-roll cost basis with the coefficient
+derived from the contract price — verified byte-for-byte against legacy: revient 11,87, coef 13,
+PV 4,06 €/Ml on 029A/0512), TarifModeDialog editor in edit mode (radio cards, contract editor
+with tranche rows + history). Expired contract = ref unavailable everywhere (no standard
+fallback): dialog notice, PDF drops the coloris, selection dialog disables the row. Fiche Tarifs
+PDF honors both modes. Historique des commandes: divers lines (type 3) now resolve
+`ref_divers.designation` + `ref_divers_variation` (couleur/taille) instead of the literal
+"Divers"; unité 4 shows "unité". Métrage displays app-wide corrected to "Ml"
+(ClientsGestion, FinisReferences, FinisStock, SousTraitantsCommandes).
+
 ## 2026-07-15 — feat/pwa
 App-wide — **PWA identity renamed to "ETM" + missing install icons created** (`apps/web/vite.config.ts`,
 `apps/web/index.html`, `apps/web/public/favicon.svg`, `apps/web/public/icons/*`). The manifest previously

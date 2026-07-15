@@ -129,10 +129,16 @@ function bandPrix(bands: BandRow[], poids: number): number {
  * coloris. Returns `tranches: []` (never throws) when the inputs can't produce a
  * price — missing ref/écru, rendement 0, or no coloris — so the UI shows an
  * empty state rather than an error.
+ *
+ * `opts.coefficient` (0..1 ratio) replaces the degressive per-tranche
+ * COEFFICIENT_V2 margin with a fixed one for every tranche — the legacy
+ * "coefficient fixe" client tarif mode (a single `tranche_tarifaire` row with
+ * `coefficient` %, e.g. 20 → 0.20).
  */
 export async function calcTarifRefFini(
   IDref_fini: number,
   IDcoloris: number,
+  opts?: { coefficient?: number },
 ): Promise<TarifResult> {
   const empty: TarifResult = {
     IDref_fini,
@@ -318,7 +324,10 @@ export async function calcTarifRefFini(
     const moRevient = moFil + moTricotage + moTraitements + moTeinte
 
     const tauxPort = i === 8 ? TAUX_FRAIS_DE_PORT_30RLX : TAUX_FRAIS_DE_PORT
-    const rCoeff = COEFFICIENT_V2[i]
+    const rCoeff =
+      opts?.coefficient !== undefined && opts.coefficient > 0 && opts.coefficient < 1
+        ? opts.coefficient
+        : COEFFICIENT_V2[i]
 
     // CalculPrixDeVente (type-fini branch).
     const venteAvantPortKg = moRevient / (1 - rCoeff)

@@ -1317,7 +1317,7 @@ function StockCard({ detail, isEditing }: { detail: RefFiniDetail; isEditing: bo
                 </div>
                 <div className="flex items-baseline gap-2">
                   <span className="text-xs text-muted-foreground">Total métrage</span>
-                  <span className="text-lg font-semibold tabular-nums">{fmtNum(detail.stock_total_m, 1)} m</span>
+                  <span className="text-lg font-semibold tabular-nums">{fmtNum(detail.stock_total_m, 1)} Ml</span>
                 </div>
               </div>
               {detail.reference && (

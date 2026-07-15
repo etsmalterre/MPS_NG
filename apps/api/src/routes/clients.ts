@@ -591,6 +591,17 @@ async function mapSimpleRef(table: string, idCol: string, ids: number[]): Promis
   for (const r of fixed) m.set(numOf(r[idCol]), strOf(r.reference) ?? '')
   return m
 }
+/** Same as mapSimpleRef but for tables labeled by `designation`
+ *  (ref_divers, ref_divers_variation). */
+async function mapDesignation(table: string, idCol: string, ids: number[]): Promise<Map<number, string>> {
+  const m = new Map<number, string>()
+  const uniq = [...new Set(ids.filter((x) => Number.isInteger(x) && x > 0))]
+  if (!uniq.length) return m
+  const rows = await query<Record<string, unknown>>(`SELECT ${idCol}, designation FROM ${table} WHERE ${idCol} IN (${uniq.join(',')})`)
+  const fixed = await fixEncoding(rows, table, idCol, ['designation'])
+  for (const r of fixed) m.set(numOf(r[idCol]), strOf(r.designation) ?? '')
+  return m
+}
 /** Resolve a polymorphic coloris id to its label, preferring the dye catalog
  *  when avec_teinture != 0, the wash catalog otherwise (project_avec_teinture_coloris_rule). */
 function coloriLabel(id: number, avecTeinture: number, ce: Map<number, string>, rfc: Map<number, string>): string {
@@ -611,7 +622,7 @@ clientsRouter.get('/:id/historique', async (req: Request, res: Response) => {
     const cids = heads.map((h) => numOf(h.IDcommande_client))
     const headMap = new Map(heads.map((h) => [numOf(h.IDcommande_client), h]))
     const lines = await query<Record<string, unknown>>(
-      `SELECT IDligne_commande_client, IDcommande_client, TYPE AS type_kind, IDreference, IDcolori, quantite, unite, prix ` +
+      `SELECT IDligne_commande_client, IDcommande_client, TYPE AS type_kind, IDreference, IDcolori, IDvariation1, IDvariation2, quantite, unite, prix ` +
         `FROM ligne_commande_client WHERE IDcommande_client IN (${cids.join(',')}) ORDER BY IDcommande_client DESC, IDligne_commande_client`,
     )
     const finiMap = await mapRefFini(lines.filter((l) => numOf(l.type_kind) === 2).map((l) => numOf(l.IDreference)))
@@ -619,14 +630,27 @@ clientsRouter.get('/:id/historique', async (req: Request, res: Response) => {
     const colIds = lines.map((l) => numOf(l.IDcolori))
     const ceMap = await mapSimpleRef('colori_ecru', 'IDcolori_ecru', colIds)
     const rfcMap = await mapSimpleRef('ref_fini_colori', 'IDref_fini_colori', colIds)
+    // Divers lines (type 3): label from ref_divers, "coloris" from the line's
+    // variations (ref_divers_variation — couleur and/or taille).
+    const diversMap = await mapDesignation('ref_divers', 'IDref_divers', lines.filter((l) => numOf(l.type_kind) === 3).map((l) => numOf(l.IDreference)))
+    const varMap = await mapDesignation('ref_divers_variation', 'IDref_divers_variation',
+      lines.flatMap((l) => [numOf(pick(l, 'IDvariation1', 'IDVARIATION1')), numOf(pick(l, 'IDvariation2', 'IDVARIATION2'))]))
 
     const lignes = lines.map((l) => {
       const type = numOf(l.type_kind)
       let ref = ''
       let avec = 0
+      let coloris = ''
       if (type === 2) { const r = finiMap.get(numOf(l.IDreference)); ref = r?.reference ?? ''; avec = r?.avec_teinture ?? 0 }
       else if (type === 1) { ref = ecruMap.get(numOf(l.IDreference)) ?? '' }
-      else { ref = 'Divers' }
+      else if (type === 3) {
+        ref = diversMap.get(numOf(l.IDreference)) || 'Divers'
+        coloris = [numOf(pick(l, 'IDvariation1', 'IDVARIATION1')), numOf(pick(l, 'IDvariation2', 'IDVARIATION2'))]
+          .map((v) => (v > 0 ? varMap.get(v) ?? '' : ''))
+          .filter((s) => s.length > 0)
+          .join(' · ')
+      } else { ref = 'Divers' }
+      if (type !== 3) coloris = coloriLabel(numOf(l.IDcolori), avec, ceMap, rfcMap)
       const h = headMap.get(numOf(l.IDcommande_client))
       return {
         IDligne: numOf(l.IDligne_commande_client),
@@ -635,7 +659,7 @@ clientsRouter.get('/:id/historique', async (req: Request, res: Response) => {
         date_commande: strOf(h?.date_commande),
         type_kind: type,
         ref,
-        coloris: coloriLabel(numOf(l.IDcolori), avec, ceMap, rfcMap),
+        coloris,
         quantite: numOf(l.quantite),
         unite: numOf(l.unite),
         prix: numOf(l.prix),
@@ -647,6 +671,110 @@ clientsRouter.get('/:id/historique', async (req: Request, res: Response) => {
     res.status(500).json({ error: 'Internal server error' })
   }
 })
+
+// ── Client tarif modes (standard / coefficient fixe / contrat) ──
+// Legacy model, per ref_client_colori (référence client × coloris):
+//   • standard     — nothing stored; PrixDeVenteV4 with the degressive
+//                    per-tranche margins (COEFFICIENT_V2).
+//   • coefficient  — one tranche_tarifaire row (IDref_client_colori set,
+//                    IDcontrat_tarif = 0) whose `coefficient` (%, e.g. 20)
+//                    replaces the degressive margin on every tranche.
+//   • contrat      — ref_client_colori.contrat = 1 + contrat_tarif rows
+//                    (date_debut / date_expiration; renewals pile up as
+//                    history) + tranche_tarifaire rows carrying the
+//                    negotiated prix_saisi (€/Ml) per nb_rouleaux, linked
+//                    via IDcontrat_tarif.
+// tranche_tarifaire's qtéMin/qtéMax and contrat_tarif's archivé are accented —
+// never named in any SELECT/INSERT below (explicit ASCII column lists only).
+
+/** nb_rouleaux (0 = métrage "<1") → tranche index in the 9-tranche array. */
+const NB_RLX_TO_TRANCHE_IDX: Record<number, number> = { 0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 10: 6, 15: 7, 30: 8 }
+
+interface ContratTarifInfo {
+  IDcontrat_tarif: number
+  date_debut: string
+  date_expiration: string
+  tranches: { nb_rouleaux: number; prix: number }[]
+}
+
+interface TarifModeInfo {
+  tarif_mode: 'standard' | 'coefficient' | 'contrat'
+  coefficient: number
+  contrats: ContratTarifInfo[]
+  contrat_actif: ContratTarifInfo | null
+  contrat_expire: boolean
+}
+
+/** Batched tarif-mode resolution for a set of ref_client_colori rows
+ *  (two flat queries total — never per-row). `contrat` is the flag off the
+ *  rcc row itself. */
+async function fetchTarifModes(rccs: { id: number; contrat: number }[]): Promise<Map<number, TarifModeInfo>> {
+  const out = new Map<number, TarifModeInfo>()
+  const ids = [...new Set(rccs.map((r) => r.id).filter((n) => Number.isInteger(n) && n > 0))]
+  if (ids.length === 0) return out
+
+  const [ttRows, ctRows] = await Promise.all([
+    query<Record<string, unknown>>(
+      `SELECT IDtranche_tarifaire, IDref_client_colori, nb_rouleaux, coefficient, prix_saisi, IDcontrat_tarif ` +
+        `FROM tranche_tarifaire WHERE IDref_client_colori IN (${ids.join(',')})`,
+    ),
+    query<Record<string, unknown>>(
+      `SELECT IDcontrat_tarif, IDref_client_colori, date_debut, date_expiration ` +
+        `FROM contrat_tarif WHERE IDref_client_colori IN (${ids.join(',')})`,
+    ),
+  ])
+
+  const coefByRcc = new Map<number, number>()
+  const tranchesByContrat = new Map<number, { nb_rouleaux: number; prix: number }[]>()
+  for (const t of ttRows) {
+    const cid = numOf(t.IDcontrat_tarif)
+    if (cid > 0) {
+      const arr = tranchesByContrat.get(cid) ?? []
+      arr.push({ nb_rouleaux: numOf(t.nb_rouleaux), prix: numOf(t.prix_saisi) })
+      tranchesByContrat.set(cid, arr)
+    } else if (numOf(t.coefficient) > 0) {
+      coefByRcc.set(numOf(t.IDref_client_colori), numOf(t.coefficient))
+    }
+  }
+
+  const contratsByRcc = new Map<number, ContratTarifInfo[]>()
+  for (const c of ctRows) {
+    const rid = numOf(c.IDref_client_colori)
+    const info: ContratTarifInfo = {
+      IDcontrat_tarif: numOf(c.IDcontrat_tarif),
+      date_debut: strOf(c.date_debut) ?? '',
+      date_expiration: strOf(c.date_expiration) ?? '',
+      tranches: (tranchesByContrat.get(numOf(c.IDcontrat_tarif)) ?? []).sort(
+        (a, b) => (NB_RLX_TO_TRANCHE_IDX[a.nb_rouleaux] ?? 99) - (NB_RLX_TO_TRANCHE_IDX[b.nb_rouleaux] ?? 99),
+      ),
+    }
+    const arr = contratsByRcc.get(rid) ?? []
+    arr.push(info)
+    contratsByRcc.set(rid, arr)
+  }
+  for (const arr of contratsByRcc.values()) {
+    // Newest first — YYYYMMDD strings compare lexicographically.
+    arr.sort((a, b) => (a.date_debut === b.date_debut ? b.IDcontrat_tarif - a.IDcontrat_tarif : b.date_debut.localeCompare(a.date_debut)))
+  }
+
+  const today = todayDigits()
+  for (const r of rccs) {
+    const contrats = contratsByRcc.get(r.id) ?? []
+    const actif = contrats.find(
+      (c) => c.date_debut.length === 8 && c.date_expiration.length === 8 && c.date_debut <= today && today <= c.date_expiration,
+    ) ?? null
+    const coefficient = coefByRcc.get(r.id) ?? 0
+    const tarif_mode: TarifModeInfo['tarif_mode'] = r.contrat === 1 ? 'contrat' : coefficient > 0 ? 'coefficient' : 'standard'
+    out.set(r.id, {
+      tarif_mode,
+      coefficient,
+      contrats,
+      contrat_actif: actif,
+      contrat_expire: tarif_mode === 'contrat' && actif === null,
+    })
+  }
+  return out
+}
 
 // GET /api/clients/:id/references — client product catalogue
 // (Ref client = designation, Ref interne = ref_fini/ref_ecru, Coloris = ref_client_colori).
@@ -668,6 +796,7 @@ clientsRouter.get('/:id/references', async (req: Request, res: Response) => {
     const rcc = rccRows.filter((r) => !numOf(pick(r, 'archivé', 'archiv')))
     const ceMap = await mapSimpleRef('colori_ecru', 'IDcolori_ecru', rcc.map((r) => numOf(r.IDcolori_ecru)))
     const rfcMap = await mapSimpleRef('ref_fini_colori', 'IDref_fini_colori', rcc.map((r) => numOf(r.IDref_fini_colori)))
+    const modeMap = await fetchTarifModes(rcc.map((r) => ({ id: numOf(r.IDref_client_colori), contrat: numOf(r.contrat) })))
 
     const colorisByDesig = new Map<number, any[]>()
     for (const r of rcc) {
@@ -676,13 +805,20 @@ clientsRouter.get('/:id/references', async (req: Request, res: Response) => {
       const ecruColId = numOf(r.IDcolori_ecru)
       const label = finiColId > 0 ? (rfcMap.get(finiColId) ?? '') : (ceMap.get(ecruColId) ?? '')
       const arr = colorisByDesig.get(did) ?? []
+      const rccId = numOf(r.IDref_client_colori)
+      const mode = modeMap.get(rccId)
       arr.push({
-        IDref_client_colori: numOf(r.IDref_client_colori),
+        IDref_client_colori: rccId,
         label,
         // coloris id to feed the Tarif endpoint (dye → ref_fini_colori, wash → colori_ecru)
         coloris_id: finiColId > 0 ? finiColId : ecruColId,
         lst_tranche: strOf(r.lst_tranche) ?? '',
         contrat: numOf(r.contrat),
+        tarif_mode: mode?.tarif_mode ?? 'standard',
+        coefficient: mode?.coefficient ?? 0,
+        contrats: mode?.contrats ?? [],
+        contrat_actif: mode?.contrat_actif ?? null,
+        contrat_expire: mode?.contrat_expire ?? false,
       })
       colorisByDesig.set(did, arr)
     }
@@ -706,6 +842,200 @@ clientsRouter.get('/:id/references', async (req: Request, res: Response) => {
     res.json(out)
   } catch (err) {
     console.error('Error fetching client references:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Tarif mode endpoints (per référence client × coloris) ──
+
+/** Resolve a ref_client_colori scoped to the client (via its designation).
+ *  Returns null when the rcc doesn't exist or belongs to another client.
+ *  Explicit ASCII columns only (rcc.archivé is accented). */
+async function fetchClientRcc(clientId: number, rccId: number): Promise<{
+  rccId: number
+  contrat: number
+  IDref_fini: number
+  IDref_fini_colori: number
+  IDcolori_ecru: number
+} | null> {
+  const rows = await query<Record<string, unknown>>(
+    `SELECT rcc.IDref_client_colori, rcc.contrat, rcc.IDref_fini_colori, rcc.IDcolori_ecru, dc.IDref_fini ` +
+      `FROM ref_client_colori rcc ` +
+      `INNER JOIN designation_client dc ON dc.IDdesignation_client = rcc.IDdesignation_client ` +
+      `WHERE rcc.IDref_client_colori = ${rccId} AND dc.IDclient = ${clientId}`,
+  )
+  if (rows.length === 0) return null
+  const r = rows[0]
+  return {
+    rccId,
+    contrat: numOf(r.contrat),
+    IDref_fini: numOf(r.IDref_fini),
+    IDref_fini_colori: numOf(r.IDref_fini_colori),
+    IDcolori_ecru: numOf(r.IDcolori_ecru),
+  }
+}
+
+// GET /api/clients/:id/coloris/:rccId/tarif — PrixDeVente breakdown honoring the
+// client's tarif mode: coefficient fixe recomputes every tranche with the fixed
+// margin; an ACTIVE contrat surfaces its negotiated €/Ml as `prixContrat` on the
+// matching tranches (expired contracts fall back to the standard calculation).
+clientsRouter.get('/:id/coloris/:rccId/tarif', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    const rccId = parseInt(req.params.rccId, 10)
+    if (isNaN(id) || isNaN(rccId) || id <= 0 || rccId <= 0) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const rcc = await fetchClientRcc(id, rccId)
+    if (!rcc) { res.status(404).json({ error: 'Coloris not found for this client' }); return }
+
+    const mode = (await fetchTarifModes([{ id: rccId, contrat: rcc.contrat }])).get(rccId)!
+
+    // Dye refs price on ref_fini_colori, wash-only refs on colori_ecru
+    // (project_avec_teinture_coloris_rule) — mirror buildTarifsPdfData.
+    let colorisId = 0
+    if (rcc.IDref_fini > 0) {
+      const fRows = await query<{ avec_teinture: number }>(
+        `SELECT avec_teinture FROM ref_fini WHERE IDref_fini = ${rcc.IDref_fini}`,
+      )
+      const avecTeinture = fRows.length > 0 ? numOf(fRows[0].avec_teinture) : 0
+      colorisId = avecTeinture !== 0 ? rcc.IDref_fini_colori : rcc.IDcolori_ecru
+    }
+
+    const tarif = await calcTarifRefFini(
+      rcc.IDref_fini,
+      colorisId,
+      mode.tarif_mode === 'coefficient' && mode.coefficient > 0 ? { coefficient: mode.coefficient / 100 } : undefined,
+    )
+
+    const contratPrixByIdx = new Map<number, number>()
+    if (mode.tarif_mode === 'contrat' && mode.contrat_actif) {
+      for (const t of mode.contrat_actif.tranches) {
+        const idx = NB_RLX_TO_TRANCHE_IDX[t.nb_rouleaux]
+        if (idx !== undefined && t.prix > 0) contratPrixByIdx.set(idx, t.prix)
+      }
+    }
+
+    res.json({
+      ...tarif,
+      tranches: tarif.tranches.map((t, i) => ({ ...t, prixContrat: contratPrixByIdx.get(i) ?? null })),
+      tarif_mode: mode.tarif_mode,
+      coefficient: mode.coefficient,
+      contrats: mode.contrats,
+      contrat_actif: mode.contrat_actif,
+      contrat_expire: mode.contrat_expire,
+    })
+  } catch (err) {
+    console.error('Error computing client coloris tarif:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+const tarifModeBody = z.object({
+  mode: z.enum(['standard', 'coefficient', 'contrat']),
+  coefficient: z.number().int().min(1).max(99).optional(),
+  contrat: z
+    .object({
+      IDcontrat_tarif: z.number().int().positive().optional(),
+      date_debut: z.string().regex(/^\d{8}$/),
+      date_expiration: z.string().regex(/^\d{8}$/),
+      tranches: z
+        .array(
+          z.object({
+            nb_rouleaux: z.number().int().refine((n) => n in NB_RLX_TO_TRANCHE_IDX, 'invalid tranche'),
+            prix: z.number().positive(),
+          }),
+        )
+        .min(1)
+        .max(9),
+    })
+    .optional(),
+})
+
+// PUT /api/clients/:id/coloris/:rccId/tarif-mode — switch a référence×coloris
+// between the three tarif modes (permission-gated: gestion_tarifs).
+//   standard    → drop the coefficient row, contrat flag off (contract history kept)
+//   coefficient → single tranche_tarifaire row with the fixed margin %
+//   contrat     → create a new contrat_tarif (renewal keeps history) or update
+//                 the one identified by IDcontrat_tarif, with its €/Ml tranches
+clientsRouter.put('/:id/coloris/:rccId/tarif-mode', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    const rccId = parseInt(req.params.rccId, 10)
+    if (isNaN(id) || isNaN(rccId) || id <= 0 || rccId <= 0) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
+    const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'gestion_tarifs')
+    if (!allowed) { res.status(403).json({ error: 'permission denied: gestion_tarifs' }); return }
+
+    const parsed = tarifModeBody.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
+    const b = parsed.data
+    if (b.mode === 'coefficient' && !(b.coefficient && b.coefficient > 0)) {
+      res.status(400).json({ error: 'coefficient required for coefficient mode' }); return
+    }
+    if (b.mode === 'contrat' && !b.contrat) {
+      res.status(400).json({ error: 'contrat required for contrat mode' }); return
+    }
+
+    const rcc = await fetchClientRcc(id, rccId)
+    if (!rcc) { res.status(404).json({ error: 'Coloris not found for this client' }); return }
+
+    // Coefficient rows are the only client-scoped tranche_tarifaire rows with
+    // IDcontrat_tarif = 0 — dropping them never touches contract history.
+    const dropCoefficientRows = () =>
+      query(`DELETE FROM tranche_tarifaire WHERE IDref_client_colori = ${rccId} AND IDcontrat_tarif = 0`)
+
+    if (b.mode === 'standard') {
+      await dropCoefficientRows()
+      await query(`UPDATE ref_client_colori SET contrat = 0 WHERE IDref_client_colori = ${rccId}`)
+    } else if (b.mode === 'coefficient') {
+      await dropCoefficientRows()
+      await query(
+        `INSERT INTO tranche_tarifaire (nb_rouleaux, IDref_client_colori, coefficient, prix_saisi, IDcontrat_tarif, IDRef_Catalogue) ` +
+          `VALUES (1, ${rccId}, ${b.coefficient}, 0, 0, 0)`,
+      )
+      await query(`UPDATE ref_client_colori SET contrat = 0 WHERE IDref_client_colori = ${rccId}`)
+    } else {
+      const c = b.contrat!
+      // Dedupe tranches by nb_rouleaux (last entry wins).
+      const byNb = new Map<number, number>()
+      for (const t of c.tranches) byNb.set(t.nb_rouleaux, t.prix)
+
+      let contratId = 0
+      if (c.IDcontrat_tarif) {
+        const scope = await query<{ IDcontrat_tarif: number }>(
+          `SELECT IDcontrat_tarif FROM contrat_tarif WHERE IDcontrat_tarif = ${c.IDcontrat_tarif} AND IDref_client_colori = ${rccId}`,
+        )
+        if (scope.length === 0) { res.status(404).json({ error: 'Contrat not found for this coloris' }); return }
+        contratId = c.IDcontrat_tarif
+        await query(
+          `UPDATE contrat_tarif SET date_debut = '${c.date_debut}', date_expiration = '${c.date_expiration}' WHERE IDcontrat_tarif = ${contratId}`,
+        )
+        await query(`DELETE FROM tranche_tarifaire WHERE IDcontrat_tarif = ${contratId}`)
+      } else {
+        await query(
+          `INSERT INTO contrat_tarif (date_debut, date_expiration, IDref_client_colori) ` +
+            `VALUES ('${c.date_debut}', '${c.date_expiration}', ${rccId})`,
+        )
+        const back = await query<{ IDcontrat_tarif: number }>(
+          `SELECT IDcontrat_tarif FROM contrat_tarif WHERE IDref_client_colori = ${rccId} ORDER BY IDcontrat_tarif DESC`,
+        )
+        contratId = back.length > 0 ? numOf(back[0].IDcontrat_tarif) : 0
+        if (!(contratId > 0)) { res.status(500).json({ error: 'Failed to create contrat' }); return }
+      }
+      for (const [nb, prix] of byNb) {
+        await query(
+          `INSERT INTO tranche_tarifaire (nb_rouleaux, IDref_client_colori, coefficient, prix_saisi, IDcontrat_tarif, IDRef_Catalogue) ` +
+            `VALUES (${nb}, ${rccId}, 0, ${prix}, ${contratId}, 0)`,
+        )
+      }
+      await dropCoefficientRows()
+      await query(`UPDATE ref_client_colori SET contrat = 1 WHERE IDref_client_colori = ${rccId}`)
+    }
+
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error updating tarif mode:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -953,9 +1283,24 @@ async function buildTarifsPdfData(clientId: number, rccIds: number[]): Promise<T
   const ceMap = await mapSimpleRef('colori_ecru', 'IDcolori_ecru', rccRows.map((r) => numOf(r.IDcolori_ecru)))
   const rfcMap = await mapSimpleRef('ref_fini_colori', 'IDref_fini_colori', rccRows.map((r) => numOf(r.IDref_fini_colori)))
 
+  // Tarif modes (coefficient fixe / contrat) for every selected coloris —
+  // batched, and computed off the un-archived selection rows.
+  const modeMap = await fetchTarifModes(
+    rccRows
+      .filter((r) => !numOf(pick(r, 'archivé', 'archiv')))
+      .map((r) => ({ id: numOf(r.IDref_client_colori), contrat: numOf(r.contrat) })),
+  )
+
   // Group the selection by designation, keeping the request's item order for
   // columns and ordering sections by ref label.
-  interface ColSel { rccId: number; colorisId: number; label: string; trancheIdx: number[] }
+  interface ColSel {
+    rccId: number
+    colorisId: number
+    label: string
+    trancheIdx: number[]
+    coefficient: number
+    contratPrix: Map<number, number> | null
+  }
   const colsByDesig = new Map<number, ColSel[]>()
   const rccById = new Map<number, Record<string, unknown>>(rccRows.map((r) => [numOf(r.IDref_client_colori), r]))
   for (const rccId of rccIds) {
@@ -974,14 +1319,37 @@ async function buildTarifsPdfData(clientId: number, rccIds: number[]): Promise<T
     const colorisId = fini.avec_teinture !== 0 ? finiColId : ecruColId
     if (!(colorisId > 0)) continue
     const label = (finiColId > 0 ? rfcMap.get(finiColId) : ceMap.get(ecruColId)) ?? ''
-    const trancheIdx = [...new Set(
+    let trancheIdx = [...new Set(
       (strOf(r.lst_tranche) ?? '')
         .split(',')
         .map((s) => parseInt(s.trim(), 10))
         .filter((n) => Number.isInteger(n) && n >= 0 && n <= 8),
     )].sort((a, b) => a - b)
+    if (trancheIdx.length === 0) trancheIdx = [0, 1, 2, 3, 4, 5, 6]
+
+    // Client tarif mode overrides: an ACTIVE contrat prints exactly its
+    // negotiated tranches at their €/Ml; coefficient fixe recomputes every
+    // tranche with the fixed margin. An EXPIRED contrat means the ref is not
+    // sellable until a new contract is signed — never print standard prices
+    // for it, drop the coloris from the fiche entirely.
+    const mode = modeMap.get(rccId)
+    let coefficient = 0
+    let contratPrix: Map<number, number> | null = null
+    if (mode?.tarif_mode === 'coefficient' && mode.coefficient > 0) {
+      coefficient = mode.coefficient
+    } else if (mode?.tarif_mode === 'contrat') {
+      if (!mode.contrat_actif) continue
+      contratPrix = new Map()
+      for (const t of mode.contrat_actif.tranches) {
+        const idx = NB_RLX_TO_TRANCHE_IDX[t.nb_rouleaux]
+        if (idx !== undefined && t.prix > 0) contratPrix.set(idx, t.prix)
+      }
+      if (contratPrix.size > 0) trancheIdx = [...contratPrix.keys()].sort((a, b) => a - b)
+      else contratPrix = null
+    }
+
     const arr = colsByDesig.get(did) ?? []
-    arr.push({ rccId, colorisId, label, trancheIdx: trancheIdx.length > 0 ? trancheIdx : [0, 1, 2, 3, 4, 5, 6] })
+    arr.push({ rccId, colorisId, label, trancheIdx, coefficient, contratPrix })
     colsByDesig.set(did, arr)
   }
 
@@ -999,7 +1367,9 @@ async function buildTarifsPdfData(clientId: number, rccIds: number[]): Promise<T
     const fini = finiById.get(finiId)!
     const ecru = ecruById.get(fini.IDref_ecru)
 
-    const tarifs = await Promise.all(cols.map((c) => calcTarifRefFini(finiId, c.colorisId)))
+    const tarifs = await Promise.all(
+      cols.map((c) => calcTarifRefFini(finiId, c.colorisId, c.coefficient > 0 ? { coefficient: c.coefficient / 100 } : undefined)),
+    )
 
     // Union of the selected coloris' tranche indices, ascending.
     const idxUnion = [...new Set(cols.flatMap((c) => c.trancheIdx))].sort((a, b) => a - b)
@@ -1014,6 +1384,8 @@ async function buildTarifsPdfData(clientId: number, rccIds: number[]): Promise<T
         ml: anyTranche.isMetrage ? `< ${anyTranche.qte_ml}` : String(anyTranche.qte_ml),
         prices: cols.map((c, ci) => {
           if (!c.trancheIdx.includes(i)) return null
+          const contrat = c.contratPrix?.get(i)
+          if (contrat !== undefined) return contrat
           const t = tarifs[ci].tranches[i]
           return t && t.moPrixDeVenteAuMl > 0 ? t.moPrixDeVenteAuMl : null
         }),
