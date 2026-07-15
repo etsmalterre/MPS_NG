@@ -270,6 +270,41 @@ After deployment, verify:
 - [ ] Navigate to `http://mpsng.malterre/fournisseurs/gestion` in browser
 - [ ] Certificate PDF viewer works (may need `client_max_body_size` increase in nginx)
 
+## Step 5 — Clean up merged worktrees (after a green deploy)
+
+Once the deploy is live and smoke checks pass, the feature branches that just shipped no
+longer need their worktree, local/remote branch, or detached dev servers. A merged
+`feat/*` branch is one whose tip is an **ancestor of `origin/master`** — that only happens
+after `/feature-complete` lands it, so a merged branch still lying around is leftover.
+Clean each one up; this is safe precisely because "merged" guarantees no unshipped commits.
+
+**Do NOT touch un-merged branches** — active worktrees (e.g. ones you can see in
+`/worktree-status`) are not ancestors of master, so the ancestor test excludes them
+automatically. Never delete `master`.
+
+1. **List merged remote feature branches**:
+   ```bash
+   cd /c/dev/etsmalterre/MPS_NG && git fetch --prune origin
+   for b in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin/feat); do
+     name=${b#origin/feat/}
+     if git merge-base --is-ancestor "$b" origin/master; then echo "MERGED: $name"; fi
+   done
+   ```
+
+2. **For each merged feature**, tear down any leftover worktree (dir + registry entry +
+   detached servers) and delete the remote branch:
+   ```bash
+   node scripts/worktree/down.mjs <name> --remove   # no-op-safe if already gone
+   git push origin --delete feat/<name>
+   git worktree prune
+   ```
+   `down.mjs` is idempotent — it just reaps the dir and reports "No registry entry" if the
+   worktree was already cleaned by `/feature-complete`. The local `feat/<name>` branch is
+   usually already gone; delete it too if it lingers (`git branch -D feat/<name>`).
+
+3. **Report** which worktrees/branches were cleaned. Only act on branches confirmed merged
+   in step 1 — if unsure whether a branch is truly done, leave it and tell the user.
+
 ## Known Issues
 
 - **nginx upload limit**: Default 1MB `client_max_body_size` may block large certificate uploads. Fix: add `client_max_body_size 10m;` to the `/api/` location block in nginx config.
