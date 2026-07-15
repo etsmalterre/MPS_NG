@@ -105,6 +105,7 @@ interface FactureDetail {
   mode_paiement_label: string | null
   IDecheance: number
   echeance_label: string | null
+  date_echeance: string | null
   IDtva: number
   tva_rate: number
   tva_label: string | null
@@ -1501,6 +1502,11 @@ function InfoTab({
           <PopoverSelect size="sm" options={echeances.map((e) => ({ id: e.IDecheance, primary: e.libelle }))}
             value={editIDEcheance} onChange={onEditIDEcheanceChange} emptyLabel="—" />
         ) : (facture.echeance_label || '—')} />
+        {/* Computed due date (facture date + echeance rule) — server-side calc,
+            so it only shows in view mode; refreshed on save. */}
+        {!isEditing && facture.date_echeance && (
+          <KV label="Date d'échéance" value={facture.date_echeance} />
+        )}
         <KV label="TVA" value={isEditing ? (
           <PopoverSelect size="sm" options={tvaOptions.map((t) => ({ id: t.IDtva, primary: tvaRateLabel(t.valeur), secondary: t.libelle }))}
             value={editIDTva} onChange={onEditIDTvaChange} emptyLabel="—" />

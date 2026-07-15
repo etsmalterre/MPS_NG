@@ -14,6 +14,7 @@ import {
   AddressCard,
   CreditCardIcon,
   CalendarIcon,
+  ClockIcon,
   MessageSquareIcon,
   LandmarkIcon,
   type AddressBlockData,
@@ -45,6 +46,10 @@ export interface FacturePdfData {
   adresseFacturation: AddrLite | null
   modePaiement: string | null
   echeance: string | null
+  /** "31/08/2026" — due date computed from the facture date + the echeance
+   *  rule (see computeDateEcheance in factures.ts). Null when the terms have
+   *  no computable date (à réception, avant livraison, acomptes…). */
+  echeanceDate?: string | null
   /** TVA rate as a percentage (e.g. 20). */
   tvaRate: number
   lignes: Array<{
@@ -163,8 +168,6 @@ const styles = StyleSheet.create({
   grandLabel: { fontSize: sizes.fontLg, color: colors.primary, fontWeight: 900, letterSpacing: 0.6, lineHeight: 1.25 },
   grandValue: { fontSize: sizes.fontLg, color: colors.primary, fontWeight: 900, textAlign: 'right', lineHeight: 1.25 },
 
-  proformaMention: { marginTop: 10, fontSize: sizes.fontSm, color: colors.muted, fontWeight: 700, letterSpacing: 0.3 },
-
   // ── Bank coordinates card (proforma only) ────────────
   // Pinned to the bottom of the last page, just above the footer band: the
   // spacer soaks up the remaining vertical space, the card never splits.
@@ -219,7 +222,7 @@ export function FacturePdf({ data }: { data: FacturePdfData }) {
   return (
     <MalterreDocument
       documentType={docWord}
-      reference={`${docWord.toUpperCase()} N°${data.numero}`}
+      reference={`N°${data.numero}`}
       documentDate={data.dateFacture || ''}
       title={`${docWord} ${data.numero}`}
     >
@@ -245,9 +248,16 @@ export function FacturePdf({ data }: { data: FacturePdfData }) {
             ) : null}
             {data.echeance ? (
               <View style={styles.comboMetaRow}>
-                <View style={styles.comboMetaIconBox}><CalendarIcon /></View>
+                <View style={styles.comboMetaIconBox}><ClockIcon /></View>
                 <Text style={styles.comboMetaLabel}>Échéance</Text>
                 <Text style={styles.comboMetaValue}>{data.echeance}</Text>
+              </View>
+            ) : null}
+            {data.echeanceDate ? (
+              <View style={styles.comboMetaRow}>
+                <View style={styles.comboMetaIconBox}><CalendarIcon /></View>
+                <Text style={styles.comboMetaLabel}>Date d'échéance</Text>
+                <Text style={styles.comboMetaValue}>{data.echeanceDate}</Text>
               </View>
             ) : null}
           </View>
@@ -299,12 +309,6 @@ export function FacturePdf({ data }: { data: FacturePdfData }) {
           </View>
         </View>
       </View>
-
-      {isProforma ? (
-        <Text style={styles.proformaMention}>
-          Document non contractuel — ne tient pas lieu de facture.
-        </Text>
-      ) : null}
 
       {/* Proforma only: bank coordinates at the bottom of the last page,
           just above the footer — proformas are paid before delivery. */}

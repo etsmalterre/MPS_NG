@@ -11,6 +11,30 @@ other worktrees see what changed when they rebase. Format:
 <!-- entries below -->
 
 
+## 2026-07-15 — feat/facturation
+Clients › Facturation — **proforma display number = PK (legacy convention), PDF header/mention
+cleanup, computed date d'échéance** (`apps/api/src/routes/factures.ts`,
+`apps/api/src/lib/pdf/FacturePdf.tsx`, `apps/web/src/pages/ClientsFacturation.tsx`).
+**(1) Proforma number.** The legacy app shows a proforma's `IDfacture_prov` (PK) as its number —
+`facture_prov.numero` is a vestigial internal sequence (verified live: legacy "proforma 13521" =
+IDfacture_prov 13521, numero 3). New `displayNumero()` helper routes every user-facing surface
+(list, detail, PDF, email defaults/filename, generate-summary payload) through the PK for
+`kind='prov'`; definitive factures keep their real `numero`. The MAX+1 numero allocator is
+unchanged (still used for post-insert id resolution).
+**(2) PDF header.** `FacturePdf` passed `reference={"FACTURE PROFORMA N°9"}` so the title
+appeared twice in the header band; now `reference={"N°9"}` — title on line 1, number alone on
+line 2. The proforma "Document non contractuel — ne tient pas lieu de facture." mention is removed.
+**(3) Date d'échéance.** The `echeance` table carries calculation params (`TYPE` reserved-word
+column, `nb_jours`, `jour`) and legacy auto-computes the due date from the facture date. Ported as
+`computeDateEcheance()`: TYPE 2 = +N days; TYPE 3 = +N days then end of month (verified against
+legacy: 15/07/2026 + "45 jours, fin de mois" → 31/08/2026); TYPE 4 = end of month then +N days;
+TYPE 5 = TYPE 3 then +`jour` days (the Nth of the next month — best-guess, no live sample);
+TYPE 1 (à réception / avant livraison / acomptes) = no date. `loadEcheanceLabel` became
+`loadEcheanceRule` (returns libelle + params). The PDF top-right card now shows both rows —
+Échéance (phrase, ClockIcon) and Date d'échéance (dd/mm/yyyy, CalendarIcon) — and the detail
+response gained `date_echeance`, surfaced as a view-mode KV row in the web Info tab.
+
+
 ## 2026-07-13 — feat/soumission
 Sous-traitants › Commandes — **Soumission Lot email defaults: ref commande client in the body,
 emdash dropped from the subject** (`apps/api/src/routes/commandes-sous-traitant.ts`,

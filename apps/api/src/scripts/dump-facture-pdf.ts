@@ -18,7 +18,8 @@ const data: FacturePdfData = {
     cp: '94548', ville: 'ORLY AEROGARE CEDEX', pays: 'FRANCE',
   },
   modePaiement: 'VIREMENT',
-  echeance: 'Avant livraison',
+  echeance: '45 jours, fin de mois',
+  echeanceDate: '31/08/2026',
   tvaRate: 20,
   lignes: [
     { designation: 'Port', quantite: 1, unite: 'pièce', prix: 166, montant: 166 },

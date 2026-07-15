@@ -162,6 +162,17 @@ function todayDigits(): string {
   return `${t.getFullYear()}${String(t.getMonth() + 1).padStart(2, '0')}${String(t.getDate()).padStart(2, '0')}`
 }
 
+/** Display number for a facture row. Definitive invoices show their `numero`
+ *  column, but the legacy app shows a proforma's PK (IDfacture_prov) as its
+ *  number — facture_prov.numero is a vestigial internal sequence the user
+ *  never sees (verified live: legacy "proforma 13521" = IDfacture_prov 13521,
+ *  numero 3). Every user-facing surface (list, detail, PDF, email) goes
+ *  through this. */
+function displayNumero(kind: Kind, id: number, numero: unknown): number | null {
+  if (kind === 'prov') return id
+  return numero != null ? Number(numero) : null
+}
+
 /** Next numero for the given ledger (IDsociete=1). MAX+1 matches the legacy
  *  allocator; concurrent POSTs retry on collision. facture and facture_prov
  *  keep separate sequences. */
@@ -207,11 +218,50 @@ async function loadModePaiementLabel(id: number): Promise<string | null> {
   return (fixed[0]?.libelle ?? null) as string | null
 }
 
-async function loadEcheanceLabel(id: number): Promise<string | null> {
+interface EcheanceRule { libelle: string | null; type: number; nb_jours: number; jour: number }
+
+/** Echeance row incl. the calculation params (TYPE is a reserved word — comes
+ *  back as the uppercase key, like facture.DATE/TYPE). */
+async function loadEcheanceRule(id: number): Promise<EcheanceRule | null> {
   if (!(id > 0)) return null
-  const rows = await query<{ libelle: string | null }>(`SELECT libelle FROM echeance WHERE IDecheance = ${id}`)
+  const rows = await query<any>(`SELECT * FROM echeance WHERE IDecheance = ${id}`)
+  if (rows.length === 0) return null
   const fixed = await fixEncoding(rows, 'echeance', 'IDecheance', ['libelle'])
-  return (fixed[0]?.libelle ?? null) as string | null
+  const r = fixed[0] as any
+  return {
+    libelle: (r.libelle ?? null) as string | null,
+    type: Number(r.TYPE) || 0,
+    nb_jours: Number(r.nb_jours) || 0,
+    jour: Number(r.jour) || 0,
+  }
+}
+
+/** Due date from the facture date + the echeance rule — mirrors the legacy
+ *  calculation (verified against live data: facture 15/07/2026 + "45 jours,
+ *  fin de mois" [TYPE 3, nb_jours 45] → 31/08/2026, matching the legacy PDF).
+ *    TYPE 1 → no computable date (à réception / avant livraison / acomptes…)
+ *    TYPE 2 → date + nb_jours
+ *    TYPE 3 → "<nb> jours, fin de mois": date + nb_jours, then end of month
+ *    TYPE 4 → "fin de mois, <nb> jours": end of month, then + nb_jours
+ *    TYPE 5 → "<nb> jours, fin de mois, le <jour>": TYPE 3 then + jour days
+ *             (= the <jour>th of the following month)
+ *  Returns "dd/mm/yyyy" or null. */
+function computeDateEcheance(dateYmd: string | null | undefined, ech: EcheanceRule | null): string | null {
+  if (!ech) return null
+  const s = String(dateYmd ?? '')
+  if (!/^\d{8}$/.test(s)) return null
+  let d = new Date(parseInt(s.slice(0, 4), 10), parseInt(s.slice(4, 6), 10) - 1, parseInt(s.slice(6, 8), 10))
+  const addDays = (n: number) => { d = new Date(d.getFullYear(), d.getMonth(), d.getDate() + n) }
+  const endOfMonth = () => { d = new Date(d.getFullYear(), d.getMonth() + 1, 0) }
+  switch (ech.type) {
+    case 2: addDays(ech.nb_jours); break
+    case 3: addDays(ech.nb_jours); endOfMonth(); break
+    case 4: endOfMonth(); addDays(ech.nb_jours); break
+    case 5: addDays(ech.nb_jours); endOfMonth(); addDays(ech.jour); break
+    default: return null
+  }
+  const pad = (x: number) => String(x).padStart(2, '0')
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`
 }
 
 async function loadAdresse(id: number): Promise<Record<string, unknown> | null> {
@@ -466,7 +516,7 @@ facturesRouter.get('/', async (req: Request, res: Response) => {
       return {
         id,
         kind,
-        numero: f.numero != null ? Number(f.numero) : null,
+        numero: displayNumero(kind, id, f.numero),
         date: f.DATE ?? null,
         IDclient: Number(f.IDclient) || 0,
         client_nom: clientNames.get(Number(f.IDclient)) ?? '',
@@ -536,7 +586,7 @@ facturesRouter.get('/:kind/:id', async (req: Request, res: Response) => {
       loadFactureLines(kind, id),
       loadTvaMap(),
       loadModePaiementLabel(Number(h.IDmode_paiement) || 0),
-      loadEcheanceLabel(Number(h.IDecheance) || 0),
+      loadEcheanceRule(Number(h.IDecheance) || 0),
     ])
 
     const tva = tvaMap.get(Number(h.IDtva)) ?? { valeur: 0, libelle: '' }
@@ -559,14 +609,17 @@ facturesRouter.get('/:kind/:id', async (req: Request, res: Response) => {
       numero_def: numeroDef,
       IDclient,
       client_nom: clientNames.get(IDclient) ?? '',
-      numero: h.numero != null ? Number(h.numero) : null,
+      // Proforma display number = the PK (what the legacy app shows), NOT the
+      // numero column — see displayNumero.
+      numero: displayNumero(kind, id, h.numero),
       date: h.DATE ?? null,
       type: Number(h.TYPE) || 1,
       IDadresse: Number(h.IDadresse) || 0,
       IDmode_paiement: Number(h.IDmode_paiement) || 0,
       mode_paiement_label: modePaiement,
       IDecheance: Number(h.IDecheance) || 0,
-      echeance_label: echeance,
+      echeance_label: echeance?.libelle ?? null,
+      date_echeance: computeDateEcheance(h.DATE, echeance),
       IDtva: Number(h.IDtva) || 0,
       tva_rate: tva.valeur,
       tva_label: tva.libelle,
@@ -818,7 +871,9 @@ facturesRouter.post('/prov/generate', async (_req: Request, res: Response) => {
 
       created.push({
         id: newId,
-        numero: newNumero,
+        // Display number = the PK (legacy convention), not the internal
+        // numero sequence — see displayNumero.
+        numero: newId,
         client_nom: clientMap.get(clientId)?.nom ?? '',
         nb_lignes: lines.length,
         nb_expeditions: contributing.size,
@@ -1211,7 +1266,7 @@ export async function buildFacturePdfData(kind: Kind, id: number): Promise<Factu
     loadFactureLines(kind, id),
     loadTvaMap(),
     loadModePaiementLabel(Number(h.IDmode_paiement) || 0),
-    loadEcheanceLabel(Number(h.IDecheance) || 0),
+    loadEcheanceRule(Number(h.IDecheance) || 0),
   ])
   const tva = tvaMap.get(Number(h.IDtva)) ?? { valeur: 0, libelle: '' }
 
@@ -1222,7 +1277,7 @@ export async function buildFacturePdfData(kind: Kind, id: number): Promise<Factu
   } : null
 
   return {
-    numero: String(h.numero ?? id),
+    numero: String(displayNumero(kind, id, h.numero) ?? id),
     type: Number(h.TYPE) || 1,
     isProforma: kind === 'prov',
     dateFacture: formatHfsqlDateLongFr(h.DATE),
@@ -1230,7 +1285,8 @@ export async function buildFacturePdfData(kind: Kind, id: number): Promise<Factu
     numTva: (h.num_tva ?? '').toString() || null,
     adresseFacturation: cleanAddr,
     modePaiement,
-    echeance,
+    echeance: echeance?.libelle ?? null,
+    echeanceDate: computeDateEcheance(h.DATE, echeance),
     tvaRate: tva.valeur,
     lignes: lignes.map((l) => ({ designation: l.designation ?? '', quantite: l.quantite, unite: l.unite, prix: l.prix, montant: l.montant })),
   }
@@ -1282,7 +1338,7 @@ async function buildEmailDefaults(kind: Kind, id: number): Promise<{
   )
   if (rows.length === 0) return null
   const IDclient = Number(rows[0].IDclient) || 0
-  const numero = String(rows[0].numero ?? id)
+  const numero = String(displayNumero(kind, id, rows[0].numero) ?? id)
   const isAvoir = Number(rows[0].TYPE) === 2
   const isProforma = kind === 'prov'
   const docWord = (isAvoir ? 'avoir' : 'facture') + (isProforma ? ' proforma' : '')
