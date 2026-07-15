@@ -52,15 +52,64 @@ OPTS="-F none -i $KEY -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=1
 
 **Key location varies per machine** (verified 2026-07-06): on the **factory PC** (`vince`) the
 Windows-side key path above does **not exist** — the key lives on the WSL side at
-`/home/vincent/.ssh/claude_deploy/claude_deploy`. If the Windows key file is missing
-(`Identity file … not accessible`), fall back to WSL:
+`/home/vincent/.ssh/claude_deploy/claude_deploy`.
+
+**Pick the transport with a file test, not a failed SSH probe** (a probe wastes a round-trip):
 ```bash
-wsl bash -c "ssh -i /home/vincent/.ssh/claude_deploy/claude_deploy -o StrictHostKeyChecking=no debian@10.10.2.163 '<command>'"
-wsl bash -c "scp -i /home/vincent/.ssh/claude_deploy/claude_deploy <local> debian@10.10.2.163:<remote>"
+if [ -f "$HOME/.ssh/claude_deploy/claude_deploy" ]; then TRANSPORT=win; else TRANSPORT=wsl; fi
 ```
-(For WSL scp, local Windows paths are `/mnt/c/...`.) Try `hostname` with one method; if the
-identity file is missing, switch to the other — don't conclude the key isn't enabled until
-an existing key file is refused.
+- `win` (laptop `malte`): use the `$SSH`/`$SCP`/`$OPTS`/`$KEY` recipe above.
+- `wsl` (factory PC `vince`): wrap every command through WSL with the WSL-side key:
+  ```bash
+  WKEY="/home/vincent/.ssh/claude_deploy/claude_deploy"
+  WOPTS="-i $WKEY -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no"
+  wsl bash -c "ssh $WOPTS debian@10.10.2.163 '<command>'"
+  wsl bash -c "scp $WOPTS <local> debian@10.10.2.163:<remote>"
+  ```
+  **WSL `scp` can only read `/mnt/c/...` paths** — git-bash `/tmp` is NOT reachable. Stage any
+  tarball under a Windows-visible dir first (the session scratchpad works; its `/mnt/c/...`
+  form is the same path with `/c/` → `/mnt/c/`), then scp from there.
+
+Shell state does NOT persist between Bash tool calls, so re-establish `TRANSPORT`/the key vars
+in each call (or just inline the WSL form on the factory PC — that's the common case here).
+
+## Step 0 — What needs deploying (ALWAYS run first)
+
+Do this before building anything. It answers "is there an undeployed merge, and does it touch
+the API, the web, or both?" deterministically — so a bare "deploy" never needs you to ask the
+user what merged, and you never eyeball `git show --stat` to pick API-vs-web by hand.
+
+Prod records the commit it's running in a `DEPLOYED_SHA` file on each server (written at the end
+of every deploy — see the deploy steps). The check:
+
+1. **Sync and read what's live** (uses the transport from §SSH Access):
+   ```bash
+   cd /c/dev/etsmalterre/MPS_NG && git fetch origin
+   LOCAL=$(git rev-parse origin/master)
+   # factory PC (wsl) form — read both servers' deployed SHA (missing file → "none"):
+   API_SHA=$(wsl bash -c "ssh $WOPTS debian@10.10.2.163 'cat /home/debian/mps_api/DEPLOYED_SHA 2>/dev/null || echo none'")
+   WEB_SHA=$(wsl bash -c "ssh $WOPTS debian@10.10.2.165 'cat /home/debian/mps_erp/DEPLOYED_SHA 2>/dev/null || echo none'")
+   ```
+
+2. **Show the gap** — the merged features not yet on prod (this is the "make sure you get it
+   when a worktree is merged" signal). List commits and the merge-log entries between the
+   deployed SHA and `origin/master`:
+   ```bash
+   git log --oneline ${API_SHA}..origin/master   # (API_SHA is the older of the two if they differ)
+   ```
+   `claude_doc/worktree-merge-log.md` has the prose description of each landed feature.
+
+3. **Decide API / web / both by the changed paths** in that range — don't guess:
+   ```bash
+   git diff --name-only ${API_SHA}..origin/master -- apps/api | head -1   # non-empty → deploy API
+   git diff --name-only ${WEB_SHA}..origin/master -- apps/web | head -1   # non-empty → deploy web
+   ```
+   Deploy API if `apps/api/**` changed, web if `apps/web/**` changed (usually both). If a
+   server's `DEPLOYED_SHA` is `none` (first deploy after adopting this) or the SHA is unknown to
+   git, treat that side as needing deploy and just ship it.
+
+4. **Report the plan to the user before proceeding**: e.g. *"prod API at `9b208bc`, origin/master
+   at `f4c26c9` (1 ahead: facturation) — touches apps/api + apps/web → deploying both."*
 
 ## API Server (10.10.2.163)
 
@@ -112,6 +161,13 @@ an existing key file is refused.
    # restart
    sudo systemctl restart mps-api
    sudo systemctl status mps-api
+   ```
+
+4. **Stamp the deployed commit** after a clean restart (this is what Step 0 reads next time).
+   Compute the SHA locally (`git rev-parse origin/master`) and write it on the API server:
+   ```bash
+   SHA=$(cd /c/dev/etsmalterre/MPS_NG && git rev-parse origin/master)
+   wsl bash -c "ssh $WOPTS debian@10.10.2.163 'echo $SHA > /home/debian/mps_api/DEPLOYED_SHA'"
    ```
 
 ### Key Differences from Local Dev
@@ -181,14 +237,22 @@ an existing key file is refused.
    ```bash
    "$SCP" -i "$KEY" -o IdentitiesOnly=yes -r apps/web/dist/* debian@10.10.2.165:/home/debian/mps_erp/dist/
    ```
-   Or tar it first for speed:
+   Or tar it first for speed. **On the factory PC (wsl transport), stage the tarball under a
+   `/mnt/c`-visible dir — NOT git-bash `/tmp`, which WSL `scp` cannot read** (see §SSH Access):
    ```bash
    tar czf /tmp/mps_web_dist.tar.gz -C apps/web/dist .
-   "$SCP" -i "$KEY" -o IdentitiesOnly=yes /tmp/mps_web_dist.tar.gz debian@10.10.2.165:/home/debian/
+   "$SCP" -i "$KEY" -o IdentitiesOnly=yes /tmp/mps_web_dist.tar.gz debian@10.10.2.165:/home/debian/   # win transport
    "$SSH" $OPTS debian@10.10.2.165 'rm -rf /home/debian/mps_erp/dist/* && tar xzf /home/debian/mps_web_dist.tar.gz -C /home/debian/mps_erp/dist/'
    ```
 
-3. **No restart needed** — nginx serves static files directly. Just verify:
+3. **Stamp the deployed commit** — write it to `/home/debian/mps_erp/DEPLOYED_SHA`, which is the
+   PARENT of `dist/` so it survives the `rm -rf dist/*` above (and isn't served publicly):
+   ```bash
+   SHA=$(cd /c/dev/etsmalterre/MPS_NG && git rev-parse origin/master)
+   wsl bash -c "ssh $WOPTS debian@10.10.2.165 'echo $SHA > /home/debian/mps_erp/DEPLOYED_SHA'"
+   ```
+
+4. **No restart needed** — nginx serves static files directly. Just verify:
    ```bash
    curl -s -o /dev/null -w "%{http_code}" http://mpsng.malterre/
    ```
