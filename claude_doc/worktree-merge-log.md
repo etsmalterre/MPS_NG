@@ -11,6 +11,19 @@ other worktrees see what changed when they rebase. Format:
 <!-- entries below -->
 
 
+## 2026-07-15 — feat/pwa
+App-wide — **PWA identity renamed to "ETM" + missing install icons created** (`apps/web/vite.config.ts`,
+`apps/web/index.html`, `apps/web/public/favicon.svg`, `apps/web/public/icons/*`). The manifest previously
+referenced `icons/icon-192.png` / `icon-512.png` / `apple-touch-icon.png` that did not exist in `public/`,
+so Chrome never offered the install prompt. Generated all three (gold "ETM" wordmark on primary blue
+`#143D6B`, sized inside the maskable safe zone since `icon-512.png` doubles as the maskable icon —
+`logo-small.png` at 80px was too low-res to composite). Manifest `name`/`short_name` are now `ETM`,
+`lang: 'fr'` added, `theme_color` moved from the old `#00243E` navy to brand primary `#143D6B` (also in
+the `index.html` meta). Tab title is now `ETM`; favicon.svg redrawn as ETM in brand colors. Removed the
+phantom `favicon.ico` from `includeAssets` (never existed). Note: the install prompt only appears on
+production builds (`vite preview` / prod) — vite-plugin-pwa serves no manifest in dev, and `devOptions`
+was deliberately left off to keep the service worker out of the dev loop.
+
 ## 2026-07-15 — feat/permissions
 Paramètres › Utilisateurs + Clients › Facturation — **new `edit_factures` permission
 ("Édition des factures", new "Facturation" catalog section between "Commandes client" and

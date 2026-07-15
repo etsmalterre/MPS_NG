@@ -14,12 +14,13 @@ export default defineConfig({
       // includeAssets are globbed from publicDir and injected as manifest
       // entries, bypassing the precache-size check — safe because all of these
       // are small (logos < 15 KB, icons < 150 KB).
-      includeAssets: ['favicon.ico', 'icons/*.png', 'logo-full.png', 'logo-small.png'],
+      includeAssets: ['favicon.svg', 'icons/*.png', 'logo-full.png', 'logo-small.png'],
       manifest: {
-        name: 'MPS - ETS Malterre',
-        short_name: 'MPS',
+        name: 'ETM',
+        short_name: 'ETM',
+        lang: 'fr',
         description: 'Système ERP pour ETS Malterre - Textile/Tricotage',
-        theme_color: '#00243E',
+        theme_color: '#143D6B',
         background_color: '#ffffff',
         display: 'standalone',
         start_url: '/',
