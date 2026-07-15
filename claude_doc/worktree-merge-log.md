@@ -11,6 +11,22 @@ other worktrees see what changed when they rebase. Format:
 <!-- entries below -->
 
 
+## 2026-07-15 — feat/permissions
+Paramètres › Utilisateurs + Clients › Facturation — **new `edit_factures` permission
+("Édition des factures", new "Facturation" catalog section between "Commandes client" and
+"Gestion client")** (`apps/api/src/lib/permission-keys.ts`, `apps/api/src/routes/factures.ts`,
+`apps/web/src/pages/ClientsFacturation.tsx`). Without the grant, Clients › Facturation is
+strictly read-only: the UI hides « Nouveau », « Modifier », « Convertir en facture » and the
+proforma batch block (« Générer les factures » / « Supprimer des factures »); list, detail,
+print PDF and email stay open. Server-side, a shared `requireEditFactures()` guard (401 unauth /
+403 without grant, effective-admin bypass via `userHasPermission`) gates every write endpoint:
+`POST /:kind` (create), `PUT`/`DELETE /:kind/:id`, line CRUD (`POST /:kind/:id/lignes`,
+`PUT`/`DELETE /:kind/lignes/:lineId`), `POST /prov/generate`, `POST /prov/delete-batch`,
+`DELETE /prov/all`, `POST /prov/:id/convert`. Frontend gating threads one
+`useHasPermission('edit_factures')` read down as `canEdit` props to `FactureList` and
+`DetailHeader`.
+
+
 ## 2026-07-15 — feat/facturation
 Clients › Facturation — **proforma display number = PK (legacy convention), PDF header/mention
 cleanup, computed date d'échéance** (`apps/api/src/routes/factures.ts`,

@@ -34,7 +34,16 @@ export const PERMISSION_KEYS = [
       'Affiche l’interrupteur « Donation » et autorise à marquer une commande comme donation dans Clients > Commandes.',
     category: 'Commandes client',
   },
-  // Gestion client — rendered directly below "Commandes client" in
+  // Facturation — rendered between "Commandes client" and "Gestion client" in
+  // Paramètres > Utilisateurs (sections follow catalog insertion order).
+  {
+    key: 'edit_factures',
+    label: 'Édition des factures',
+    description:
+      'Autorise la création et la modification des factures dans Clients > Facturation : boutons « Nouveau », « Modifier », « Générer les factures », « Supprimer des factures » et « Convertir en facture ».',
+    category: 'Facturation',
+  },
+  // Gestion client — rendered directly below "Facturation" in
   // Paramètres > Utilisateurs (sections follow catalog insertion order).
   {
     key: 'delete_client',

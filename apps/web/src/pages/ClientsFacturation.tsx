@@ -37,6 +37,7 @@ import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates
 import { fmtNum } from '@/lib/format'
 import { apiFetch, API_URL } from '@/lib/api'
 import { postEmail } from '@/lib/email'
+import { useHasPermission } from '@/contexts/PermissionsContext'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -164,6 +165,9 @@ function formatDateTime(raw: string): string {
 
 export function ClientsFacturation() {
   const queryClient = useQueryClient()
+  // Gates the invoice-lifecycle actions: generate proformas, batch-delete
+  // proformas, convert proforma → definitive (edit_factures permission).
+  const canEditFactures = useHasPermission('edit_factures')
   const [bucket, setBucket] = useState<Kind>('def')
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
@@ -398,6 +402,7 @@ export function ClientsFacturation() {
             onGenerate={() => setGenerateConfirmOpen(true)}
             onDeleteBatch={() => setDeleteBatchOpen(true)}
             isEditing={isEditing}
+            canEdit={canEditFactures}
           />
         }
         detailHeader={
@@ -415,6 +420,7 @@ export function ClientsFacturation() {
             onEmailClick={() => setEmailModalOpen(true)}
             onConvertClick={() => setConvertConfirmOpen(true)}
             onViewDefinitive={handleViewDefinitive}
+            canEdit={canEditFactures}
           />
         }
         detail={
@@ -746,7 +752,7 @@ function FactureList({
   searchQuery, onSearchChange,
   bucket, onBucketChange,
   typeFilter, onTypeFilterChange,
-  onNew, onGenerate, onDeleteBatch, isEditing,
+  onNew, onGenerate, onDeleteBatch, isEditing, canEdit,
 }: {
   rows: FactureListRow[]
   isLoading: boolean
@@ -764,6 +770,7 @@ function FactureList({
   onGenerate: () => void
   onDeleteBatch: () => void
   isEditing: boolean
+  canEdit: boolean
 }) {
   return (
     <div className="flex flex-col h-full rounded-lg border shadow-sm bg-zinc-100/80">
@@ -886,8 +893,9 @@ function FactureList({
           above the footer (flex sibling of the scrollable list, so they
           stay visible however long the list is). Disabled during edit
           mode rather than hidden: batch operations while a proforma edit
-          is in flight would be destructive. */}
-      {bucket === 'prov' && (
+          is in flight would be destructive. Hidden entirely without the
+          edit_factures permission (API gates the endpoints too). */}
+      {bucket === 'prov' && canEdit && (
         <div className="flex-shrink-0 p-3 border-t bg-zinc-200/50 space-y-1.5">
           <Button size="sm" className="w-full" onClick={onGenerate} disabled={isEditing}>
             <FilePlus2 className="h-3.5 w-3.5 mr-1.5" />Générer les factures
@@ -906,7 +914,7 @@ function FactureList({
 
       <div className="p-3 border-t text-xs text-muted-foreground flex items-center justify-between rounded-b-lg bg-zinc-200/50">
         <span>{rows.length} document{rows.length !== 1 ? 's' : ''}</span>
-        {!isEditing && (
+        {!isEditing && canEdit && (
           <Button size="sm" variant="ghost" onClick={onNew} className="text-accent hover:text-accent hover:bg-accent/10">
             <Plus className="h-3.5 w-3.5 mr-1" />Nouveau
           </Button>
@@ -922,6 +930,7 @@ function DetailHeader({
   facture, isLoading, isEditing, editable,
   onStartEdit, onCancelEdit, onSave, isSaving,
   onDelete, onPrintClick, onEmailClick, onConvertClick, onViewDefinitive,
+  canEdit,
 }: {
   facture: FactureDetail | null
   isLoading: boolean
@@ -936,6 +945,7 @@ function DetailHeader({
   onEmailClick: () => void
   onConvertClick: () => void
   onViewDefinitive: (defId: number) => void
+  canEdit: boolean
 }) {
   if (!facture && !isLoading) return null
   const chip = facture ? typeChip(facture.type) : null
@@ -1009,14 +1019,15 @@ function DetailHeader({
                 <Button variant="outline" size="icon" className="h-9 w-9" title="Envoyer un email" onClick={onEmailClick}>
                   <AtSign className="h-4 w-4" />
                 </Button>
-                {/* Convert proforma → definitive */}
-                {editable && (
+                {/* Convert proforma → definitive — edit_factures permission */}
+                {editable && canEdit && (
                   <Button variant="outline" size="sm" onClick={onConvertClick} title="Convertir le proforma en facture définitive">
                     <FileCheck className="h-3.5 w-3.5 mr-1.5" />Convertir en facture
                   </Button>
                 )}
-                {/* Modifier — only an open proforma is editable */}
-                {editable && (
+                {/* Modifier — only an open proforma is editable, and only
+                    with the edit_factures permission */}
+                {editable && canEdit && (
                   <Button variant="gold" size="sm" onClick={onStartEdit}>
                     <Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier
                   </Button>

@@ -55,8 +55,27 @@ import { FacturePdf, type FacturePdfData } from '../lib/pdf/FacturePdf.js'
 import { sendMail } from '../lib/gmail.js'
 import { getUserEmail } from '../lib/user-emails.js'
 import { IS_WINDOWS, esc, n, dateDigits as dateStr } from '../lib/sst-shared.js'
+import { userHasPermission } from '../lib/permissions.js'
+import { isEffectiveAdmin } from '../lib/auth.js'
 
 export const facturesRouter: RouterType = Router()
+
+/** Guard for every invoice write path: create, header edit, delete, line
+ *  CRUD, generate, batch-delete and convert (edit_factures permission).
+ *  Reads (list / detail / pdf / email) stay open to everyone.
+ *  Sends the 401/403 itself and returns false when the caller is not allowed. */
+async function requireEditFactures(req: Request, res: Response): Promise<boolean> {
+  if (req.userId === undefined) {
+    res.status(401).json({ error: 'not authenticated' })
+    return false
+  }
+  const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'edit_factures')
+  if (!allowed) {
+    res.status(403).json({ error: 'permission denied: edit_factures' })
+    return false
+  }
+  return true
+}
 
 // type_doc 19 = "facture definitve" (sic — validated invoice). Used for the
 // envoi_email audit log when a facture/avoir is emailed.
@@ -650,8 +669,9 @@ facturesRouter.get('/:kind/:id', async (req: Request, res: Response) => {
  *  Skipped: clients internes (client.client_interne = 1), donations
  *  (expedition.donation = 1 OR commande_client.donation = 1), and expeditions
  *  with no shipped rolls (left unmarked so a later run picks them up). */
-facturesRouter.post('/prov/generate', async (_req: Request, res: Response) => {
+facturesRouter.post('/prov/generate', async (req: Request, res: Response) => {
   try {
+    if (!(await requireEditFactures(req, res))) return
     // 1. Candidate expeditions (formelle, ETM, not yet invoiced).
     const expRows = await query<any>(
       `SELECT IDexpedition, IDcommande_client, donation FROM expedition
@@ -954,8 +974,9 @@ async function wipeOpenProformas(targetIds: number[]): Promise<{ deleted: number
  *  history and are kept). Expeditions whose lines were only referenced by the
  *  deleted proformas get est_facture reset to 0 so the next generation run
  *  picks them up again. Must register BEFORE the generic /:kind/:id delete. */
-facturesRouter.delete('/prov/all', async (_req: Request, res: Response) => {
+facturesRouter.delete('/prov/all', async (req: Request, res: Response) => {
   try {
+    if (!(await requireEditFactures(req, res))) return
     const heads = await query<any>(`SELECT IDfacture_prov, IDexpedition_divers FROM facture_prov WHERE IDsociete = 1`)
     const openIds = heads
       .filter((h: any) => (Number(h.IDexpedition_divers) || 0) === 0)
@@ -977,6 +998,7 @@ facturesRouter.delete('/prov/all', async (_req: Request, res: Response) => {
 const deleteBatchBody = z.object({ ids: z.array(z.number().int().positive()).min(1).max(500) })
 facturesRouter.post('/prov/delete-batch', async (req: Request, res: Response) => {
   try {
+    if (!(await requireEditFactures(req, res))) return
     const parsed = deleteBatchBody.safeParse(req.body)
     if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
     const requested = Array.from(new Set(parsed.data.ids))
@@ -1003,6 +1025,7 @@ facturesRouter.post('/prov/delete-batch', async (req: Request, res: Response) =>
 
 facturesRouter.post('/:kind', async (req: Request, res: Response) => {
   try {
+    if (!(await requireEditFactures(req, res))) return
     const kind = parseKind(req.params.kind)
     if (!kind) { res.status(404).json({ error: 'Not found' }); return }
     const t = TBL[kind]
@@ -1060,6 +1083,7 @@ facturesRouter.post('/:kind', async (req: Request, res: Response) => {
 
 facturesRouter.put('/:kind/:id', async (req: Request, res: Response) => {
   try {
+    if (!(await requireEditFactures(req, res))) return
     const kind = parseKind(req.params.kind)
     if (!kind) { res.status(404).json({ error: 'Not found' }); return }
     const id = parseInt(req.params.id, 10)
@@ -1092,6 +1116,7 @@ facturesRouter.put('/:kind/:id', async (req: Request, res: Response) => {
 
 facturesRouter.delete('/:kind/:id', async (req: Request, res: Response) => {
   try {
+    if (!(await requireEditFactures(req, res))) return
     const kind = parseKind(req.params.kind)
     if (!kind) { res.status(404).json({ error: 'Not found' }); return }
     const id = parseInt(req.params.id, 10)
@@ -1116,6 +1141,7 @@ facturesRouter.delete('/:kind/:id', async (req: Request, res: Response) => {
 
 facturesRouter.post('/prov/:id/convert', async (req: Request, res: Response) => {
   try {
+    if (!(await requireEditFactures(req, res))) return
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
 
@@ -1180,6 +1206,7 @@ facturesRouter.post('/prov/:id/convert', async (req: Request, res: Response) => 
 
 facturesRouter.post('/:kind/:id/lignes', async (req: Request, res: Response) => {
   try {
+    if (!(await requireEditFactures(req, res))) return
     const kind = parseKind(req.params.kind)
     if (!kind) { res.status(404).json({ error: 'Not found' }); return }
     const id = parseInt(req.params.id, 10)
@@ -1204,6 +1231,7 @@ facturesRouter.post('/:kind/:id/lignes', async (req: Request, res: Response) => 
 
 facturesRouter.put('/:kind/lignes/:lineId', async (req: Request, res: Response) => {
   try {
+    if (!(await requireEditFactures(req, res))) return
     const kind = parseKind(req.params.kind)
     if (!kind) { res.status(404).json({ error: 'Not found' }); return }
     const lineId = parseInt(req.params.lineId, 10)
@@ -1232,6 +1260,7 @@ facturesRouter.put('/:kind/lignes/:lineId', async (req: Request, res: Response) 
 
 facturesRouter.delete('/:kind/lignes/:lineId', async (req: Request, res: Response) => {
   try {
+    if (!(await requireEditFactures(req, res))) return
     const kind = parseKind(req.params.kind)
     if (!kind) { res.status(404).json({ error: 'Not found' }); return }
     const lineId = parseInt(req.params.lineId, 10)
