@@ -241,9 +241,10 @@ export function FilsStock() {
   return (
     <div className="h-full flex flex-col gap-3 min-h-0">
 
-      {/* Toolbar */}
-      <div className="flex-shrink-0 flex items-center gap-3">
-        <div className="relative flex-1 min-w-0">
+      {/* Toolbar — below sm: search + Nouveau share row 1 (create action stays top-right),
+          the filter checkbox wraps to row 2. Desktop order/pixels unchanged. */}
+      <div className="flex-shrink-0 flex flex-wrap items-center gap-3">
+        <div className="relative order-1 flex-1 min-w-0">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <input
             type="text"
@@ -254,7 +255,7 @@ export function FilsStock() {
           />
         </div>
 
-        <label className="flex items-center gap-2 text-sm cursor-pointer select-none flex-shrink-0">
+        <label className="flex items-center gap-2 text-sm cursor-pointer select-none flex-shrink-0 order-3 sm:order-2 w-full sm:w-auto">
           <input
             type="checkbox"
             checked={hideFinished}
@@ -265,7 +266,7 @@ export function FilsStock() {
         </label>
 
         {canCreate && (
-          <Button size="sm" onClick={() => setCreateOpen(true)} className="flex-shrink-0">
+          <Button size="sm" onClick={() => setCreateOpen(true)} className="flex-shrink-0 order-2 sm:order-3">
             <Plus className="h-3.5 w-3.5 mr-1" />
             Nouveau
           </Button>
@@ -290,6 +291,8 @@ export function FilsStock() {
           </div>
         ) : (
           <>
+            {/* Desktop table (md+) — split header/body sharing one colgroup */}
+            <div className="hidden md:flex md:flex-col flex-1 min-h-0">
             {/* Header table (non-scrolling) */}
             <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
               <colgroup>
@@ -367,6 +370,44 @@ export function FilsStock() {
                 </tbody>
               </table>
             </div>
+            </div>
+
+            {/* Mobile card list (< md) — same rows, selection and sort state as the table */}
+            <div className="md:hidden flex-1 min-h-0 flex flex-col">
+              <div className="flex items-center gap-2 px-2 py-1.5 bg-zinc-200/60 border-b border-border/60">
+                <span className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold flex-shrink-0">Tri</span>
+                <div className="flex-1 min-w-0">
+                  <PopoverSelect
+                    hideEmpty
+                    options={COLUMNS.map((c, i) => ({ id: i + 1, primary: c.label }))}
+                    value={COLUMNS.findIndex((c) => c.key === sort.key) + 1}
+                    onChange={(id) => {
+                      const col = COLUMNS[id - 1]
+                      if (col) setSort((prev) => ({ key: col.key, dir: prev.dir }))
+                    }}
+                  />
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-9 w-9 flex-shrink-0"
+                  onClick={() => setSort((prev) => ({ ...prev, dir: prev.dir === 'asc' ? 'desc' : 'asc' }))}
+                  title={sort.dir === 'asc' ? 'Tri croissant' : 'Tri décroissant'}
+                >
+                  {sort.dir === 'asc' ? <ArrowUp className="h-4 w-4" /> : <ArrowDown className="h-4 w-4" />}
+                </Button>
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto scrollbar-transparent p-2 space-y-2 bg-zinc-100/80">
+                {filteredSorted.map((r) => (
+                  <StockLotCard
+                    key={r.IDstock_fil}
+                    row={r}
+                    isSelected={r.IDstock_fil === selectedId}
+                    onClick={() => handleRowClick(r.IDstock_fil)}
+                  />
+                ))}
+              </div>
+            </div>
           </>
         )}
       </div>
@@ -441,6 +482,54 @@ function SortHeader({ label, sortKey, sort, onSort, align = 'left' }: SortHeader
   )
 }
 
+// ── Mobile card (below md) ─────────────────────────────
+// One stock lot as a touch-friendly card. Same data, click handler and
+// data-stock-row marker as the table row — only the markup differs.
+
+function CardKV({ label, value, mono, strong }: { label: string; value: React.ReactNode; mono?: boolean; strong?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className={cn('text-xs truncate', mono && 'tabular-nums', strong && 'font-semibold')}>{value}</p>
+    </div>
+  )
+}
+
+function StockLotCard({ row, isSelected, onClick }: { row: StockRow; isSelected: boolean; onClick: () => void }) {
+  return (
+    <div
+      data-stock-row
+      onClick={onClick}
+      className={cn(
+        'rounded-lg border p-3 cursor-pointer transition-colors shadow-sm',
+        isSelected ? 'bg-accent/10 border-accent ring-1 ring-accent' : 'bg-white border-border/60 hover:border-accent/40'
+      )}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-sm font-medium truncate">{row.ref_fil ?? '—'}</p>
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {!!row.bio && <Leaf className="h-3.5 w-3.5 text-green-600" />}
+          {!!row.recycle && <Recycle className="h-3.5 w-3.5 text-blue-600" />}
+          {!!row.termine && <Badge variant="outline" className="text-[10px] py-0">T</Badge>}
+        </div>
+      </div>
+      <p className="text-xs text-muted-foreground mt-0.5 truncate">{row.colori_reference ?? '—'}</p>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 mt-2">
+        <CardKV label="Lot" value={row.lot ?? '—'} mono />
+        <CardKV label="Stock" value={formatKg(row.stock)} mono strong />
+        <CardKV label="Fournisseur" value={row.fournisseur_nom ?? '—'} />
+        <CardKV label="Emplacement" value={row.emplacement ?? '—'} />
+      </div>
+      {!!(row.date_entree || row.commentaire?.trim()) && (
+        <div className="flex items-center justify-between gap-2 mt-2 pt-2 border-t border-border/40 text-[11px] text-muted-foreground">
+          <span className="truncate italic">{row.commentaire?.trim() ?? ''}</span>
+          <span className="flex-shrink-0 tabular-nums">{row.date_entree ? formatHfsqlDate(row.date_entree) : ''}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Side drawer ────────────────────────────────────────
 
 interface DrawerProps {
@@ -484,8 +573,8 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess, onDirtyChange, save
       const target = e.target as Node | null
       if (!target) return
       if (drawerRef.current?.contains(target)) return
-      // Ignore clicks on rows of the stock table — they handle selection themselves
-      if ((target as Element).closest?.('tr[data-stock-row]')) return
+      // Ignore clicks on stock rows (table rows or mobile cards) — they handle selection themselves
+      if ((target as Element).closest?.('[data-stock-row]')) return
       onClose()
     }
     document.addEventListener('mousedown', handleMouseDown)
@@ -556,7 +645,7 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess, onDirtyChange, save
     <div
       ref={drawerRef}
       className={cn(
-        'fixed right-0 bottom-0 w-[440px] bg-white border-l border-border/60 shadow-xl z-30 transition-transform duration-300 flex flex-col',
+        'fixed right-0 bottom-0 w-full max-w-[440px] bg-white border-l border-border/60 shadow-xl z-30 transition-transform duration-300 flex flex-col',
         embed ? 'top-0' : 'top-14',
         open ? 'translate-x-0' : 'translate-x-full'
       )}
@@ -626,6 +715,16 @@ function StockDetailDrawer({ id, onClose, onMutationSuccess, onDirtyChange, save
               )}
             </div>
           )}
+          {/* Mobile-only close — at full drawer width there is no "outside" left to tap */}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 flex-shrink-0 -mt-0.5 md:hidden"
+            onClick={onClose}
+            title="Fermer"
+          >
+            <X className="h-4 w-4" />
+          </Button>
         </div>
       </div>
 
@@ -960,13 +1059,13 @@ function NewStockFilDialog({ open, onOpenChange, onCreated }: NewStockFilDialogP
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl" onClose={() => onOpenChange(false)}>
+      <DialogContent className="max-w-xl max-h-[90dvh] overflow-y-auto" onClose={() => onOpenChange(false)}>
         <DialogHeader>
           <DialogTitle className="font-heading">Nouveau lot de fil</DialogTitle>
         </DialogHeader>
 
-        <div className="grid grid-cols-2 gap-3 mt-3">
-          <div className="col-span-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+          <div className="col-span-full">
             <label className="text-xs text-muted-foreground mb-1 block">Fournisseur *</label>
             <SearchableCombobox<{ IDfournisseur: number; nom: string }>
               options={fournisseursQuery.data ?? []}
@@ -1056,7 +1155,7 @@ function NewStockFilDialog({ open, onOpenChange, onCreated }: NewStockFilDialogP
             />
           </div>
 
-          <div className="col-span-2">
+          <div className="col-span-full">
             <label className="text-xs text-muted-foreground mb-1 block">Emplacement</label>
             <input
               type="text"
@@ -1066,7 +1165,7 @@ function NewStockFilDialog({ open, onOpenChange, onCreated }: NewStockFilDialogP
             />
           </div>
 
-          <div className="col-span-2">
+          <div className="col-span-full">
             <label className="text-xs text-muted-foreground mb-1 block">Commentaire</label>
             <textarea
               value={commentaire}

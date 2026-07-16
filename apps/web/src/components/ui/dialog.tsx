@@ -29,7 +29,7 @@ function Dialog({ open, onOpenChange, children }: DialogProps) {
   if (!open) return null
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       {/* Overlay */}
       <div
         className="fixed inset-0 bg-black/80 animate-in fade-in-0"

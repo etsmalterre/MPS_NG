@@ -21,8 +21,14 @@ export default defineConfig({
     trace: 'retain-on-failure',
   },
   projects: [
-    { name: 'desktop-1920', use: { viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 } },
-    { name: 'desktop-1366', use: { viewport: { width: 1366, height: 768 }, deviceScaleFactor: 1 } },
+    // ≥ md (768px): table layout — these run the standard spec
+    { name: 'desktop-1920', testIgnore: /-responsive\.spec\.ts$/, use: { viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 } },
+    { name: 'desktop-1366', testIgnore: /-responsive\.spec\.ts$/, use: { viewport: { width: 1366, height: 768 }, deviceScaleFactor: 1 } },
+    { name: 'tablet-768', testIgnore: /-responsive\.spec\.ts$/, use: { viewport: { width: 768, height: 1024 }, deviceScaleFactor: 1 } },
+    // < md: card-list layout — these run only the *-responsive specs
+    { name: 'fold-open-717', testMatch: /-responsive\.spec\.ts$/, use: { viewport: { width: 717, height: 880 }, deviceScaleFactor: 1 } },
+    { name: 'phone-390', testMatch: /-responsive\.spec\.ts$/, use: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 } },
+    { name: 'fold-cover-345', testMatch: /-responsive\.spec\.ts$/, use: { viewport: { width: 345, height: 720 }, deviceScaleFactor: 1 } },
   ],
   webServer: {
     // Port 3200: outside worktree web slots (3000-3006) and vite default 5174.
