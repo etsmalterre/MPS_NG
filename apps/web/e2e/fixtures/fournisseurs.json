@@ -1,0 +1,434 @@
+[
+  {
+    "IDfournisseur": 60,
+    "nom": "ALMER TEKSTIL",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 0
+  },
+  {
+    "IDfournisseur": 55,
+    "nom": "AQUAFIL",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 0
+  },
+  {
+    "IDfournisseur": 4,
+    "nom": "Belda Llorens",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 6,
+    "nom": "Caulliez",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 45,
+    "nom": "C.I.T Dessaint",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 3
+  },
+  {
+    "IDfournisseur": 1,
+    "nom": "Contifibre",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 50,
+    "nom": "Créora",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 0
+  },
+  {
+    "IDfournisseur": 53,
+    "nom": "DEFIBER SA",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 0
+  },
+  {
+    "IDfournisseur": 2,
+    "nom": "DIVERS",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 29,
+    "nom": "Doucet D.TEX",
+    "tel": "03 20 96 28 00",
+    "fax": "03 20 60 00 37",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 5,
+    "nom": "Elaspan",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 44,
+    "nom": "Eurogriffe",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 3
+  },
+  {
+    "IDfournisseur": 46,
+    "nom": "FM TEXTILES SAS",
+    "tel": "06.65.34.99.68",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 0
+  },
+  {
+    "IDfournisseur": 3,
+    "nom": "francitex",
+    "tel": "32 475 46 74 24",
+    "fax": "",
+    "commentaire": "thierry francis",
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 7,
+    "nom": "Gilleman",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 8,
+    "nom": "Hilaturas Ferre",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 34,
+    "nom": "ILCAT",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 9,
+    "nom": "Inovafil",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 59,
+    "nom": "Karafiber",
+    "tel": ".",
+    "fax": ".",
+    "commentaire": ".",
+    "est_visible": 1,
+    "IDsociete": 0
+  },
+  {
+    "IDfournisseur": 38,
+    "nom": "La french filature",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 10,
+    "nom": "Legs",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 11,
+    "nom": "Lepere Oursport",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 28,
+    "nom": "Linificio",
+    "tel": "+39 035 634 011",
+    "fax": "+39 035 634 027",
+    "commentaire": "info@linificio.it",
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 12,
+    "nom": "Margitex",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 13,
+    "nom": "Massebeuf",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 56,
+    "nom": "MAXEL",
+    "tel": "03.64.17.28.49",
+    "fax": "03.64.17.28.51",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 0
+  },
+  {
+    "IDfournisseur": 48,
+    "nom": "MFT",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 0
+  },
+  {
+    "IDfournisseur": 37,
+    "nom": "Miroglio",
+    "tel": "",
+    "fax": "",
+    "commentaire": "Contact Nicolas Dierckx",
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 27,
+    "nom": "Mundifios",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 51,
+    "nom": "NAZAR TEXTILE",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 0
+  },
+  {
+    "IDfournisseur": 30,
+    "nom": "Novalfa",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 15,
+    "nom": "Otto",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 39,
+    "nom": "Prym",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 3
+  },
+  {
+    "IDfournisseur": 35,
+    "nom": "Risatel",
+    "tel": "351 253 520 738",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 23,
+    "nom": "Roica",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 16,
+    "nom": "Safilin",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 57,
+    "nom": "SAN VITALE",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 0
+  },
+  {
+    "IDfournisseur": 17,
+    "nom": "Somelos",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 32,
+    "nom": "SPOERRY",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 18,
+    "nom": "Stiafilco",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 33,
+    "nom": "Taekwang",
+    "tel": "",
+    "fax": "",
+    "commentaire": "Francitex",
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 54,
+    "nom": "TEXPRO",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 0
+  },
+  {
+    "IDfournisseur": 19,
+    "nom": "Textile des dunes",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 14,
+    "nom": "Textiles Dubois",
+    "tel": "253 470 400",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 20,
+    "nom": "Tissage la Mouline",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 21,
+    "nom": "Trifitrofa",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 25,
+    "nom": "Weber & Heusseur",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 1
+  },
+  {
+    "IDfournisseur": 47,
+    "nom": "Weturn",
+    "tel": "",
+    "fax": "",
+    "commentaire": null,
+    "est_visible": 1,
+    "IDsociete": 0
+  }
+]

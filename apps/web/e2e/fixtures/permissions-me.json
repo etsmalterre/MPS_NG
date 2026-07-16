@@ -1,0 +1,25 @@
+{
+  "isAdmin": true,
+  "isEffectiveAdmin": true,
+  "granted": [
+    "dashboard_fil_etat",
+    "dashboard_la_gentle",
+    "edit_commandes_client",
+    "donation_commande_client",
+    "edit_observations_rouleaux",
+    "edit_factures",
+    "delete_client",
+    "gestion_tarifs",
+    "gestion_references",
+    "retour_marchandise",
+    "create_stock_fil",
+    "cut_stock_fini",
+    "create_stock_fini",
+    "edit_stock_fini",
+    "surteindre_stock_fini",
+    "create_stock_ecru",
+    "edit_stock_ecru",
+    "cut_stock_ecru",
+    "responsable_qualite"
+  ]
+}

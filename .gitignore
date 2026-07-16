@@ -77,3 +77,7 @@ apps/api/tsconfig.tsbuildinfo
 # real source isn't caught.
 apps/api/backfill-*
 apps/api/*-rollback-*.json
+
+# Playwright artifacts (baselines in apps/web/e2e/__screenshots__ ARE committed)
+apps/web/test-results/
+apps/web/playwright-report/
