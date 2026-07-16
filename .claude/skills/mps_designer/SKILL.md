@@ -3848,7 +3848,7 @@ Reference: **`apps/web/src/pages/FilsStock.tsx`** (`StockLotCard`, `CardKV`, mob
 Every responsive change must be **additive**: existing markup gets `hidden md:*`, new mobile markup gets `md:hidden`, form grids gain `sm:` gates, flex order swaps use `order-*` utilities that preserve DOM order at `sm`+. Never restructure or restyle desktop rendering "while you're in there". Proof is mechanical, not visual: capture Playwright desktop baselines BEFORE the first CSS change (§40.7) and keep them green after every edit — during the work, temporarily set `maxDiffPixels: 0` to prove strict pixel identity.
 
 Layout-family map (which screens need work):
-- **Table-centric (§27)** — the responsive gap; this section is mostly about them. Done: FilsStock ✅. To port: FinisStock (twin, incl. its 440px drawer), TombeMetierStock, RapportCommandesSst.
+- **Table-centric (§27)** — the responsive gap; this section is mostly about them. Done: FilsStock ✅, FinisStock ✅ (incl. edit-mode multi-select cards — checkbox is CSS-driven via a `data-editing` group attribute on the card container, same trick as the tbody, so edit-mode toggles re-render zero cards). To port: TombeMetierStock, RapportCommandesSst.
 - **Master-detail (§4)** — already handled by `useResponsiveLayout` (stacked below 1240). Do not touch.
 - **Dashboard** — already responsive (`sm:`/`lg:` grid).
 
@@ -3885,7 +3885,7 @@ Structure inside the §27.3 table card container — loading/error/empty branche
 - Second line: secondary identifier (`text-xs text-muted-foreground`).
 - Body: 2-col grid of `CardKV` (label `text-[10px] uppercase tracking-wide text-muted-foreground`, value `text-xs truncate`, `tabular-nums` for numbers, `font-semibold` on the value users scan for — e.g. Stock).
 - Optional footer after a `border-t border-border/40`: comment (italic, truncate) left, date right.
-- Keep card components **in-file** next to the page (like `SortHeader`) until a second screen ports the pattern — then extract to `components/stock/`.
+- The shared primitives live in **`apps/web/src/components/stock/StockCardParts.tsx`**: `CardKV` (label/value cell) and `MobileSortRow` (generic over the screen's `SortKey`). The card component itself (`StockLotCard`, `StockFiniCard`) stays **in-file** next to the page — fields differ per screen. Memo the card like the table row when the screen has perf-sensitive row counts.
 
 **Mobile sort row** — table headers disappear with the table, so sorting gets a compact `md:hidden` row above the cards, styled like the table header band (`bg-zinc-200/60 border-b border-border/60 px-2 py-1.5`): a `TRI` micro-label, a full-width `PopoverSelect` (`hideEmpty`, options = the `COLUMNS` labels, `id = index + 1`) that changes `sort.key` keeping the current direction, and a ghost `h-9 w-9` icon button toggling `asc`/`desc` (ArrowUp/ArrowDown, French titles "Tri croissant"/"Tri décroissant").
 

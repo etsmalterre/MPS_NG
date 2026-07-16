@@ -34,6 +34,7 @@ import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates
 import { apiFetch, API_URL } from '@/lib/api'
 import { fmtNum } from '@/lib/format'
 import { useHasPermission } from '@/contexts/PermissionsContext'
+import { CardKV, MobileSortRow } from '@/components/stock/StockCardParts'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -374,29 +375,7 @@ export function FilsStock() {
 
             {/* Mobile card list (< md) — same rows, selection and sort state as the table */}
             <div className="md:hidden flex-1 min-h-0 flex flex-col">
-              <div className="flex items-center gap-2 px-2 py-1.5 bg-zinc-200/60 border-b border-border/60">
-                <span className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold flex-shrink-0">Tri</span>
-                <div className="flex-1 min-w-0">
-                  <PopoverSelect
-                    hideEmpty
-                    options={COLUMNS.map((c, i) => ({ id: i + 1, primary: c.label }))}
-                    value={COLUMNS.findIndex((c) => c.key === sort.key) + 1}
-                    onChange={(id) => {
-                      const col = COLUMNS[id - 1]
-                      if (col) setSort((prev) => ({ key: col.key, dir: prev.dir }))
-                    }}
-                  />
-                </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-9 w-9 flex-shrink-0"
-                  onClick={() => setSort((prev) => ({ ...prev, dir: prev.dir === 'asc' ? 'desc' : 'asc' }))}
-                  title={sort.dir === 'asc' ? 'Tri croissant' : 'Tri décroissant'}
-                >
-                  {sort.dir === 'asc' ? <ArrowUp className="h-4 w-4" /> : <ArrowDown className="h-4 w-4" />}
-                </Button>
-              </div>
+              <MobileSortRow columns={COLUMNS} sort={sort} onSortChange={setSort} />
               <div className="flex-1 min-h-0 overflow-y-auto scrollbar-transparent p-2 space-y-2 bg-zinc-100/80">
                 {filteredSorted.map((r) => (
                   <StockLotCard
@@ -485,15 +464,6 @@ function SortHeader({ label, sortKey, sort, onSort, align = 'left' }: SortHeader
 // ── Mobile card (below md) ─────────────────────────────
 // One stock lot as a touch-friendly card. Same data, click handler and
 // data-stock-row marker as the table row — only the markup differs.
-
-function CardKV({ label, value, mono, strong }: { label: string; value: React.ReactNode; mono?: boolean; strong?: boolean }) {
-  return (
-    <div className="min-w-0">
-      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
-      <p className={cn('text-xs truncate', mono && 'tabular-nums', strong && 'font-semibold')}>{value}</p>
-    </div>
-  )
-}
 
 function StockLotCard({ row, isSelected, onClick }: { row: StockRow; isSelected: boolean; onClick: () => void }) {
   return (

@@ -50,6 +50,7 @@ import { apiFetch, API_URL } from '@/lib/api'
 import { EtatPill } from '@/lib/etat-stock-fini'
 import { useHasPermission } from '@/contexts/PermissionsContext'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
+import { CardKV, MobileSortRow } from '@/components/stock/StockCardParts'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -426,15 +427,16 @@ export function FinisStock() {
 
   return (
     <div className="h-full flex flex-col gap-3 min-h-0">
-      {/* Toolbar */}
-      <div className="flex-shrink-0 flex items-center gap-3">
+      {/* Toolbar — below sm: search + actions share row 1 (actions stay top-right),
+          badge and filter checkbox wrap below. Desktop order/pixels unchanged. */}
+      <div className="flex-shrink-0 flex flex-wrap items-center gap-3">
         {isEditing && (
-          <Badge className="bg-accent text-accent-foreground gap-1 shadow-sm flex-shrink-0">
+          <Badge className="bg-accent text-accent-foreground gap-1 shadow-sm flex-shrink-0 order-3 sm:order-1">
             <Pencil className="h-3 w-3" />
             Mode édition
           </Badge>
         )}
-        <div className="relative flex-1 min-w-0">
+        <div className="relative order-1 sm:order-2 flex-1 min-w-0">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <input
             type="text"
@@ -445,7 +447,7 @@ export function FinisStock() {
           />
         </div>
 
-        <label className="flex items-center gap-2 text-sm cursor-pointer select-none flex-shrink-0">
+        <label className="flex items-center gap-2 text-sm cursor-pointer select-none flex-shrink-0 order-4 sm:order-3 w-full sm:w-auto">
           <input
             type="checkbox"
             checked={hideShipped}
@@ -456,7 +458,7 @@ export function FinisStock() {
         </label>
 
         {!isEditing ? (
-          <div className="flex items-center gap-2 flex-shrink-0">
+          <div className="flex items-center gap-2 flex-shrink-0 order-2 sm:order-4">
             {canCreate && (
               <Button size="sm" onClick={() => setCreateOpen(true)}>
                 <Plus className="h-3.5 w-3.5 mr-1" />
@@ -469,7 +471,7 @@ export function FinisStock() {
             </Button>
           </div>
         ) : (
-          <div className="flex items-center gap-2 flex-shrink-0">
+          <div className="flex items-center gap-2 flex-shrink-0 order-2 sm:order-4">
             {canCut && selectedRollIds.size === 1 && (
               <Button
                 variant="outline"
@@ -529,6 +531,8 @@ export function FinisStock() {
           </div>
         ) : (
           <>
+            {/* Desktop table (md+) — split header/body sharing one colgroup */}
+            <div className="hidden md:flex md:flex-col flex-1 min-h-0">
             {/* Header table (non-scrolling) */}
             <table className="w-full text-xs" style={{ tableLayout: 'fixed' }}>
               <colgroup>
@@ -582,6 +586,29 @@ export function FinisStock() {
                   ))}
                 </tbody>
               </table>
+            </div>
+            </div>
+
+            {/* Mobile card list (< md) — same rows, selection, sort and edit-mode
+                state as the table. data-editing drives the card checkboxes via CSS
+                (same trick as the tbody) so toggling edit mode re-renders no card. */}
+            <div className="md:hidden flex-1 min-h-0 flex flex-col">
+              <MobileSortRow columns={COLUMNS} sort={sort} onSortChange={setSort} />
+              <div
+                className="group flex-1 min-h-0 overflow-y-auto scrollbar-transparent p-2 space-y-2 bg-zinc-100/80"
+                data-editing={isEditing ? 'true' : 'false'}
+              >
+                {filteredSorted.map((r) => (
+                  <StockFiniCard
+                    key={r.IDstock_fini}
+                    row={r}
+                    selected={
+                      isEditing ? selectedRollIds.has(r.IDstock_fini) : r.IDstock_fini === selectedId
+                    }
+                    onRowClick={onRowClick}
+                  />
+                ))}
+              </div>
             </div>
           </>
         )}
@@ -783,7 +810,7 @@ function CutRollDialog({
 
   return (
     <Dialog open={open && !!row} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-lg" onClose={onClose}>
+      <DialogContent className="max-w-lg max-h-[90dvh] overflow-y-auto" onClose={onClose}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Scissors className="h-5 w-5 text-accent" />
@@ -1005,7 +1032,7 @@ function BatchEditDialog({
 
   return (
     <Dialog open={open && count > 0} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-md" onClose={onClose}>
+      <DialogContent className="max-w-md max-h-[90dvh] overflow-y-auto" onClose={onClose}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Layers className="h-5 w-5 text-accent" />
@@ -1172,7 +1199,7 @@ function SurteindreDialog({
 
   return (
     <Dialog open={open && count > 0} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-7xl w-[95vw]" onClose={onClose}>
+      <DialogContent className="max-w-7xl w-[95vw] max-h-[90dvh] overflow-y-auto" onClose={onClose}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Paintbrush className="h-5 w-5 text-accent" />
@@ -1447,7 +1474,7 @@ function CreateFiniRollDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl" onClose={() => onOpenChange(false)}>
+      <DialogContent className="max-w-xl max-h-[90dvh] overflow-y-auto" onClose={() => onOpenChange(false)}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <FiniRollIcon className="h-5 w-5 text-accent" />
@@ -1455,8 +1482,8 @@ function CreateFiniRollDialog({
           </DialogTitle>
         </DialogHeader>
 
-        <div className="grid grid-cols-2 gap-3 mt-4">
-          <div className="col-span-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
+          <div className="col-span-full">
             <label className="text-xs text-muted-foreground mb-1 block">Référence *</label>
             <SearchableCombobox<RefFiniOption>
               options={refsQuery.data ?? []}
@@ -1470,7 +1497,7 @@ function CreateFiniRollDialog({
             />
           </div>
 
-          <div className="col-span-2">
+          <div className="col-span-full">
             <label className="text-xs text-muted-foreground mb-1 block">Coloris *</label>
             <PopoverSelect
               options={(colorisQuery.data ?? []).map((c) => ({ id: c.id, primary: c.reference ?? '' }))}
@@ -1546,7 +1573,7 @@ function CreateFiniRollDialog({
             />
           </div>
 
-          <div className="col-span-2">
+          <div className="col-span-full">
             <label className="text-xs text-muted-foreground mb-1 block">Emplacement</label>
             <input
               type="text"
@@ -1556,7 +1583,7 @@ function CreateFiniRollDialog({
             />
           </div>
 
-          <div className="col-span-2">
+          <div className="col-span-full">
             <label className="text-xs text-muted-foreground mb-1 block">Observations</label>
             <textarea
               value={observations}
@@ -1668,6 +1695,67 @@ const StockRow = memo(function StockRow({
   )
 })
 
+// ── Mobile card (below md) ─────────────────────────────
+// Same memo discipline as StockRow: `selected` is the only changing prop, and
+// the edit-mode checkbox is CSS-driven via the container's data-editing group
+// attribute, so edit-mode toggles re-render zero cards.
+
+const StockFiniCard = memo(function StockFiniCard({
+  row,
+  selected,
+  onRowClick,
+}: {
+  row: StockFiniRow
+  selected: boolean
+  onRowClick: (id: number, shiftKey: boolean) => void
+}) {
+  return (
+    <div
+      data-stock-row
+      onClick={(e) => onRowClick(row.IDstock_fini, e.shiftKey)}
+      className={cn(
+        'rounded-lg border p-3 cursor-pointer transition-colors shadow-sm group-data-[editing=true]:select-none',
+        selected ? 'bg-accent/10 border-accent ring-1 ring-accent' : 'bg-white border-border/60 hover:border-accent/40',
+      )}
+    >
+      <div className="flex items-center gap-2">
+        <div
+          className={cn(
+            'h-5 w-5 rounded border flex-shrink-0 items-center justify-center transition-colors hidden group-data-[editing=true]:flex',
+            selected ? 'bg-accent border-accent text-accent-foreground' : 'bg-white border-input',
+          )}
+        >
+          {selected && <Check className="h-3.5 w-3.5" />}
+        </div>
+        <p className="text-sm font-medium truncate flex-1 min-w-0">{row.ref_fini ?? '—'}</p>
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {!!row.second_choix && (
+            <Badge variant="outline" className="text-[10px] py-0 border-red-300 text-red-700">2C</Badge>
+          )}
+          {!!row.don && <Gift className="h-3.5 w-3.5 text-amber-600" />}
+          {!!row.destockage && <Trash2 className="h-3.5 w-3.5 text-zinc-500" />}
+          {row.etat_libelle && <EtatPill libelle={row.etat_libelle} />}
+        </div>
+      </div>
+      <p className="text-xs text-muted-foreground mt-0.5 truncate">{row.coloris_reference ?? '—'}</p>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 mt-2">
+        <CardKV label="Numéro" value={row.numero ?? '—'} mono />
+        <CardKV label="Poids" value={formatKg(row.poids)} mono strong />
+        <CardKV label="Métrage" value={row.metrage != null ? `${fmtNum(row.metrage, 1)} Ml` : '—'} mono />
+        <CardKV label="Lot" value={row.lot ?? '—'} mono />
+        <CardKV label="Client" value={row.client_nom ?? '—'} />
+        <CardKV label="Emplacement" value={row.emplacement ?? '—'} />
+      </div>
+      {!!(row.date_saisie || row.observations?.trim()) && (
+        <div className="flex items-center justify-between gap-2 mt-2 pt-2 border-t border-border/40 text-[11px] text-muted-foreground">
+          <span className="truncate italic">{row.observations?.trim() ?? ''}</span>
+          <span className="flex-shrink-0 tabular-nums">{row.date_saisie ? formatHfsqlDate(row.date_saisie) : ''}</span>
+        </div>
+      )}
+    </div>
+  )
+})
+
 // ── Sort header cell ───────────────────────────────────
 
 interface SortHeaderProps {
@@ -1755,7 +1843,8 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
       const target = e.target as Node | null
       if (!target) return
       if (drawerRef.current?.contains(target)) return
-      if ((target as Element).closest?.('tr[data-stock-row]')) return
+      // Table rows or mobile cards both carry data-stock-row — they switch selection themselves
+      if ((target as Element).closest?.('[data-stock-row]')) return
       onClose()
     }
     document.addEventListener('mousedown', handleMouseDown)
@@ -1851,7 +1940,7 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
     <div
       ref={drawerRef}
       className={cn(
-        'fixed right-0 bottom-0 w-[440px] bg-white border-l border-border/60 shadow-xl z-30 transition-transform duration-300 flex flex-col',
+        'fixed right-0 bottom-0 w-full max-w-[440px] bg-white border-l border-border/60 shadow-xl z-30 transition-transform duration-300 flex flex-col',
         embed ? 'top-0' : 'top-14',
         open ? 'translate-x-0' : 'translate-x-full',
       )}
@@ -1945,6 +2034,16 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
                 )}
               </div>
             )}
+            {/* Mobile-only close — at full drawer width there is no "outside" left to tap */}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 flex-shrink-0 -mt-0.5 md:hidden"
+              onClick={onClose}
+              title="Fermer"
+            >
+              <X className="h-4 w-4" />
+            </Button>
           </div>
           {isEditing && saveError && (
             <div className="mt-2 flex items-center gap-2 text-sm text-destructive">
