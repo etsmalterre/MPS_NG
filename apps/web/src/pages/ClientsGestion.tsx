@@ -807,12 +807,17 @@ function DetailMain({ client, isLoading, hasSelection, isEditing, canManageTarif
           )
         })}
       </div>
-      {/* px-1/pb-1 keep focus rings and card hover borders clear of the overflow clip (§31.5). */}
-      <div className="flex-1 min-h-0 overflow-auto space-y-2 pt-3 px-1 pb-1">
+      {/* Flex column (not a scroll container): each tab owns its scrolling so
+          Références can host the §31 in-screen drawer with the shrink mechanic. */}
+      <div className="flex-1 min-h-0 flex flex-col gap-2 pt-3 pb-1">
         {/* Commercial sub-views (tarif modes editable in edit mode, permission-gated) */}
         {activeTab === 'references' && <ReferencesTab clientId={client.IDclient} isEditing={isEditing} canManageTarifs={canManageTarifs} />}
-        {activeTab === 'historique' && <HistoriqueTab clientId={client.IDclient} />}
-        {activeTab === 'marchandise' && <MarchandiseTab clientId={client.IDclient} />}
+        {activeTab === 'historique' && (
+          <div className="flex-1 min-h-0 overflow-auto scrollbar-transparent px-1"><HistoriqueTab clientId={client.IDclient} /></div>
+        )}
+        {activeTab === 'marchandise' && (
+          <div className="flex-1 min-h-0 overflow-auto scrollbar-transparent px-1"><MarchandiseTab clientId={client.IDclient} /></div>
+        )}
       </div>
     </div>
   )
@@ -1281,9 +1286,11 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
   // Ref-level settings dialog: { existing: null } = create, { existing: ref } = edit.
   const [settings, setSettings] = useState<{ existing: ClientReference | null } | null>(null)
   const [search, setSearch] = useState('')
+  // §31 in-screen drawer: the selected ref's coloris. Toggle on reclick.
+  const [drawerRefId, setDrawerRefId] = useState<number | null>(null)
   const { data, isLoading } = useQuery<ClientReference[]>({ queryKey: ['client-references', clientId], queryFn: () => apiFetch(`/clients/${clientId}/references`) })
-  // The tab stays mounted across client switches; don't carry the filter over.
-  useEffect(() => { setSearch('') }, [clientId])
+  // The tab stays mounted across client switches; don't carry the filter/drawer over.
+  useEffect(() => { setSearch(''); setDrawerRefId(null) }, [clientId])
   // Multi-criteria filter: every space-separated term must match at least one of
   // the ref's fields (commercial name, internal ref, designation, coloris labels).
   const filtered = useMemo(() => {
@@ -1295,12 +1302,25 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
       return terms.every((t) => hay.some((h) => h.includes(t)))
     })
   }, [data, search])
-  // Edit-mode chip click edits the tarif mode (permission-gated); view-mode click shows the tarif.
-  const tarifEditable = isEditing && canManageTarifs
+
+  const drawerRef = drawerRefId !== null ? filtered.find((r) => r.IDdesignation_client === drawerRefId) ?? null : null
+  const drawerOpen = drawerRef !== null
+  // Close the drawer when the search narrows its ref out of the visible list.
+  useEffect(() => {
+    if (drawerRefId !== null && !filtered.some((r) => r.IDdesignation_client === drawerRefId)) setDrawerRefId(null)
+  }, [filtered, drawerRefId])
+  // Bring the selected card into view once the list has shrunk under the drawer.
+  useEffect(() => {
+    if (drawerRefId === null) return
+    requestAnimationFrame(() => {
+      document.querySelector(`[data-ref-card="${drawerRefId}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    })
+  }, [drawerRefId])
+
   return (
     <>
       {!isLoading && !!data && data.length > 0 && (
-        <div className="relative">
+        <div className="relative flex-shrink-0 mx-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <input value={search} onChange={(e) => setSearch(e.target.value)}
             placeholder="Filtrer (réf, désignation, coloris...)"
@@ -1309,13 +1329,15 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
       )}
       {isLoading ? <SectionSpinner /> : !data || data.length === 0 ? <SectionEmpty text="Aucune référence client" />
         : filtered.length === 0 ? <SectionEmpty text="Aucune référence ne correspond à la recherche" /> : (
-        <div className="space-y-2">
+        <div className={cn('overflow-auto space-y-2 p-1 scrollbar-transparent',
+          drawerOpen ? 'flex-shrink-0 max-h-[40%]' : 'flex-1 min-h-0')}>
           {filtered.map((r) => (
-            <div key={r.IDdesignation_client}
-              onClick={isEditing ? () => setSettings({ existing: r }) : undefined}
-              title={isEditing ? 'Modifier la référence' : undefined}
+            <div key={r.IDdesignation_client} data-ref-card={r.IDdesignation_client}
+              onClick={() => setDrawerRefId((prev) => (prev === r.IDdesignation_client ? null : r.IDdesignation_client))}
+              title={drawerRefId === r.IDdesignation_client ? 'Masquer les coloris' : 'Voir les coloris'}
               className={cn('group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3', 'border-l-amber-400/60',
-                isEditing && 'cursor-pointer hover:border-accent/40 transition-colors')}>
+                'cursor-pointer hover:bg-zinc-100 hover:border-accent/40 transition-colors',
+                drawerRefId === r.IDdesignation_client && 'ring-1 ring-accent bg-accent/[0.06] border-accent/50')}>
               <div className="flex items-center gap-2">
                 <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-amber-400/10"><Tag className="h-3.5 w-3.5 text-amber-600" /></div>
                 <div className="min-w-0 flex-1">
@@ -1325,53 +1347,106 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
                     {r.unite === 1 && <Badge variant="outline" className="text-[10px] py-0 flex-shrink-0">Kg</Badge>}
                     <div className="flex items-center gap-1.5 ml-auto flex-shrink-0">
                       {!!r.soumettre && <Badge variant="secondary" className="text-[10px] py-0">Soumis</Badge>}
-                      {isEditing && <Pencil className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />}
+                      <span className="text-[11px] text-muted-foreground tabular-nums flex items-center gap-1">
+                        <Palette className="h-3 w-3" />{r.coloris.length}
+                      </span>
+                      {isEditing && (
+                        <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="Modifier la référence"
+                          onClick={(e) => { e.stopPropagation(); setSettings({ existing: r }) }}>
+                          <Pencil className="h-3 w-3" />
+                        </Button>
+                      )}
                     </div>
                   </div>
                   {r.designation && <p className="text-[11px] text-muted-foreground truncate">{r.designation}</p>}
                 </div>
               </div>
-              {r.coloris.length > 0 && (
-                <div className="mt-2 flex flex-wrap gap-1 ml-9">
-                  {r.coloris.map((c) => {
-                    const priceable = r.IDref_fini > 0 && c.coloris_id > 0
-                    const label = `${r.client_ref} · ${c.label}`
-                    return (
-                      <button key={c.IDref_client_colori} type="button" disabled={!priceable}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          if (!priceable) return
-                          if (tarifEditable) setTarifMode({ coloris: c, label })
-                          else setTarif({ rccId: c.IDref_client_colori, label })
-                        }}
-                        title={priceable ? (tarifEditable ? 'Modifier le tarif' : 'Voir le tarif') : undefined}
-                        className={cn('inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border transition-colors',
-                          priceable
-                            ? tarifEditable
-                              ? 'border-accent/60 bg-accent/10 hover:bg-accent/20 text-foreground cursor-pointer'
-                              : 'border-accent/30 bg-accent/5 hover:bg-accent/15 text-foreground cursor-pointer'
-                            : 'border-border bg-muted text-muted-foreground cursor-default')}>
-                        <Palette className="h-2.5 w-2.5" />{c.label || '—'}
-                        <TarifModeTag c={c} />
-                        {priceable && (tarifEditable ? <Pencil className="h-2.5 w-2.5 opacity-60" /> : <BadgeEuro className="h-2.5 w-2.5 opacity-60" />)}
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
             </div>
           ))}
         </div>
       )}
+      {drawerOpen && drawerRef && (
+        <div className="flex-1 min-h-0 flex flex-col mx-1 rounded-lg border border-border/60 overflow-hidden bg-zinc-50/80 animate-in slide-in-from-bottom-4 fade-in-0 duration-200">
+          <ColorisDrawer
+            refItem={drawerRef}
+            tarifEditable={isEditing && canManageTarifs}
+            onClose={() => setDrawerRefId(null)}
+            onOpenTarif={(c) => setTarif({ rccId: c.IDref_client_colori, label: `${drawerRef.client_ref} · ${c.label}` })}
+            onOpenTarifMode={(c) => setTarifMode({ coloris: c, label: `${drawerRef.client_ref} · ${c.label}` })}
+          />
+        </div>
+      )}
       {isEditing && (
-        <Button variant="ghost" size="sm" className="w-full text-muted-foreground hover:text-foreground" onClick={() => setSettings({ existing: null })}>
-          <Plus className="h-4 w-4 mr-1.5" />Ajouter une référence
-        </Button>
+        <div className="flex-shrink-0 mx-1">
+          <Button variant="ghost" size="sm" className="w-full text-muted-foreground hover:text-foreground" onClick={() => setSettings({ existing: null })}>
+            <Plus className="h-4 w-4 mr-1.5" />Ajouter une référence
+          </Button>
+        </div>
       )}
       <TarifDialog open={tarif !== null} onClose={() => setTarif(null)} clientId={clientId} rccId={tarif?.rccId ?? 0} label={tarif?.label ?? ''} />
       <TarifModeDialog open={tarifMode !== null} onClose={() => setTarifMode(null)} clientId={clientId} target={tarifMode} />
       <RefSettingsDialog open={settings !== null} existing={settings?.existing ?? null} clientId={clientId} onClose={() => setSettings(null)} />
     </>
+  )
+}
+
+// ── Coloris drawer (§31 in-screen contained drawer, slides up under the ref list) ──
+
+function ColorisDrawer({ refItem, tarifEditable, onClose, onOpenTarif, onOpenTarifMode }: {
+  refItem: ClientReference
+  tarifEditable: boolean
+  onClose: () => void
+  onOpenTarif: (c: RefColoris) => void
+  onOpenTarifMode: (c: RefColoris) => void
+}) {
+  return (
+    <div className="flex flex-col h-full min-h-0 overflow-hidden bg-zinc-100/80">
+      {/* Minimal top strip: the selected ref card is highlighted right above (§31.4). */}
+      <div className="flex-shrink-0 px-2 py-1 border-b bg-zinc-200/50 flex items-center justify-between">
+        <span className="pl-1 text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
+          Coloris ({refItem.coloris.length})
+        </span>
+        <Button variant="ghost" size="icon" onClick={onClose} className="h-7 w-7" title="Fermer">
+          <X className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+      <div className="flex-1 overflow-y-auto p-3 scrollbar-transparent">
+        {refItem.coloris.length === 0 ? (
+          <p className="text-sm text-muted-foreground italic">
+            Aucun coloris disponible pour cette référence{tarifEditable ? ' - ajoutez-en via le crayon de la référence' : ''}
+          </p>
+        ) : (
+          <div className="grid grid-cols-2 xl:grid-cols-3 gap-2">
+            {refItem.coloris.map((c) => {
+              const priceable = refItem.IDref_fini > 0 && c.coloris_id > 0
+              return (
+                <button key={c.IDref_client_colori} type="button" disabled={!priceable}
+                  onClick={() => { if (priceable) (tarifEditable ? onOpenTarifMode(c) : onOpenTarif(c)) }}
+                  title={priceable ? (tarifEditable ? 'Modifier le tarif' : 'Voir le tarif') : undefined}
+                  className={cn('group flex items-center gap-2 rounded-lg border bg-card shadow-sm p-2.5 text-left transition-colors',
+                    priceable ? 'hover:border-accent/50 cursor-pointer' : 'opacity-60 cursor-default')}>
+                  <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-accent/10">
+                    <Palette className="h-3.5 w-3.5 text-accent" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium truncate">{c.label || '—'}</p>
+                    <div className="mt-0.5">
+                      {c.tarif_mode === 'standard'
+                        ? <span className="text-[10px] text-muted-foreground">Tarif standard</span>
+                        : <TarifModeTag c={c} />}
+                    </div>
+                  </div>
+                  {priceable && (tarifEditable
+                    ? <Pencil className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+                    : <BadgeEuro className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />)}
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 
