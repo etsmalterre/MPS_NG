@@ -3796,7 +3796,8 @@ function DetailMain({ client, isLoading, hasSelection, ... }) {
           )
         })}
       </div>
-      <div className="flex-1 min-h-0 overflow-auto space-y-2 pt-3 pr-1">
+      {/* px-1/pb-1 keep focus rings and hover borders clear of the overflow clip (§31.5) */}
+      <div className="flex-1 min-h-0 overflow-auto space-y-2 pt-3 px-1 pb-1">
         {activeTab === 'references' && <ReferencesTab clientId={client.IDclient} ... />}
         {activeTab === 'historique' && <HistoriqueTab clientId={client.IDclient} />}
         {activeTab === 'marchandise' && <MarchandiseTab clientId={client.IDclient} />}
