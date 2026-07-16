@@ -1309,12 +1309,15 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
   useEffect(() => {
     if (drawerRefId !== null && !filtered.some((r) => r.IDdesignation_client === drawerRefId)) setDrawerRefId(null)
   }, [filtered, drawerRefId])
-  // Slide the selected card to the very top of the shrunk band so the drawer
-  // gets all the remaining vertical space.
+  // When the drawer closes, the full list re-renders from scrollTop 0 — bring
+  // the card the user was working on back into view.
+  const lastDrawerRefId = useRef<number | null>(null)
   useEffect(() => {
-    if (drawerRefId === null) return
+    if (drawerRefId !== null) { lastDrawerRefId.current = drawerRefId; return }
+    const last = lastDrawerRefId.current
+    if (last === null) return
     requestAnimationFrame(() => {
-      document.querySelector(`[data-ref-card="${drawerRefId}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+      document.querySelector(`[data-ref-card="${last}"]`)?.scrollIntoView({ block: 'nearest' })
     })
   }, [drawerRefId])
 
@@ -1330,11 +1333,11 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
       )}
       {isLoading ? <SectionSpinner /> : !data || data.length === 0 ? <SectionEmpty text="Aucune référence client" />
         : filtered.length === 0 ? <SectionEmpty text="Aucune référence ne correspond à la recherche" /> : (
-        <div className={cn('overflow-auto space-y-2 p-1 scrollbar-transparent',
-          // Open drawer: collapse the list to a one-card band (selected card pinned
-          // at its top, next card peeking to hint the list still scrolls).
-          drawerOpen ? 'flex-shrink-0 max-h-[84px]' : 'flex-1 min-h-0')}>
-          {filtered.map((r) => (
+        <div className={cn('space-y-2 p-1 scrollbar-transparent',
+          // Open drawer: the band renders ONLY the selected card (exact height,
+          // drawer docks right under it); the full scrollable list is view state.
+          drawerOpen ? 'flex-shrink-0' : 'flex-1 min-h-0 overflow-auto')}>
+          {(drawerOpen ? filtered.filter((r) => r.IDdesignation_client === drawerRefId) : filtered).map((r) => (
             <div key={r.IDdesignation_client} data-ref-card={r.IDdesignation_client}
               // Edit mode: the card click is reserved for the settings dialog (§31.3);
               // the drawer only opens from view mode.
