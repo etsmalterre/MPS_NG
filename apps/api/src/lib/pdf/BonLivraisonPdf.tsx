@@ -364,7 +364,7 @@ export function BonLivraisonPdf({ data }: { data: BonLivraisonPdfData }) {
                     <View style={styles.tableHeader} fixed>
                       <Text style={[styles.tableHeaderCell, showObs ? styles.colPiece : styles.colPieceWide]}>PIÈCE</Text>
                       <Text style={[styles.tableHeaderCell, styles.colNum]}>POIDS (KG)</Text>
-                      <Text style={[styles.tableHeaderCell, styles.colNum]}>MÉTRAGE (M)</Text>
+                      <Text style={[styles.tableHeaderCell, styles.colNum]}>MÉTRAGE (ML)</Text>
                       {showObs ? <Text style={[styles.tableHeaderCell, styles.colObs]}>OBSERVATIONS</Text> : null}
                     </View>
                     {lot.pieces.slice(0, -1).map(pieceRow)}
@@ -375,7 +375,7 @@ export function BonLivraisonPdf({ data }: { data: BonLivraisonPdfData }) {
                       {lot.pieces.length > 0 ? pieceRow(lot.pieces[lot.pieces.length - 1], lot.pieces.length - 1) : null}
                       <View style={styles.lotTotalRow}>
                         <Text style={[styles.lotTotalLabel, showObs ? styles.colPiece : styles.colPieceWide]}>
-                          {`Total lot — ${t.nb} pièce${t.nb > 1 ? 's' : ''}`}
+                          {`Total lot - ${t.nb} pièce${t.nb > 1 ? 's' : ''}`}
                         </Text>
                         <Text style={[styles.lotTotalCell, styles.colNum]}>{fmtNum(t.poids)}</Text>
                         <Text style={[styles.lotTotalCell, styles.colNum]}>{fmtNum(t.metrage)}</Text>
@@ -392,7 +392,7 @@ export function BonLivraisonPdf({ data }: { data: BonLivraisonPdfData }) {
                 <Text style={styles.articleTotalLabel}>Total article</Text>
                 <Text style={styles.articleTotalValue}>{`${articleTotal.nb} pièce${articleTotal.nb > 1 ? 's' : ''}`}</Text>
                 <Text style={styles.articleTotalValue}>{`${fmtNum(articleTotal.poids)} Kg`}</Text>
-                <Text style={styles.articleTotalValue}>{`${fmtNum(articleTotal.metrage)} M`}</Text>
+                <Text style={styles.articleTotalValue}>{`${fmtNum(articleTotal.metrage)} Ml`}</Text>
               </View>
             ) : null}
           </View>
@@ -403,8 +403,8 @@ export function BonLivraisonPdf({ data }: { data: BonLivraisonPdfData }) {
       <View style={styles.grandWrapper} wrap={false}>
         <View style={styles.grand}>
           <View style={styles.grandRow}>
-            <Text style={styles.grandLabel}>{`TOTAL AVIS — ${grand.nb} PIÈCE${grand.nb > 1 ? 'S' : ''}`}</Text>
-            <Text style={styles.grandValue}>{`${fmtNum(grand.poids)} Kg   ·   ${fmtNum(grand.metrage)} M`}</Text>
+            <Text style={styles.grandLabel}>{`TOTAL AVIS - ${grand.nb} PIÈCE${grand.nb > 1 ? 'S' : ''}`}</Text>
+            <Text style={styles.grandValue}>{`${fmtNum(grand.poids)} Kg   ·   ${fmtNum(grand.metrage)} Ml`}</Text>
           </View>
         </View>
       </View>

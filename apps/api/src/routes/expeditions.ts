@@ -61,6 +61,7 @@ import { repairAliased } from './stock-fini.js'
 import { esc, n, dateDigits as dateStr, IS_WINDOWS } from '../lib/sst-shared.js'
 import { stripRtf, wrapRtf } from '../lib/rtf-utils.js'
 import { BonLivraisonPdf, type BonLivraisonPdfData, type BlArticle, type BlLot, type BlPiece } from '../lib/pdf/BonLivraisonPdf.js'
+import { BonLivraisonDiversPdf, type BonLivraisonDiversPdfData, type BlDiversCarton } from '../lib/pdf/BonLivraisonDiversPdf.js'
 import { sendMail } from '../lib/gmail.js'
 import { getUserEmail } from '../lib/user-emails.js'
 
@@ -1659,8 +1660,9 @@ expeditionsRouter.get('/formelle/:id/pdf', async (req: Request, res: Response) =
 // ════════════════════════════════════════════════════════
 
 // type_doc 14 = "avis expedition" — envoi_email audit rows for formelle BLs.
-// (16 = "avis expedition diver" is reserved for the divers flow, not built yet.)
+// type_doc 16 = "avis expedition diver" — same, for the divers flow.
 const TYPE_DOC_AVIS_EXPEDITION = 14
+const TYPE_DOC_AVIS_EXPEDITION_DIVERS = 16
 
 function nowHfsqlDatetime(): string {
   const d = new Date()
@@ -1716,7 +1718,7 @@ async function buildBlEmailDefaults(id: number): Promise<{
     else suggestions.push(recipient)
   }
 
-  const subject = `Avis d'expédition N°${id} — ETS Malterre`
+  const subject = `Avis d'expédition N°${id} - ETS Malterre`
   const body =
     `Bonjour,\n\n` +
     `Veuillez trouver ci-joint notre avis d'expédition N°${id}.\n\n` +
@@ -1755,7 +1757,7 @@ const emailBody = z.object({
 })
 const ALLOW_DEV_SKIP_SEND = process.env.NODE_ENV !== 'production'
 
-async function logEnvoiEmails(idReference: number, recipients: string[], societe: string): Promise<void> {
+async function logEnvoiEmails(idReference: number, recipients: string[], societe: string, typeDoc: number): Promise<void> {
   if (recipients.length === 0) return
   const ts = nowHfsqlDatetime()
   for (const raw of recipients) {
@@ -1765,12 +1767,12 @@ async function logEnvoiEmails(idReference: number, recipients: string[], societe
       if (IS_WINDOWS) {
         await query(
           `INSERT INTO envoi_email (DATE, adresse, société, IDreference, invalidé, notes, IDtype_doc)
-           VALUES ('${ts}', ${sqlText(addr)}, ${sqlText(societe || '')}, ${idReference}, 0, '', ${TYPE_DOC_AVIS_EXPEDITION})`,
+           VALUES ('${ts}', ${sqlText(addr)}, ${sqlText(societe || '')}, ${idReference}, 0, '', ${typeDoc})`,
         )
       } else {
         await query(
           `INSERT INTO envoi_email (DATE, adresse, IDreference, notes, IDtype_doc)
-           VALUES ('${ts}', ${sqlText(addr)}, ${idReference}, '', ${TYPE_DOC_AVIS_EXPEDITION})`,
+           VALUES ('${ts}', ${sqlText(addr)}, ${idReference}, '', ${typeDoc})`,
         )
       }
     } catch (e) {
@@ -1807,7 +1809,7 @@ expeditionsRouter.post('/formelle/:id/email', async (req: Request, res: Response
       const fixedUser = await fixEncoding(userRows, 'utilisateur', 'IDutilisateur', ['prenom', 'nom'])
       const u = (fixedUser[0] as any) ?? null
       const displayName = u ? [u.prenom, u.nom].filter((s: string | null) => s && s.trim()).map((s: string) => s.trim()).join(' ') : ''
-      const fromName = displayName ? `${displayName} — ETS Malterre` : 'ETS Malterre'
+      const fromName = displayName ? `${displayName} - ETS Malterre` : 'ETS Malterre'
 
       const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
       if (parsed.data.attach_pdf !== false) {
@@ -1836,11 +1838,232 @@ expeditionsRouter.post('/formelle/:id/email', async (req: Request, res: Response
       const names = await resolveClientNames([Number(cr[0]?.IDclient) || 0])
       societe = names.get(Number(cr[0]?.IDclient) || 0) ?? ''
     } catch { /* informational */ }
-    await logEnvoiEmails(id, allRecipients, societe)
+    await logEnvoiEmails(id, allRecipients, societe, TYPE_DOC_AVIS_EXPEDITION)
 
     res.json({ ok: true, messageId })
   } catch (err) {
     console.error('Error sending expedition email:', err)
+    const message = err instanceof Error ? err.message : 'Internal server error'
+    res.status(500).json({ error: 'send_failed', message })
+  }
+})
+
+// ════════════════════════════════════════════════════════
+//  PDF + EMAIL — Avis d'expédition diverse
+// ════════════════════════════════════════════════════════
+
+export async function buildBlDiversPdfData(id: number): Promise<BonLivraisonDiversPdfData | null> {
+  const rows = await query<any>(
+    `SELECT IDexpedition_divers, IDclient, ref_client, IDadresse, IDtransporteur, DATE AS dexp ` +
+      `FROM expedition_divers WHERE IDexpedition_divers = ${id}`,
+  )
+  if (rows.length === 0) return null
+  const fixed = await fixEncoding(rows, 'expedition_divers', 'IDexpedition_divers', ['ref_client'])
+  const h = fixed[0] as any
+  const IDclient = Number(h.IDclient) || 0
+
+  const [clientNames, transNames, adr, lignesRaw] = await Promise.all([
+    resolveClientNames([IDclient]),
+    resolveTransporteurNames([Number(h.IDtransporteur)]),
+    loadAdresse(Number(h.IDadresse) || 0),
+    query<any>(
+      `SELECT IDligne_expedition_divers, detail_ligne FROM ligne_expedition_divers ` +
+        `WHERE IDexpedition_divers = ${id} ORDER BY IDligne_expedition_divers`,
+    ),
+  ])
+  const lignesFixed = await fixEncoding(lignesRaw, 'ligne_expedition_divers', 'IDligne_expedition_divers', ['detail_ligne'])
+  const itemsByLigne = await loadDiversItems((lignesFixed as any[]).map((l) => Number(l.IDligne_expedition_divers) || 0))
+
+  const cartons: BlDiversCarton[] = (lignesFixed as any[]).map((l) => {
+    const items = itemsByLigne.get(Number(l.IDligne_expedition_divers)) ?? []
+    return {
+      detail: stripRtf(l.detail_ligne) || '',
+      items: items.map((it) => ({
+        // Legacy free-text override wins, else the catalog designation (same
+        // rule as the web UI's diversItemLabel).
+        designation: it.designation.trim() || it.ref_designation || `Réf #${it.IDref_divers}`,
+        variations: [it.variation1_label, it.variation2_label].filter(Boolean).join(' · ') || null,
+        quantite: it.quantite,
+        unite: it.unite,
+        unite_label: it.unite_label,
+        prix: it.prix,
+      })),
+    }
+  })
+
+  const refClient = (h.ref_client ?? '').toString().replace(/\s+/g, ' ').trim()
+  const a = adr as any
+  return {
+    numero: id,
+    dateLong: formatHfsqlDateLongFr(h.dexp),
+    clientNom: (IDclient > 0 ? clientNames.get(IDclient) : '') || refClient || '',
+    refClient: refClient || null,
+    transporteurNom: transNames.get(Number(h.IDtransporteur)) || null,
+    adresseLivraison: a
+      ? {
+          nom: (a.nom ?? null) as string | null,
+          adresse1: (a.adresse1 ?? null) as string | null,
+          adresse2: (a.adresse2 ?? null) as string | null,
+          adresse3: (a.adresse3 ?? null) as string | null,
+          cp: (a.cp ?? null) as string | null,
+          ville: (a.ville ?? null) as string | null,
+          pays: (a.pays ?? null) as string | null,
+        }
+      : null,
+    cartons,
+  }
+}
+
+async function renderBlDiversPdfBuffer(data: BonLivraisonDiversPdfData): Promise<Buffer> {
+  return renderToBuffer(
+    React.createElement(BonLivraisonDiversPdf, { data }) as unknown as React.ReactElement<
+      import('@react-pdf/renderer').DocumentProps
+    >,
+  )
+}
+
+expeditionsRouter.get('/divers/:id/pdf', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const data = await buildBlDiversPdfData(id)
+    if (!data) { res.status(404).json({ error: 'Expédition not found' }); return }
+    const buffer = await renderBlDiversPdfBuffer(data)
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `inline; filename="BL-divers-${id}.pdf"`)
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.send(buffer)
+  } catch (err) {
+    console.error('Error rendering expedition diverse PDF:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+async function buildBlDiversEmailDefaults(id: number): Promise<{
+  recipients: { selected: EmailRecipientPayload[]; suggestions: EmailRecipientPayload[] }
+  subject: string; body: string; clientNom: string
+} | null> {
+  const rows = await query<any>(
+    `SELECT IDexpedition_divers, IDclient, ref_client FROM expedition_divers WHERE IDexpedition_divers = ${id}`,
+  )
+  if (rows.length === 0) return null
+  const IDclient = Number(rows[0].IDclient) || 0
+
+  const [clientNames, contactRows] = await Promise.all([
+    resolveClientNames([IDclient]),
+    IDclient > 0
+      ? query<{ IDcontact: number; nom: string | null; prenom: string | null; mail: string | null; envoi_bl: number | null; est_visible: number | null }>(
+          `SELECT IDcontact, nom, prenom, mail, envoi_bl, est_visible FROM contact WHERE IDclient = ${IDclient}`,
+        )
+      : Promise.resolve([]),
+  ])
+  const clientNom = clientNames.get(IDclient) ?? (rows[0].ref_client ?? '').toString().trim()
+  const fixedContacts = await fixEncoding(contactRows, 'contact', 'IDcontact', ['nom', 'prenom', 'mail'])
+
+  const selected: EmailRecipientPayload[] = []
+  const suggestions: EmailRecipientPayload[] = []
+  const seen = new Set<string>()
+  for (const c of fixedContacts as any[]) {
+    if (c.est_visible === 0) continue
+    const raw = (c.mail ?? '').toString().trim()
+    if (!raw || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)) continue
+    const key = raw.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    const displayName = [c.prenom, c.nom].map((s: string | null) => (s ?? '').toString().trim()).filter((s: string) => s.length > 0).join(' ')
+    const recipient: EmailRecipientPayload = { email: raw, source: 'contact', contactId: Number(c.IDcontact) }
+    if (displayName) recipient.name = displayName
+    if (c.envoi_bl === 1) selected.push(recipient)
+    else suggestions.push(recipient)
+  }
+
+  const subject = `Avis d'expédition N°${id} - ETS Malterre`
+  const body =
+    `Bonjour,\n\n` +
+    `Veuillez trouver ci-joint notre avis d'expédition N°${id}.\n\n` +
+    `Nous restons à votre disposition pour toute information complémentaire.\n\n` +
+    `Cordialement,\n` +
+    `ETS Malterre`
+  return { recipients: { selected, suggestions }, subject, body, clientNom }
+}
+
+expeditionsRouter.get('/divers/:id/email-defaults', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const defaults = await buildBlDiversEmailDefaults(id)
+    if (!defaults) { res.status(404).json({ error: 'Expédition not found' }); return }
+    res.json(defaults)
+  } catch (err) {
+    console.error('Error building expedition diverse email defaults:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+expeditionsRouter.post('/divers/:id/email', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
+    const parsed = emailBody.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
+    const devSkip = parsed.data.dev_skip_send === true && ALLOW_DEV_SKIP_SEND
+
+    let messageId: string
+    if (devSkip) {
+      messageId = `dev-skip-${Date.now()}`
+      console.log(`[dev-skip-send] expedition diverse #${id} — fake send to ${parsed.data.to.join(', ')}`)
+    } else {
+      const senderEmail = await getUserEmail(req.userId)
+      if (!senderEmail) {
+        res.status(400).json({
+          error: 'no_sender_email',
+          message: "Aucune adresse email n'est associée à votre compte. Un administrateur doit en définir une dans Paramètres › Utilisateurs.",
+        })
+        return
+      }
+      const userRows = await query<{ prenom: string | null; nom: string | null }>(
+        `SELECT prenom, nom FROM utilisateur WHERE IDutilisateur = ${req.userId}`,
+      )
+      const fixedUser = await fixEncoding(userRows, 'utilisateur', 'IDutilisateur', ['prenom', 'nom'])
+      const u = (fixedUser[0] as any) ?? null
+      const displayName = u ? [u.prenom, u.nom].filter((s: string | null) => s && s.trim()).map((s: string) => s.trim()).join(' ') : ''
+      const fromName = displayName ? `${displayName} - ETS Malterre` : 'ETS Malterre'
+
+      const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
+      if (parsed.data.attach_pdf !== false) {
+        const data = await buildBlDiversPdfData(id)
+        if (!data) { res.status(404).json({ error: 'Expédition not found' }); return }
+        const buffer = await renderBlDiversPdfBuffer(data)
+        attachments.push({ filename: `BL-divers-${id}.pdf`, content: buffer, contentType: 'application/pdf' })
+      }
+      for (const a of parsed.data.extra_attachments ?? []) {
+        attachments.push({ filename: a.filename, content: Buffer.from(a.content_base64, 'base64'), contentType: a.content_type })
+      }
+      messageId = await sendMail({
+        from: senderEmail, fromName, to: parsed.data.to, cc: parsed.data.cc,
+        subject: parsed.data.subject, body: parsed.data.body,
+        attachments: attachments.length > 0 ? attachments : undefined,
+      })
+    }
+
+    const allRecipients = [...parsed.data.to, ...(parsed.data.cc ?? [])]
+    let societe = ''
+    try {
+      const er = await query<{ IDclient: number; ref_client: string | null }>(
+        `SELECT IDclient, ref_client FROM expedition_divers WHERE IDexpedition_divers = ${id}`,
+      )
+      const cid = Number(er[0]?.IDclient) || 0
+      const names = await resolveClientNames([cid])
+      societe = names.get(cid) ?? (er[0]?.ref_client ?? '').toString().trim()
+    } catch { /* informational */ }
+    await logEnvoiEmails(id, allRecipients, societe, TYPE_DOC_AVIS_EXPEDITION_DIVERS)
+
+    res.json({ ok: true, messageId })
+  } catch (err) {
+    console.error('Error sending expedition diverse email:', err)
     const message = err instanceof Error ? err.message : 'Internal server error'
     res.status(500).json({ error: 'send_failed', message })
   }

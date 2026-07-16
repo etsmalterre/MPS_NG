@@ -210,7 +210,6 @@ export function ClientsExpeditions() {
   const [createOpen, setCreateOpen] = useState(false)
   const [autoEditForId, setAutoEditForId] = useState<number | null>(null)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
-  const [printOpen, setPrintOpen] = useState(false)
   const [emailOpen, setEmailOpen] = useState(false)
 
   // Formelle roll drawer (page-level so startEdit can close it — mps_designer §31.2).
@@ -412,9 +411,8 @@ export function ClientsExpeditions() {
             isSaving={saveHeaderMut.isPending}
             onDelete={() => setDeleteConfirmOpen(true)}
             onPrintClick={() => {
-              // Avis d'expédition PDF exists for formelle; divers has no print yet.
-              if (bucket === 'formelle' && selectedId !== null) window.open(`${API_URL}/expeditions/formelle/${selectedId}/pdf`, '_blank')
-              else setPrintOpen(true)
+              // Avis d'expédition PDF — formelle (BL) and divers (BL divers).
+              if (selectedId !== null) window.open(`${API_URL}/expeditions/${bucket}/${selectedId}/pdf`, '_blank')
             }}
             onEmailClick={() => setEmailOpen(true)}
           />
@@ -481,22 +479,18 @@ export function ClientsExpeditions() {
         onConfirm={() => { if (selectedId !== null) deleteMut.mutate(selectedId) }}
       />
 
-      <PlaceholderDialog open={printOpen} onClose={() => setPrintOpen(false)} title="Imprimer" Icon={Printer} CenterIcon={FileText} />
-
-      {/* Email: real send flow for formelle (BL PDF attached); divers has no document yet. */}
-      {selectedId !== null && bucket === 'formelle' ? (
+      {/* Email: real send flow for both kinds (BL / BL divers PDF attached). */}
+      {selectedId !== null && (
         <SendEmailDialog
           open={emailOpen}
           onClose={() => setEmailOpen(false)}
           contextLabel={detail?.client_nom ?? undefined}
-          queryKey={['expedition-email-defaults', selectedId]}
-          loadDefaults={() => apiFetch(`/expeditions/formelle/${selectedId}/email-defaults`)}
-          pdfUrl={`${API_URL}/expeditions/formelle/${selectedId}/pdf`}
-          pdfAttachmentLabel={`BL-${selectedId}.pdf`}
-          onSend={(p) => postEmail(`${API_URL}/expeditions/formelle/${selectedId}/email`, p, { includeAttachPdf: true })}
+          queryKey={['expedition-email-defaults', bucket, selectedId]}
+          loadDefaults={() => apiFetch(`/expeditions/${bucket}/${selectedId}/email-defaults`)}
+          pdfUrl={`${API_URL}/expeditions/${bucket}/${selectedId}/pdf`}
+          pdfAttachmentLabel={bucket === 'formelle' ? `BL-${selectedId}.pdf` : `BL-divers-${selectedId}.pdf`}
+          onSend={(p) => postEmail(`${API_URL}/expeditions/${bucket}/${selectedId}/email`, p, { includeAttachPdf: true })}
         />
-      ) : (
-        <PlaceholderDialog open={emailOpen} onClose={() => setEmailOpen(false)} title="Envoyer un email" Icon={AtSign} CenterIcon={AtSign} />
       )}
     </>
   )
@@ -2055,27 +2049,3 @@ function ToggleSwitch({ value, onChange }: { value: boolean; onChange: (v: boole
   )
 }
 
-function PlaceholderDialog({
-  open, onClose, title, Icon, CenterIcon,
-}: {
-  open: boolean
-  onClose: () => void
-  title: string
-  Icon: ComponentType<{ className?: string }>
-  CenterIcon: ComponentType<{ className?: string }>
-}) {
-  return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
-      <DialogContent onClose={onClose}>
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2"><Icon className="h-5 w-5 text-accent" />{title}</DialogTitle>
-        </DialogHeader>
-        <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-          <CenterIcon className="h-12 w-12 mb-3 opacity-40" />
-          <p className="text-sm font-medium">En developpement</p>
-          <p className="text-xs mt-1">Cette fonctionnalite sera disponible prochainement.</p>
-        </div>
-      </DialogContent>
-    </Dialog>
-  )
-}

@@ -10,6 +10,27 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-16 — feat/expe
+Clients › Expéditions — **Print + email for expéditions diverses (previously "En
+developpement" placeholders) + Ml label fix on the formelle BL.** New
+`BonLivraisonDiversPdf.tsx`: "Avis d'expédition / BL divers N°X" in the shared
+MalterreDocument frame — delivery-address + metadata cards (client, réf. client,
+transporteur), one section per carton (free-text label, framed items table: désignation
+with variation labels, quantité with pluralized unit, P.U. €, total €, per-carton totals
+row), gold grand-total box (cartons · articles · total €). Price columns auto-hide when
+every item's prix is 0 (free-sample shipments). API (`expeditions.ts`):
+`buildBlDiversPdfData`/`renderBlDiversPdfBuffer` + `GET /divers/:id/pdf` (iframe header
+strip), `GET /divers/:id/email-defaults` (client contacts split by `envoi_bl`),
+`POST /divers/:id/email` (PDF re-render + user attachments, logs `envoi_email` with
+`IDtype_doc=16` "avis expedition diver" — `logEnvoiEmails` now takes the typeDoc as a
+param). Web: Imprimer opens `/expeditions/{bucket}/{id}/pdf` for both buckets; divers gets
+the real `SendEmailDialog` (attachment `BL-divers-{id}.pdf`); the local `PlaceholderDialog`
+was deleted. Also: formelle BL PDF's métrage column/units corrected `(M)` → `(ML)`/`Ml`
+(métrage is always Ml), and an em-dash sweep on strings touched (formelle email subject,
+From display name, BL total labels) per Vincent's preference. New synthetic render harness
+`dump-bl-divers-pdf.ts`. Verified live: expedition 597 PDF (2 pages), email-defaults, and a
+dev-skip send writing the type-16 audit row.
+
 
 ## 2026-07-16 — feat/gestion-client
 Clients › Gestion — **"Classeur" layout (3rd gold-standard layout) + ref-level settings
