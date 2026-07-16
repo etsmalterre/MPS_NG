@@ -1,0 +1,22 @@
+[
+  {
+    "IDetat_stock_fini": 1,
+    "libelle": "En Contrôle"
+  },
+  {
+    "IDetat_stock_fini": 2,
+    "libelle": "En Reprise"
+  },
+  {
+    "IDetat_stock_fini": 3,
+    "libelle": "Validé"
+  },
+  {
+    "IDetat_stock_fini": 4,
+    "libelle": "Expédié"
+  },
+  {
+    "IDetat_stock_fini": 5,
+    "libelle": "Attente de décision"
+  }
+]

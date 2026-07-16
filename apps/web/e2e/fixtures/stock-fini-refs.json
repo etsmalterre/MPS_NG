@@ -1,0 +1,2774 @@
+[
+  {
+    "IDref_fini": 1730,
+    "reference": "001A",
+    "designation": "Molleton coton non gratté",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1731,
+    "reference": "001B",
+    "designation": "Molleton coton gratté",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1817,
+    "reference": "001D",
+    "designation": "molleton coton gris chiné NG",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1839,
+    "reference": "001E",
+    "designation": "molleton coton gris chiné GR",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1615,
+    "reference": "002A",
+    "designation": "cote 2/1 pa/elast microfibre J18",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1729,
+    "reference": "003A",
+    "designation": "Piqué DF Pes",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1781,
+    "reference": "003B",
+    "designation": "Piqué DF Pes",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1764,
+    "reference": "004A",
+    "designation": "Jersey polyester/el 90/10",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1737,
+    "reference": "004B",
+    "designation": "Jersey polyester/el 90/10 non feu permanent",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 124,
+    "reference": "007A",
+    "designation": "Molleton pes/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1376,
+    "reference": "008A",
+    "designation": "Piqué recyclé Pes cot 55/45",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1738,
+    "reference": "009A",
+    "designation": "cote lourde coton bio pour molleton",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1768,
+    "reference": "009B",
+    "designation": "cote lourde coton bio pour molleton",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1739,
+    "reference": "011A",
+    "designation": "jersey lin/elasthanne",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1741,
+    "reference": "011B",
+    "designation": "jersey lin/elasthanne ecru",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1616,
+    "reference": "012A",
+    "designation": "milano coton J28",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1352,
+    "reference": "013A",
+    "designation": "Molleton non gratté Coton bio elasthanne ",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1353,
+    "reference": "013B",
+    "designation": "Molleton gratté Coton bio elasthanne ",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1366,
+    "reference": "014A",
+    "designation": "Jersey recyclé Cot/Pes ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1441,
+    "reference": "014B",
+    "designation": "Jersey recyclé Cot/Pes",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1597,
+    "reference": "014C",
+    "designation": "Jersey recyclé Cot/Pes ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1634,
+    "reference": "014D",
+    "designation": "Jersey recyclé Cot/Pes suradouci",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1488,
+    "reference": "015A",
+    "designation": "jersey coton ",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1807,
+    "reference": "015B",
+    "designation": "jersey coton ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 87,
+    "reference": "016A",
+    "designation": "Jersey pes coolmax/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1367,
+    "reference": "017A",
+    "designation": "Côte 1 x1 Coton/Pes Recyclé 55/45",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1446,
+    "reference": "017B",
+    "designation": "Côte 1/1 Recyclé pes/cot ",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1541,
+    "reference": "017C",
+    "designation": "Côte 1 x1 Coton/Pes Recyclé 55/45",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1707,
+    "reference": "017D",
+    "designation": "Côte 1/1 Recyclé pes/cot ",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1299,
+    "reference": "019A",
+    "designation": "Molleton recyclé Cot/Pes Non Gratté",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1354,
+    "reference": "019B",
+    "designation": "Molleton Gratté recyclé Cot/Pes ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1378,
+    "reference": "019C",
+    "designation": "Mlt surteint Non Gratté recyclé Cot/Pes ",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1379,
+    "reference": "019D",
+    "designation": "Mlt surteint Gratté Rasé recyclé Cot/Pes ",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1527,
+    "reference": "019E",
+    "designation": "Molleton Non Gratté suradouci recyclé Cot/Pes ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1530,
+    "reference": "019F",
+    "designation": "Molleton Gratté suradouci recyclé Cot/Pes ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1680,
+    "reference": "019G",
+    "designation": "Molleton Teint Gratté suradouci recyclé Cot/Pes ",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1858,
+    "reference": "019H",
+    "designation": "Mlt Gratté Rasé Pes/cot 55/45",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1617,
+    "reference": "021A",
+    "designation": "jersey pes ring J28 26\"",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 799,
+    "reference": "022A",
+    "designation": "Jersey lin leger",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1765,
+    "reference": "022B",
+    "designation": "jersey lin léger ecru lavé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1355,
+    "reference": "023A",
+    "designation": "Molleton recyclé Pes 48.5% Cot 48.5% elast 3%",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1356,
+    "reference": "023B",
+    "designation": "Molleton gr recyclé Pes 48.5% Cot 48.5% elast 3%",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1447,
+    "reference": "023C",
+    "designation": "Molleton recyclé Pes/cot/elast surteint",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1448,
+    "reference": "023D",
+    "designation": "Molleton gr recyclé Pes/cot/elast surteint",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1881,
+    "reference": "023E",
+    "designation": "Molleton gr recyclé Pes 53% Cot 44% elast 3% ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1882,
+    "reference": "023F",
+    "designation": "Molleton gr recycl 53%cot/44% pes 3%elast surteint",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 720,
+    "reference": "025",
+    "designation": "Côte recyclé Cot 48 % Acry 48% ela 4%",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1357,
+    "reference": "025A",
+    "designation": "Côte recyclé Cot 48 % Pes 48% ela 4%",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1444,
+    "reference": "025B",
+    "designation": "Côte recyclé Cot 48 % Pes 48% ela 4%",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1542,
+    "reference": "025C",
+    "designation": "Côte recyclé Cot 48 % Pes 48% ela 4% suradoucie",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1884,
+    "reference": "025D",
+    "designation": "Côte Pes/cot 55/45",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1859,
+    "reference": "025H",
+    "designation": "Côte Pes/cot 55/45",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1767,
+    "reference": "026A",
+    "designation": "Côte 1x1 coton/elas teint",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1840,
+    "reference": "026B",
+    "designation": "Côte 1x1 coton/elas chiné",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1769,
+    "reference": "027A",
+    "designation": "cote 1/1 cot/elast lourde",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1771,
+    "reference": "027B",
+    "designation": "cote 1/1 cot/elast lourde",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1772,
+    "reference": "028A",
+    "designation": "jersey 100% lin",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1773,
+    "reference": "028B",
+    "designation": "jersey 100% lin ecru lavé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 639,
+    "reference": "029A",
+    "designation": "Jersey coton bio elas",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1629,
+    "reference": "029B",
+    "designation": "Jersey coton bio elas",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1849,
+    "reference": "029C",
+    "designation": "Jersey coton bio elas hydrophile",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 825,
+    "reference": "031A",
+    "designation": "Cote 1/1 coton bio",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1824,
+    "reference": "031B",
+    "designation": "Cote 1/1 coton bio lavé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1613,
+    "reference": "033A",
+    "designation": "Piqué Pes",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1377,
+    "reference": "034A",
+    "designation": "Piqué lourd Recyclé Cot/Pes 45/55",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1583,
+    "reference": "034B",
+    "designation": "Piqué lourd Recyclé Cot/Pes 45/55",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1592,
+    "reference": "034C",
+    "designation": "Piqué lourd Recyclé Cot/Pes 45/55",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1612,
+    "reference": "035A",
+    "designation": "itl pes J28",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1778,
+    "reference": "036A",
+    "designation": "interlock coton",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1790,
+    "reference": "036B",
+    "designation": "interlock coton",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1782,
+    "reference": "037A",
+    "designation": "Piqué DF Pes",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1783,
+    "reference": "037B",
+    "designation": "Piqué DF Pes",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1784,
+    "reference": "038A",
+    "designation": "Piqué DF lyocell/pes",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1797,
+    "reference": "040A",
+    "designation": "interlock coton bio",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1791,
+    "reference": "040B",
+    "designation": "interlock coton bio",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1800,
+    "reference": "040C",
+    "designation": "interlock coton bio suradouci",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1803,
+    "reference": "040D",
+    "designation": "interlock coton bio suradouci",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1795,
+    "reference": "041A",
+    "designation": "jersey piqué pes/cot",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1818,
+    "reference": "043A",
+    "designation": "Interlock coton bio",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1825,
+    "reference": "043B",
+    "designation": "Interlock coton bio",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1827,
+    "reference": "043C",
+    "designation": "Interlock coton bio PAT",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1411,
+    "reference": "044A",
+    "designation": "Jersey recyclé Pes 48% Cot.48% El 4%",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1409,
+    "reference": "044B",
+    "designation": "jersey pes/cot/elast surteint",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1460,
+    "reference": "046/1",
+    "designation": "Jersey pes/cot",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1544,
+    "reference": "046/2",
+    "designation": "Jersey lourd recyclé Cot/Pes 50/50 rayure 14/4",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1368,
+    "reference": "046A",
+    "designation": "Jersey lourd recyclé Cot/Pes 50/50",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1548,
+    "reference": "046B",
+    "designation": "Jersey lourd recyclé Cot/Pes 50/50 suradouci",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1605,
+    "reference": "046C",
+    "designation": "Jersey lourd recyclé Cot/Pes 50/50 surteint",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1862,
+    "reference": "046D",
+    "designation": "Jersey lourd recyclé Cot/Pes 55/45 surteint",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1872,
+    "reference": "046E",
+    "designation": "Jersey lourd recyclé Cot/Pes 55/45 ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1371,
+    "reference": "047A",
+    "designation": "Cote 1/1 pes/cot recyclé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1630,
+    "reference": "047B",
+    "designation": "Cote 1/1 pes/cot recyclé",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1705,
+    "reference": "047C",
+    "designation": "Cote 1/1 pes/cot rec suradouci",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1785,
+    "reference": "047D",
+    "designation": "Cote 1/1 pes/cot recyclé blanc pour impression",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1867,
+    "reference": "047E",
+    "designation": "Cote 1/1 pes/cot recyclé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1373,
+    "reference": "049A",
+    "designation": "Piqué DF coton bio",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1375,
+    "reference": "049B",
+    "designation": "Piqué DF coton bio chiné",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1090,
+    "reference": "050A",
+    "designation": "Jersey coton bio",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1545,
+    "reference": "050B",
+    "designation": "Jersey coton bio",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1097,
+    "reference": "051A",
+    "designation": "Piqué DF coton bio",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1104,
+    "reference": "052A",
+    "designation": "Interlock coton Bio",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1457,
+    "reference": "052B",
+    "designation": "Interlock coton",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1792,
+    "reference": "053A",
+    "designation": "milano coton bio siliconé",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1863,
+    "reference": "053B",
+    "designation": "milano coton bio ",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1801,
+    "reference": "054A",
+    "designation": "milano pes/Ela.",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1809,
+    "reference": "055A",
+    "designation": "jersey coton élasth ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1811,
+    "reference": "056A",
+    "designation": "interlock pes",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1358,
+    "reference": "060A",
+    "designation": "Cote 2/1 pes/cot recyclé/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1536,
+    "reference": "060B",
+    "designation": "Cote 2/1 pes/cot recyclé/elast",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1345,
+    "reference": "061A",
+    "designation": "Côte 2/1 coton bio élasthanne ",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1346,
+    "reference": "061B",
+    "designation": "Côte 2/1 coton bio élasthanne ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1500,
+    "reference": "061C",
+    "designation": "Côte 2/1 coton bio élasthanne jauni",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1893,
+    "reference": "061D",
+    "designation": "Côte 2/1 coton bio élasthanne tubulaire",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1462,
+    "reference": "062A",
+    "designation": "jersey DF pa/coton",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1813,
+    "reference": "063A",
+    "designation": "jersey polyamide/elasthanne",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1814,
+    "reference": "064A",
+    "designation": "jersey polyamide/elasthanne",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1816,
+    "reference": "065A",
+    "designation": "jersey 100 % lin",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1820,
+    "reference": "066A",
+    "designation": "piqué coton bio/ea",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1449,
+    "reference": "067A",
+    "designation": "Jersey lin/cot",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1101,
+    "reference": "067B",
+    "designation": "Jersey lin 69% /coton bio 31%",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1848,
+    "reference": "068A",
+    "designation": "jersey coton/chanvre 75/25",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1821,
+    "reference": "068B",
+    "designation": "jersey coton/chanvre 75/25",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1823,
+    "reference": "069A",
+    "designation": "Jersey coton bio rayé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1843,
+    "reference": "070A",
+    "designation": "Jersey lourd recyclé Cot/Pes 50/50",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1866,
+    "reference": "070B",
+    "designation": "Jersey lourd recyclé Cot/Pes 55/45",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1856,
+    "reference": "071A",
+    "designation": "côte 1/1 cot/chanvre",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1860,
+    "reference": "074A",
+    "designation": "Jersey lourd 100% coton bio (SD)",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1864,
+    "reference": "078A",
+    "designation": "Interlock Pa",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1868,
+    "reference": "081A",
+    "designation": "Jersey cot/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1869,
+    "reference": "082B",
+    "designation": "Escrime Imprimée",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1880,
+    "reference": "084A",
+    "designation": "Interlock Pa",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1883,
+    "reference": "085A",
+    "designation": "interlock Mérinos",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1892,
+    "reference": "085B",
+    "designation": "interlock Mérinos",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1513,
+    "reference": "086A",
+    "designation": "jersey DF coton/pa/elast chiné intérieur",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1628,
+    "reference": "086B",
+    "designation": "jersey DF coton/pa/elast uni",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1886,
+    "reference": "088A",
+    "designation": "côte 2/2",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1888,
+    "reference": "088B",
+    "designation": "Côte 2/2",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1887,
+    "reference": "089A",
+    "designation": "côte \"Richelieu\"",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 989,
+    "reference": "091A",
+    "designation": "Milano pes ",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1799,
+    "reference": "100A",
+    "designation": "jersey rayé coton",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 250,
+    "reference": "10143",
+    "designation": "Micro polaire",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1450,
+    "reference": "101A",
+    "designation": "interlock pes ring",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1392,
+    "reference": "102A",
+    "designation": "jersey rayé coton",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1,
+    "reference": "106A",
+    "designation": "Jersey bambou",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1412,
+    "reference": "119A",
+    "designation": "Escrime",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 157,
+    "reference": "119B",
+    "designation": "Escrime Imprimée",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1088,
+    "reference": "124A",
+    "designation": "Jersey coton bio/elast ",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1537,
+    "reference": "128/1",
+    "designation": "jersey coton bio rayé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1543,
+    "reference": "128/2",
+    "designation": "jersey coton bio rayé 23/7",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1362,
+    "reference": "128A",
+    "designation": "jersey coton bio lourd",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1364,
+    "reference": "128B",
+    "designation": "Jersey Coton bio lavé lourd",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1461,
+    "reference": "128C",
+    "designation": "jersey coton bio lourd",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1498,
+    "reference": "128D",
+    "designation": "jersey coton bio lourd jauni",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1829,
+    "reference": "128E",
+    "designation": "jersey coton bio lourd suradouci",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1363,
+    "reference": "129A",
+    "designation": "Côte 1x1 coton bio",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1365,
+    "reference": "129B",
+    "designation": "Côte 1x1 coton bio",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1501,
+    "reference": "129C",
+    "designation": "Côte 1x1 coton bio chiné jauni",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1830,
+    "reference": "129E",
+    "designation": "Côte 1x1 coton bio suradouci",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 32,
+    "reference": "130A",
+    "designation": "Milano coton/pa/elast J28 30\"",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1834,
+    "reference": "131A",
+    "designation": "milano tencel/pa/ea",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1523,
+    "reference": "132A",
+    "designation": "jersey coton ",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1871,
+    "reference": "132B",
+    "designation": "jersey coton PAT",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1341,
+    "reference": "138A",
+    "designation": "jersey coton Bio",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1360,
+    "reference": "138B",
+    "designation": "Jersey coton bio léger",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1497,
+    "reference": "138C",
+    "designation": "jersey coton",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1359,
+    "reference": "141A",
+    "designation": "Côte 1/1 Coton Bio",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1361,
+    "reference": "141B",
+    "designation": "Côte 1/1 Coton Bio Gris chiné",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1204,
+    "reference": "158A",
+    "designation": "Jersey cot bio/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1508,
+    "reference": "160A",
+    "designation": "GOUSSET COTON/PA",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1796,
+    "reference": "160B",
+    "designation": "Double face coton pa",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 151,
+    "reference": "161A",
+    "designation": "Gousset Pa 65 519 002 000",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1511,
+    "reference": "163A",
+    "designation": "Jersey Bambou Elasthanne 95/5",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 913,
+    "reference": "166 chiné",
+    "designation": "Jersey coton",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1425,
+    "reference": "166A",
+    "designation": "Jersey coton chiné",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1533,
+    "reference": "166B",
+    "designation": "Jersey coton teint",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1879,
+    "reference": "167/1A",
+    "designation": "Cote 1/1 coton Rayé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1885,
+    "reference": "167/2A",
+    "designation": "Cote 1/1 coton Rayé (32/16)",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 958,
+    "reference": "167A",
+    "designation": "Cote 1/1 coton",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1763,
+    "reference": "167B",
+    "designation": "Cote 1/1 coton",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1413,
+    "reference": "168A",
+    "designation": "molleton chiné non gratté",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1348,
+    "reference": "170A",
+    "designation": "Molleton coton bio non gratté",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1349,
+    "reference": "170B",
+    "designation": "Molleton coton bio gratté",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1418,
+    "reference": "170C",
+    "designation": "Molleton coton bio gratté gris chiné",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1692,
+    "reference": "170D",
+    "designation": "molleton coton bio gris chiné NG",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1850,
+    "reference": "171-2B",
+    "designation": "Côte 1x1 Coton Bio/Elas chiné",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 274,
+    "reference": "171A",
+    "designation": "Côte 1x1 coton bio elas teint",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1343,
+    "reference": "171B",
+    "designation": "Côte 1x1 Coton Bio/Elas chiné",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1671,
+    "reference": "171D",
+    "designation": "Côte 1x1 coton bio elas teint suradoucie",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 308,
+    "reference": "172A",
+    "designation": "Jersey Coton lourd",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1437,
+    "reference": "1731",
+    "designation": "Jersey coton Elasthanne 91/9",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1438,
+    "reference": "1732",
+    "designation": "Jersey cot Elast 91% 9% résiné",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1618,
+    "reference": "175A",
+    "designation": "jersey lourd pes/cot J20",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 30,
+    "reference": "180102A",
+    "designation": "Gousset DOUBLE FACE CO/PA",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1300,
+    "reference": "180A",
+    "designation": "100% lin",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1599,
+    "reference": "180B",
+    "designation": "100% lin ecru lavé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1479,
+    "reference": "182A",
+    "designation": "molleton invisible teint NG",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1480,
+    "reference": "182B",
+    "designation": "molleton invisible teint GR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1478,
+    "reference": "182C",
+    "designation": "molleton invisible chiné NG",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1455,
+    "reference": "182D",
+    "designation": "molleton invisible chiné GR",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1404,
+    "reference": "184A",
+    "designation": "Cote 1/1 cot/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1815,
+    "reference": "184B",
+    "designation": "Cote 1/1 cot/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1471,
+    "reference": "186A",
+    "designation": "molleton coton bio moyen NG",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1472,
+    "reference": "186B",
+    "designation": "molleton coton bio moyen GR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1601,
+    "reference": "186C",
+    "designation": "molleton coton bio moyen NG ecru",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1602,
+    "reference": "186D",
+    "designation": "molleton coton bio moyen GR ecru",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1654,
+    "reference": "186E",
+    "designation": "molleton coton bio moyen NG ecru",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1469,
+    "reference": "187A",
+    "designation": "molleton coton bio lourd NG",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1470,
+    "reference": "187B",
+    "designation": "molleton coton bio lourd GR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1638,
+    "reference": "187C",
+    "designation": "molleton coton bio lourd NG ",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1806,
+    "reference": "187D",
+    "designation": "molleton coton bio lourd NG ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1854,
+    "reference": "187E",
+    "designation": "molleton coton bio lourd GR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1851,
+    "reference": "188-2D",
+    "designation": "molleton coton bio tres lourd GR",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1468,
+    "reference": "188A",
+    "designation": "molleton coton bio tres lourd NG",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1458,
+    "reference": "188B",
+    "designation": "molleton coton bio tres lourd GR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1571,
+    "reference": "188C",
+    "designation": "molleton coton bio tres lourd NG",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1572,
+    "reference": "188D",
+    "designation": "molleton coton bio tres lourd GR",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1793,
+    "reference": "188E",
+    "designation": "molleton coton bio tres lourd NG",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1805,
+    "reference": "188F",
+    "designation": "molleton coton bio tres lourd NG",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1466,
+    "reference": "190A",
+    "designation": "molleton pes/cot J20 30\"",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1465,
+    "reference": "190B",
+    "designation": "molleton pes/cot J20 30\"",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 842,
+    "reference": "192A",
+    "designation": "Jersey pes/cot",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1706,
+    "reference": "192B",
+    "designation": "Jersey pes/cot",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1567,
+    "reference": "194A",
+    "designation": "Cote 1/1 pes/cot/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1464,
+    "reference": "194B",
+    "designation": "Cote 1/1 pes/cot/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1473,
+    "reference": "199A",
+    "designation": "interlock pes/UNI01",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1474,
+    "reference": "199B",
+    "designation": "interlock pes/UNI01FR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1646,
+    "reference": "199C",
+    "designation": "interlock pes",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1762,
+    "reference": "199D",
+    "designation": "interlock pes ignifugé",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1481,
+    "reference": "204A",
+    "designation": "molleton invisible teint NG",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1482,
+    "reference": "204B",
+    "designation": "molleton invisible teint GR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1484,
+    "reference": "204C",
+    "designation": "molleton invisible chiné NG",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1483,
+    "reference": "204D",
+    "designation": "molleton invisible chiné GR",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1499,
+    "reference": "204E",
+    "designation": "molleton invisible chiné NG jauni",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1490,
+    "reference": "206A",
+    "designation": "jersey lourd coton bio",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1573,
+    "reference": "206B",
+    "designation": "jersey lourd coton bio",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1485,
+    "reference": "207A",
+    "designation": "Molleton non gratté 50% coton bio/ 50% cot recyclé",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1486,
+    "reference": "207B",
+    "designation": "Molleton gratté 50%coton bio/ 50% coton recyclé",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1619,
+    "reference": "207C",
+    "designation": "Molleton non gratté 50% coton bio/ 50% cot recyclé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1620,
+    "reference": "207D",
+    "designation": "Molleton gratté 50%coton bio/ 50% coton recyclé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1658,
+    "reference": "207E",
+    "designation": "Molleton gratté  50%cot bio/50% cot rec suradouci",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1672,
+    "reference": "207F",
+    "designation": "Molleton gratté  50%cot bio/50% cot rec suradouci",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1487,
+    "reference": "208A",
+    "designation": "jersey lourd bio/recyclé",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1591,
+    "reference": "208B",
+    "designation": "jersey lourd bio/recyclé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1664,
+    "reference": "208C",
+    "designation": "jersey lourd bio/recyclé suradouci",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1491,
+    "reference": "209A",
+    "designation": "jersey lenpur J28 26\"",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1492,
+    "reference": "209B",
+    "designation": "jersey lenpur J28 26\"",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1493,
+    "reference": "210A",
+    "designation": "jersey coton bio/recyclé 60/40",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1494,
+    "reference": "210B",
+    "designation": "jersey coton bio/recyclé 60/40",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1653,
+    "reference": "210C",
+    "designation": "jersey coton bio/recyclé 60/40",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1495,
+    "reference": "212A",
+    "designation": "Jersey coton gris chiné",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1496,
+    "reference": "213A",
+    "designation": "Cote 1x1",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1506,
+    "reference": "218B",
+    "designation": "Molleton Coton bio/Elast GR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1509,
+    "reference": "219A",
+    "designation": "Cote 1/1 Coton BIO elas 98/2",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1515,
+    "reference": "221A",
+    "designation": "piqué DF coton",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1516,
+    "reference": "221B",
+    "designation": "piqué DF coton",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1526,
+    "reference": "222A",
+    "designation": "milano tencel",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1532,
+    "reference": "223A",
+    "designation": "cote 1/1 tencel",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1535,
+    "reference": "224A",
+    "designation": "jersey coton bio ",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1725,
+    "reference": "224B",
+    "designation": "jersey coton bio lavé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1426,
+    "reference": "225A",
+    "designation": "Jersey pes/cot recyclé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1549,
+    "reference": "226A",
+    "designation": "jersey tencel/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1554,
+    "reference": "226B",
+    "designation": "jersey tencel/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1861,
+    "reference": "227/1B",
+    "designation": "Jersey cot/elast rayé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1697,
+    "reference": "227A",
+    "designation": "Jersey cot/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1802,
+    "reference": "227B",
+    "designation": "Jersey cot/elast ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1838,
+    "reference": "227C",
+    "designation": "Jersey cot/elast BNO PAT",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 2,
+    "reference": "228/122",
+    "designation": "Jersey Coton 115g",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1828,
+    "reference": "228/122B",
+    "designation": "Jersey Coton 115g PAT",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 31,
+    "reference": "228/173",
+    "designation": "Jersey coton elasthanne 90/10",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 44,
+    "reference": "228/21A",
+    "designation": "jersey cot/elast 90/10",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1555,
+    "reference": "229A",
+    "designation": "Jersey coton/elast ",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1808,
+    "reference": "229B",
+    "designation": "Jersey coton/elast ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1556,
+    "reference": "230A",
+    "designation": "Jersey coton bio",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1557,
+    "reference": "230B",
+    "designation": "Jersey coton bio",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1560,
+    "reference": "231A",
+    "designation": "jersey coton lourd",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1870,
+    "reference": "232A",
+    "designation": "Côte 1x1 coton ",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1565,
+    "reference": "233A",
+    "designation": "jersey bio/recyclé/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1564,
+    "reference": "233B",
+    "designation": "jersey bio/recyclé/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1568,
+    "reference": "239A",
+    "designation": "jersey lin/coton lourd uni",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1569,
+    "reference": "239B",
+    "designation": "jersey lin/coton lourd uni",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1577,
+    "reference": "241A",
+    "designation": "interlock coton bio J20",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1648,
+    "reference": "241B",
+    "designation": "interlock coton bio ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1574,
+    "reference": "242A",
+    "designation": "jersey lin (linificio)",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1587,
+    "reference": "242B",
+    "designation": "jersey lin (linificio) ecru lavé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1578,
+    "reference": "243A",
+    "designation": "DF pes HT",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1576,
+    "reference": "244A",
+    "designation": "jersey 100% lin FR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1588,
+    "reference": "244B",
+    "designation": "jersey 100% lin FR ecru lavé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1647,
+    "reference": "244C",
+    "designation": "jersey 100% lin gaia BLANC SURTEINT EN NOIR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1579,
+    "reference": "245A",
+    "designation": "Jersey lin/pes/cot",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1580,
+    "reference": "246A",
+    "designation": "jersey pes/cot/elast J28",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1581,
+    "reference": "247A",
+    "designation": "cote 1/1 coton J18",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1582,
+    "reference": "248A",
+    "designation": "interlock pes/cot",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1584,
+    "reference": "249A",
+    "designation": "cote 1/1 thermosoie",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1589,
+    "reference": "250A",
+    "designation": "jersey coton lourd J28 26\"",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1590,
+    "reference": "251A",
+    "designation": "jersey coton leger j20 30\"",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1593,
+    "reference": "252A",
+    "designation": "molleton lin NG",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1594,
+    "reference": "252B",
+    "designation": "molleton lin GR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1595,
+    "reference": "252C",
+    "designation": "molleton lin ecru NG",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1596,
+    "reference": "252D",
+    "designation": "molleton lin ecru GR",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1621,
+    "reference": "254A",
+    "designation": "interlock coton J20",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1726,
+    "reference": "254B",
+    "designation": "interlock coton J20",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1170,
+    "reference": "260A",
+    "designation": "Interlock coton bio",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1633,
+    "reference": "262A",
+    "designation": "jersey absorbant bio",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1636,
+    "reference": "262B",
+    "designation": "jersey absorbant bio",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1635,
+    "reference": "263A",
+    "designation": "Côte 1x1 pes el. 95/5",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1641,
+    "reference": "267A",
+    "designation": "jersey chanvre",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1702,
+    "reference": "267B",
+    "designation": "jersey chanvre teint",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1631,
+    "reference": "270A",
+    "designation": "jersey lyocell/elasthanne",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1701,
+    "reference": "270B",
+    "designation": "jersey lyocell/elasthanne",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1632,
+    "reference": "271A",
+    "designation": "jersey lyocell",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1857,
+    "reference": "272A",
+    "designation": "jersey Tencel",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1640,
+    "reference": "273A",
+    "designation": "molleton pes/cot/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1649,
+    "reference": "274A",
+    "designation": "jersey pes/cot",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 771,
+    "reference": "276A",
+    "designation": "Jersey lin ",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1655,
+    "reference": "277A",
+    "designation": "molleton lyocell",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1656,
+    "reference": "278A",
+    "designation": "bouclette lyocell hydrophile",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1657,
+    "reference": "280A",
+    "designation": "jersey piqué coton/pes 80/20",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1422,
+    "reference": "281A",
+    "designation": "Molleton cot/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1558,
+    "reference": "281B",
+    "designation": "Molleton cot/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1642,
+    "reference": "281B1",
+    "designation": "Molleton cot/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1643,
+    "reference": "281B2",
+    "designation": "Molleton cot/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1637,
+    "reference": "281C",
+    "designation": "Molleton cot/elast suradouci",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1694,
+    "reference": "281D",
+    "designation": "Molleton cot/elast Gratté",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1696,
+    "reference": "281E",
+    "designation": "Molleton cot/elast gratté",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1423,
+    "reference": "282A",
+    "designation": "Cote 1/1 cot/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1559,
+    "reference": "282B",
+    "designation": "Cote 1/1 cot/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1644,
+    "reference": "282B1",
+    "designation": "Cote 1/1 cot/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1645,
+    "reference": "282B2",
+    "designation": "Cote 1/1 cot/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1674,
+    "reference": "283A",
+    "designation": "Piqué DF Pes",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1676,
+    "reference": "283B",
+    "designation": "Piqué DF 100 % Pes bloqué",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1704,
+    "reference": "284A",
+    "designation": "Jersey coton élasthanne 92/8",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1675,
+    "reference": "284B",
+    "designation": "Jersey coton élasthanne 90/10",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1679,
+    "reference": "285A",
+    "designation": "bouclette lyocell",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1709,
+    "reference": "285B",
+    "designation": "bouclette lyocell",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1837,
+    "reference": "286B",
+    "designation": "Molleton cot bio /elast gratté",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1682,
+    "reference": "287A",
+    "designation": "jersey pes/coton J20",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1683,
+    "reference": "288A",
+    "designation": "cote 1/1 pes/coton ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1407,
+    "reference": "289A",
+    "designation": "jersey coton",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1408,
+    "reference": "290A",
+    "designation": "cote 1/1 coton ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1386,
+    "reference": "291A",
+    "designation": "Jersey pes/cot",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1384,
+    "reference": "292A",
+    "designation": "Côte 1/1 pes/cot",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1385,
+    "reference": "293A",
+    "designation": "Jersey coton",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1383,
+    "reference": "294A",
+    "designation": "Côte 1/1 coton",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1399,
+    "reference": "295A",
+    "designation": "piqué DF pes/cot J20 30\"",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1400,
+    "reference": "296A",
+    "designation": "piqué DF pes/cot",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1401,
+    "reference": "297A",
+    "designation": "Piqué DF pes/cot",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1410,
+    "reference": "298A",
+    "designation": "Côte 1X1 Ela eco 1/28",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1685,
+    "reference": "299A",
+    "designation": "Cote 1/1 pes/cot/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1684,
+    "reference": "300A",
+    "designation": "Côte 1x1 coton bio elas teint",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1774,
+    "reference": "300B",
+    "designation": "Côte 1x1 coton bio elas ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1832,
+    "reference": "300E",
+    "designation": "Côte 1x1 coton bio elas teint PAT",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1431,
+    "reference": "301A",
+    "designation": "Molleton pes/cot/Elast NG",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1430,
+    "reference": "301B",
+    "designation": "Molleton pes/cot/Elast GR",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1387,
+    "reference": "302A",
+    "designation": "Molleton Coton bio/Elast NG",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1388,
+    "reference": "302B",
+    "designation": "Molleton CotonBio/Elast GR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1819,
+    "reference": "302C",
+    "designation": "Molleton Coton bio/Elast NG",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1775,
+    "reference": "302D",
+    "designation": "Molleton CotonBio/Elast GR",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1831,
+    "reference": "302E",
+    "designation": "Molleton Coton bio/Elast NG PAT",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1402,
+    "reference": "303A",
+    "designation": "Molleton pes/cot/elast NG",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1403,
+    "reference": "303B",
+    "designation": "Molleton pes/cot/elast GR",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1681,
+    "reference": "304A",
+    "designation": "jersey maïs",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1689,
+    "reference": "305A",
+    "designation": "jersey coton rayé 23/7",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1691,
+    "reference": "307A",
+    "designation": "molleton cot/pes/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1693,
+    "reference": "308A",
+    "designation": "interlock PP",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1698,
+    "reference": "310A",
+    "designation": "Jersey cot/elast ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1700,
+    "reference": "311A",
+    "designation": "Jersey cot/elast ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1708,
+    "reference": "312A",
+    "designation": "jersey coton rayé 27/13",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1713,
+    "reference": "313A",
+    "designation": "interlock pes/Recyclé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1710,
+    "reference": "313C",
+    "designation": "interlock pes/UNI01 non préfixé",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1711,
+    "reference": "314A",
+    "designation": "jersey viscose/laine 75/25",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1714,
+    "reference": "315A",
+    "designation": "interlock pes recyclé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1718,
+    "reference": "316A",
+    "designation": "cote 1/1 pes/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1847,
+    "reference": "316B",
+    "designation": "cote 1/1 pes/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1721,
+    "reference": "317A",
+    "designation": "interlock DF pes",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1723,
+    "reference": "319A",
+    "designation": "jersey coton teint",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1732,
+    "reference": "319B",
+    "designation": "jersey coton fil teint",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1727,
+    "reference": "320A",
+    "designation": "piqué DF 100% cot",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1780,
+    "reference": "320B",
+    "designation": "piqué DF 100% coton",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1390,
+    "reference": "323A",
+    "designation": "Jersey rayé coton",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1786,
+    "reference": "324A",
+    "designation": "piqué DF 100% cot chiné",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1728,
+    "reference": "325A",
+    "designation": "piqué DF 100% pes dép",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1853,
+    "reference": "325B",
+    "designation": "piqué DF 100% pes dép ign",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1742,
+    "reference": "329A",
+    "designation": "molleton inv moyen NG",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1744,
+    "reference": "329B",
+    "designation": "molleton inv moyen GR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1745,
+    "reference": "329C",
+    "designation": "molleton inv moyen NG",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1746,
+    "reference": "329D",
+    "designation": "molleton inv moyen GR",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1747,
+    "reference": "330A",
+    "designation": "molleton inv lourd NG",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1748,
+    "reference": "330B",
+    "designation": "molleton inv lourd GR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1749,
+    "reference": "330C",
+    "designation": "molleton inv lourd NG",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1750,
+    "reference": "330D",
+    "designation": "molleton inv lourd GR",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1751,
+    "reference": "331A",
+    "designation": "molleton inv très lourd NG",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1752,
+    "reference": "331B",
+    "designation": "molleton inv très lourd GR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1753,
+    "reference": "331C",
+    "designation": "molleton inv très lourd NG",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1754,
+    "reference": "331D",
+    "designation": "molleton inv très lourd GR",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1755,
+    "reference": "332B",
+    "designation": "mollton inv cot & pes GR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1759,
+    "reference": "333A",
+    "designation": "Molleton inv pes/cot NG",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1760,
+    "reference": "333B",
+    "designation": "Molleton inv pes/cot gratté",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1757,
+    "reference": "334A",
+    "designation": "jersey coton flammé",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1761,
+    "reference": "335A",
+    "designation": "milano pes",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1787,
+    "reference": "337A",
+    "designation": "Mlt inv. très lourd pour sublimation (fibre)",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1789,
+    "reference": "338A",
+    "designation": "Mlt inv. lourd pour sublimation (texturé)",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1812,
+    "reference": "340B",
+    "designation": "molleton inv moyen GR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1439,
+    "reference": "528/05/68",
+    "designation": "jersey piqué coton/pa 91/9",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 99,
+    "reference": "618/107",
+    "designation": "Cote 1/1 pes elasthanne noir 95/5",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1255,
+    "reference": "620/03/L",
+    "designation": "jersey pa/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1539,
+    "reference": "720/23",
+    "designation": "milano DF pes",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1233,
+    "reference": "BEN01",
+    "designation": "Molleton pes/cot/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1551,
+    "reference": "COC01A ",
+    "designation": "Jersey cot/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1089,
+    "reference": "COC01A bio",
+    "designation": "Jersey cot/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1552,
+    "reference": "COC01B",
+    "designation": "Jersey cot/elast ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1534,
+    "reference": "COC01B bio",
+    "designation": "Jersey cot/elast ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1553,
+    "reference": "COC01C",
+    "designation": "Jersey cot/elast ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1421,
+    "reference": "COC01C bio",
+    "designation": "Jersey cot/elast ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1424,
+    "reference": "COC04A",
+    "designation": "Jersey coton",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1611,
+    "reference": "COR01",
+    "designation": "itl pes J28",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1609,
+    "reference": "COR02",
+    "designation": "itl pesHT J28 30\"",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1756,
+    "reference": "D43A",
+    "designation": "jersey lourd coton OE",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1059,
+    "reference": "DUH01",
+    "designation": "Bouclette cot/pes ",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 474,
+    "reference": "Duo01",
+    "designation": "interlock J28 pes FR",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 864,
+    "reference": "E005",
+    "designation": "DF piqué pes J20",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 721,
+    "reference": "E006",
+    "designation": "Cote 1/1 Coton elas 98/2",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1179,
+    "reference": "E062",
+    "designation": "Jersey DF cot/pa",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 4,
+    "reference": "E128/101",
+    "designation": "Interlock pes J28 30\"",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1734,
+    "reference": "E128/101B",
+    "designation": "Interlock pes J28 30\"",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 5,
+    "reference": "E128/13",
+    "designation": "Mousse 100% polyamide",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 96,
+    "reference": "E139",
+    "designation": "Molleton Pes",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 25,
+    "reference": "E148",
+    "designation": "JERSEY POLYESTER FIBRE/ELASTHANNE 92/8",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 280,
+    "reference": "E168/28",
+    "designation": "Molleton coton ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 61,
+    "reference": "E438/228/1",
+    "designation": "Jersey polyester/el 90/10",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 66,
+    "reference": "E479/1",
+    "designation": "jersey Pa Micro/El. 90/10",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1842,
+    "reference": "E7:10",
+    "designation": "molleton polyester tubulaire 100mm",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1841,
+    "reference": "E7:15",
+    "designation": "molleton polyester tubulaire 150mm",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1779,
+    "reference": "E7:20",
+    "designation": "molleton polyester tubulaire 200mm",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1665,
+    "reference": "E7:25",
+    "designation": "molleton polyester tubulaire 250mm",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 21,
+    "reference": "E7:30",
+    "designation": "molleton polyester tubulaire 300mm",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1562,
+    "reference": "E7:40",
+    "designation": "molleton polyester tubulaire 400mm",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 8,
+    "reference": "EDF85/55",
+    "designation": "DOUBLE FACE PES/COTON",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1416,
+    "reference": "HAP04/10A",
+    "designation": "jersey rayé pes/cot",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1417,
+    "reference": "HAP04/10B",
+    "designation": "jersey rayé cot",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1394,
+    "reference": "HAP04C",
+    "designation": "Jersey cot/lin",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1651,
+    "reference": "HAP04D",
+    "designation": "Jersey coton",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1395,
+    "reference": "HAP05C",
+    "designation": "Côte 1/1 coton/lin",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1650,
+    "reference": "HAP10/1A",
+    "designation": "jersey  rayé",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 638,
+    "reference": "ICC01 ",
+    "designation": "Interlock Pes ",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1396,
+    "reference": "ICC01A",
+    "designation": "Interlock Pes ",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1432,
+    "reference": "ICC01B",
+    "designation": "Interlock Pes ",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1428,
+    "reference": "LGF01A",
+    "designation": "Molleton Coton bio/Elast GR",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1429,
+    "reference": "LGF01B",
+    "designation": "Molleton Coton bio/Elast NG",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 673,
+    "reference": "LGF03A",
+    "designation": "Piqué cot/elast",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1381,
+    "reference": "LGF03B",
+    "designation": "Piqué cot/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1382,
+    "reference": "LGF03C",
+    "designation": "Piqué pes/cot/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1434,
+    "reference": "LTP07 rayé",
+    "designation": "Jersey coton bio",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1435,
+    "reference": "LTP07 uni",
+    "designation": "Jersey coton bio",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1777,
+    "reference": "Madf B ",
+    "designation": "Double face coton polyamide micro fibre",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 607,
+    "reference": "N5",
+    "designation": "Charmeuse 100% polyamide 6",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1663,
+    "reference": "NEO01",
+    "designation": "milano coton",
+    "avec_teinture": 2
+  },
+  {
+    "IDref_fini": 1586,
+    "reference": "NEO02",
+    "designation": "milano coton J28 30\"",
+    "avec_teinture": 1
+  },
+  {
+    "IDref_fini": 1889,
+    "reference": "Nouveau",
+    "designation": "",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1451,
+    "reference": "PAM02",
+    "designation": "Jersey cot bio/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1235,
+    "reference": "PAM02 M003",
+    "designation": "Jersey cot bio/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1459,
+    "reference": "SIG01",
+    "designation": "gousset pa/elast",
+    "avec_teinture": 0
+  },
+  {
+    "IDref_fini": 1507,
+    "reference": "SNI05",
+    "designation": "cote 1/1 acry/laine/elast",
+    "avec_teinture": 0
+  }
+]
