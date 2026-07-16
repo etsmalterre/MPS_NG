@@ -10,6 +10,32 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-16 — feat/commande-client
+Clients › Commandes — **"Confirmation de commande" rename + CGV always attached + a batch
+of drawer/sidebar UX fixes.** Rename: the client order document is now "Confirmation de
+commande" everywhere the legacy "Accusé de réception" appeared — email subject/body
+(`email-defaults`), PDF header (split across the type/reference header rows as
+CONFIRMATION DE / COMMANDE N°X so no word is stranded), PDF title + attachment/download
+filename (`confirmation-commande-N.pdf`), Historique tab label, docs empty-state copy.
+CGV: new `CgvPdf.tsx` renders the Conditions Générales de Vente (verbatim legal text
+provided 2026-07-16, sections I–X — the single source of truth; legacy `ETAT_CGV*.wde`
+are PCS-compressed and unextractable) as a one-page two-column branded document
+(I–VII left / VIII–X right, hand-balanced split); served by `GET /commandes-client/cgv/pdf`
+(process-cached buffer) and **always attached** as `CGV - ETS Malterre.pdf` to every
+confirmation email. The shared `SendEmailDialog` gained `extraServerAttachments` —
+non-removable, previewable chips (used here for the CGV). PDF headers: uppercase accented
+É renders badly in the header font, so documentType drops accents on purpose (Avis
+d'expedition ×2, Conditions Generales de Vente); formelle BL header reference is now
+`N°X` (no "BL"). Line drawer: Expédition tab trimmed to just the two tables (shipment-info
+strip removed) and each expedition row gained per-row Imprimer / @ buttons reusing the
+Clients › Expéditions endpoints (`/expeditions/formelle/:id/...`, BL PDF + SendEmailDialog);
+Affectation tab roll cards are now click-anywhere-to-select (inner buttons stop
+propagation). Line cards use the standard domain icons (TmRollIcon / FiniRollIcon / Box)
+instead of Layers. Sidebar: Donation toggle hidden entirely once lignes exist (reappears
+when all deleted; donation orders keep the pieces lock), Réf. client edit input flexes to
+the full row width, donation section's Ajouter/Modifier buttons are edit-mode-only.
+Verified live on the dev API: CGV render, email-defaults wording, PDF headers, BL 11525.
+
 ## 2026-07-16 — feat/gestion-client (2nd landing)
 Clients › Gestion — **Associated refs + retour marchandise + 2 permissions + sidebar card
 polish.** (1) Associated refs (legacy model reverse-engineered from data:

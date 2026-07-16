@@ -30,6 +30,7 @@ import { renderToBuffer } from '@react-pdf/renderer'
 import React from 'react'
 import { query, queryRaw, fixEncoding } from '../lib/hfsql-auto.js'
 import { CommandeClientPdf, type CommandeClientPdfData } from '../lib/pdf/CommandeClientPdf.js'
+import { CgvPdf } from '../lib/pdf/CgvPdf.js'
 import { calcLignePriceClient } from '../lib/pricing-ligne-client.js'
 import { calcTarifSST } from '../lib/pricing-sst.js'
 import { sendMail } from '../lib/gmail.js'
@@ -3618,6 +3619,40 @@ async function renderClientPdfBuffer(data: CommandeClientPdfData): Promise<Buffe
   )
 }
 
+// ── CGV (conditions générales de vente) ──────────────────
+// Rendered from CgvPdf.tsx (the legal text lives there), always attached to
+// confirmation-de-commande emails and previewable in the send-email dialog.
+// The content is static per process lifetime, so render once and cache.
+const CGV_ATTACHMENT_FILENAME = 'CGV - ETS Malterre.pdf'
+let cgvPdfCache: Buffer | null = null
+
+async function getCgvPdf(): Promise<Buffer> {
+  if (!cgvPdfCache) {
+    cgvPdfCache = await renderToBuffer(
+      React.createElement(CgvPdf) as unknown as React.ReactElement<
+        import('@react-pdf/renderer').DocumentProps
+      >,
+    )
+  }
+  return cgvPdfCache
+}
+
+// Registered before /:id/pdf so the literal segment wins over the param route.
+commandesClientRouter.get('/cgv/pdf', async (_req: Request, res: Response) => {
+  try {
+    const buf = await getCgvPdf()
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `inline; filename="${CGV_ATTACHMENT_FILENAME}"`)
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.send(buf)
+  } catch (err) {
+    console.error('Error rendering CGV PDF:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 commandesClientRouter.get('/:id/pdf', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10)
@@ -3626,7 +3661,7 @@ commandesClientRouter.get('/:id/pdf', async (req: Request, res: Response) => {
     if (!data) { res.status(404).json({ error: 'Commande not found' }); return }
     const buffer = await renderClientPdfBuffer(data)
     res.setHeader('Content-Type', 'application/pdf')
-    res.setHeader('Content-Disposition', `inline; filename="commande-client-${data.numero}.pdf"`)
+    res.setHeader('Content-Disposition', `inline; filename="confirmation-commande-${data.numero}.pdf"`)
     res.removeHeader('X-Frame-Options')
     res.removeHeader('Content-Security-Policy')
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
@@ -3703,10 +3738,10 @@ async function buildEmailDefaults(id: number): Promise<EmailDefaultsPayload | nu
     console.error('email-defaults recap build failed:', (e as Error).message)
   }
 
-  const subject = `Accusé de réception de commande N°${numero} - ETS Malterre`
+  const subject = `Confirmation de commande N°${numero} - ETS Malterre`
   const body =
     `Bonjour,\n\n` +
-    `Veuillez trouver ci-joint l'accusé de réception de votre commande N°${numero}.\n\n` +
+    `Veuillez trouver ci-joint la confirmation de votre commande N°${numero}, accompagnée de nos conditions générales de vente.\n\n` +
     recap +
     `**Nous vous remercions de vérifier attentivement les termes de ce document (références, coloris, quantités, délais) et de nous signaler toute anomalie sous 48 heures. Sans retour de votre part dans ce délai, la commande sera considérée comme acceptée en l'état.**\n\n` +
     `Nous restons à votre disposition pour toute information complémentaire.\n\n` +
@@ -3804,8 +3839,10 @@ commandesClientRouter.post('/:id/email', async (req: Request, res: Response) => 
         const data = await buildClientPdfData(id)
         if (!data) { res.status(404).json({ error: 'Commande not found' }); return }
         const buffer = await renderClientPdfBuffer(data)
-        attachments.push({ filename: `commande-client-${data.numero}.pdf`, content: buffer, contentType: 'application/pdf' })
+        attachments.push({ filename: `confirmation-commande-${data.numero}.pdf`, content: buffer, contentType: 'application/pdf' })
       }
+      // CGV ride along on every confirmation email.
+      attachments.push({ filename: CGV_ATTACHMENT_FILENAME, content: await getCgvPdf(), contentType: 'application/pdf' })
       for (const a of parsed.data.extra_attachments ?? []) {
         attachments.push({ filename: a.filename, content: Buffer.from(a.content_base64, 'base64'), contentType: a.content_type })
       }
@@ -3859,7 +3896,7 @@ commandesClientRouter.get('/:id/historique', async (req: Request, res: Response)
       byDate.set(dt, acc)
     }
     const events = Array.from(byDate.values())
-      .map((e) => ({ kind: 'email' as const, type_label: 'Accusé de réception', recipients: e.recipients, DATE: e.DATE }))
+      .map((e) => ({ kind: 'email' as const, type_label: 'Confirmation de commande', recipients: e.recipients, DATE: e.DATE }))
       .sort((a, b) => (a.DATE < b.DATE ? 1 : -1))
     res.json(events)
   } catch (err) {

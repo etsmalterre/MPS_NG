@@ -39,6 +39,16 @@ function makeAttachmentId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
+/** Server-side attachment that always rides along with the send (e.g. the
+ *  CGV on client order confirmations). Shown as a non-removable chip and
+ *  previewable in the right pane; the API attaches it itself, so it is never
+ *  part of the send payload. */
+export interface ExtraServerAttachment {
+  id: string
+  label: string
+  url: string
+}
+
 interface SendEmailDialogProps {
   open: boolean
   onClose: () => void
@@ -60,6 +70,8 @@ interface SendEmailDialogProps {
   /** Display label for the server-rendered PDF chip (e.g. "Bon de commande
    *  675.pdf"). Only shown when pdfUrl is set. */
   pdfAttachmentLabel?: string
+  /** Always-attached server documents (CGV…). Non-removable chips. */
+  extraServerAttachments?: ExtraServerAttachment[]
 }
 
 export function SendEmailDialog({
@@ -71,6 +83,7 @@ export function SendEmailDialog({
   onSend,
   pdfUrl,
   pdfAttachmentLabel = 'document.pdf',
+  extraServerAttachments,
 }: SendEmailDialogProps) {
   // ── Form state ───────────────────────────────────────
   const [selectedRecipients, setSelectedRecipients] = useState<EmailRecipient[]>([])
@@ -119,9 +132,9 @@ export function SendEmailDialog({
     setCc((defaults.cc ?? []).join(', '))
     setSubject(defaults.subject)
     setBody(defaults.body)
-    setPreviewedId(pdfUrl ? 'server' : null)
+    setPreviewedId(pdfUrl ? 'server' : extraServerAttachments?.[0]?.id ?? null)
     setHydrated(true)
-  }, [open, defaults, hydrated, pdfUrl])
+  }, [open, defaults, hydrated, pdfUrl, extraServerAttachments])
 
   // Reset all local state when the dialog closes so re-opening fetches fresh
   // defaults and starts from a clean slate. Blob URLs for user attachments
@@ -232,26 +245,26 @@ export function SendEmailDialog({
       const next = prev.filter((a) => a.id !== id)
       // If the removed attachment was the active preview, fall through to
       // the next remaining user file, then the server PDF (if still in the
-      // list), then null.
+      // list), then the first always-attached server doc, then null.
       setPreviewedId((curr) => {
         if (curr !== id) return curr
         if (next.length > 0) return next[0].id
         if (pdfUrl && attachPdf) return 'server'
-        return null
+        return extraServerAttachments?.[0]?.id ?? null
       })
       return next
     })
-  }, [pdfUrl, attachPdf])
+  }, [pdfUrl, attachPdf, extraServerAttachments])
 
   const removeServerPdf = useCallback(() => {
     setAttachPdf(false)
     // If the server PDF was the active preview, fall through to the first
-    // user attachment, or null if none.
+    // user attachment, then the first always-attached server doc, then null.
     setPreviewedId((curr) => {
       if (curr !== 'server') return curr
-      return userAttachments[0]?.id ?? null
+      return userAttachments[0]?.id ?? extraServerAttachments?.[0]?.id ?? null
     })
-  }, [userAttachments])
+  }, [userAttachments, extraServerAttachments])
 
   const selectPreview = useCallback((id: 'server' | string) => {
     setPreviewedId(id)
@@ -338,6 +351,10 @@ export function SendEmailDialog({
       return { kind: 'server-pdf', url: `${pdfUrl}#view=FitH` }
     }
     if (previewedId && previewedId !== 'server') {
+      const extra = extraServerAttachments?.find((a) => a.id === previewedId)
+      if (extra) {
+        return { kind: 'server-pdf', url: `${extra.url}#view=FitH` }
+      }
       const att = userAttachments.find((a) => a.id === previewedId)
       if (att) {
         const type = att.file.type
@@ -351,7 +368,7 @@ export function SendEmailDialog({
       }
     }
     return { kind: 'empty' }
-  }, [previewedId, pdfUrl, attachPdf, userAttachments])
+  }, [previewedId, pdfUrl, attachPdf, userAttachments, extraServerAttachments])
 
   // ── Render ───────────────────────────────────────────
   return (
@@ -627,6 +644,33 @@ export function SendEmailDialog({
                       </button>
                     </div>
                   )}
+
+                  {/* Always-attached server documents (CGV…) — click to
+                      preview, no ✕: the API attaches them unconditionally. */}
+                  {(extraServerAttachments ?? []).map((a) => (
+                    <div
+                      key={a.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => selectPreview(a.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          selectPreview(a.id)
+                        }
+                      }}
+                      className={cn(
+                        'inline-flex items-center gap-1.5 rounded-md bg-white border shadow-sm text-xs py-1 px-2 text-foreground cursor-pointer transition-colors',
+                        previewedId === a.id
+                          ? 'border-accent ring-2 ring-accent/60'
+                          : 'border-border/60 hover:bg-zinc-50',
+                      )}
+                      title={`${a.label} - joint automatiquement`}
+                    >
+                      <FileText className="h-3 w-3 text-accent flex-shrink-0" />
+                      <span className="max-w-[180px] truncate">{a.label}</span>
+                    </div>
+                  ))}
 
                   {/* User-uploaded attachment chips — same click-to-preview +
                       inner ✕-to-remove mechanics. */}

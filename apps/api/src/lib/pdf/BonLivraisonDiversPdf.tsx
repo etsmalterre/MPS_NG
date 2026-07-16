@@ -217,7 +217,8 @@ export function BonLivraisonDiversPdf({ data }: { data: BonLivraisonDiversPdfDat
 
   return (
     <MalterreDocument
-      documentType="Avis d'expédition"
+      // No accent on purpose — the uppercased É renders badly in the header font.
+      documentType="Avis d'expedition"
       reference={`BL divers N°${data.numero}`}
       documentDate={data.dateLong || ''}
       title={`Avis d'expédition diverse ${data.numero}`}

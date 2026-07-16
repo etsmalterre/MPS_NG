@@ -1,5 +1,5 @@
-// PDF document for a client "Accusé de réception de commande" (order
-// acknowledgement / bon de commande client). Renders inside the shared
+// PDF document for a client "Confirmation de commande" (order
+// confirmation / bon de commande client). Renders inside the shared
 // MalterreDocument frame. Single-flow (no page-2 stock section): a header with
 // the client + billing/delivery addresses + payment terms, a lines table
 // (ref/coloris · qté+unité · prix u. · montant · livraison), and a totals block
@@ -232,10 +232,14 @@ export function CommandeClientPdf({ data }: { data: CommandeClientPdfData }) {
 
   return (
     <MalterreDocument
-      documentType="Accusé de réception"
+      // "Confirmation de commande" doesn't fit the header block on one line
+      // at the doc-type font size, and the natural wrap strands "COMMANDE"
+      // alone. Splitting across the type/reference rows gives the wanted
+      // two-line header: CONFIRMATION DE / COMMANDE N°X.
+      documentType="Confirmation de"
       reference={`COMMANDE N°${data.numero}`}
       documentDate={data.dateCommande || ''}
-      title={`Accusé de réception commande ${data.numero}`}
+      title={`Confirmation de commande ${data.numero}`}
     >
       {/* Top row: client (billing) on the left; payment terms on the right.
           The delivery address lives in its own card at the bottom of the

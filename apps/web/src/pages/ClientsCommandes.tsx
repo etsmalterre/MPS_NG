@@ -28,6 +28,7 @@ import {
   FileText,
   Upload,
   Layers,
+  Box,
   Lock,
   LockOpen,
   Sparkles,
@@ -629,7 +630,10 @@ export function ClientsCommandes() {
           queryKey={['commande-client-email-defaults', selectedId]}
           loadDefaults={() => apiFetch(`/commandes-client/${selectedId}/email-defaults`)}
           pdfUrl={`${API_URL}/commandes-client/${selectedId}/pdf`}
-          pdfAttachmentLabel={`commande-client-${selectedId}.pdf`}
+          pdfAttachmentLabel={`confirmation-commande-${selectedId}.pdf`}
+          extraServerAttachments={[
+            { id: 'cgv', label: 'CGV - ETS Malterre.pdf', url: `${API_URL}/commandes-client/cgv/pdf` },
+          ]}
           onSend={(p) => postEmail(`${API_URL}/commandes-client/${selectedId}/email`, p, { includeAttachPdf: true })}
         />
       )}
@@ -1129,7 +1133,9 @@ function DonationSection({
     queryFn: () => apiFetch(`/commandes-client/${commandeId}/donation-pieces`),
   })
 
-  useEffect(() => { if (isEditing || locked) setPickerOpen(false) }, [isEditing, locked])
+  // The picker is an edit-mode affordance — close it when leaving edit mode
+  // (or when the commande gets soldée under us).
+  useEffect(() => { if (!isEditing || locked) setPickerOpen(false) }, [isEditing, locked])
 
   const ecru = data?.ecru ?? []
   const fini = data?.fini ?? []
@@ -1147,7 +1153,7 @@ function DonationSection({
             <Gift className="h-3.5 w-3.5 text-accent" />
             Pièces en donation
           </div>
-          {!isEditing && !locked && nb > 0 && (
+          {isEditing && !locked && nb > 0 && (
             <Button variant="outline" size="sm" onClick={() => setPickerOpen(true)}>
               <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter / Modifier
             </Button>
@@ -1160,7 +1166,7 @@ function DonationSection({
           <div className="flex-1 flex flex-col items-center justify-center py-12 text-muted-foreground">
             <Gift className="h-12 w-12 mb-3 opacity-40" />
             <p className="text-sm">Aucune pièce en donation</p>
-            {!isEditing && !locked && (
+            {isEditing && !locked && (
               <Button variant="outline" size="sm" className="mt-3" onClick={() => setPickerOpen(true)}>
                 <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter des pièces
               </Button>
@@ -1480,6 +1486,9 @@ function LineCard({
 }) {
   const { border, iconBg, iconColor } = lineCardColors(line)
   const chip = lineTypeChip(line.type)
+  // Domain icon per line type — same visual language as the sidebar nav:
+  // écru → TmRollIcon, fini → FiniRollIcon, divers → Box.
+  const TypeIcon = line.type === 2 ? FiniRollIcon : line.type === 3 ? Box : TmRollIcon
   const canAffect = line.type === 1 || line.type === 2
   const clickable = !isEditing && canAffect
   const target = Number(line.quantite) || 0
@@ -1499,7 +1508,7 @@ function LineCard({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <div className={cn('h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0', iconBg)}>
-            <Layers className={cn('h-3.5 w-3.5', iconColor)} />
+            <TypeIcon className={cn('h-3.5 w-3.5', iconColor)} />
           </div>
           <div className="min-w-0">
             <p className="text-sm font-medium truncate">
@@ -2092,15 +2101,21 @@ function RollRow({
   const secondary = dim === 'metrage' ? Number(roll.poids) || 0 : Number(roll.metrage) || 0
   const secondaryLabel = dim === 'metrage' ? 'kg' : 'Ml'
   return (
-    <div className={cn(
-      'rounded-lg border border-border/60 bg-card shadow-sm p-3',
-      selected && 'border-accent ring-1 ring-accent bg-accent/[0.06]',
-    )}>
+    <div
+      // When the row is selectable, the whole card is the click target —
+      // inner action buttons stop propagation so they don't also toggle.
+      onClick={onToggleSelect}
+      className={cn(
+        'rounded-lg border border-border/60 bg-card shadow-sm p-3',
+        onToggleSelect && 'cursor-pointer hover:border-accent/40 transition-colors',
+        selected && 'border-accent ring-1 ring-accent bg-accent/[0.06]',
+      )}
+    >
       <div className="flex items-center gap-3">
         {onToggleSelect && (
           <button
             type="button"
-            onClick={onToggleSelect}
+            onClick={(e) => { e.stopPropagation(); onToggleSelect() }}
             title={selected ? 'Retirer de la sélection' : 'Sélectionner pour expédition'}
             className={cn(
               'h-5 w-5 rounded flex items-center justify-center flex-shrink-0 border transition-colors',
@@ -2136,7 +2151,7 @@ function RollRow({
             variant="ghost"
             size="icon"
             className="h-7 w-7 text-muted-foreground hover:text-accent flex-shrink-0"
-            onClick={onEditObs}
+            onClick={(e) => { e.stopPropagation(); onEditObs() }}
             title="Modifier les observations"
           >
             <Pencil className="h-3.5 w-3.5" />
@@ -2146,7 +2161,7 @@ function RollRow({
             no "Retirer"; the état pill already says why. Read-only mode
             (commande terminée) hides the action entirely. */}
         {!readOnly && !(action === 'unlink' && roll.expedie) && (
-          <Button size="sm" variant={action === 'link' ? 'default' : 'outline'} onClick={onAction} disabled={isBusy} className="flex-shrink-0">
+          <Button size="sm" variant={action === 'link' ? 'default' : 'outline'} onClick={(e) => { e.stopPropagation(); onAction() }} disabled={isBusy} className="flex-shrink-0">
             {isBusy ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
               : action === 'link' ? <Link2 className="h-3.5 w-3.5 mr-1.5" /> : <Unlink className="h-3.5 w-3.5 mr-1.5" />}
             {action === 'link' ? 'Affecter' : 'Retirer'}
@@ -2212,6 +2227,9 @@ function ExpeditionTab({
   const exps = useMemo(() => data?.expeditions ?? [], [data])
   const dim = data?.dim ?? 'metrage'
   const [selId, setSelId] = useState<number | null>(null)
+  // Per-row print/email — same endpoints and flow as Clients › Expéditions
+  // (line expeditions are always formal ones, hence the fixed bucket).
+  const [emailExpId, setEmailExpId] = useState<number | null>(null)
   const sel = exps.find((e) => e.IDexpedition === selId) ?? exps[0] ?? null
   const RollIcon = kind === 'fini' ? FiniRollIcon : TmRollIcon
 
@@ -2244,33 +2262,46 @@ function ExpeditionTab({
               key: 'q', label: dim === 'metrage' ? 'Métrage' : 'Poids', align: 'right',
               render: (r) => <span className="font-semibold">{dim === 'metrage' ? `${fmtNum(r.metrage, 1)} Ml` : `${fmtNum(r.poids, 1)} kg`}</span>,
             },
+            {
+              key: 'actions', label: '', align: 'right',
+              render: (r) => (
+                <span className="inline-flex items-center gap-0.5">
+                  <Button
+                    variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-accent"
+                    title="Imprimer"
+                    onClick={(e) => { e.stopPropagation(); window.open(`${API_URL}/expeditions/formelle/${r.IDexpedition}/pdf`, '_blank') }}
+                  >
+                    <Printer className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-accent"
+                    title="Envoyer un email"
+                    onClick={(e) => { e.stopPropagation(); setEmailExpId(r.IDexpedition) }}
+                  >
+                    <AtSign className="h-3.5 w-3.5" />
+                  </Button>
+                </span>
+              ),
+            },
           ]}
         />
       </section>
 
+      {emailExpId !== null && (
+        <SendEmailDialog
+          open
+          onClose={() => setEmailExpId(null)}
+          contextLabel={`Expédition N° ${emailExpId}`}
+          queryKey={['expedition-email-defaults', 'formelle', emailExpId]}
+          loadDefaults={() => apiFetch(`/expeditions/formelle/${emailExpId}/email-defaults`)}
+          pdfUrl={`${API_URL}/expeditions/formelle/${emailExpId}/pdf`}
+          pdfAttachmentLabel={`BL-${emailExpId}.pdf`}
+          onSend={(p) => postEmail(`${API_URL}/expeditions/formelle/${emailExpId}/email`, p, { includeAttachPdf: true })}
+        />
+      )}
+
       {sel && (
         <section>
-          <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
-            Expédition N° {sel.IDexpedition} — {sel.nb_rolls} rouleau{sel.nb_rolls > 1 ? 'x' : ''}
-          </h3>
-          {/* Shipment info (legacy right-hand "Informations" panel, condensed) */}
-          <div className="rounded-lg border border-border/60 bg-card shadow-sm p-2.5 mb-2 flex items-center gap-4 text-[11px] text-muted-foreground flex-wrap">
-            <span className="inline-flex items-center gap-1.5">
-              <Truck className="h-3.5 w-3.5 text-accent" />
-              {sel.transporteur_nom || 'Transporteur non défini'}
-            </span>
-            {(sel.adresse_nom || sel.adresse_ville) && (
-              <span className="inline-flex items-center gap-1.5 min-w-0">
-                <MapPin className="h-3.5 w-3.5 text-accent flex-shrink-0" />
-                <span className="truncate">{[sel.adresse_nom, sel.adresse_ville].filter(Boolean).join(' · ')}</span>
-              </span>
-            )}
-            {!!sel.inclure_rapport && (
-              <span className="inline-flex items-center gap-1.5">
-                <ClipboardList className="h-3.5 w-3.5 text-accent" />Rapport de contrôle inclus
-              </span>
-            )}
-          </div>
           <div className="rounded-lg border border-border/60 bg-card shadow-sm overflow-hidden">
             <table className="w-full text-xs">
               <thead className="bg-zinc-200/60 border-b border-border/60">
@@ -3865,9 +3896,18 @@ function InfoTab({
           <input type="date" value={editDateCommande} onChange={(e) => onEditDateCommandeChange(e.target.value)}
             className="h-7 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring text-right" />
         ) : (commande.date_commande ? formatHfsqlDate(commande.date_commande) : '—')} />
-        <KV label="Réf. client" value={isEditing ? (
-          <input type="text" value={editRefClient} onChange={(e) => onEditRefClientChange(e.target.value)} className={smallInput} />
-        ) : (commande.ref_client || '—')} />
+        {/* Réf. client carries long free text ("Commande 0006293 du 06/11/2025")
+            — in edit mode the input flexes to all the width left of the label
+            instead of the narrow fixed KV value slot. */}
+        {isEditing ? (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground flex-shrink-0">Réf. client</span>
+            <input type="text" value={editRefClient} onChange={(e) => onEditRefClientChange(e.target.value)}
+              className="flex-1 min-w-0 h-7 px-2 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring text-right" />
+          </div>
+        ) : (
+          <KV label="Réf. client" value={commande.ref_client || '—'} />
+        )}
         <KV label="Mode paiement" value={isEditing ? (
           <PopoverSelect size="sm" options={modesPaiement.map((m) => ({ id: m.IDmode_paiement, primary: m.libelle }))}
             value={editIDModePaiement} onChange={onEditIDModePaiementChange} emptyLabel="—" />
@@ -3885,23 +3925,20 @@ function InfoTab({
         {/* Donation — material shipped from this order must never generate a
             proforma; the flag propagates to expeditions created from it.
             Visible only with the donation_commande_client permission.
-            The flag rewires the whole order model (lignes ↔ donation pieces),
-            so it locks as soon as the commande has content on either side:
-            can't turn ON once lignes exist, can't turn OFF while stock pieces
+            The flag rewires the whole order model (lignes ↔ donation pieces):
+            on a normal commande the toggle disappears entirely as soon as a
+            ligne exists (it comes back when they're all deleted); on a
+            donation commande it stays visible but locks while stock pieces
             are still attached. Mirrors the API 409 guards. */}
-        {canMarkDonation && (() => {
-          const donationLocked = commande.donation === 1
-            ? commande.nb_donation_pieces > 0
-            : commande.lignes.length > 0
+        {canMarkDonation && (commande.donation === 1 || commande.lignes.length === 0) && (() => {
+          const donationLocked = commande.donation === 1 && commande.nb_donation_pieces > 0
           return (
             <div className="pt-1">
               <TogglePill label="Donation" checked={isEditing ? editDonation : !!commande.donation}
                 disabled={!isEditing || donationLocked} onChange={onEditDonationChange} />
               {isEditing && donationLocked && (
                 <p className="text-[10px] text-muted-foreground mt-1">
-                  {commande.donation === 1
-                    ? 'Retirez d’abord les pièces en donation pour pouvoir désactiver.'
-                    : 'Disponible uniquement sur une commande sans ligne.'}
+                  Retirez d’abord les pièces en donation pour pouvoir désactiver.
                 </p>
               )}
             </div>
@@ -4140,7 +4177,7 @@ function DocsTab({ commande, isEditing }: { commande: CommandeDetail; isEditing:
         <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
           <FileText className="h-10 w-10 mb-3 opacity-40" />
           <p className="text-sm font-medium">Aucun document</p>
-          <p className="text-[11px] mt-1 text-center">Les bons de commande, accusés et autres documents liés à cette commande apparaîtront ici.</p>
+          <p className="text-[11px] mt-1 text-center">Les bons de commande, confirmations et autres documents liés à cette commande apparaîtront ici.</p>
         </div>
       )}
       {!!data?.length && (
