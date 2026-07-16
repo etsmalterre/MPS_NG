@@ -11,6 +11,21 @@ other worktrees see what changed when they rebase. Format:
 <!-- entries below -->
 
 
+## 2026-07-16 — feat/bugs
+Finis › Stock — **Fix: saving a roll's notes failed silently when the text contained accented
+characters** (bug report from Isabelle, 2026-07-10: some pieces' comments could be edited, others
+not — the difference was whether the existing Observations already held an accent like
+"Pièce"/"N°"). Root cause: `PATCH /api/stock/fini/:id` wrote `observations`, `observation_sst`,
+`emplacement` and `conteneur` as raw `'${esc(...)}'` quoted literals, so any non-ASCII text hit
+the Linux bridge's `[HY090]` UTF-8 corruption and the request 500'd — the batch endpoint had
+already been converted to `sqlText()` but the single-roll endpoint was missed. Since the drawer
+resends the whole Observations text on save, any roll with pre-existing accented notes was
+un-editable even to add ASCII text. Fix: the four text fields now go through `sqlText()`
+(Latin-1 hex literal for accented values). Companion UI fix in `FinisStock.tsx`: the drawer's
+save mutation previously had no `onError`, so a failed save looked like a dead Enregistrer
+button; it now shows the standard AlertCircle destructive banner in the drawer header
+("L'enregistrement a échoué…"), cleared on retry and on entering edit mode.
+
 ## 2026-07-15 — feat/gestion-client
 Clients › Gestion — **Tarif modes per référence×coloris (standard / coefficient fixe / contrat)
 + permission « Gestion des tarifs » + historique divers fix + Ml label sweep.**

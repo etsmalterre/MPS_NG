@@ -763,10 +763,10 @@ stockFiniRouter.patch('/fini/:id', async (req: Request, res: Response) => {
     const body = req.body ?? {}
     const sets: string[] = []
 
-    if (typeof body.observations === 'string') sets.push(`observations = '${esc(body.observations)}'`)
-    if (typeof body.observation_sst === 'string') sets.push(`observation_sst = '${esc(body.observation_sst)}'`)
-    if (typeof body.emplacement === 'string') sets.push(`emplacement = '${esc(body.emplacement)}'`)
-    if (typeof body.conteneur === 'string') sets.push(`conteneur = '${esc(body.conteneur)}'`)
+    if (typeof body.observations === 'string') sets.push(`observations = ${sqlText(body.observations)}`)
+    if (typeof body.observation_sst === 'string') sets.push(`observation_sst = ${sqlText(body.observation_sst)}`)
+    if (typeof body.emplacement === 'string') sets.push(`emplacement = ${sqlText(body.emplacement)}`)
+    if (typeof body.conteneur === 'string') sets.push(`conteneur = ${sqlText(body.conteneur)}`)
     if (body.second_choix !== undefined) sets.push(`second_choix = ${body.second_choix ? 1 : 0}`)
     if (body.destockage !== undefined) sets.push(`destockage = ${body.destockage ? 1 : 0}`)
     if (body.don !== undefined) sets.push(`don = ${body.don ? 1 : 0}`)

@@ -1732,6 +1732,7 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
   const [editSecondChoix, setEditSecondChoix] = useState(false)
   const [editDestockage, setEditDestockage] = useState(false)
   const [editDon, setEditDon] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   const originalDraftRef = useRef<{
     observations: string
@@ -1782,6 +1783,7 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
     setEditDestockage(snapshot.destockage)
     setEditDon(snapshot.don)
     originalDraftRef.current = snapshot
+    setSaveError(null)
     setIsEditing(true)
   }, [detail])
 
@@ -1800,10 +1802,12 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
           don: editDon,
         }),
       }),
+    onMutate: () => setSaveError(null),
     onSuccess: () => {
       onMutationSuccess()
       setIsEditing(false)
     },
+    onError: () => setSaveError("L'enregistrement a échoué. Réessayez ou contactez l'administrateur."),
   })
 
   const isDirty = useMemo(() => {
@@ -1942,6 +1946,12 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
               </div>
             )}
           </div>
+          {isEditing && saveError && (
+            <div className="mt-2 flex items-center gap-2 text-sm text-destructive">
+              <AlertCircle className="h-4 w-4 flex-shrink-0" />
+              {saveError}
+            </div>
+          )}
         </div>
 
         {/* Body */}
