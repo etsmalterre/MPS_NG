@@ -11,6 +11,33 @@ other worktrees see what changed when they rebase. Format:
 <!-- entries below -->
 
 
+## 2026-07-16 — feat/gestion-client
+Clients › Gestion — **"Classeur" layout (3rd gold-standard layout) + ref-level settings
+(legacy "Référence client" window) + References tab UX overhaul (search + coloris drawer).**
+Layout: the center panel's three stacked collapsible sections became master tabs
+(Références / Historique des commandes / Marchandise expédiée) styled like the header
+submenu pills on the natural background, landing on Références at every selection; adopted
+into `mps_designer` as the **Classeur** layout (§39) and the three layouts got names
+(Fiche / Tableau / Classeur). Ref settings: cards enriched with the catalog designation +
+Kg badge + amber "À soumettre" pill; edit-mode card click opens a settings dialog mirroring
+the legacy window — nom commercial, finition Tombé de métier / Ennobli, référence interne
+(searchable, catalog switches with finition), unité Ml/Kg, soumission toggle, coloris made
+available to the client, fils facturés (stored inverted in accented `fil_non_facturé` CSV);
+"Ajouter une référence" creates one. API (`clients.ts`): references GET enriched with
+`designation` + `fil_non_facture[]`; POST/PUT `/clients/:id/references(/:did)` write
+`designation_client` via positional INSERT (accented `archivé`/`caché`/`fil_non_facturé`
+never named; verified column order + datetime literal), updates delete+re-insert preserving
+PK; `ref_client_colori` availability diff-sync archives/unarchives rows (tarif history
+preserved) and inserts new ones with the 9-tranche default; new
+`GET /clients/lookups/composition-fils` (composition_ecru yarns); refs-ecru lookup now
+returns `designation`. References tab UX: accent-insensitive multi-criteria search
+(every space-separated term must match ref/designation/coloris); coloris chips replaced by
+the §31 in-screen drawer — selecting a ref docks it alone in a one-card band under the
+search bar and the drawer below shows the coloris as a 2/3-column grid of white cards
+(label + tarif mode, hover euro/pencil opening the tarif / tarif-mode dialogs); edit-mode
+card click opens the settings dialog instead (drawer is view-mode-opened). Also fixed the
+Classeur overflow-clip cropping focus rings (§31.5 padding) and synced the skill snippet.
+
 ## 2026-07-16 - feat/commandes-client
 Clients > Commandes - **Order-confirmation email hardening: recap in body + bold 48h
 tacit-acceptance clause + HTML email support.** Customers were not verifying the attached
