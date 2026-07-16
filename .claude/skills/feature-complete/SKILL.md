@@ -77,7 +77,7 @@ Deploys are separate per repo: `/mps_deploy` from MPS_NG ships the API (+ NG web
 
 3. **Push the branch** (ensure the account first):
    ```bash
-   gh auth switch --user vincentmalterre
+   gh auth switch --user etsmalterre
    git push -u origin HEAD
    ```
 

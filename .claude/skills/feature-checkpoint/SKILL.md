@@ -29,7 +29,7 @@ package filter below. MPS-TRM has **no API package**, so skip any `@mps/api` ste
 
 3. **Ensure the push account, then push the branch:**
    ```bash
-   gh auth switch --user vincentmalterre
+   gh auth switch --user etsmalterre
    git push -u origin HEAD
    ```
 
