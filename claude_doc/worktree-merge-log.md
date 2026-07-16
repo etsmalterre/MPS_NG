@@ -10,6 +10,25 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-16 — feat/gestion-client (3rd landing)
+Clients › Gestion — **Negotiated 15/30-rouleaux tranches + expired-contract view/duplicate
++ coloris drawer edit-mode close.** The Tarif dialog now honors
+`ref_client_colori.lst_tranche`: standard/coefficient modes only show the enabled tranche
+rows (default = up to 10 rlx, indices 0..6 — shared `parseLstTrancheIdx()` helper in
+`clients.ts`, also consumed by the Fiche Tarifs PDF path; new-coloris creation default
+fixed from all-9 to 0..6). A gold "Modifier" button under the table (permission
+`gestion_tarifs`, hidden in contrat mode) opens a "Tranches négociées" panel with two §35
+toggle pills (15 / 30 rouleaux, each showing its Ml + computed €/Ml); saving goes through
+the new `PUT /clients/:id/coloris/:rccId/tranches` (permission-gated, preserves base
+indices, ASCII-safe write). GET `.../tarif` now returns `tranche_idx`. Expired contract:
+the Tarif dialog shows the old contract read-only (dates + tranche table, "expiré" chip)
+under the red banner, plus a "Dupliquer le contrat" button (gestion_tarifs) that opens the
+Mode de tarification dialog hydrated from it as a NEW contract (same tranche grid, début =
+today, no IDcontrat_tarif → renewal keeps history). Références tab: entering edit mode
+(with gestion_references) now closes the in-screen coloris drawer (§31.3 — the card click
+is reserved for the settings dialog there). Probe script
+`inspect-tarif-tranche-flags.ts` dumps lst_tranche value distribution.
+
 ## 2026-07-16 — feat/commande-client
 Clients › Commandes — **"Confirmation de commande" rename + CGV always attached + a batch
 of drawer/sidebar UX fixes.** Rename: the client order document is now "Confirmation de

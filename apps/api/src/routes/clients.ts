@@ -700,6 +700,23 @@ clientsRouter.get('/:id/historique', async (req: Request, res: Response) => {
 /** nb_rouleaux (0 = métrage "<1") → tranche index in the 9-tranche array. */
 const NB_RLX_TO_TRANCHE_IDX: Record<number, number> = { 0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 10: 6, 15: 7, 30: 8 }
 
+/** Default visible tranches: up to 10 rouleaux (indices 0..6). The 15/30
+ *  rouleaux rows (7/8) are only shown once negotiated per client. */
+const DEFAULT_TRANCHE_IDX = [0, 1, 2, 3, 4, 5, 6]
+
+/** Parse ref_client_colori.lst_tranche ("0,1,2,3,4,5,6" = indices into the
+ *  9-tranche array <1,1,2,3,4,5,10,15,30 rlx) — empty falls back to the
+ *  up-to-10-rouleaux default, matching the legacy Fiche Tarifs behavior. */
+function parseLstTrancheIdx(raw: string | null | undefined): number[] {
+  const idx = [...new Set(
+    String(raw ?? '')
+      .split(',')
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => Number.isInteger(n) && n >= 0 && n <= 8),
+  )].sort((a, b) => a - b)
+  return idx.length === 0 ? [...DEFAULT_TRANCHE_IDX] : idx
+}
+
 interface ContratTarifInfo {
   IDcontrat_tarif: number
   date_debut: string
@@ -1008,7 +1025,9 @@ async function syncRccRows(did: number, col: 'IDref_fini_colori' | 'IDcolori_ecr
       IDdesignation_client: did,
       IDref_fini_colori: col === 'IDref_fini_colori' ? colorisId : 0,
       IDcolori_ecru: col === 'IDcolori_ecru' ? colorisId : 0,
-      lst_tranche: '0,1,2,3,4,5,6,7,8',
+      // Up-to-10-rouleaux default — the 15/30 tranches are enabled per client
+      // after negotiation (Tarif dialog, permission gestion_tarifs).
+      lst_tranche: DEFAULT_TRANCHE_IDX.join(','),
       contrat: 0,
       IDphoto_produit: 0,
       archive: 0,
@@ -1247,12 +1266,13 @@ clientsRouter.get('/lookups/composition-fils', async (req: Request, res: Respons
 async function fetchClientRcc(clientId: number, rccId: number): Promise<{
   rccId: number
   contrat: number
+  lst_tranche: string
   IDref_fini: number
   IDref_fini_colori: number
   IDcolori_ecru: number
 } | null> {
   const rows = await query<Record<string, unknown>>(
-    `SELECT rcc.IDref_client_colori, rcc.contrat, rcc.IDref_fini_colori, rcc.IDcolori_ecru, dc.IDref_fini ` +
+    `SELECT rcc.IDref_client_colori, rcc.contrat, rcc.lst_tranche, rcc.IDref_fini_colori, rcc.IDcolori_ecru, dc.IDref_fini ` +
       `FROM ref_client_colori rcc ` +
       `INNER JOIN designation_client dc ON dc.IDdesignation_client = rcc.IDdesignation_client ` +
       `WHERE rcc.IDref_client_colori = ${rccId} AND dc.IDclient = ${clientId}`,
@@ -1262,6 +1282,7 @@ async function fetchClientRcc(clientId: number, rccId: number): Promise<{
   return {
     rccId,
     contrat: numOf(r.contrat),
+    lst_tranche: strOf(r.lst_tranche) ?? '',
     IDref_fini: numOf(r.IDref_fini),
     IDref_fini_colori: numOf(r.IDref_fini_colori),
     IDcolori_ecru: numOf(r.IDcolori_ecru),
@@ -1311,6 +1332,7 @@ clientsRouter.get('/:id/coloris/:rccId/tarif', async (req: Request, res: Respons
     res.json({
       ...tarif,
       tranches: tarif.tranches.map((t, i) => ({ ...t, prixContrat: contratPrixByIdx.get(i) ?? null })),
+      tranche_idx: parseLstTrancheIdx(rcc.lst_tranche),
       tarif_mode: mode.tarif_mode,
       coefficient: mode.coefficient,
       contrats: mode.contrats,
@@ -1429,6 +1451,41 @@ clientsRouter.put('/:id/coloris/:rccId/tarif-mode', async (req: Request, res: Re
     res.json({ ok: true })
   } catch (err) {
     console.error('Error updating tarif mode:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+const tranchesBody = z.object({ t15: z.boolean(), t30: z.boolean() })
+
+// PUT /api/clients/:id/coloris/:rccId/tranches — toggle the negotiated 15/30
+// rouleaux tranches (lst_tranche indices 7/8) for a référence×coloris
+// (permission-gated: gestion_tarifs). Base indices (0..6) are preserved as-is;
+// an empty lst_tranche is materialized to the up-to-10-rouleaux default.
+clientsRouter.put('/:id/coloris/:rccId/tranches', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    const rccId = parseInt(req.params.rccId, 10)
+    if (isNaN(id) || isNaN(rccId) || id <= 0 || rccId <= 0) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
+    const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'gestion_tarifs')
+    if (!allowed) { res.status(403).json({ error: 'permission denied: gestion_tarifs' }); return }
+
+    const parsed = tranchesBody.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
+
+    const rcc = await fetchClientRcc(id, rccId)
+    if (!rcc) { res.status(404).json({ error: 'Coloris not found for this client' }); return }
+
+    const idx = parseLstTrancheIdx(rcc.lst_tranche).filter((n) => n < 7)
+    if (parsed.data.t15) idx.push(7)
+    if (parsed.data.t30) idx.push(8)
+    // lst_tranche is pure ASCII (digits + commas) — plain quoted literal is safe.
+    await query(`UPDATE ref_client_colori SET lst_tranche = '${idx.join(',')}' WHERE IDref_client_colori = ${rccId}`)
+
+    res.json({ ok: true, tranche_idx: idx })
+  } catch (err) {
+    console.error('Error updating tranches:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -1768,13 +1825,7 @@ async function buildTarifsPdfData(clientId: number, rccIds: number[]): Promise<T
     const colorisId = fini.avec_teinture !== 0 ? finiColId : ecruColId
     if (!(colorisId > 0)) continue
     const label = (finiColId > 0 ? rfcMap.get(finiColId) : ceMap.get(ecruColId)) ?? ''
-    let trancheIdx = [...new Set(
-      (strOf(r.lst_tranche) ?? '')
-        .split(',')
-        .map((s) => parseInt(s.trim(), 10))
-        .filter((n) => Number.isInteger(n) && n >= 0 && n <= 8),
-    )].sort((a, b) => a - b)
-    if (trancheIdx.length === 0) trancheIdx = [0, 1, 2, 3, 4, 5, 6]
+    let trancheIdx = parseLstTrancheIdx(strOf(r.lst_tranche))
 
     // Client tarif mode overrides: an ACTIVE contrat prints exactly its
     // negotiated tranches at their €/Ml; coefficient fixe recomputes every

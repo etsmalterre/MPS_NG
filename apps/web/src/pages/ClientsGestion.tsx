@@ -35,6 +35,7 @@ import {
   Archive,
   ArchiveRestore,
   Link2,
+  Copy,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -1354,8 +1355,8 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs, canManageRefs }: 
   // mode on this tab: cards open the coloris drawer, no settings dialog,
   // no "Ajouter une référence".
   const canEditRefs = isEditing && canManageRefs
-  const [tarif, setTarif] = useState<{ rccId: number; label: string } | null>(null)
-  const [tarifMode, setTarifMode] = useState<{ coloris: RefColoris; label: string } | null>(null)
+  const [tarif, setTarif] = useState<{ rccId: number; label: string; coloris: RefColoris } | null>(null)
+  const [tarifMode, setTarifMode] = useState<{ coloris: RefColoris; label: string; duplicate?: boolean } | null>(null)
   // Ref-level settings dialog: { existing: null } = create, { existing: ref } = edit.
   const [settings, setSettings] = useState<{ existing: ClientReference | null } | null>(null)
   const [search, setSearch] = useState('')
@@ -1364,6 +1365,9 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs, canManageRefs }: 
   const { data, isLoading } = useQuery<ClientReference[]>({ queryKey: ['client-references', clientId], queryFn: () => apiFetch(`/clients/${clientId}/references`) })
   // The tab stays mounted across client switches; don't carry the filter/drawer over.
   useEffect(() => { setSearch(''); setDrawerRefId(null) }, [clientId])
+  // Entering edit mode reserves the card click for the settings dialog (§31.3)
+  // — close the coloris drawer so it doesn't linger with no way to reopen it.
+  useEffect(() => { if (canEditRefs) setDrawerRefId(null) }, [canEditRefs])
   // Multi-criteria filter: every space-separated term must match at least one of
   // the ref's fields (commercial name, internal ref, designation, coloris labels).
   const filtered = useMemo(() => {
@@ -1459,7 +1463,7 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs, canManageRefs }: 
             refItem={drawerRef}
             tarifEditable={isEditing && canManageTarifs}
             onClose={() => setDrawerRefId(null)}
-            onOpenTarif={(c) => setTarif({ rccId: c.IDref_client_colori, label: `${drawerRef.client_ref} · ${c.label}` })}
+            onOpenTarif={(c) => setTarif({ rccId: c.IDref_client_colori, label: `${drawerRef.client_ref} · ${c.label}`, coloris: c })}
             onOpenTarifMode={(c) => setTarifMode({ coloris: c, label: `${drawerRef.client_ref} · ${c.label}` })}
           />
         </div>
@@ -1471,7 +1475,8 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs, canManageRefs }: 
           </Button>
         </div>
       )}
-      <TarifDialog open={tarif !== null} onClose={() => setTarif(null)} clientId={clientId} rccId={tarif?.rccId ?? 0} label={tarif?.label ?? ''} />
+      <TarifDialog open={tarif !== null} onClose={() => setTarif(null)} clientId={clientId} rccId={tarif?.rccId ?? 0} label={tarif?.label ?? ''} canManageTarifs={canManageTarifs}
+        onDuplicateContrat={canManageTarifs && tarif ? () => { setTarifMode({ coloris: tarif.coloris, label: tarif.label, duplicate: true }); setTarif(null) } : undefined} />
       <TarifModeDialog open={tarifMode !== null} onClose={() => setTarifMode(null)} clientId={clientId} target={tarifMode} />
       <RefSettingsDialog open={settings !== null} existing={settings?.existing ?? null} clientId={clientId} onClose={() => setSettings(null)} />
     </>
@@ -1843,6 +1848,7 @@ interface TarifTranche {
 }
 interface TarifResult {
   IDref_fini: number; IDcoloris: number; avec_teinture: number; rendement: number; tranches: TarifTranche[]
+  tranche_idx: number[]
   tarif_mode: TarifMode; coefficient: number; contrats: ContratTarif[]; contrat_actif: ContratTarif | null; contrat_expire: boolean
 }
 
@@ -1866,23 +1872,81 @@ function CostLine({ label, value }: { label: string; value: string }) {
   )
 }
 
-function TarifDialog({ open, onClose, clientId, rccId, label }: { open: boolean; onClose: () => void; clientId: number; rccId: number; label: string }) {
+/** §35 toggle-pill row for one negotiated tranche (15 / 30 rouleaux). */
+function TrancheToggleRow({ label, tranche, value, onChange, disabled }: {
+  label: string; tranche: TarifTranche | null; value: boolean; onChange: (v: boolean) => void; disabled: boolean
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-lg border border-border/60 bg-white shadow-sm">
+      <div className="min-w-0 flex-1">
+        <p className="text-xs font-semibold">{label}</p>
+        <p className="text-[10px] text-muted-foreground mt-0.5">
+          {tranche ? `${fmtNum(tranche.qte_ml)} Ml · ${fmtNum(tranche.moPrixDeVenteAuMl, 2)} €/Ml` : '—'}
+          {' · '}{value ? 'proposée au client' : 'non proposée'}
+        </p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={value}
+        disabled={disabled}
+        onClick={() => onChange(!value)}
+        className={cn(
+          'relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full transition-colors',
+          'focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+          'disabled:opacity-50 disabled:cursor-not-allowed',
+          value ? 'bg-accent shadow-inner' : 'bg-zinc-300 hover:bg-zinc-400/80',
+        )}
+      >
+        <span className={cn(
+          'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200 ease-out',
+          value ? 'translate-x-[18px]' : 'translate-x-0.5',
+        )} />
+      </button>
+    </div>
+  )
+}
+
+function TarifDialog({ open, onClose, clientId, rccId, label, canManageTarifs, onDuplicateContrat }: {
+  open: boolean; onClose: () => void; clientId: number; rccId: number; label: string; canManageTarifs: boolean
+  /** Set (permission gestion_tarifs) → "Dupliquer le contrat" on an expired
+   *  contract opens the tarif-mode dialog prefilled from it as a new contract. */
+  onDuplicateContrat?: () => void
+}) {
+  const queryClient = useQueryClient()
   const [selectedTranche, setSelectedTranche] = useState(0)
-  useEffect(() => { if (open) setSelectedTranche(0) }, [open, rccId])
+  // Negotiated-tranches edit panel (15/30 rlx): null = view mode.
+  const [tranchesDraft, setTranchesDraft] = useState<{ t15: boolean; t30: boolean } | null>(null)
+  useEffect(() => { if (open) { setSelectedTranche(0); setTranchesDraft(null) } }, [open, rccId])
   const { data, isLoading, isError } = useQuery<TarifResult>({
     queryKey: ['client-tarif', clientId, rccId],
     queryFn: () => apiFetch(`/clients/${clientId}/coloris/${rccId}/tarif`),
     enabled: open && rccId > 0,
   })
+  const saveTranchesMut = useMutation({
+    mutationFn: (b: { t15: boolean; t30: boolean }) =>
+      apiFetch(`/clients/${clientId}/coloris/${rccId}/tranches`, { method: 'PUT', body: JSON.stringify(b) }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['client-tarif', clientId, rccId] })
+      // lst_tranche travels on the references payload too — keep it in sync.
+      queryClient.invalidateQueries({ queryKey: ['client-references', clientId] })
+      setTranchesDraft(null)
+    },
+  })
   // Contrat mode (active contract): the user only ever buys at the negotiated
   // prices — show exclusively the contracted tranches, like the legacy Tarifs
   // tab. Standard rows only reappear when the contract has expired (fallback).
+  // Otherwise, honor lst_tranche: the 15/30 rlx rows only show when negotiated.
   const allTranches = data?.tranches ?? []
+  const enabledIdx = data?.tranche_idx ?? [0, 1, 2, 3, 4, 5, 6]
   const tranches = data?.tarif_mode === 'contrat' && data.contrat_actif
     ? allTranches.filter((t) => t.prixContrat != null)
-    : allTranches
+    : allTranches.filter((_, i) => enabledIdx.includes(i))
   const current = tranches[Math.min(selectedTranche, Math.max(tranches.length - 1, 0))] ?? null
   const eurKg = (v: number) => `${fmtNum(v, 2)} €/Kg`
+  // The 15/30 toggles only make sense where the standard table rules the rows
+  // (contrat rows are managed through the Mode de tarif dialog instead).
+  const canEditTranches = canManageTarifs && !!data && !isLoading && !isError && data.tarif_mode !== 'contrat'
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
       <DialogContent className="max-w-lg" onClose={onClose}>
@@ -1894,14 +1958,54 @@ function TarifDialog({ open, onClose, clientId, rccId, label }: { open: boolean;
           : data?.tarif_mode === 'contrat' && data.contrat_expire ? (
             // Expired contract: the negotiated prices are gone and the ref is
             // simply not sellable until a new contract is signed — never fall
-            // back to the standard tarif here.
-            <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg border border-red-500/25 bg-red-500/10 text-red-700 text-xs font-medium">
-              <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
-              <span>
-                Contrat expiré{data.contrats[0]?.date_expiration ? ` depuis le ${formatHfsqlDate(data.contrats[0].date_expiration)}` : ''} —
-                cette référence n’est plus disponible tant qu’un nouveau contrat n’a pas été établi.
-              </span>
-            </div>
+            // back to the standard tarif here. The old contract stays readable
+            // below so it can serve as the base for a renewal (Dupliquer).
+            <>
+              <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg border border-red-500/25 bg-red-500/10 text-red-700 text-xs font-medium">
+                <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+                <span>
+                  Contrat expiré{data.contrats[0]?.date_expiration ? ` depuis le ${formatHfsqlDate(data.contrats[0].date_expiration)}` : ''} —
+                  cette référence n’est plus disponible tant qu’un nouveau contrat n’a pas été établi.
+                </span>
+              </div>
+              {data.contrats[0] && (
+                <div className="rounded-lg border border-border/60 overflow-hidden bg-card shadow-sm">
+                  <div className="flex items-center gap-2 px-3 py-2 border-b border-border/40 text-xs font-medium text-muted-foreground">
+                    <FileSignature className="h-3.5 w-3.5 flex-shrink-0" />
+                    Contrat du {formatHfsqlDate(data.contrats[0].date_debut)} au {formatHfsqlDate(data.contrats[0].date_expiration)}
+                    <span className="text-[9px] font-semibold px-1 rounded bg-red-500/10 text-red-700 border border-red-500/25">expiré</span>
+                  </div>
+                  <table className="w-full text-xs" style={{ tableLayout: 'fixed' }}>
+                    <colgroup><col style={{ width: '26%' }} /><col style={{ width: '34%' }} /><col style={{ width: '40%' }} /></colgroup>
+                    <thead className={thHead}><tr>
+                      <th className="px-2 py-1.5 text-left font-semibold">Qté (Rlx)</th>
+                      <th className="px-2 py-1.5 text-right font-semibold">Qté (Ml)</th>
+                      <th className="px-2 py-1.5 text-right font-semibold">Prix / Ml</th>
+                    </tr></thead>
+                    <tbody>
+                      {data.contrats[0].tranches.map((t) => {
+                        const idx = TRANCHE_NB_VALUES.indexOf(t.nb_rouleaux)
+                        const qteMl = idx >= 0 ? allTranches[idx]?.qte_ml ?? null : null
+                        return (
+                          <tr key={t.nb_rouleaux} className="border-b border-border/40 last:border-b-0 text-muted-foreground">
+                            <td className="px-2 py-1.5 tabular-nums">{t.nb_rouleaux === 0 ? '< 1' : `${t.nb_rouleaux} et plus`}</td>
+                            <td className="px-2 py-1.5 text-right tabular-nums">{qteMl != null ? `${t.nb_rouleaux === 0 ? '< ' : ''}${fmtNum(qteMl)}` : '—'}</td>
+                            <td className="px-2 py-1.5 text-right tabular-nums font-medium">{fmtNum(t.prix, 2)} €</td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {onDuplicateContrat && data.contrats.length > 0 && (
+                <div className="flex justify-end">
+                  <Button size="sm" onClick={onDuplicateContrat}>
+                    <Copy className="h-3.5 w-3.5 mr-1.5" />Dupliquer le contrat
+                  </Button>
+                </div>
+              )}
+            </>
           ) : tranches.length === 0 ? (
             <p className="text-sm text-muted-foreground italic">Tarif indisponible pour cette référence / ce coloris.</p>
           ) : (
@@ -1947,6 +2051,33 @@ function TarifDialog({ open, onClose, clientId, rccId, label }: { open: boolean;
                   </tbody>
                 </table>
               </div>
+              {canEditTranches && tranchesDraft === null && (
+                <div className="flex justify-end">
+                  <Button variant="gold" size="sm"
+                    onClick={() => setTranchesDraft({ t15: enabledIdx.includes(7), t30: enabledIdx.includes(8) })}>
+                    <Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier
+                  </Button>
+                </div>
+              )}
+              {tranchesDraft !== null && (
+                <div className="rounded-lg border border-accent/25 bg-accent/[0.03] p-3 space-y-2">
+                  <p className="text-xs font-semibold text-accent uppercase tracking-wide">Tranches négociées</p>
+                  <TrancheToggleRow label="15 rouleaux" tranche={allTranches[7] ?? null} value={tranchesDraft.t15}
+                    onChange={(v) => setTranchesDraft({ ...tranchesDraft, t15: v })} disabled={saveTranchesMut.isPending} />
+                  <TrancheToggleRow label="30 rouleaux" tranche={allTranches[8] ?? null} value={tranchesDraft.t30}
+                    onChange={(v) => setTranchesDraft({ ...tranchesDraft, t30: v })} disabled={saveTranchesMut.isPending} />
+                  {saveTranchesMut.isError && (
+                    <p className="text-xs text-destructive">Erreur lors de l’enregistrement des tranches.</p>
+                  )}
+                  <div className="flex justify-end gap-2 pt-1">
+                    <Button variant="outline" size="sm" disabled={saveTranchesMut.isPending} onClick={() => setTranchesDraft(null)}>Annuler</Button>
+                    <Button size="sm" disabled={saveTranchesMut.isPending} onClick={() => saveTranchesMut.mutate(tranchesDraft)}>
+                      {saveTranchesMut.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Save className="h-3.5 w-3.5 mr-1.5" />}
+                      Enregistrer
+                    </Button>
+                  </div>
+                </div>
+              )}
               {current && (() => {
                 // Contract tranche: legacy computes the "Calcul du Tarif" detail
                 // on the 15-roll cost basis (bulk dye/treatment bands, -5%
@@ -2035,7 +2166,9 @@ function TarifModeCard({ selected, onSelect, icon: Icon, title, desc, children }
 
 function TarifModeDialog({ open, onClose, clientId, target }: {
   open: boolean; onClose: () => void; clientId: number
-  target: { coloris: RefColoris; label: string } | null
+  /** duplicate: hydrate the contrat form from the latest (expired) contract as
+   *  a NEW contract — same tranches, fresh dates, no IDcontrat_tarif. */
+  target: { coloris: RefColoris; label: string; duplicate?: boolean } | null
 }) {
   const queryClient = useQueryClient()
   const [mode, setMode] = useState<TarifMode>('standard')
@@ -2056,9 +2189,16 @@ function TarifModeDialog({ open, onClose, clientId, target }: {
     setCoefficient(c.coefficient > 0 ? String(c.coefficient) : '')
     const base = c.contrat_actif ?? c.contrats[0] ?? null
     if (base) {
-      setContratId(base.IDcontrat_tarif)
-      setDateDebut(hfsqlDateToInput(base.date_debut))
-      setDateExpiration(hfsqlDateToInput(base.date_expiration))
+      if (target.duplicate) {
+        // Renewal from the same base: keep the tranche grid, save as new.
+        setContratId(null)
+        setDateDebut(new Date().toISOString().slice(0, 10))
+        setDateExpiration('')
+      } else {
+        setContratId(base.IDcontrat_tarif)
+        setDateDebut(hfsqlDateToInput(base.date_debut))
+        setDateExpiration(hfsqlDateToInput(base.date_expiration))
+      }
       setTranches(base.tranches.map((t) => ({ key: ++keyRef.current, nb_rouleaux: t.nb_rouleaux, prix: String(t.prix) })))
     } else {
       setContratId(null)
