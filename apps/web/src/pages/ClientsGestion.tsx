@@ -807,7 +807,8 @@ function DetailMain({ client, isLoading, hasSelection, isEditing, canManageTarif
           )
         })}
       </div>
-      <div className="flex-1 min-h-0 overflow-auto space-y-2 pt-3 pr-1">
+      {/* px-1/pb-1 keep focus rings and card hover borders clear of the overflow clip (§31.5). */}
+      <div className="flex-1 min-h-0 overflow-auto space-y-2 pt-3 px-1 pb-1">
         {/* Commercial sub-views (tarif modes editable in edit mode, permission-gated) */}
         {activeTab === 'references' && <ReferencesTab clientId={client.IDclient} isEditing={isEditing} canManageTarifs={canManageTarifs} />}
         {activeTab === 'historique' && <HistoriqueTab clientId={client.IDclient} />}
