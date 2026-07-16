@@ -10,6 +10,29 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-16 — feat/commandes-client
+Clients › Commandes — **Affectation tab notes-as-icons + gated observation editing + 2 new
+permissions.** (1) Roll cards in the line drawer's Affectation tab (and the shared RollRow
+used by the enno/tricotage lists) no longer render the full-width blue/red `RollNotes`
+banners; instead compact top-right icons appear only when content exists — red AlertTriangle
+for the defect report (`observation_sst` and/or "2e choix"), blue MessageSquare for
+`observations` — each with a styled left-side Tooltip that sizes to its content (`w-max`
+capped at 320px, so short notes stay on one line). Défauts tooltip: only the title +
+"2e choix" tag are red, the body text is default black. `RollNotes` itself is untouched
+(SousTraitantsCommandes still uses it). (2) The observation icon is now the single edit
+affordance (the per-roll pencil is gone): gray frameless ghost to add when no obs, blue
+framed when filled; editing is armed by a "Modifier les observations" toggle that rides the
+first section heading row of the Affectation tab (title left / action right, gold pill when
+active; falls back to the "Stock disponible" heading when no rolls are affected yet, hidden
+on soldée). (3) New permission `edit_observations_rouleaux` ("Commandes client") gates that
+toggle in the UI and the `PUT .../pieces/:kind/:stockId/observations` endpoint (403 without
+it). (4) New permission `edit_commandes_client` ("Commandes client") — without it the gold
+"Modifier" and the list-footer "+ Nouvelle" buttons are hidden (screen read-only; view-mode
+workflows — affectation, expédier, état pill, print/email, documents — stay open) and a
+`requireEditFactures`-style `requireEditCommandes` guard 403s the six write paths:
+`POST /commandes-client`, `PUT /:id`, `DELETE /:id`, `POST /:id/lignes`,
+`PUT /lignes/:lineId`, `DELETE /lignes/:lineId`.
+
 ## 2026-07-16 — feat/gestion-client (3rd landing)
 Clients › Gestion — **Negotiated 15/30-rouleaux tranches + expired-contract view/duplicate
 + coloris drawer edit-mode close.** The Tarif dialog now honors

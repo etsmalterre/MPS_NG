@@ -28,10 +28,24 @@ export const PERMISSION_KEYS = [
   // Commandes client — kept right after the dashboard keys so the section
   // renders directly below "Tableau de bord" in Paramètres > Utilisateurs.
   {
+    key: 'edit_commandes_client',
+    label: 'Édition des commandes client',
+    description:
+      'Autorise la création, la modification et la suppression des commandes et de leurs lignes dans Clients > Commandes : boutons « Nouvelle », « Modifier » et « Supprimer ».',
+    category: 'Commandes client',
+  },
+  {
     key: 'donation_commande_client',
     label: 'Marquer une commande comme donation',
     description:
       'Affiche l’interrupteur « Donation » et autorise à marquer une commande comme donation dans Clients > Commandes.',
+    category: 'Commandes client',
+  },
+  {
+    key: 'edit_observations_rouleaux',
+    label: 'Modifier les observations des rouleaux',
+    description:
+      'Affiche le bouton « Modifier les observations » dans l’onglet Affectation d’une ligne et autorise la modification des observations des rouleaux dans Clients > Commandes.',
     category: 'Commandes client',
   },
   // Facturation — rendered between "Commandes client" and "Gestion client" in

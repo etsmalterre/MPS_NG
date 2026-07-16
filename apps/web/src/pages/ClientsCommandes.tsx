@@ -18,6 +18,7 @@ import {
   Save,
   Trash2,
   MessageSquare,
+  AlertTriangle,
   CheckCircle2,
   Clock,
   Package,
@@ -43,11 +44,11 @@ import { KnitIcon } from '@/components/icons/KnitIcon'
 import { TmRollIcon } from '@/components/icons/TmRollIcon'
 import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
 import { BobineIcon } from '@/components/icons/BobineIcon'
-import { RollNotes } from '@/components/shared/RollNotes'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
+import { Tooltip } from '@/components/ui/tooltip'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { SendEmailDialog } from '@/components/email/SendEmailDialog'
 import { cn } from '@/lib/utils'
@@ -342,6 +343,9 @@ function lineCardColors(line: LigneCommande) {
 export function ClientsCommandes() {
   const queryClient = useQueryClient()
   const canMarkDonation = useHasPermission('donation_commande_client')
+  // Create / edit / delete commandes + lignes. Without it, no "Nouvelle" and
+  // no "Modifier" — the screen is read-only (view-mode workflows stay open).
+  const canEditCommandes = useHasPermission('edit_commandes_client')
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [debouncedQuery, setDebouncedQuery] = useState('')
@@ -545,6 +549,7 @@ export function ClientsCommandes() {
             statusFilter={statusFilter}
             onStatusFilterChange={handleStatusFilterChange}
             onNew={() => setCreateOpen(true)}
+            canCreate={canEditCommandes}
             isEditing={isEditing}
           />
         }
@@ -553,6 +558,7 @@ export function ClientsCommandes() {
             commande={detail ?? null}
             isLoading={detailLoading && selectedId !== null}
             isEditing={isEditing}
+            canEdit={canEditCommandes}
             onStartEdit={startEdit}
             onCancelEdit={cancelEdit}
             onSave={() => saveHeaderMut.mutate()}
@@ -648,7 +654,7 @@ function CommandeList({
   selectedId, onSelect,
   searchQuery, onSearchChange,
   statusFilter, onStatusFilterChange,
-  onNew, isEditing,
+  onNew, canCreate, isEditing,
 }: {
   rows: CommandeListRow[]
   isLoading: boolean
@@ -661,6 +667,7 @@ function CommandeList({
   statusFilter: 'all' | 'open' | 'terminee'
   onStatusFilterChange: (s: 'all' | 'open' | 'terminee') => void
   onNew: () => void
+  canCreate: boolean
   isEditing: boolean
 }) {
   return (
@@ -756,7 +763,7 @@ function CommandeList({
 
       <div className="p-3 border-t text-xs text-muted-foreground flex items-center justify-between rounded-b-lg bg-zinc-200/50">
         <span>{rows.length} commande{rows.length !== 1 ? 's' : ''}</span>
-        {!isEditing && (
+        {!isEditing && canCreate && (
           <Button size="sm" variant="ghost" onClick={onNew} className="text-accent hover:text-accent hover:bg-accent/10">
             <Plus className="h-3.5 w-3.5 mr-1" />Nouvelle
           </Button>
@@ -769,13 +776,14 @@ function CommandeList({
 // ── Center: Detail Header ──────────────────────────────
 
 function DetailHeader({
-  commande, isLoading, isEditing,
+  commande, isLoading, isEditing, canEdit,
   onStartEdit, onCancelEdit, onSave, isSaving,
   onDelete, onPrintClick, onEmailClick,
 }: {
   commande: CommandeDetail | null
   isLoading: boolean
   isEditing: boolean
+  canEdit: boolean
   onStartEdit: () => void
   onCancelEdit: () => void
   onSave: () => void
@@ -836,9 +844,11 @@ function DetailHeader({
                 <Button variant="outline" size="icon" className="h-9 w-9" title="Envoyer un email" onClick={onEmailClick}>
                   <AtSign className="h-4 w-4" />
                 </Button>
-                <Button variant="gold" size="sm" onClick={onStartEdit}>
-                  <Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier
-                </Button>
+                {canEdit && (
+                  <Button variant="gold" size="sm" onClick={onStartEdit}>
+                    <Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier
+                  </Button>
+                )}
               </>
             )}
           </div>
@@ -1604,7 +1614,11 @@ function AffectationDrawer({
     onSuccess: (payload: AffectationPayload) => { queryClient.setQueryData(queryKey, payload); onSuccess() },
   })
 
-  // Edit a roll's free-text observations (pencil on each roll row).
+  // Edit a roll's free-text observations. Permission-gated: the "Modifier les
+  // observations" toggle in the tab strip arms the per-roll edit affordance;
+  // without it the obs/defect icons are display-only.
+  const canEditObs = useHasPermission('edit_observations_rouleaux')
+  const [obsEditMode, setObsEditMode] = useState(false)
   const [editObsRoll, setEditObsRoll] = useState<RollLite | null>(null)
   const obsMut = useMutation({
     mutationFn: ({ stockId, observations }: { stockId: number; observations: string }) =>
@@ -1701,6 +1715,25 @@ function AffectationDrawer({
     return next
   })
 
+  // Obs edit toggle rides the first section heading row of the Affectation
+  // tab (title left, action right — §23 header pattern) instead of claiming
+  // its own band. -my-1 keeps the taller button from inflating the row.
+  const obsToggle = canEditObs && !soldee ? (
+    <button
+      type="button"
+      onClick={() => setObsEditMode((v) => !v)}
+      className={cn(
+        'flex items-center gap-1.5 px-2.5 py-1 -my-1 text-[11px] font-medium rounded-md transition-colors cursor-pointer',
+        obsEditMode
+          ? 'bg-accent text-accent-foreground shadow-sm'
+          : 'text-muted-foreground hover:bg-accent/10 hover:text-accent',
+      )}
+    >
+      <Pencil className="h-3 w-3" />
+      <span>Modifier les observations</span>
+    </button>
+  ) : null
+
   return (
     <>
     <div className="flex flex-col h-full min-h-0 overflow-hidden bg-zinc-100/80">
@@ -1758,15 +1791,18 @@ function AffectationDrawer({
 
             {linked.length > 0 && (
               <section>
-                <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
-                  Affecté à la commande ({linked.length})
-                </h3>
+                <div className="flex items-center justify-between mb-1.5">
+                  <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
+                    Affecté à la commande ({linked.length})
+                  </h3>
+                  {obsToggle}
+                </div>
                 <div className="space-y-1.5">
                   {linked.map((roll) => (
                     <RollRow key={roll.id} roll={roll} dim={dim} action="unlink"
                       kind={kind === 'fini' ? 'fini' : 'ecru'}
                       readOnly={soldee}
-                      onEditObs={soldee ? undefined : () => setEditObsRoll(roll)}
+                      onEditObs={soldee || !obsEditMode ? undefined : () => setEditObsRoll(roll)}
                       onAction={() => unlinkMut.mutate(roll.id)}
                       isBusy={unlinkMut.isPending && unlinkMut.variables === roll.id}
                       selected={!soldee && !roll.expedie && shipSel.has(roll.id)}
@@ -1780,14 +1816,17 @@ function AffectationDrawer({
                 affected anymore, the tab is a record of what shipped. */}
             {!soldee && available.length > 0 && (
               <section>
-                <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold mb-1.5">
-                  Stock disponible ({available.length})
-                </h3>
+                <div className="flex items-center justify-between mb-1.5">
+                  <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
+                    Stock disponible ({available.length})
+                  </h3>
+                  {linked.length === 0 ? obsToggle : null}
+                </div>
                 <div className="space-y-1.5">
                   {available.map((roll) => (
                     <RollRow key={roll.id} roll={roll} dim={dim} action="link"
                       kind={kind === 'fini' ? 'fini' : 'ecru'}
-                      onEditObs={() => setEditObsRoll(roll)}
+                      onEditObs={obsEditMode ? () => setEditObsRoll(roll) : undefined}
                       onAction={() => linkMut.mutate(roll.id)}
                       isBusy={linkMut.isPending && linkMut.variables === roll.id} />
                   ))}
@@ -2100,6 +2139,12 @@ function RollRow({
   const primaryLabel = dim === 'metrage' ? 'Ml' : 'kg'
   const secondary = dim === 'metrage' ? Number(roll.poids) || 0 : Number(roll.metrage) || 0
   const secondaryLabel = dim === 'metrage' ? 'kg' : 'Ml'
+  // Notes surface as hover icons on the right of the card (tooltip carries
+  // the text) instead of full-width banners — keeps the roll list compact.
+  const obsText = roll.observations?.trim() ?? ''
+  const defautText = (roll.observation_sst ?? '').trim()
+  const isSecondChoix = Number(roll.second_choix) > 0
+  const hasDefect = isSecondChoix || defautText.length > 0
   return (
     <div
       // When the row is selectable, the whole card is the click target —
@@ -2146,17 +2191,66 @@ function RollRow({
             {roll.magasin_nom && <span className="flex items-center gap-0.5 truncate"><MapPin className="h-2.5 w-2.5" />{roll.magasin_nom}</span>}
           </div>
         </div>
-        {onEditObs && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 text-muted-foreground hover:text-accent flex-shrink-0"
-            onClick={(e) => { e.stopPropagation(); onEditObs() }}
-            title="Modifier les observations"
+        {hasDefect && (
+          <Tooltip
+            side="left"
+            content={
+              <div className="w-max max-w-[320px] space-y-1.5 py-1">
+                <p className="text-xs font-semibold uppercase tracking-wide text-red-700 whitespace-nowrap">
+                  Défauts
+                </p>
+                {isSecondChoix && (
+                  <p className="text-xs font-bold uppercase tracking-wide text-red-700">2e choix</p>
+                )}
+                {defautText.length > 0 && (
+                  <p className="text-sm font-normal whitespace-pre-line">{defautText}</p>
+                )}
+              </div>
+            }
           >
-            <Pencil className="h-3.5 w-3.5" />
-          </Button>
+            <span
+              className="h-6 w-6 rounded-md flex items-center justify-center flex-shrink-0 cursor-pointer border border-red-200 bg-red-50 hover:bg-red-100 transition-colors"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <AlertTriangle className="h-3.5 w-3.5 text-red-600" />
+            </span>
+          </Tooltip>
         )}
+        {/* Observations: single affordance replacing the old pencil — gray
+            ghost when empty (click to add), blue framed when filled (hover
+            shows the text, click edits). */}
+        {obsText.length > 0 ? (
+          <Tooltip
+            side="left"
+            content={
+              <div className="w-max max-w-[320px] space-y-1.5 py-1">
+                <p className="text-xs font-semibold uppercase tracking-wide text-blue-700 whitespace-nowrap">
+                  Observations
+                </p>
+                <p className="text-sm font-normal whitespace-pre-line">{obsText}</p>
+              </div>
+            }
+          >
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onEditObs?.() }}
+              className={cn(
+                'h-6 w-6 rounded-md flex items-center justify-center flex-shrink-0 border border-blue-200 bg-blue-50 transition-colors',
+                onEditObs ? 'cursor-pointer hover:bg-blue-100' : 'cursor-default',
+              )}
+            >
+              <MessageSquare className="h-3.5 w-3.5 text-blue-600" />
+            </button>
+          </Tooltip>
+        ) : onEditObs ? (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onEditObs() }}
+            className="h-6 w-6 rounded-md flex items-center justify-center flex-shrink-0 text-muted-foreground hover:text-blue-600 hover:bg-blue-50 transition-colors"
+          >
+            <MessageSquare className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
         {/* A shipped roll's affectation is locked (the expedition owns it) —
             no "Retirer"; the état pill already says why. Read-only mode
             (commande terminée) hides the action entirely. */}
@@ -2167,15 +2261,6 @@ function RollRow({
             {action === 'link' ? 'Affecter' : 'Retirer'}
           </Button>
         )}
-      </div>
-      {/* Observations / defect banners — indented under the icon box
-          (h-10 = 40px + gap-3 = 12px), mirrors the sst pieces drawer. */}
-      <div className="ml-[52px]">
-        <RollNotes
-          secondChoix={Number(roll.second_choix) > 0}
-          observations={[{ label: null, text: roll.observations?.trim() ?? '' }]}
-          defautText={roll.observation_sst}
-        />
       </div>
     </div>
   )

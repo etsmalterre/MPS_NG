@@ -1112,8 +1112,26 @@ commandesClientRouter.get('/:id', async (req: Request, res: Response) => {
 //  HEADER CRUD
 // ════════════════════════════════════════════════════════
 
+/** Guard for the commande write paths: create, header edit, delete, line
+ *  CRUD (edit_commandes_client permission). View-mode workflows (état pill,
+ *  affectation, expédier, observations, documents, email) stay open.
+ *  Sends the 401/403 itself and returns false when the caller is not allowed. */
+async function requireEditCommandes(req: Request, res: Response): Promise<boolean> {
+  if (req.userId === undefined) {
+    res.status(401).json({ error: 'not authenticated' })
+    return false
+  }
+  const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'edit_commandes_client')
+  if (!allowed) {
+    res.status(403).json({ error: 'permission denied: edit_commandes_client' })
+    return false
+  }
+  return true
+}
+
 commandesClientRouter.post('/', async (req: Request, res: Response) => {
   try {
+    if (!(await requireEditCommandes(req, res))) return
     const parsed = commandeBody.safeParse(req.body)
     if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
     const d = parsed.data
@@ -1164,6 +1182,7 @@ commandesClientRouter.post('/', async (req: Request, res: Response) => {
 
 commandesClientRouter.put('/:id', async (req: Request, res: Response) => {
   try {
+    if (!(await requireEditCommandes(req, res))) return
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
     const parsed = commandeBody.partial().safeParse(req.body)
@@ -1249,6 +1268,7 @@ commandesClientRouter.put('/:id/etat', async (req: Request, res: Response) => {
 
 commandesClientRouter.delete('/:id', async (req: Request, res: Response) => {
   try {
+    if (!(await requireEditCommandes(req, res))) return
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
     // Release every reserved roll, then delete the lines, then the header.
@@ -1508,6 +1528,7 @@ commandesClientRouter.put('/:id/donation-pieces', async (req: Request, res: Resp
 
 commandesClientRouter.post('/:id/lignes', async (req: Request, res: Response) => {
   try {
+    if (!(await requireEditCommandes(req, res))) return
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
     if (refuseIfSoldee(res, await loadCommandeSoldee(id))) return
@@ -1552,6 +1573,7 @@ commandesClientRouter.post('/:id/lignes', async (req: Request, res: Response) =>
 
 commandesClientRouter.put('/lignes/:lineId', async (req: Request, res: Response) => {
   try {
+    if (!(await requireEditCommandes(req, res))) return
     const lineId = parseInt(req.params.lineId, 10)
     if (isNaN(lineId)) { res.status(400).json({ error: 'Invalid ID' }); return }
     const commandeId = await loadCommandeIdForLine(lineId)
@@ -1583,6 +1605,7 @@ commandesClientRouter.put('/lignes/:lineId', async (req: Request, res: Response)
 
 commandesClientRouter.delete('/lignes/:lineId', async (req: Request, res: Response) => {
   try {
+    if (!(await requireEditCommandes(req, res))) return
     const lineId = parseInt(req.params.lineId, 10)
     if (isNaN(lineId)) { res.status(400).json({ error: 'Invalid ID' }); return }
     const commandeId = await loadCommandeIdForLine(lineId)
@@ -2177,6 +2200,9 @@ commandesClientRouter.put('/:id/lignes/:ligneId/pieces/:kind/:stockId/observatio
     if (kind !== 'ecru' && kind !== 'fini') { res.status(400).json({ error: 'Invalid kind' }); return }
     const parsed = rollObsSchema.safeParse(req.body)
     if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
+    if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
+    const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'edit_observations_rouleaux')
+    if (!allowed) { res.status(403).json({ error: 'permission denied: edit_observations_rouleaux' }); return }
     const ctx = await loadClientLineContext(commandeId, ligneId)
     if (!ctx || ctx.kind !== kind) { res.status(404).json({ error: 'Line not found or kind mismatch' }); return }
     if (refuseIfSoldee(res, await loadCommandeSoldee(commandeId))) return
