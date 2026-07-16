@@ -10,8 +10,8 @@ There are **two** gold-standard references in the codebase. Pick the one whose l
 
 | Screen | File | Use when |
 |---|---|---|
-| **`/fournisseurs/gestion`** (3-panel) | `apps/web/src/pages/Fournisseurs.tsx` | One entity at a time has rich nested data (contacts, addresses, sub-resources) and the user works on one record start-to-finish. Implements `MasterDetailLayout`, collapsible card sections with status-colored items, side-by-side edit dialogs with file upload + PDF preview, sidebar tabs with inline edit forms, global vs per-section edit state. **§4–§9, §18, §21–§25.** |
-| **`/fournisseurs/stock`** (table-centric + slide-in drawer) | `apps/web/src/pages/FournisseursStock.tsx` | The page is fundamentally a sortable / searchable list of many flat rows; selecting a row reveals a focused detail view, but the row-set is the primary working surface. Implements toolbar (search + filters + create), split-aligned sortable table, right slide-in drawer, embed-mode top-offset, "Nouveau" creation dialog, KV-row drawer cards. **§27.** |
+| **`/fils/gestion`** (3-panel) | `apps/web/src/pages/FilsGestion.tsx` | One entity at a time has rich nested data (contacts, addresses, sub-resources) and the user works on one record start-to-finish. Implements `MasterDetailLayout`, collapsible card sections with status-colored items, side-by-side edit dialogs with file upload + PDF preview, sidebar tabs with inline edit forms, global vs per-section edit state. **§4–§9, §18, §21–§25.** |
+| **`/fils/stock`** (table-centric + slide-in drawer) | `apps/web/src/pages/FilsStock.tsx` | The page is fundamentally a sortable / searchable list of many flat rows; selecting a row reveals a focused detail view, but the row-set is the primary working surface. Implements toolbar (search + filters + create), split-aligned sortable table, right slide-in drawer, embed-mode top-offset, "Nouveau" creation dialog, KV-row drawer cards. **§27.** |
 
 When in doubt about a single rule, look at both references. When in doubt about which *layout* to choose, ask the user — do NOT mix patterns from both into a hybrid third design.
 
@@ -197,7 +197,7 @@ className="px-4 py-1.5 text-sm font-medium rounded-md transition-colors whitespa
 Component: `apps/web/src/components/layout/MasterDetailLayout.tsx`
 Hook: `apps/web/src/hooks/useResponsiveLayout.ts`
 
-> **Don't use this for list-heavy screens.** If the page is fundamentally a sortable / searchable / filterable table of many flat rows, use the **table-centric pattern** in §27 instead — that's the layout used by `/fournisseurs/stock`.
+> **Don't use this for list-heavy screens.** If the page is fundamentally a sortable / searchable / filterable table of many flat rows, use the **table-centric pattern** in §27 instead — that's the layout used by `/fils/stock`.
 
 ### Props
 
@@ -470,7 +470,7 @@ Every detail screen should surface the same canonical set of view-mode action bu
 
 `onPrintClick` and `onEmailClick` flip page-level state (`setPrintModalOpen(true)` / `setEmailModalOpen(true)`) that opens the corresponding placeholder Dialog (§18). Both Dialogs are always mounted at the page root as siblings of the `MasterDetailLayout`, alongside any other top-level dialogs (`UnsavedChangesDialog`, `CreateXxxDialog`, etc.).
 
-Reference implementations: `apps/web/src/pages/Entreprises.tsx`, `apps/web/src/pages/Fournisseurs.tsx`, `apps/web/src/pages/FournisseursStock.tsx`, and `apps/web/src/pages/FournisseursCommandes.tsx` — all four use `<Button variant="gold">` for the Modifier action.
+Reference implementations: `apps/web/src/pages/Entreprises.tsx`, `apps/web/src/pages/FilsGestion.tsx`, `apps/web/src/pages/FilsStock.tsx`, and `apps/web/src/pages/FilsCommandes.tsx` — all four use `<Button variant="gold">` for the Modifier action.
 
 ---
 
@@ -709,7 +709,7 @@ When a sidebar tab renders a list of items (documents, contacts, notes, attachme
 | Context | Container classes | Used on |
 |---|---|---|
 | **Sidebar tab item** (this rule) | `p-3 rounded-lg border bg-card shadow-sm` | `DocsTab` doc cards, `AdresseCard`, `InfoTab` sub-cards |
-| **Center-panel item** (§7) | `rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3` | `LineCard`, ref cards, commande cards in `Fournisseurs.tsx` |
+| **Center-panel item** (§7) | `rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3` | `LineCard`, ref cards, commande cards in `FilsGestion.tsx` |
 
 Visual intent: center-panel cards sit on the warm background and rely on the left-edge status color to communicate state; sidebar tab cards sit on the `bg-zinc-100/80` panel and need to be white `bg-card` with a shadow to separate from the panel. Mixing the two — putting a zinc + border-l card inside a zinc sidebar panel — makes the card disappear into the background.
 
@@ -765,7 +765,7 @@ Conventions:
 - **Edit mode** — click opens the create/edit form dialog. The card picks up `editSectionClass` so users see it's in "edit context". The only hover-revealed action on the card is **Trash** (red ghost icon); there is no separate Pencil button — the whole card is the pencil.
 - **Delete** — hover-reveal `<Button variant="ghost" size="icon" className="h-6 w-6 text-destructive hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">` with `e.stopPropagation()` inside its handler so the row click doesn't also fire. The destructive action goes through `ConfirmDialog` (§33).
 
-Reference implementation: `DocsTab` in `FournisseursCommandes.tsx`. Applies to every future tab where items are editable (contacts, adresses, lots, attachments…).
+Reference implementation: `DocsTab` in `FilsCommandes.tsx`. Applies to every future tab where items are editable (contacts, adresses, lots, attachments…).
 
 ---
 
@@ -1159,7 +1159,7 @@ Always use `variant="gold"` for the "Modifier" button at the top right of every 
 
 1. **Tableau de bord** — Dashboard
 2. **Clients** — Commandes, Devis, Facturation, Gestion
-3. **Fournisseurs** — Commandes, Gestion
+3. **Fils** — Références, Stock, Commandes, Gestion, Prévisions
 4. **Sous-traitants** — Commandes, Gestion
 5. **Production** — Tricotage, Teinture, Confection, Contrôle qualité
 6. **Stock** — Matières premières, Produits finis, Mouvements
@@ -1257,7 +1257,7 @@ When the body is a `<form>` element or a single flex column, put the `mt-4` on t
 
 ### A-bis. "En developpement" Placeholder Dialog (canonical)
 
-Any feature that's wired up in the UI but not yet implemented (email send, print, export, etc.) must open this exact placeholder Dialog. Reference: `Entreprises.tsx` email button, `FournisseursCommandes.tsx` print + email buttons.
+Any feature that's wired up in the UI but not yet implemented (email send, print, export, etc.) must open this exact placeholder Dialog. Reference: `Entreprises.tsx` email button, `FilsCommandes.tsx` print + email buttons.
 
 ```tsx
 <Dialog open={placeholderOpen} onOpenChange={setPlaceholderOpen}>
@@ -1289,7 +1289,7 @@ Always use the literal strings above so a global search for `"En developpement"`
 
 ### B. Full-Bleed Viewer Dialog (chrome-free)
 
-For embedded document/PDF viewers where the dialog frame would distract. Used by `CertificatViewDialog` in `Fournisseurs.tsx`.
+For embedded document/PDF viewers where the dialog frame would distract. Used by `CertificatViewDialog` in `FilsGestion.tsx`.
 
 ```tsx
 <Dialog open={!!cert} onOpenChange={() => onClose()}>
@@ -1439,7 +1439,7 @@ res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
 
 ## 22. File Upload Pattern
 
-Hidden `<input type="file">` wrapped in a styled `<label>` for a polished button look. Used in `CertificatEditDialog` in `Fournisseurs.tsx`.
+Hidden `<input type="file">` wrapped in a styled `<label>` for a polished button look. Used in `CertificatEditDialog` in `FilsGestion.tsx`.
 
 ```tsx
 <label className="cursor-pointer">
@@ -1568,7 +1568,7 @@ Two layers of edit state work together in data screens.
 
 ### Global `isEditing` (top-level page state)
 
-Lives at the page component (e.g. `Fournisseurs`). Toggled by the **"Modifier"** button in the detail header.
+Lives at the page component (e.g. `FilsGestion`). Toggled by the **"Modifier"** button in the detail header.
 
 When `true`:
 - Detail header shows the entity name as an `<input>` and adds the **"Mode edition"** badge
@@ -1645,7 +1645,7 @@ useEffect(() => {
 
 The `eslint-disable` is deliberate — including `startEdit` in deps re-runs the effect whenever the callback identity changes, which causes false re-triggers after cancel. Keying the effect on `[autoEditForId, detail]` alone is correct.
 
-Reference: `FournisseursCommandes.tsx` — apply the same pattern to every screen with a "Nouveau" affordance.
+Reference: `FilsCommandes.tsx` — apply the same pattern to every screen with a "Nouveau" affordance.
 
 ### 25.2 Auto-select the next item after a delete (read cache BEFORE invalidating)
 
@@ -1694,7 +1694,7 @@ Conventions:
 - **Set selection explicitly, not to null** — setting to null and relying on an auto-select-first effect hits the stale-while-revalidate gap. Compute the next selection yourself and set it directly.
 - **Empty list → `null`** — if nothing remains, set `selectedId` to `null` and let the existing empty-state render.
 
-Reference: `FournisseursCommandes.tsx`. Apply to every delete mutation on every master-detail screen.
+Reference: `FilsCommandes.tsx`. Apply to every delete mutation on every master-detail screen.
 
 ---
 
@@ -1726,7 +1726,7 @@ function formatHfsqlDate(raw: string): string {
 }
 ```
 
-These three helpers live in **`apps/web/src/lib/dates.ts`** — import from there, do not redefine. Both `Fournisseurs.tsx` and `FournisseursStock.tsx` consume them via `import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'`.
+These three helpers live in **`apps/web/src/lib/dates.ts`** — import from there, do not redefine. Both `FilsGestion.tsx` and `FilsStock.tsx` consume them via `import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'`.
 
 ---
 
@@ -1761,13 +1761,13 @@ The `fr-FR` locale emits `\u202f` (narrow no-break space) or `\u00a0` (non-break
 - Do not redefine a local `fmtNum` inside a page file — import the shared one
 - Do not hardcode the separator character in tests or snapshots; the helper guarantees a plain space but read the output through `fmtNum` if you need to assert
 
-Reference: `FournisseursCommandes.tsx` uses `fmtNum` for list card kg/€, totals footer, and line card quantite/prix/total.
+Reference: `FilsCommandes.tsx` uses `fmtNum` for list card kg/€, totals footer, and line card quantite/prix/total.
 
 ---
 
 ## 27. Table-Centric Screen Pattern
 
-Reference: **`apps/web/src/pages/FournisseursStock.tsx`** (`/fournisseurs/stock`).
+Reference: **`apps/web/src/pages/FilsStock.tsx`** (`/fils/stock`).
 
 Use this pattern — never `MasterDetailLayout` — when the page is fundamentally a sortable / searchable list of many flat rows (e.g. stock lots, order lines, movements) and selecting a row reveals a focused detail view that the user reads/edits without leaving the table context.
 
@@ -1787,7 +1787,7 @@ return (
 
 `min-h-0` on the root is mandatory — without it the table body can't shrink to fit and the whole page scrolls instead of just the rows.
 
-**No page title `<h1>` on table-centric screens.** Do NOT add a heading row (`<h1 className="text-3xl font-heading…">Commandes sous-traitants</h1>` + gold accent line) above the toolbar. The screen's identity already comes from the sidebar nav / header submenu tab that routed here; a redundant title just eats the vertical space the table needs and is absent from every reference table-centric screen (`FournisseursStock`, `FilsStock`, `RapportCommandesSst`). The toolbar (search + filters + actions) is the **first** element under the page root. This is the opposite of master-detail screens (§6), which DO get the title in the detail header — but that title is the *selected entity's name*, not the screen name. A screen-name `<h1>` is never correct in this app.
+**No page title `<h1>` on table-centric screens.** Do NOT add a heading row (`<h1 className="text-3xl font-heading…">Commandes sous-traitants</h1>` + gold accent line) above the toolbar. The screen's identity already comes from the sidebar nav / header submenu tab that routed here; a redundant title just eats the vertical space the table needs and is absent from every reference table-centric screen (`FilsStock`, `RapportCommandesSst`). The toolbar (search + filters + actions) is the **first** element under the page root. This is the opposite of master-detail screens (§6), which DO get the title in the detail header — but that title is the *selected entity's name*, not the screen name. A screen-name `<h1>` is never correct in this app.
 
 ### 27.2 Toolbar (top, full-width)
 
@@ -1938,7 +1938,7 @@ const embed = searchParams.get('embed') === 'true'
 
 #### Three-tone background composition
 
-The drawer must match the Fournisseurs right panel exactly: an opaque white root, an inner zinc-100/80 layer, and a zinc-200/50 top band. These need to be **nested** divs, not stacked classes — `bg-zinc-100/80` is semi-transparent and only blends correctly when there is an opaque base behind it.
+The drawer must match the FilsGestion right panel exactly: an opaque white root, an inner zinc-100/80 layer, and a zinc-200/50 top band. These need to be **nested** divs, not stacked classes — `bg-zinc-100/80` is semi-transparent and only blends correctly when there is an opaque base behind it.
 
 ```tsx
 <div className="fixed ... bg-white ...">                          {/* opaque base */}
@@ -1960,11 +1960,11 @@ The drawer must match the Fournisseurs right panel exactly: an opaque white root
 | Top band (header) | `bg-zinc-200/50` | the darker gray, blended over the inner zinc-100/80 |
 | DrawerCards inside body | `bg-card` | white cards |
 
-**Do not** put `bg-zinc-100/80` directly on the drawer root or `bg-zinc-200/50` directly over white — the colors will not match the Fournisseurs panel.
+**Do not** put `bg-zinc-100/80` directly on the drawer root or `bg-zinc-200/50` directly over white — the colors will not match the FilsGestion panel.
 
 #### Header content
 
-- **Icon** (`h-10 w-10` rounded square, `icon-box-gold` class normally / `bg-accent/15` when editing) containing a **`BobineIcon`** at `h-[25px] w-[25px]`. Always use `BobineIcon` for yarn-related screens (matches the inline icon used in `Fournisseurs.tsx` "Références de fil" section). Other domains get their domain-specific icon at the same frame size.
+- **Icon** (`h-10 w-10` rounded square, `icon-box-gold` class normally / `bg-accent/15` when editing) containing a **`BobineIcon`** at `h-[25px] w-[25px]`. Always use `BobineIcon` for yarn-related screens (matches the inline icon used in `FilsGestion.tsx` "Références de fil" section). Other domains get their domain-specific icon at the same frame size.
 - **Title row**: `<h2 className="text-base font-heading font-bold tracking-tight truncate">` followed by inline `Badge`s (Bio, Recyclé) — use the same green/blue badge palette as elsewhere.
 - **Subtitle**: `text-xs text-muted-foreground mt-0.5` — secondary identifier line (e.g. "coloris • Lot N").
 - **Action buttons** (right-aligned, `flex-shrink-0 -mt-0.5`): `outline` Modifier in view mode, `outline` Annuler + default Enregistrer in edit mode. Save button shows a `Loader2` spinner when `mutation.isPending`.
@@ -2135,7 +2135,7 @@ Sub-sections (Contacts tab, Adresses tab, Lignes card, Recommandations card, etc
 
 #### 28.3.a Single-source callback (use when sub-forms are mutually exclusive)
 
-When only **one** sub-form can be open at a time in the whole screen — e.g. Fournisseurs where tab content is conditionally mounted so Contacts and Adresses can never be dirty at the same instant — pass a single `onDirtyChange: (dirty: boolean) => void` through the tree.
+When only **one** sub-form can be open at a time in the whole screen — e.g. FilsGestion where tab content is conditionally mounted so Contacts and Adresses can never be dirty at the same instant — pass a single `onDirtyChange: (dirty: boolean) => void` through the tree.
 
 ```tsx
 // In the child (ContactsTab, LignesSection, etc.)
@@ -2181,7 +2181,7 @@ useEffect(() => () => { reportDirtyRef.current('ent-contacts', false) }, [])
 
 Key naming: prefix with the screen (e.g. `ent-contacts`, `ent-adresses`, `ent-recommandations`) to avoid collisions if the same component is reused across screens later.
 
-#### 28.3.c Drawer-based screens (FournisseursStock pattern)
+#### 28.3.c Drawer-based screens (FilsStock pattern)
 
 When the edit form lives inside a right-side drawer child component (per §27), the drawer owns its own edit state. Surface `isDirty` to the page via a callback + expose `save` and `onDiscard` via mutable refs so the page-level guard can invoke them:
 
@@ -2550,7 +2550,7 @@ Decision rule: *"Can the user change this from a dropdown or toggle?"* If yes, i
 
 ### 29.7 Gotcha: `<Badge variant='default'>` is primary blue, not grey
 
-When building related status indicators elsewhere, note that the shadcn `<Badge>` component in this project defaults to `variant='default'` which is `bg-primary text-primary-foreground` — **solid deep blue**, not a neutral grey. If you append a `badge-warning` / `badge-success` utility via `className`, the variant's `bg-primary` will usually win because both classes sit in the same CSS layer. Always pass an explicit `variant` (`variant='default'`, `variant='success'`, `variant='warning'`, `variant='secondary'`) when building status badges. This is how `CommandeEtatBadge` in `FournisseursCommandes.tsx` is written: `<Badge variant="success">Terminée</Badge>` / `<Badge variant="default">En cours</Badge>`.
+When building related status indicators elsewhere, note that the shadcn `<Badge>` component in this project defaults to `variant='default'` which is `bg-primary text-primary-foreground` — **solid deep blue**, not a neutral grey. If you append a `badge-warning` / `badge-success` utility via `className`, the variant's `bg-primary` will usually win because both classes sit in the same CSS layer. Always pass an explicit `variant` (`variant='default'`, `variant='success'`, `variant='warning'`, `variant='secondary'`) when building status badges. This is how `CommandeEtatBadge` in `FilsCommandes.tsx` is written: `<Badge variant="success">Terminée</Badge>` / `<Badge variant="default">En cours</Badge>`.
 
 ### 29.8 Left-list card status pill matches the footer color
 
@@ -2566,7 +2566,7 @@ This supersedes any earlier "light tinted background for inline use" guidance �
 
 ## 30. List Card Deadline / Urgency Indicator
 
-Reference: **`apps/web/src/pages/FournisseursCommandes.tsx`** → `deliveryUrgency()` helper + left-list card.
+Reference: **`apps/web/src/pages/FilsCommandes.tsx`** → `deliveryUrgency()` helper + left-list card.
 
 For any entity that has a **deadline** (delivery date, due date, échéance, expected ship date…), the left-list card should visually flag how urgent that deadline is. The pattern:
 
@@ -2659,7 +2659,7 @@ Do NOT use the semantic `destructive` / `warning` tokens here — those vary sli
 
 Apply it to any list card that carries a deadline the user cares about. Candidates in MPS_NG:
 
-- Fournisseurs → Commandes (implemented) — earliest line `date_livraison`
+- Fils → Commandes (implemented) — earliest line `date_livraison`
 - Clients → Commandes — earliest line `date_livraison`
 - Clients → Facturation — `date_echeance`
 - Sous-traitants → Commandes — `date_retour_prevue`
@@ -2672,7 +2672,7 @@ The three-day window can be tuned per domain, but the visual language (red = lat
 
 ## 31. In-Screen Contained Drawer (click-a-row → slides up inside the center panel)
 
-Reference: **`apps/web/src/pages/FournisseursCommandes.tsx`** → `StockLinkDrawer` + the split inside `LignesSection`.
+Reference: **`apps/web/src/pages/FilsCommandes.tsx`** → `StockLinkDrawer` + the split inside `LignesSection`.
 
 When a user clicks a row in the center panel's main list (e.g. an order line), a drawer should slide up inside that same panel — **not** as a full-screen `Sheet` overlay. The rows shrink to make room; the drawer fills the bottom. Nothing outside the center panel is covered.
 
@@ -2886,7 +2886,7 @@ The `onSuccess` callback bubbles up to the page so the parent `['commande-fil', 
 
 This pattern will recur wherever the user needs to "drill into a row to pick related items". Candidates:
 
-- Fournisseurs → Commandes (implemented) — pick stock_fil lots for a ref_fil_commande line
+- Fils → Commandes (implemented) — pick stock_fil lots for a ref_fil_commande line
 - Clients → Commandes — pick finished-product lots for a client order line (same shape)
 - Sous-traitants → Commandes — pick semi-finished batches for a subcontract return
 - Production → Tricotage / Teinture / Confection — pick inputs to consume for a production order line
@@ -2901,12 +2901,12 @@ Every case has the same mechanic: a list of rows in the center panel, and each r
 References:
 - **Shared component**: `apps/web/src/components/email/SendEmailDialog.tsx` — the single reusable two-pane dialog used by every email button in the app.
 - **Shared lib**: `apps/web/src/lib/email.ts` — types (`EmailRecipient`, `EmailDefaults`, `SendPayload`), `parseEmailList`, `formatFileSize`, `MAX_TOTAL_ATTACHMENT_BYTES`, `postEmail(url, payload, opts)`.
-- **Call sites**: `apps/web/src/pages/FournisseursCommandes.tsx` (with PDF preview) and `apps/web/src/pages/Entreprises.tsx` (no PDF → empty viewer).
+- **Call sites**: `apps/web/src/pages/FilsCommandes.tsx` (with PDF preview) and `apps/web/src/pages/Entreprises.tsx` (no PDF → empty viewer).
 - **Backend reference**: `apps/api/src/routes/commandes-fil.ts` → `/:id/email-defaults` + `/:id/email` (with server-rendered PDF + user attachments). `apps/api/src/routes/entreprises.ts` has the minus-PDF variant.
 
 Every document-centric screen (bons de commande, devis, factures, bons de livraison, bons d'expédition…) plus "plain" email-enabled screens like Entreprises use the same `SendEmailDialog` component. Backed by a single Google service account with Workspace domain-wide delegation — there is no per-user OAuth flow.
 
-**Historical note**: through April 2026 the plan was per-screen `EmailXxxDialog` forks until 3+ copies justified abstracting. The actual abstraction landed earlier: `FournisseursCommandes.tsx` got a working `EmailCommandeDialog`, then `Entreprises.tsx` needed one, then a bunch of other screens were queued — so the shared component was built directly, the local `EmailCommandeDialog` was deleted, and both call sites were wired through `<SendEmailDialog>`. **Do not re-fork per screen**. Add props to the shared component or lift state up if a screen needs something custom.
+**Historical note**: through April 2026 the plan was per-screen `EmailXxxDialog` forks until 3+ copies justified abstracting. The actual abstraction landed earlier: `FilsCommandes.tsx` got a working `EmailCommandeDialog`, then `Entreprises.tsx` needed one, then a bunch of other screens were queued — so the shared component was built directly, the local `EmailCommandeDialog` was deleted, and both call sites were wired through `<SendEmailDialog>`. **Do not re-fork per screen**. Add props to the shared component or lift state up if a screen needs something custom.
 
 ### 32.1 Infrastructure (one-time, already in place)
 
@@ -3161,7 +3161,7 @@ Any other 4xx/5xx falls through to the generic `Erreur HTTP {status}` banner.
 
 The shared `SendEmailDialog` covers every email-enabled screen. Apply to:
 
-- Fournisseurs → Commandes ✅ implemented (with server PDF)
+- Fils → Commandes ✅ implemented (with server PDF)
 - Réseau → Entreprises ✅ implemented (no server PDF — plain message with user attachments)
 - Sous-traitants → Commandes — contact flag `envoi_commande`
 - Clients → Commandes — contact flag `envoi_commande`
@@ -3184,7 +3184,7 @@ A plain non-document screen (like Entreprises) skips steps 1–3 and omits `pdfU
 
 ## 33. Destructive confirmation — `ConfirmDialog` (never use `window.confirm`)
 
-Reference: **`apps/web/src/components/shared/ConfirmDialog.tsx`**, used for commande / ligne / document deletion in `FournisseursCommandes.tsx`.
+Reference: **`apps/web/src/components/shared/ConfirmDialog.tsx`**, used for commande / ligne / document deletion in `FilsCommandes.tsx`.
 
 **Never call `window.confirm()` / `window.alert()` / `window.prompt()` from application code.** Native browser dialogs are jarring, styled by the browser (so they break the app's visual language), block the entire tab, and cannot surface loading state while the destructive mutation runs. Every destructive or hard-to-reverse action in the app must go through `ConfirmDialog` instead.
 
@@ -3302,7 +3302,7 @@ Any existing `window.confirm(…)` / `alert(…)` / `prompt(…)` call in the co
 
 ## 34. Polymorphic document attachments (`ged` + `type_doc`)
 
-Reference implementation: **`apps/web/src/pages/FournisseursCommandes.tsx`** → `DocsTab`, `DocViewDialog`, `DocCreateEditDialog` + **`apps/api/src/routes/commandes-fil.ts`** → the `/:id/documents*` endpoint cluster.
+Reference implementation: **`apps/web/src/pages/FilsCommandes.tsx`** → `DocsTab`, `DocViewDialog`, `DocCreateEditDialog` + **`apps/api/src/routes/commandes-fil.ts`** → the `/:id/documents*` endpoint cluster.
 
 The legacy MPS database uses **one shared table `ged`** to store documents for every entity in the system — client commandes, sous-traitant commandes, commande_fil (fournisseur orders), stock lots, certificates, references, and more. Rather than one attachment table per parent, rows are disambiguated by which of several discriminator columns is non-zero. Every screen that needs attached documents follows the same convention below — do not build a new dedicated table, and do not skip any of the conventions.
 
@@ -3534,7 +3534,7 @@ Empty `linked_lots` on the frontend = render nothing (the doc applies globally).
 
 ### 34.9 Frontend — `DocsTab` + `DocViewDialog` + `DocCreateEditDialog`
 
-Three components, all colocated in the parent screen file (not factored into shared), mirroring `FournisseursCommandes.tsx`:
+Three components, all colocated in the parent screen file (not factored into shared), mirroring `FilsCommandes.tsx`:
 
 1. **`DocsTab`** — the sidebar tab:
    - Fragment root (no wrapping card, per §8.2)
@@ -3559,7 +3559,7 @@ Three components, all colocated in the parent screen file (not factored into sha
 
 Apply this entire pattern to every screen where entities have attached documents:
 
-- **Fournisseurs → Commandes** ✅ reference implementation
+- **Fils → Commandes** ✅ reference implementation
 - **Clients → Commandes** — discriminator: `IDcommande_client = id`, `IDcommande_sous_traitant = 0`
 - **Sous-traitants → Commandes** — discriminator: `IDcommande_sous_traitant = id`, `IDcommande_client = 0`
 - **Clients → Devis / Facturation** — same legacy split; check which `IDtype_doc` values legacy populates for each
@@ -3572,7 +3572,7 @@ For each new parent, the checklist is: (1) identify the discriminator columns, (
 
 ## 35. Inline toggle pill (`role="switch"`)
 
-Reference: **`apps/web/src/pages/FournisseursCommandes.tsx`** → `DocCreateEditDialog` "Appliquer à tous les lots" row.
+Reference: **`apps/web/src/pages/FilsCommandes.tsx`** → `DocCreateEditDialog` "Appliquer à tous les lots" row.
 
 For inline boolean controls inside a form — "Appliquer à tous les lots", "Notifier par email à la création", "Afficher les éléments archivés", etc. — use an iOS-style pill switch, not a plain `<input type="checkbox">` and not a shadcn-style filled checkbox. The pill reads as a toggle at a glance and matches the app's modern feel.
 
