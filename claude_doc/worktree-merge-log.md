@@ -11,6 +11,22 @@ other worktrees see what changed when they rebase. Format:
 <!-- entries below -->
 
 
+## 2026-07-16 - feat/commandes-client
+Clients > Commandes - **Order-confirmation email hardening: recap in body + bold 48h
+tacit-acceptance clause + HTML email support.** Customers were not verifying the attached
+accuse de reception, so mistakes slipped through. The default email body now includes (1) a
+"Recapitulatif" bullet per order line (ref - coloris : quantite unite - livraison date),
+built from `buildClientPdfData` so it always matches the attached PDF (best-effort: recap is
+skipped on error), and (2) a bold clause asking the client to check references/coloris/
+quantites/delais and report any anomaly within 48 hours, after which the order is considered
+accepted as-is. To render bold, `gmail.ts sendMail` now always emits a multipart/alternative
+body (text/plain + text/html) - nested in multipart/mixed when attachments are present - with
+lightweight `**bold**` markup: HTML part renders `<strong>`, plain part strips the markers.
+This benefits every email endpoint app-wide. `buildMimeMessage` is now exported for testing.
+`SendEmailDialog` gained a hint under the Message textarea explaining the `**` syntax.
+Also removed em-dashes from the commande-client email subject, recap separators, and From
+display name (user preference: no em-dashes in user-facing text).
+
 ## 2026-07-16 — feat/bugs
 Finis › Stock — **Fix: saving a roll's notes failed silently when the text contained accented
 characters** (bug report from Isabelle, 2026-07-10: some pieces' comments could be edited, others

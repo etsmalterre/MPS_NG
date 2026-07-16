@@ -3684,10 +3684,31 @@ async function buildEmailDefaults(id: number): Promise<EmailDefaultsPayload | nu
     else suggestions.push(recipient)
   }
 
-  const subject = `Accusé de réception de commande N°${numero} — ETS Malterre`
+  // Order recap in the body itself so key terms are verifiable without
+  // opening the PDF. Reuses the PDF data builder so both always agree.
+  let recap = ''
+  try {
+    const pdfData = await buildClientPdfData(id)
+    if (pdfData && pdfData.lignes.length > 0) {
+      const lines = pdfData.lignes.map((l) => {
+        const ref = [l.ref_label, l.colori_reference].filter((s) => s && s.trim()).join(' - ')
+        const qty = `${l.quantite.toLocaleString('fr-FR').replace(/[\u202f\u00a0]/g, ' ')} ${l.unite_label}`.trim()
+        const liv = l.date_livraison ? ` - livraison ${l.date_livraison}` : ''
+        return `  •  ${ref || 'Ligne'} : ${qty}${liv}`
+      })
+      recap = `Récapitulatif :\n${lines.join('\n')}\n\n`
+    }
+  } catch (e) {
+    // Recap is best-effort — the attached PDF stays the reference document.
+    console.error('email-defaults recap build failed:', (e as Error).message)
+  }
+
+  const subject = `Accusé de réception de commande N°${numero} - ETS Malterre`
   const body =
     `Bonjour,\n\n` +
     `Veuillez trouver ci-joint l'accusé de réception de votre commande N°${numero}.\n\n` +
+    recap +
+    `**Nous vous remercions de vérifier attentivement les termes de ce document (références, coloris, quantités, délais) et de nous signaler toute anomalie sous 48 heures. Sans retour de votre part dans ce délai, la commande sera considérée comme acceptée en l'état.**\n\n` +
     `Nous restons à votre disposition pour toute information complémentaire.\n\n` +
     `Cordialement,\n` +
     `ETS Malterre`
@@ -3776,7 +3797,7 @@ commandesClientRouter.post('/:id/email', async (req: Request, res: Response) => 
       const fixedUser = await fixEncoding(userRows, 'utilisateur', 'IDutilisateur', ['prenom', 'nom'])
       const u = (fixedUser[0] as any) ?? null
       const displayName = u ? [u.prenom, u.nom].filter((s: string | null) => s && s.trim()).map((s: string) => s.trim()).join(' ') : ''
-      const fromName = displayName ? `${displayName} — ETS Malterre` : 'ETS Malterre'
+      const fromName = displayName ? `${displayName} - ETS Malterre` : 'ETS Malterre'
 
       const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
       if (parsed.data.attach_pdf !== false) {

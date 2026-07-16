@@ -85,9 +85,37 @@ export interface SendMailOptions {
   cc?: string[]
   bcc?: string[]
   subject: string
-  /** Plain-text body. Line breaks are preserved. */
+  /** Body text. Line breaks are preserved. Supports lightweight `**bold**`
+   *  markup: the HTML part renders it as <strong>, the plain-text part
+   *  strips the markers. */
   body: string
   attachments?: SendMailAttachment[]
+}
+
+// ── Body rendering (plain + HTML alternative) ────────────
+
+const BOLD_RE = /\*\*([^*]+)\*\*/g
+
+/** Plain-text part: body with `**bold**` markers stripped. */
+function bodyToPlain(body: string): string {
+  return body.replace(BOLD_RE, '$1')
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/** HTML part: escaped body, `**bold**` → <strong>, newlines → <br>. Wrapped
+ *  in a minimal styled div so rendering stays close to the plain default. */
+function bodyToHtml(body: string): string {
+  const html = escapeHtml(body)
+    .replace(BOLD_RE, '<strong>$1</strong>')
+    .replace(/\r?\n/g, '<br>\r\n')
+  return (
+    '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;color:#222222;">' +
+    html +
+    '</div>'
+  )
 }
 
 /** Encode a header value using MIME "encoded-word" (RFC 2047) when it
@@ -105,10 +133,12 @@ function formatFrom(email: string, name?: string): string {
   return `${encodeHeader(name)} <${email}>`
 }
 
-/** Build a RFC 2822 MIME message as a single Buffer. Uses multipart/mixed
- *  when there are attachments, otherwise a plain text/plain body. */
-function buildMimeMessage(opts: SendMailOptions): Buffer {
+/** Build a RFC 2822 MIME message as a single Buffer. The body is always a
+ *  multipart/alternative pair (text/plain + text/html) so `**bold**` markup
+ *  renders; with attachments it nests inside a multipart/mixed envelope. */
+export function buildMimeMessage(opts: SendMailOptions): Buffer {
   const boundary = `----=_MPS_${Date.now()}_${Math.random().toString(36).slice(2)}`
+  const altBoundary = `${boundary}_alt`
   const hasAttachments = (opts.attachments?.length ?? 0) > 0
   const crlf = '\r\n'
 
@@ -120,10 +150,20 @@ function buildMimeMessage(opts: SendMailOptions): Buffer {
   headers.push(`Subject: ${encodeHeader(opts.subject)}`)
   headers.push('MIME-Version: 1.0')
 
+  const altPart =
+    `--${altBoundary}${crlf}` +
+    `Content-Type: text/plain; charset="UTF-8"${crlf}` +
+    `Content-Transfer-Encoding: 8bit${crlf}${crlf}` +
+    bodyToPlain(opts.body) + crlf +
+    `--${altBoundary}${crlf}` +
+    `Content-Type: text/html; charset="UTF-8"${crlf}` +
+    `Content-Transfer-Encoding: 8bit${crlf}${crlf}` +
+    bodyToHtml(opts.body) + crlf +
+    `--${altBoundary}--${crlf}`
+
   if (!hasAttachments) {
-    headers.push('Content-Type: text/plain; charset="UTF-8"')
-    headers.push('Content-Transfer-Encoding: 8bit')
-    return Buffer.from(headers.join(crlf) + crlf + crlf + opts.body, 'utf8')
+    headers.push(`Content-Type: multipart/alternative; boundary="${altBoundary}"`)
+    return Buffer.from(headers.join(crlf) + crlf + crlf + altPart, 'utf8')
   }
 
   headers.push(`Content-Type: multipart/mixed; boundary="${boundary}"`)
@@ -131,11 +171,10 @@ function buildMimeMessage(opts: SendMailOptions): Buffer {
   const parts: (string | Buffer)[] = []
   parts.push(headers.join(crlf) + crlf + crlf)
 
-  // Text body part
+  // Body part — the alternative pair nested inside the mixed envelope
   parts.push(`--${boundary}${crlf}`)
-  parts.push(`Content-Type: text/plain; charset="UTF-8"${crlf}`)
-  parts.push(`Content-Transfer-Encoding: 8bit${crlf}${crlf}`)
-  parts.push(opts.body + crlf)
+  parts.push(`Content-Type: multipart/alternative; boundary="${altBoundary}"${crlf}${crlf}`)
+  parts.push(altPart)
 
   // Attachment parts
   for (const att of opts.attachments!) {

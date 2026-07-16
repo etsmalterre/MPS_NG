@@ -496,6 +496,9 @@ export function SendEmailDialog({
                       onChange={(e) => setBody(e.target.value)}
                       className="flex-1 min-h-0 w-full rounded-md border border-input bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-none font-sans scrollbar-transparent"
                     />
+                    <p className="flex-shrink-0 text-[10px] text-muted-foreground">
+                      Astuce : le texte entouré de ** apparaîtra en <strong>gras</strong> dans l'email envoyé.
+                    </p>
                   </div>
                 </div>
 
