@@ -430,11 +430,14 @@ export function FinisStock() {
       {/* Toolbar — below sm: search + actions share row 1 (actions stay top-right),
           badge and filter checkbox wrap below. Desktop order/pixels unchanged. */}
       <div className="flex-shrink-0 flex flex-wrap items-center gap-3">
+        {/* Badge wrapper takes the full row below sm so it doesn't crush the search */}
         {isEditing && (
-          <Badge className="bg-accent text-accent-foreground gap-1 shadow-sm flex-shrink-0 order-3 sm:order-1">
-            <Pencil className="h-3 w-3" />
-            Mode édition
-          </Badge>
+          <div className="order-3 sm:order-1 w-full sm:w-auto flex-shrink-0">
+            <Badge className="bg-accent text-accent-foreground gap-1 shadow-sm">
+              <Pencil className="h-3 w-3" />
+              Mode édition
+            </Badge>
+          </div>
         )}
         <div className="relative order-1 sm:order-2 flex-1 min-w-0">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -460,14 +463,14 @@ export function FinisStock() {
         {!isEditing ? (
           <div className="flex items-center gap-2 flex-shrink-0 order-2 sm:order-4">
             {canCreate && (
-              <Button size="sm" onClick={() => setCreateOpen(true)}>
-                <Plus className="h-3.5 w-3.5 mr-1" />
-                Nouveau
+              <Button size="sm" onClick={() => setCreateOpen(true)} title="Nouveau">
+                <Plus className="h-3.5 w-3.5 sm:mr-1" />
+                <span className="hidden sm:inline">Nouveau</span>
               </Button>
             )}
-            <Button variant="gold" size="sm" onClick={enterEditMode}>
-              <Pencil className="h-3.5 w-3.5 mr-1.5" />
-              Modifier
+            <Button variant="gold" size="sm" onClick={enterEditMode} title="Modifier">
+              <Pencil className="h-3.5 w-3.5 sm:mr-1.5" />
+              <span className="hidden sm:inline">Modifier</span>
             </Button>
           </div>
         ) : (
@@ -505,9 +508,9 @@ export function FinisStock() {
                 <Paintbrush className="h-4 w-4" />
               </Button>
             )}
-            <Button size="sm" onClick={exitEditMode}>
-              <X className="h-3.5 w-3.5 mr-1.5" />
-              Terminer
+            <Button size="sm" onClick={exitEditMode} title="Terminer">
+              <X className="h-3.5 w-3.5 sm:mr-1.5" />
+              <span className="hidden sm:inline">Terminer</span>
             </Button>
           </div>
         )}
@@ -614,15 +617,19 @@ export function FinisStock() {
         )}
       </div>
 
-      {/* Totalizer — standalone summary bar, detached from the table */}
+      {/* Totalizer — standalone summary bar, detached from the table.
+          Below sm the "Poids/Métrage total" labels disappear (the kg/Ml units
+          are self-explanatory) and values shrink one step so the whole bar
+          stays on ONE line even at 345px. The edit-mode selection summary gets
+          its own row. Desktop (sm+) unchanged. */}
       {!isLoading && !isError && filteredSorted.length > 0 && (
-        <div className="flex-shrink-0 flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-zinc-100/80 shadow-sm px-4 py-2.5">
-          <div className="flex items-center gap-2 text-sm">
+        <div className="flex-shrink-0 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/60 bg-zinc-100/80 shadow-sm px-4 py-2.5">
+          <div className={cn('flex flex-wrap items-center gap-2 text-sm', selCount > 0 && 'w-full sm:w-auto')}>
             <Package className="h-4 w-4 text-accent" />
             <span className="font-semibold">{rollCount}</span>
             <span className="text-muted-foreground">rouleau{rollCount > 1 ? 'x' : ''}</span>
             {selCount > 0 && (
-              <span className="ml-3 pl-3 border-l border-border/60 flex items-center gap-1.5 text-accent">
+              <span className="w-full sm:w-auto sm:ml-3 sm:pl-3 sm:border-l border-border/60 flex flex-wrap items-center gap-1.5 text-accent">
                 <Check className="h-3.5 w-3.5" />
                 <span className="font-semibold tabular-nums">{selCount}</span>
                 <span>sélectionné{selCount > 1 ? 's' : ''}</span>
@@ -633,14 +640,14 @@ export function FinisStock() {
               </span>
             )}
           </div>
-          <div className="flex items-center gap-5">
-            <div className="flex items-baseline gap-2">
-              <span className="text-xs uppercase tracking-wide text-muted-foreground">Poids total</span>
-              <span className="text-base font-bold tabular-nums">{fmtNum(totalPoids, 1)} kg</span>
+          <div className="flex items-center gap-3 sm:gap-5">
+            <div className="flex items-baseline gap-1.5 sm:gap-2">
+              <span className="hidden sm:inline text-xs uppercase tracking-wide text-muted-foreground whitespace-nowrap">Poids total</span>
+              <span className="text-sm sm:text-base font-bold tabular-nums whitespace-nowrap">{fmtNum(totalPoids, 1)} kg</span>
             </div>
-            <div className="flex items-baseline gap-2 border-l border-border/60 pl-5">
-              <span className="text-xs uppercase tracking-wide text-muted-foreground">Métrage total</span>
-              <span className="text-base font-bold tabular-nums">{fmtNum(totalMetrage, 1)} Ml</span>
+            <div className="flex items-baseline gap-1.5 sm:gap-2 border-l border-border/60 pl-3 sm:pl-5">
+              <span className="hidden sm:inline text-xs uppercase tracking-wide text-muted-foreground whitespace-nowrap">Métrage total</span>
+              <span className="text-sm sm:text-base font-bold tabular-nums whitespace-nowrap">{fmtNum(totalMetrage, 1)} Ml</span>
             </div>
           </div>
         </div>

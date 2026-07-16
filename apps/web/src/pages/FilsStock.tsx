@@ -267,9 +267,9 @@ export function FilsStock() {
         </label>
 
         {canCreate && (
-          <Button size="sm" onClick={() => setCreateOpen(true)} className="flex-shrink-0 order-2 sm:order-3">
-            <Plus className="h-3.5 w-3.5 mr-1" />
-            Nouveau
+          <Button size="sm" onClick={() => setCreateOpen(true)} className="flex-shrink-0 order-2 sm:order-3" title="Nouveau">
+            <Plus className="h-3.5 w-3.5 sm:mr-1" />
+            <span className="hidden sm:inline">Nouveau</span>
           </Button>
         )}
       </div>

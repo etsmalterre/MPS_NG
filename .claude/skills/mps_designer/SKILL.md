@@ -3903,6 +3903,12 @@ Structure inside the §27.3 table card container — loading/error/empty branche
   - checkbox label: `order-3 sm:order-2 w-full sm:w-auto`
   - Nouveau button: `order-2 sm:order-3 flex-shrink-0`
 - Long search placeholders just clip natively — do NOT shorten the string (that would change desktop pixels).
+- **Toolbar text buttons collapse to icon-only below `sm`** (user-confirmed): label wrapped in `<span className="hidden sm:inline">`, icon margin becomes `sm:mr-*`, and the button gets a `title` attribute (it becomes the accessible name once the text is hidden — tests select on it). Applies to Nouveau (+), Modifier (pencil), Terminer (X); icon-only buttons (Couper, batch, surteindre) are already fine.
+- **The "Mode édition" badge gets a `w-full sm:w-auto` wrapper div** so on phones it takes its own row instead of crushing the search input (a bare `order-*` badge stays on row 1 because the `flex-1 min-w-0` search absorbs the squeeze).
+
+### 40.5bis Totalizer bars on phones
+
+Below `sm`, the "Poids total / Métrage total" style labels are `hidden sm:inline` (the kg/Ml units are self-explanatory) and the values drop one size (`text-sm sm:text-base`), so the whole bar stays on ONE line even at 345px (user-confirmed preference over stacking). The edit-mode selection summary becomes its own row (`w-full sm:w-auto` on the span, plus `w-full sm:w-auto` on the left group only when a selection exists). Divider `border-l` stays as the separator between values; `pl-3 sm:pl-5`, `gap-3 sm:gap-5`. Reference: `FinisStock.tsx` totalizer.
 
 ### 40.6 Dialogs on phones
 
