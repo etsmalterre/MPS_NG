@@ -24,7 +24,6 @@ import {
   Receipt,
   Briefcase,
   CalendarClock,
-  ChevronDown,
   Palette,
   BadgeEuro,
   Percent,
@@ -36,7 +35,6 @@ import {
   ArchiveRestore,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
@@ -763,11 +761,25 @@ function TogglePill({ label, checked, disabled, onChange }: {
   )
 }
 
-// ── Center: Detail Main (read-only history views) ──────
+// ── Center: Detail Main (tabbed history views) ─────────
+// EXPERIMENT (layout variant): the three sections used to be stacked
+// collapsible cards; they are now header tabs so the active view gets the
+// full panel height. Revert = git revert of the commit introducing this.
+
+const MAIN_TABS = [
+  { key: 'references', label: 'Références', icon: Tag },
+  { key: 'historique', label: 'Historique des commandes', icon: History },
+  { key: 'marchandise', label: 'Marchandise expédiée', icon: Truck },
+] as const
+type MainTab = (typeof MAIN_TABS)[number]['key']
 
 function DetailMain({ client, isLoading, hasSelection, isEditing, canManageTarifs }: {
   client: ClientDetail | null; isLoading: boolean; hasSelection: boolean; isEditing: boolean; canManageTarifs: boolean
 }) {
+  const [activeTab, setActiveTab] = useState<MainTab>('references')
+  // Land on Références (the client's main info) whenever the selection changes.
+  useEffect(() => { setActiveTab('references') }, [client?.IDclient])
+
   if (!hasSelection) return (
     <div className="flex-1 flex items-center justify-center">
       <div className="text-center space-y-3">
@@ -780,11 +792,26 @@ function DetailMain({ client, isLoading, hasSelection, isEditing, canManageTarif
   if (!client) return null
 
   return (
-    <div className="flex-1 min-h-0 overflow-auto space-y-4 pr-1">
-      {/* Commercial sub-views (tarif modes editable in edit mode, permission-gated) */}
-      <ReferencesSection clientId={client.IDclient} isEditing={isEditing} canManageTarifs={canManageTarifs} />
-      <HistoriqueSection clientId={client.IDclient} />
-      <MarchandiseSection clientId={client.IDclient} />
+    <div className="flex-1 min-h-0 rounded-xl border flex flex-col overflow-hidden bg-zinc-100/80">
+      <div className="flex border-b p-1 gap-1 rounded-t-xl bg-zinc-200/50">
+        {MAIN_TABS.map((t) => {
+          const Icon = t.icon
+          const active = activeTab === t.key
+          return (
+            <button key={t.key} type="button" onClick={() => setActiveTab(t.key)}
+              className={cn('flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-md transition-colors',
+                active ? 'bg-accent text-accent-foreground shadow-sm' : 'text-muted-foreground hover:bg-accent/10')}>
+              <Icon className="h-3.5 w-3.5" />{t.label}
+            </button>
+          )
+        })}
+      </div>
+      <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-transparent">
+        {/* Commercial sub-views (tarif modes editable in edit mode, permission-gated) */}
+        {activeTab === 'references' && <ReferencesTab clientId={client.IDclient} isEditing={isEditing} canManageTarifs={canManageTarifs} />}
+        {activeTab === 'historique' && <HistoriqueTab clientId={client.IDclient} />}
+        {activeTab === 'marchandise' && <MarchandiseTab clientId={client.IDclient} />}
+      </div>
     </div>
   )
 }
@@ -1208,24 +1235,6 @@ function AdressesTab({ adresses, isEditing, clientId, onMutationSuccess, onDirty
 
 const UNITE_LABEL: Record<number, string> = { 1: 'Kg', 3: 'Ml', 4: 'unité', 5: 'm²' }
 
-function CollapsibleShell({ icon, title, badge, open, onToggle, children }: {
-  icon: React.ReactNode; title: string; badge?: React.ReactNode; open: boolean; onToggle: () => void; children: React.ReactNode
-}) {
-  return (
-    <Card className="card-premium">
-      <CardHeader className="flex flex-row items-center gap-2 p-4 space-y-0 cursor-pointer select-none" onClick={onToggle}>
-        {icon}
-        <CardTitle className="text-sm font-semibold">{title}</CardTitle>
-        <div className="ml-auto flex items-center gap-2">
-          {badge}
-          <ChevronDown className={cn('h-4 w-4 text-muted-foreground transition-transform', open && 'rotate-180')} />
-        </div>
-      </CardHeader>
-      {open && <CardContent className="pt-0">{children}</CardContent>}
-    </Card>
-  )
-}
-
 function SectionSpinner() { return <div className="flex justify-center py-6"><Loader2 className="h-5 w-5 animate-spin text-accent" /></div> }
 function SectionEmpty({ text }: { text: string }) { return <p className="text-sm text-muted-foreground italic py-2">{text}</p> }
 
@@ -1258,20 +1267,18 @@ function TarifModeTag({ c }: { c: RefColoris }) {
   return null
 }
 
-function ReferencesSection({ clientId, isEditing, canManageTarifs }: { clientId: number; isEditing: boolean; canManageTarifs: boolean }) {
-  const [open, setOpen] = useState(false)
+function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: number; isEditing: boolean; canManageTarifs: boolean }) {
   const [tarif, setTarif] = useState<{ rccId: number; label: string } | null>(null)
   const [tarifMode, setTarifMode] = useState<{ coloris: RefColoris; label: string } | null>(null)
-  const { data, isLoading } = useQuery<ClientReference[]>({ queryKey: ['client-references', clientId], queryFn: () => apiFetch(`/clients/${clientId}/references`), enabled: open })
+  const { data, isLoading } = useQuery<ClientReference[]>({ queryKey: ['client-references', clientId], queryFn: () => apiFetch(`/clients/${clientId}/references`) })
   // Edit-mode click edits the tarif mode (permission-gated); view-mode click shows the tarif.
   const tarifEditable = isEditing && canManageTarifs
   return (
-    <CollapsibleShell icon={<Tag className="h-4 w-4 text-accent" />} title="Références" open={open} onToggle={() => setOpen(!open)}
-      badge={data ? <Badge variant="secondary" className="text-xs">{data.length}</Badge> : null}>
+    <>
       {isLoading ? <SectionSpinner /> : !data || data.length === 0 ? <SectionEmpty text="Aucune référence client" /> : (
         <div className="space-y-2">
           {data.map((r) => (
-            <div key={r.IDdesignation_client} className={cn('rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3', 'border-l-amber-400/60')}>
+            <div key={r.IDdesignation_client} className={cn('rounded-lg border-l-4 border border-border/60 bg-card shadow-sm p-3', 'border-l-amber-400/60')}>
               <div className="flex items-center gap-2">
                 <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-amber-400/10"><Tag className="h-3.5 w-3.5 text-amber-600" /></div>
                 <p className="text-sm font-medium truncate">{r.client_ref || '—'}</p>
@@ -1311,7 +1318,7 @@ function ReferencesSection({ clientId, isEditing, canManageTarifs }: { clientId:
       )}
       <TarifDialog open={tarif !== null} onClose={() => setTarif(null)} clientId={clientId} rccId={tarif?.rccId ?? 0} label={tarif?.label ?? ''} />
       <TarifModeDialog open={tarifMode !== null} onClose={() => setTarifMode(null)} clientId={clientId} target={tarifMode} />
-    </CollapsibleShell>
+    </>
   )
 }
 
@@ -1726,13 +1733,11 @@ function TarifModeDialog({ open, onClose, clientId, target }: {
 
 interface HistLigne { IDligne: number; IDcommande_client: number; numero: number; date_commande: string | null; type_kind: number; ref: string; coloris: string; quantite: number; unite: number; prix: number }
 
-function HistoriqueSection({ clientId }: { clientId: number }) {
-  const [open, setOpen] = useState(false)
-  const { data, isLoading } = useQuery<{ lignes: HistLigne[]; capped: boolean }>({ queryKey: ['client-historique', clientId], queryFn: () => apiFetch(`/clients/${clientId}/historique`), enabled: open })
+function HistoriqueTab({ clientId }: { clientId: number }) {
+  const { data, isLoading } = useQuery<{ lignes: HistLigne[]; capped: boolean }>({ queryKey: ['client-historique', clientId], queryFn: () => apiFetch(`/clients/${clientId}/historique`) })
   const lignes = data?.lignes ?? []
   return (
-    <CollapsibleShell icon={<History className="h-4 w-4 text-accent" />} title="Historique des commandes" open={open} onToggle={() => setOpen(!open)}
-      badge={data ? <Badge variant="secondary" className="text-xs">{lignes.length}</Badge> : null}>
+    <>
       {isLoading ? <SectionSpinner /> : lignes.length === 0 ? <SectionEmpty text="Aucune commande" /> : (
         <>
           <div className="rounded-lg border border-border/60 overflow-x-auto bg-card shadow-sm scrollbar-transparent">
@@ -1762,7 +1767,7 @@ function HistoriqueSection({ clientId }: { clientId: number }) {
           {data?.capped && <p className="text-[11px] text-muted-foreground italic mt-2">120 commandes les plus récentes affichées.</p>}
         </>
       )}
-    </CollapsibleShell>
+    </>
   )
 }
 
@@ -1770,13 +1775,11 @@ function HistoriqueSection({ clientId }: { clientId: number }) {
 
 interface MarchLigne { IDexpedition: number; date: string | null; piece: string; lot: string; ref: string; coloris: string; poids: number; metrage: number; second_choix: number }
 
-function MarchandiseSection({ clientId }: { clientId: number }) {
-  const [open, setOpen] = useState(false)
-  const { data, isLoading } = useQuery<{ lignes: MarchLigne[]; capped: boolean }>({ queryKey: ['client-marchandise', clientId], queryFn: () => apiFetch(`/clients/${clientId}/marchandise`), enabled: open })
+function MarchandiseTab({ clientId }: { clientId: number }) {
+  const { data, isLoading } = useQuery<{ lignes: MarchLigne[]; capped: boolean }>({ queryKey: ['client-marchandise', clientId], queryFn: () => apiFetch(`/clients/${clientId}/marchandise`) })
   const lignes = data?.lignes ?? []
   return (
-    <CollapsibleShell icon={<Truck className="h-4 w-4 text-accent" />} title="Marchandise expédiée" open={open} onToggle={() => setOpen(!open)}
-      badge={data ? <Badge variant="secondary" className="text-xs">{lignes.length}</Badge> : null}>
+    <>
       {isLoading ? <SectionSpinner /> : lignes.length === 0 ? <SectionEmpty text="Aucune expédition" /> : (
         <>
           <div className="rounded-lg border border-border/60 overflow-x-auto bg-card shadow-sm scrollbar-transparent">
@@ -1808,6 +1811,6 @@ function MarchandiseSection({ clientId }: { clientId: number }) {
           {data?.capped && <p className="text-[11px] text-muted-foreground italic mt-2">400 pièces les plus récentes affichées.</p>}
         </>
       )}
-    </CollapsibleShell>
+    </>
   )
 }
