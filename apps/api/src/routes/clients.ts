@@ -795,8 +795,14 @@ clientsRouter.get('/:id/references', async (req: Request, res: Response) => {
     // designation_client tolerates SELECT * (verified). archivé is accented → prune in JS.
     const dRows = await query<Record<string, unknown>>(`SELECT * FROM designation_client WHERE IDclient = ${id} ORDER BY designation`)
     const dFixed = await fixEncoding(dRows, 'designation_client', 'IDdesignation_client', ['designation'])
-    const desigs = dFixed.filter((r) => !numOf(pick(r, 'archivé', 'archiv')))
+    const active = dFixed.filter((r) => !numOf(pick(r, 'archivé', 'archiv')))
+    // caché=1 rows are the hidden "Reference Associée" markers a parent ref
+    // creates when linking an associated ref — never list them as entries.
+    const desigs = active.filter((r) => !numOf(pick(r, 'caché', 'cach')))
     if (desigs.length === 0) { res.json([]); return }
+    // did → IDref_fini over ALL active rows (hidden ones included) so a parent's
+    // associee CSV (child designation ids) resolves to the linked ref_fini ids.
+    const finiByDid = new Map(active.map((r) => [numOf(r.IDdesignation_client), numOf(r.IDref_fini)]))
 
     const finiMap = await mapRefFini(desigs.map((r) => numOf(r.IDref_fini)))
     const ecruMap = await mapRefEcruFull(desigs.map((r) => numOf(r.IDref_ecru)))
@@ -851,6 +857,12 @@ clientsRouter.get('/:id/references', async (req: Request, res: Response) => {
         // Inverted legacy storage: yarns NOT invoiced to the client (CSV of IDref_fil).
         fil_non_facture: String(pick(r, 'fil_non_facturé', 'fil_non_factur') ?? '')
           .split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n) && n > 0),
+        // Linked associated refs: the parent's associee CSV holds hidden child
+        // designation ids — resolve each to the child's IDref_fini.
+        associees: String(r.associee ?? '')
+          .split(',').map((s) => parseInt(s.trim(), 10))
+          .map((cd) => (Number.isInteger(cd) && cd > 0 ? (finiByDid.get(cd) ?? 0) : 0))
+          .filter((x) => x > 0),
         coloris: colorisByDesig.get(numOf(r.IDdesignation_client)) ?? [],
       }
     })
@@ -1005,6 +1017,60 @@ async function syncRccRows(did: number, col: 'IDref_fini_colori' | 'IDcolori_ecr
   }
 }
 
+/** Reconcile the hidden "Reference Associée" child rows (caché=1) of a parent
+ *  designation against the wanted associated IDref_fini list, keeping the
+ *  parent's associee CSV (child designation ids) in sync. Legacy model:
+ *  checking an associated ref in the settings dialog creates a hidden
+ *  designation_client row for it (designation 'Reference Associée', caché=1,
+ *  unite=0, no coloris rows) so order entry can propose/check it alongside
+ *  the parent; unchecking deletes that hidden row. */
+async function syncAssociees(clientId: number, did: number, currentCsv: string, wantedFiniIds: number[]): Promise<void> {
+  const childIds = [...new Set(currentCsv.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n) && n > 0))]
+  let children: DesignationRow[] = []
+  if (childIds.length > 0) {
+    const rows = await query<Record<string, unknown>>(
+      `SELECT * FROM designation_client WHERE IDdesignation_client IN (${childIds.join(',')}) AND IDclient = ${clientId}`,
+    )
+    children = rows.map(normalizeDesignationRow)
+  }
+  // Only link refs that actually exist in the finished-goods catalog.
+  const finiMap = await mapRefFini(wantedFiniIds)
+  const wanted = new Set(wantedFiniIds.filter((x) => finiMap.has(x)))
+  const keep: number[] = []
+  for (const c of children) {
+    if (wanted.has(c.IDref_fini)) {
+      wanted.delete(c.IDref_fini)
+      keep.push(c.IDdesignation_client)
+    } else {
+      await query(`DELETE FROM designation_client WHERE IDdesignation_client = ${c.IDdesignation_client}`)
+    }
+  }
+  if (wanted.size > 0) {
+    let pk = await nextPk('designation_client', 'IDdesignation_client')
+    for (const idFini of wanted) {
+      const newDid = pk++
+      await insertDesignationPositional({
+        IDclient: clientId,
+        IDdesignation_client: newDid,
+        designation: 'Reference Associée', // exact legacy marker string
+        IDref_fini: idFini,
+        IDref_ecru: 0,
+        archive: 0,
+        associee: '',
+        cache: 1,
+        soumettre: 0,
+        unite: 0,
+        fil_non_facture: '',
+      }, nowDateTime())
+      keep.push(newDid)
+    }
+  }
+  const csv = keep.join(',')
+  if (csv !== currentCsv) {
+    await query(`UPDATE designation_client SET associee = '${csv}' WHERE IDdesignation_client = ${did}`)
+  }
+}
+
 const refSettingsBody = z
   .object({
     designation: z.string().min(1).max(100),
@@ -1014,6 +1080,9 @@ const refSettingsBody = z
     unite: z.union([z.literal(1), z.literal(3)]), // 1 = Kg, 3 = Ml
     fil_non_facture: z.array(z.number().int().positive()).max(50),
     coloris: z.array(z.number().int().positive()).max(500),
+    // Associated refs (IDref_fini) to link as hidden child designations.
+    // Only meaningful for fini refs — forced empty for TM (écru) refs.
+    associees: z.array(z.number().int().positive()).max(50).default([]),
   })
   .refine((b) => (b.IDref_fini > 0) !== (b.IDref_ecru > 0), {
     message: 'Exactly one of IDref_fini / IDref_ecru must be set',
@@ -1022,6 +1091,9 @@ const refSettingsBody = z
 // POST /api/clients/:id/references — create a client reference (designation_client)
 clientsRouter.post('/:id/references', async (req: Request, res: Response) => {
   try {
+    if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
+    const allowedRefs = await userHasPermission(req.userId, isEffectiveAdmin(req), 'gestion_references')
+    if (!allowedRefs) { res.status(403).json({ error: 'permission denied: gestion_references' }); return }
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
     const parsed = refSettingsBody.safeParse(req.body)
@@ -1049,6 +1121,7 @@ clientsRouter.post('/:id/references', async (req: Request, res: Response) => {
     )
     const col = await rccColorisColumn(b.IDref_fini)
     await syncRccRows(newDid, col, b.coloris)
+    if (b.IDref_fini > 0 && b.associees.length > 0) await syncAssociees(id, newDid, '', b.associees)
     res.status(201).json({ IDdesignation_client: newDid })
   } catch (err) {
     console.error('Error creating client reference:', err)
@@ -1059,6 +1132,9 @@ clientsRouter.post('/:id/references', async (req: Request, res: Response) => {
 // PUT /api/clients/:id/references/:did — update a client reference's settings
 clientsRouter.put('/:id/references/:did', async (req: Request, res: Response) => {
   try {
+    if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
+    const allowedRefs = await userHasPermission(req.userId, isEffectiveAdmin(req), 'gestion_references')
+    if (!allowedRefs) { res.status(403).json({ error: 'permission denied: gestion_references' }); return }
     const id = parseInt(req.params.id, 10)
     const did = parseInt(req.params.did, 10)
     if (isNaN(id) || isNaN(did)) { res.status(400).json({ error: 'Invalid ID' }); return }
@@ -1094,9 +1170,38 @@ clientsRouter.put('/:id/references/:did', async (req: Request, res: Response) =>
 
     const col = await rccColorisColumn(b.IDref_fini)
     await syncRccRows(did, col, b.coloris)
+    // Always reconcile (deletes unlinked hidden children when the user
+    // unchecks a ref or switches the designation to a TM/écru ref).
+    await syncAssociees(id, did, original.associee, b.IDref_fini > 0 ? b.associees : [])
     res.json({ ok: true })
   } catch (err) {
     console.error('Error updating client reference:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/clients/lookups/refs-associees?ref_fini=X — the finished refs
+// associated to X (ref_fini.associee CSV, defined in Finis › Références),
+// candidates for the "Références associées" checklist of the settings dialog.
+clientsRouter.get('/lookups/refs-associees', async (req: Request, res: Response) => {
+  try {
+    const refFini = parseInt(String(req.query.ref_fini ?? ''), 10)
+    if (!Number.isInteger(refFini) || refFini <= 0) { res.status(400).json({ error: 'Invalid ref_fini' }); return }
+    const rows = await query<Record<string, unknown>>(`SELECT associee FROM ref_fini WHERE IDref_fini = ${refFini}`)
+    if (rows.length === 0) { res.json([]); return }
+    // Legacy CSV is messy: leading "0", empty items, sometimes the ref itself.
+    const ids = [...new Set(String(rows[0].associee ?? '')
+      .split(',').map((s) => parseInt(s.trim(), 10))
+      .filter((n) => Number.isInteger(n) && n > 0 && n !== refFini))]
+    if (ids.length === 0) { res.json([]); return }
+    const finiMap = await mapRefFini(ids)
+    res.json(ids.filter((x) => finiMap.has(x)).map((x) => ({
+      IDref_fini: x,
+      reference: finiMap.get(x)!.reference,
+      designation: finiMap.get(x)!.designation,
+    })))
+  } catch (err) {
+    console.error('Error fetching associated refs lookup:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
@@ -1336,7 +1441,7 @@ clientsRouter.get('/:id/marchandise', async (req: Request, res: Response) => {
     // DATE is a reserved word (alias to dexp); never name expedition's accented
     // envoyé_client/envoyé_sst. Scope to client via commande_client, ETM only.
     const rows = await query<Record<string, unknown>>(
-      `SELECT TOP 400 e.IDexpedition, e.DATE AS dexp, sf.numero AS piece, sf.poids, sf.metrage, sf.lot, sf.second_choix, sf.IDref_fini, sf.IDColoris ` +
+      `SELECT TOP 400 e.IDexpedition, e.DATE AS dexp, sf.IDstock_fini, sf.numero AS piece, sf.poids, sf.metrage, sf.lot, sf.second_choix, sf.IDref_fini, sf.IDColoris ` +
         `FROM expedition e ` +
         `INNER JOIN ligne_expedition le ON le.IDexpedition = e.IDexpedition ` +
         `INNER JOIN stock_fini sf ON sf.IDligne_expedition = le.IDligne_expedition ` +
@@ -1351,6 +1456,7 @@ clientsRouter.get('/:id/marchandise', async (req: Request, res: Response) => {
       const rf = finiMap.get(numOf(r.IDref_fini))
       return {
         IDexpedition: numOf(r.IDexpedition),
+        IDstock_fini: numOf(r.IDstock_fini),
         date: strOf(r.dexp),
         piece: strOf(r.piece) ?? '',
         lot: strOf(r.lot) ?? '',
@@ -1364,6 +1470,61 @@ clientsRouter.get('/:id/marchandise', async (req: Request, res: Response) => {
     res.json({ lignes, capped: rows.length >= 400 })
   } catch (err) {
     console.error('Error fetching client marchandise:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// POST /api/clients/:id/marchandise/retour-stock — return shipped rolls to stock.
+// Body { ids: IDstock_fini[] }. Permission retour_marchandise. Unlinks each
+// roll from its expedition line (IDligne_expedition = 0 → it reappears in
+// Finis > Stock) and appends "Récupéré chez <client> le <dd/MM/yyyy>" to its
+// observations. Observations are read repaired (fixEncoding) so existing
+// accents survive the rewrite; the write goes through sqlText (Latin-1 hex).
+const retourStockBody = z.object({ ids: z.array(z.number().int().positive()).min(1).max(200) })
+
+clientsRouter.post('/:id/marchandise/retour-stock', async (req: Request, res: Response) => {
+  try {
+    if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
+    const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'retour_marchandise')
+    if (!allowed) { res.status(403).json({ error: 'permission denied: retour_marchandise' }); return }
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const parsed = retourStockBody.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
+
+    const clientRows = await query<Record<string, unknown>>(`SELECT IDclient, nom FROM client WHERE IDclient = ${id}`)
+    if (clientRows.length === 0) { res.status(404).json({ error: 'Client not found' }); return }
+    const clientFixed = await fixEncoding(clientRows, 'client', 'IDclient', ['nom'])
+    const clientNom = strOf(clientFixed[0].nom) ?? `client ${id}`
+
+    // Scope guard: only rolls actually shipped to THIS client are eligible.
+    const scoped = await query<Record<string, unknown>>(
+      `SELECT sf.IDstock_fini, sf.observations FROM stock_fini sf ` +
+        `INNER JOIN ligne_expedition le ON sf.IDligne_expedition = le.IDligne_expedition ` +
+        `INNER JOIN expedition e ON le.IDexpedition = e.IDexpedition ` +
+        `INNER JOIN commande_client cc ON e.IDcommande_client = cc.IDcommande_client ` +
+        `WHERE cc.IDclient = ${id} AND sf.IDstock_fini IN (${parsed.data.ids.join(',')})`,
+    )
+    if (scoped.length === 0) { res.status(404).json({ error: 'No matching shipped rolls for this client' }); return }
+    const repaired = await fixEncoding(scoped, 'stock_fini', 'IDstock_fini', ['observations'])
+
+    const d = new Date()
+    const p = (x: number) => String(x).padStart(2, '0')
+    const line = `Récupéré chez ${clientNom} le ${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`
+
+    for (const r of repaired) {
+      const sid = numOf(r.IDstock_fini)
+      if (!(sid > 0)) continue
+      // Empty observations come back as a lone NUL byte — treat as empty.
+      const existing = (strOf(r.observations) ?? '').replace(/\u0000/g, '').trim()
+      const obs = existing ? `${existing}\r\n${line}` : line
+      await query(
+        `UPDATE stock_fini SET IDligne_expedition = 0, observations = ${sqlText(obs)} WHERE IDstock_fini = ${sid}`,
+      )
+    }
+    res.json({ ok: true, returned: repaired.length, skipped: parsed.data.ids.length - repaired.length })
+  } catch (err) {
+    console.error('Error returning marchandise to stock:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

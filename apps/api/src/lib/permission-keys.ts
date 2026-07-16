@@ -60,6 +60,20 @@ export const PERMISSION_KEYS = [
     category: 'Gestion client',
   },
   {
+    key: 'gestion_references',
+    label: 'Gestion des références',
+    description:
+      'Autorise la création et la modification des références client et de leurs coloris — dialogue « Référence client » et bouton « Ajouter une référence » — dans Clients > Gestion.',
+    category: 'Gestion client',
+  },
+  {
+    key: 'retour_marchandise',
+    label: 'Retour marchandise en stock',
+    description:
+      'Autorise la sélection de pièces expédiées et leur remise en stock, avec observation de récupération, dans l’onglet « Marchandise expédiée » de Clients > Gestion.',
+    category: 'Gestion client',
+  },
+  {
     key: 'create_stock_fil',
     label: 'Créer un lot de fil',
     description: 'Autorise la création de nouvelles entrées dans Fournisseurs > Stock.',

@@ -34,6 +34,7 @@ import {
   Send,
   Archive,
   ArchiveRestore,
+  Link2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -235,6 +236,8 @@ export function ClientsGestion() {
   // confirm dialog, so the dialog reads it from cache.
   const canDelete = useHasPermission('delete_client')
   const canManageTarifs = useHasPermission('gestion_tarifs')
+  const canManageRefs = useHasPermission('gestion_references')
+  const canRetourMarchandise = useHasPermission('retour_marchandise')
   const { data: deletability } = useQuery<Deletability>({
     queryKey: ['client-deletability', selectedId],
     queryFn: () => apiFetch(`/clients/${selectedId}/deletability`),
@@ -370,7 +373,8 @@ export function ClientsGestion() {
           isUnarchiving={unarchiveMutation.isPending}
           onPrint={() => setTarifsSelector('print')} onEmail={() => setTarifsSelector('email')} />}
         detail={<DetailMain client={detail ?? null} isLoading={detailLoading && selectedId !== null}
-          hasSelection={selectedId !== null} isEditing={isEditing} canManageTarifs={canManageTarifs} />}
+          hasSelection={selectedId !== null} isEditing={isEditing} canManageTarifs={canManageTarifs}
+          canManageRefs={canManageRefs} canRetourMarchandise={canRetourMarchandise} />}
         sidebar={selectedId !== null ? <DetailSidebar client={detail ?? null} isLoading={detailLoading}
           isEditing={isEditing} clientId={selectedId} onMutationSuccess={invalidateAll}
           onSubFormsDirtyChange={setSubFormsDirty} draft={draft} onPatch={patch}
@@ -773,8 +777,9 @@ const MAIN_TABS = [
 ] as const
 type MainTab = (typeof MAIN_TABS)[number]['key']
 
-function DetailMain({ client, isLoading, hasSelection, isEditing, canManageTarifs }: {
+function DetailMain({ client, isLoading, hasSelection, isEditing, canManageTarifs, canManageRefs, canRetourMarchandise }: {
   client: ClientDetail | null; isLoading: boolean; hasSelection: boolean; isEditing: boolean; canManageTarifs: boolean
+  canManageRefs: boolean; canRetourMarchandise: boolean
 }) {
   const [activeTab, setActiveTab] = useState<MainTab>('references')
   // Land on Références (the client's main info) whenever the selection changes.
@@ -811,12 +816,14 @@ function DetailMain({ client, isLoading, hasSelection, isEditing, canManageTarif
           Références can host the §31 in-screen drawer with the shrink mechanic. */}
       <div className="flex-1 min-h-0 flex flex-col gap-2 pt-3 pb-1">
         {/* Commercial sub-views (tarif modes editable in edit mode, permission-gated) */}
-        {activeTab === 'references' && <ReferencesTab clientId={client.IDclient} isEditing={isEditing} canManageTarifs={canManageTarifs} />}
+        {activeTab === 'references' && <ReferencesTab clientId={client.IDclient} isEditing={isEditing} canManageTarifs={canManageTarifs} canManageRefs={canManageRefs} />}
         {activeTab === 'historique' && (
           <div className="flex-1 min-h-0 overflow-auto scrollbar-transparent px-1"><HistoriqueTab clientId={client.IDclient} /></div>
         )}
         {activeTab === 'marchandise' && (
-          <div className="flex-1 min-h-0 overflow-auto scrollbar-transparent px-1"><MarchandiseTab clientId={client.IDclient} /></div>
+          // Flex column, not a scroll container: the tab pins its toolbar and
+          // selection action bar while the table scrolls internally.
+          <div className="flex-1 min-h-0 flex flex-col px-1"><MarchandiseTab clientId={client.IDclient} clientNom={client.nom ?? ''} canRetour={canRetourMarchandise} /></div>
         )}
       </div>
     </div>
@@ -1053,6 +1060,27 @@ const ENVOI_FLAGS = [
   { key: 'envoi_soumission' as const, label: 'Soumission' },
 ]
 
+// Hue-per-document category chips (mps_designer §36 style): one stable colour
+// per doc type so a contact's send-flags read at a glance. Soumission matches
+// the amber "À soumettre" pill on ref cards; Facturation/Livraison on address
+// cards reuse the Facture/BL hues.
+const ENVOI_CHIP_CLASS: Record<(typeof ENVOI_FLAGS)[number]['key'], string> = {
+  envoi_commande: 'bg-sky-500/10 text-sky-700 border-sky-500/25',
+  envoi_bl: 'bg-teal-500/10 text-teal-700 border-teal-500/25',
+  envoi_facture: 'bg-orange-500/10 text-orange-700 border-orange-500/25',
+  envoi_soumission: 'bg-amber-500/15 text-amber-800 border-amber-500/30',
+}
+const chipClass = 'inline-flex items-center px-1.5 py-0 rounded text-[10px] font-medium border'
+
+// Gold "Principal(e)" star badge + gold avatar tint (icon-box-gold gradient,
+// with the darker gold text the utility uses — text-accent is too light on white).
+const principalBadgeClass = 'text-[10px] py-0 flex-shrink-0 bg-accent/10 text-amber-700 border-accent/30'
+const goldAvatarClass = 'bg-gradient-to-br from-gold/30 to-gold/10 text-amber-700'
+
+function contactInitials(prenom: string | null, nom: string | null): string {
+  return [prenom, nom].map((s) => (s ?? '').trim().charAt(0).toUpperCase()).filter(Boolean).join('')
+}
+
 function ContactsTab({ contacts, isEditing, clientId, onMutationSuccess, onDirtyChange }: {
   contacts: Contact[]; isEditing: boolean; clientId: number; onMutationSuccess: () => void; onDirtyChange: (dirty: boolean) => void
 }) {
@@ -1108,17 +1136,39 @@ function ContactsTab({ contacts, isEditing, clientId, onMutationSuccess, onDirty
           <InlineForm key={c.IDcontact} title="Modifier le contact" onSave={() => updateMut.mutate(c.IDcontact)} onCancel={() => setEditingId(null)} isSaving={updateMut.isPending}>{contactForm}</InlineForm>
         ) : (
           <div key={c.IDcontact} className={cn('p-3 rounded-lg border bg-card shadow-sm group relative', isEditing && editSectionClass)}>
-            <div className="flex items-start justify-between">
+            <div className="flex items-start gap-2.5">
+              {/* Initials avatar — gold for the principal contact, zinc otherwise */}
+              <div className={cn('h-8 w-8 rounded-full flex items-center justify-center flex-shrink-0 text-[11px] font-bold select-none',
+                c.est_defaut ? goldAvatarClass : 'bg-zinc-200/70 text-zinc-500')}>
+                {contactInitials(c.prenom, c.nom) || <User className="h-3.5 w-3.5" />}
+              </div>
               <div className="min-w-0 flex-1">
                 <div className="font-medium text-sm flex items-center gap-2">
-                  {[c.prenom, c.nom].filter(Boolean).join(' ') || 'Contact'}
-                  {!!c.est_defaut && <Badge variant="secondary" className="text-[10px] py-0"><Star className="h-2.5 w-2.5 mr-0.5" />Principal</Badge>}
+                  <span className="truncate min-w-0">{[c.prenom, c.nom].filter(Boolean).join(' ') || 'Contact'}</span>
+                  {/* Pinned top-right corner of the card */}
+                  {!!c.est_defaut && (
+                    <Badge variant="outline" className={cn(principalBadgeClass, 'ml-auto')}>
+                      <Star className="h-2.5 w-2.5 mr-0.5 fill-current" />Principal
+                    </Badge>
+                  )}
                 </div>
-                {c.tel && <div className="text-xs text-muted-foreground flex items-center gap-1.5 mt-1"><Phone className="h-3 w-3" />{c.tel}</div>}
-                {c.mail && <div className="text-xs text-muted-foreground flex items-center gap-1.5"><Mail className="h-3 w-3" /><span className="truncate">{c.mail}</span></div>}
+                {c.tel && (
+                  <div className="text-xs text-muted-foreground flex items-center gap-1.5 mt-1">
+                    <Phone className="h-3 w-3 text-amber-600/70 flex-shrink-0" />
+                    <a href={`tel:${c.tel}`} className="hover:text-accent transition-colors">{c.tel}</a>
+                  </div>
+                )}
+                {c.mail && (
+                  <div className="text-xs text-muted-foreground flex items-center gap-1.5">
+                    <Mail className="h-3 w-3 text-amber-600/70 flex-shrink-0" />
+                    <a href={`mailto:${c.mail}`} className="truncate hover:text-accent transition-colors">{c.mail}</a>
+                  </div>
+                )}
                 {ENVOI_FLAGS.some(({ key }) => !!c[key]) && (
                   <div className="flex gap-1 mt-1.5 flex-wrap">
-                    {ENVOI_FLAGS.map(({ key, label }) => !!c[key] && <Badge key={key} variant="outline" className="text-[10px] py-0 px-1.5">{label}</Badge>)}
+                    {ENVOI_FLAGS.map(({ key, label }) => !!c[key] && (
+                      <span key={key} className={cn(chipClass, ENVOI_CHIP_CLASS[key])}>{label}</span>
+                    ))}
                   </div>
                 )}
               </div>
@@ -1195,28 +1245,45 @@ function AdressesTab({ adresses, isEditing, clientId, onMutationSuccess, onDirty
 
   return (
     <>
-      {adresses.map((a) =>
-        isEditing && editingId === a.IDadresse ? (
-          <InlineForm key={a.IDadresse} title="Modifier l'adresse" onSave={() => updateMut.mutate(a.IDadresse)} onCancel={() => setEditingId(null)} isSaving={updateMut.isPending}>{adresseForm}</InlineForm>
-        ) : (
+      {adresses.map((a) => {
+        if (isEditing && editingId === a.IDadresse) {
+          return <InlineForm key={a.IDadresse} title="Modifier l'adresse" onSave={() => updateMut.mutate(a.IDadresse)} onCancel={() => setEditingId(null)} isSaving={updateMut.isPending}>{adresseForm}</InlineForm>
+        }
+        // Icon + hue follow the address type: Livraison teal Truck, Facturation
+        // orange Receipt, both/neither (or principale) gold MapPin.
+        const fact = !!a.est_defaut_facturation
+        const livr = !!a.est_defaut_livraison
+        const AddrIcon = livr && !fact ? Truck : fact && !livr ? Receipt : MapPin
+        const iconBoxClass = livr && !fact ? 'bg-teal-500/10 text-teal-600'
+          : fact && !livr ? 'bg-orange-500/10 text-orange-600'
+          : goldAvatarClass
+        return (
           <div key={a.IDadresse} className={cn('p-3 rounded-lg border bg-card shadow-sm group relative', isEditing && editSectionClass)}>
-            <div className="flex items-start justify-between">
+            <div className="flex items-start gap-2.5">
+              <div className={cn('h-8 w-8 rounded-md flex items-center justify-center flex-shrink-0', iconBoxClass)}>
+                <AddrIcon className="h-4 w-4" />
+              </div>
               <div className="min-w-0 flex-1">
                 <div className="font-medium text-sm flex items-center gap-2">
-                  {a.nom || 'Adresse'}
-                  {!!a.est_defaut && <Badge variant="secondary" className="text-[10px] py-0"><Star className="h-2.5 w-2.5 mr-0.5" />Principale</Badge>}
+                  <span className="truncate min-w-0">{a.nom || 'Adresse'}</span>
+                  {/* Pinned top-right corner of the card, mirroring the contacts tab */}
+                  {!!a.est_defaut && (
+                    <Badge variant="outline" className={cn(principalBadgeClass, 'ml-auto')}>
+                      <Star className="h-2.5 w-2.5 mr-0.5 fill-current" />Principale
+                    </Badge>
+                  )}
                 </div>
-                {(!!a.est_defaut_facturation || !!a.est_defaut_livraison) && (
-                  <div className="flex gap-1 mt-0.5">
-                    {!!a.est_defaut_facturation && <Badge variant="outline" className="text-[10px] py-0 px-1.5">Facturation</Badge>}
-                    {!!a.est_defaut_livraison && <Badge variant="outline" className="text-[10px] py-0 px-1.5">Livraison</Badge>}
+                {(fact || livr) && (
+                  <div className="flex gap-1 mt-1">
+                    {fact && <span className={cn(chipClass, ENVOI_CHIP_CLASS.envoi_facture)}>Facturation</span>}
+                    {livr && <span className={cn(chipClass, ENVOI_CHIP_CLASS.envoi_bl)}>Livraison</span>}
                   </div>
                 )}
                 <div className="text-xs text-muted-foreground mt-1 space-y-0.5">
                   {a.adresse1 && <p>{a.adresse1}</p>}
                   {a.adresse2 && <p>{a.adresse2}</p>}
                   {a.adresse3 && <p>{a.adresse3}</p>}
-                  {(a.cp || a.ville) && <p>{[a.cp, a.ville].filter(Boolean).join(' ')}</p>}
+                  {(a.cp || a.ville) && <p className="font-medium text-foreground/75">{[a.cp, a.ville].filter(Boolean).join(' ')}</p>}
                   {a.pays && <p>{a.pays}</p>}
                 </div>
               </div>
@@ -1229,7 +1296,7 @@ function AdressesTab({ adresses, isEditing, clientId, onMutationSuccess, onDirty
             </div>
           </div>
         )
-      )}
+      })}
       {isEditing && !showForm && editingId === null && (
         <Button variant="ghost" size="sm" className="w-full text-muted-foreground hover:text-foreground" onClick={() => setShowForm(true)}><Plus className="h-4 w-4 mr-1.5" />Ajouter une adresse</Button>
       )}
@@ -1255,7 +1322,9 @@ interface RefColoris {
   IDref_client_colori: number; label: string; coloris_id: number; lst_tranche: string; contrat: number
   tarif_mode: TarifMode; coefficient: number; contrats: ContratTarif[]; contrat_actif: ContratTarif | null; contrat_expire: boolean
 }
-interface ClientReference { IDdesignation_client: number; client_ref: string; IDref_fini: number; IDref_ecru: number; ref_interne: string; designation: string; avec_teinture: number; soumettre: number; unite: number; fil_non_facture: number[]; coloris: RefColoris[] }
+interface ClientReference { IDdesignation_client: number; client_ref: string; IDref_fini: number; IDref_ecru: number; ref_interne: string; designation: string; avec_teinture: number; soumettre: number; unite: number; fil_non_facture: number[]; associees: number[]; coloris: RefColoris[] }
+
+interface RefAssocieeLookup { IDref_fini: number; reference: string; designation: string }
 
 /** Small category tag showing a coloris' non-standard tarif mode on its chip. */
 function TarifModeTag({ c }: { c: RefColoris }) {
@@ -1280,7 +1349,11 @@ function normSearch(s: string): string {
   return s.normalize('NFD').replace(COMBINING_MARKS, '').toLowerCase()
 }
 
-function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: number; isEditing: boolean; canManageTarifs: boolean }) {
+function ReferencesTab({ clientId, isEditing, canManageTarifs, canManageRefs }: { clientId: number; isEditing: boolean; canManageTarifs: boolean; canManageRefs: boolean }) {
+  // Without the gestion_references permission, edit mode behaves like view
+  // mode on this tab: cards open the coloris drawer, no settings dialog,
+  // no "Ajouter une référence".
+  const canEditRefs = isEditing && canManageRefs
   const [tarif, setTarif] = useState<{ rccId: number; label: string } | null>(null)
   const [tarifMode, setTarifMode] = useState<{ coloris: RefColoris; label: string } | null>(null)
   // Ref-level settings dialog: { existing: null } = create, { existing: ref } = edit.
@@ -1342,10 +1415,10 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
               // Edit mode: the card click is reserved for the settings dialog (§31.3);
               // the drawer only opens from view mode.
               onClick={() => {
-                if (isEditing) setSettings({ existing: r })
+                if (canEditRefs) setSettings({ existing: r })
                 else setDrawerRefId((prev) => (prev === r.IDdesignation_client ? null : r.IDdesignation_client))
               }}
-              title={isEditing ? 'Modifier la référence' : drawerRefId === r.IDdesignation_client ? 'Masquer les coloris' : 'Voir les coloris'}
+              title={canEditRefs ? 'Modifier la référence' : drawerRefId === r.IDdesignation_client ? 'Masquer les coloris' : 'Voir les coloris'}
               className={cn('group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3', 'border-l-amber-400/60',
                 'cursor-pointer hover:bg-zinc-100 hover:border-accent/40 transition-colors',
                 drawerRefId === r.IDdesignation_client && 'ring-1 ring-accent bg-accent/[0.06] border-accent/50')}>
@@ -1362,10 +1435,15 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
                           À soumettre
                         </span>
                       )}
+                      {r.associees.length > 0 && (
+                        <span className="text-[11px] text-muted-foreground tabular-nums flex items-center gap-1" title={`${r.associees.length} référence(s) associée(s)`}>
+                          <Link2 className="h-3 w-3" />{r.associees.length}
+                        </span>
+                      )}
                       <span className="text-[11px] text-muted-foreground tabular-nums flex items-center gap-1">
                         <Palette className="h-3 w-3" />{r.coloris.length}
                       </span>
-                      {isEditing && <Pencil className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />}
+                      {canEditRefs && <Pencil className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />}
                     </div>
                   </div>
                   {r.designation && <p className="text-[11px] text-muted-foreground truncate">{r.designation}</p>}
@@ -1386,7 +1464,7 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
           />
         </div>
       )}
-      {isEditing && (
+      {canEditRefs && (
         <div className="flex-shrink-0 mx-1">
           <Button variant="ghost" size="sm" className="w-full text-muted-foreground hover:text-foreground" onClick={() => setSettings({ existing: null })}>
             <Plus className="h-4 w-4 mr-1.5" />Ajouter une référence
@@ -1519,6 +1597,9 @@ function RefSettingsDialog({ open, existing, clientId, onClose }: {
   const [checkedColoris, setCheckedColoris] = useState<Set<number>>(new Set())
   // Inverted like the legacy storage: the set holds yarns NOT invoiced (unchecked).
   const [uncheckedFils, setUncheckedFils] = useState<Set<number>>(new Set())
+  // Associated refs (IDref_fini) linked to this client ref — e.g. the cote
+  // always ordered (and dyed) along with a molleton.
+  const [checkedAssociees, setCheckedAssociees] = useState<Set<number>>(new Set())
   const [error, setError] = useState<string | null>(null)
 
   const originalRefId = existing ? (existing.IDref_fini > 0 ? existing.IDref_fini : existing.IDref_ecru) : 0
@@ -1535,9 +1616,10 @@ function RefSettingsDialog({ open, existing, clientId, onClose }: {
       setSoumettre(!!existing.soumettre)
       setCheckedColoris(new Set(existing.coloris.map((c) => c.coloris_id).filter((x) => x > 0)))
       setUncheckedFils(new Set(existing.fil_non_facture))
+      setCheckedAssociees(new Set(existing.associees))
     } else {
       setNom(''); setFinition('ennobli'); setRefId(0); setUnite(3); setSoumettre(false)
-      setCheckedColoris(new Set()); setUncheckedFils(new Set())
+      setCheckedColoris(new Set()); setUncheckedFils(new Set()); setCheckedAssociees(new Set())
     }
   }, [open, existing])
 
@@ -1563,8 +1645,16 @@ function RefSettingsDialog({ open, existing, clientId, onClose }: {
     queryFn: () => apiFetch(`/clients/lookups/composition-fils?${finition === 'ennobli' ? 'ref_fini' : 'ref_ecru'}=${refId}`),
     enabled: open && refId > 0,
   })
+  // Candidates come from the ref-to-ref association defined in Finis › Références
+  // (ref_fini.associee) — only fini refs can have associated refs.
+  const associeesQ = useQuery<RefAssocieeLookup[]>({
+    queryKey: ['lookup-refs-associees', refId],
+    queryFn: () => apiFetch(`/clients/lookups/refs-associees?ref_fini=${refId}`),
+    enabled: open && finition === 'ennobli' && refId > 0,
+  })
   const coloris = (colorisQ.data ?? []).map((c) => ({ id: c.id ?? c.IDcolori_ecru ?? 0, label: c.reference }))
   const fils = filsQ.data ?? []
+  const associables = finition === 'ennobli' ? (associeesQ.data ?? []) : []
 
   // Picking a different internal ref resets the per-ref selections (back to the
   // saved ones when returning to the original ref).
@@ -1573,9 +1663,11 @@ function RefSettingsDialog({ open, existing, clientId, onClose }: {
     if (existing && id === originalRefId) {
       setCheckedColoris(new Set(existing.coloris.map((c) => c.coloris_id).filter((x) => x > 0)))
       setUncheckedFils(new Set(existing.fil_non_facture))
+      setCheckedAssociees(new Set(existing.associees))
     } else {
       setCheckedColoris(new Set())
       setUncheckedFils(new Set())
+      setCheckedAssociees(new Set())
     }
   }, [existing, originalRefId])
   const handleFinitionChange = useCallback((f: 'tm' | 'ennobli') => {
@@ -1596,6 +1688,10 @@ function RefSettingsDialog({ open, existing, clientId, onClose }: {
         // Keep only yarns still in the ref's composition (stale ids drop off).
         fil_non_facture: [...uncheckedFils].filter((id) => fils.length === 0 || fils.some((f) => f.IDref_fil === id)),
         coloris: [...checkedColoris],
+        // Same stale-drop rule against the catalog's current association list.
+        associees: finition === 'ennobli'
+          ? [...checkedAssociees].filter((id) => associables.length === 0 || associables.some((a) => a.IDref_fini === id))
+          : [],
       }
       return isNew
         ? apiFetch(`/clients/${clientId}/references`, { method: 'POST', body: JSON.stringify(body) })
@@ -1690,6 +1786,23 @@ function RefSettingsDialog({ open, existing, clientId, onClose }: {
                 isLoading={colorisQ.isLoading} />
             )}
           </div>
+
+          {/* Associated refs (legacy "référence associée" list): shown only when the
+              catalog defines associations for the selected fini ref. Checking one
+              links it to this client ref — it shares the parent's tranche de tarif
+              (dyed together) and order entry can remind the customer to order it. */}
+          {finition === 'ennobli' && refId > 0 && (associeesQ.isLoading || associables.length > 0) && (
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">
+                Références associées{associables.length > 0 && ` (${[...checkedAssociees].filter((id) => associables.some((a) => a.IDref_fini === id)).length}/${associables.length})`}
+              </label>
+              <CheckList items={associables.map((a) => ({ id: a.IDref_fini, label: a.designation ? `${a.reference} · ${a.designation}` : a.reference }))}
+                isChecked={(id) => checkedAssociees.has(id)}
+                onToggle={(id) => setCheckedAssociees((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })}
+                emptyText="Aucune référence associée dans le catalogue"
+                isLoading={associeesQ.isLoading} />
+            </div>
+          )}
 
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Fils facturés au client</label>
@@ -2166,18 +2279,75 @@ function HistoriqueTab({ clientId }: { clientId: number }) {
 
 // ── Marchandise expédiée ───────────────────────────────
 
-interface MarchLigne { IDexpedition: number; date: string | null; piece: string; lot: string; ref: string; coloris: string; poids: number; metrage: number; second_choix: number }
+interface MarchLigne { IDexpedition: number; IDstock_fini: number; date: string | null; piece: string; lot: string; ref: string; coloris: string; poids: number; metrage: number; second_choix: number }
 
-function MarchandiseTab({ clientId }: { clientId: number }) {
+function MarchandiseTab({ clientId, clientNom, canRetour }: { clientId: number; clientNom: string; canRetour: boolean }) {
+  const queryClient = useQueryClient()
   const { data, isLoading } = useQuery<{ lignes: MarchLigne[]; capped: boolean }>({ queryKey: ['client-marchandise', clientId], queryFn: () => apiFetch(`/clients/${clientId}/marchandise`) })
+  // Return-to-stock flow (retour_marchandise permission): the table is
+  // read-only until the user enters selection mode via "Reprendre des pièces";
+  // checkboxes only exist in that mode, exited by Annuler or a completed return.
+  const [selectMode, setSelectMode] = useState(false)
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  useEffect(() => { setSelectMode(false); setSelected(new Set()); lastClick.current = null }, [clientId])
   const lignes = data?.lignes ?? []
+
+  const retourMut = useMutation({
+    mutationFn: () => apiFetch(`/clients/${clientId}/marchandise/retour-stock`, { method: 'POST', body: JSON.stringify({ ids: [...selected] }) }),
+    onSuccess: () => {
+      setConfirmOpen(false)
+      setSelectMode(false)
+      setSelected(new Set())
+      queryClient.invalidateQueries({ queryKey: ['client-marchandise', clientId] })
+    },
+  })
+
+  const exitSelectMode = () => { setSelectMode(false); setSelected(new Set()); lastClick.current = null }
+  const toggle = (id: number) => setSelected((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })
+  // Shift-click range selection: remember the last plain click (anchor) and
+  // the state it applied; a Shift+click applies that same state to the whole
+  // range between the anchor row and the clicked row.
+  const lastClick = useRef<{ index: number; select: boolean } | null>(null)
+  const handleRowClick = (index: number, shift: boolean) => {
+    if (shift && lastClick.current !== null) {
+      const { index: anchor, select } = lastClick.current
+      const [lo, hi] = anchor < index ? [anchor, index] : [index, anchor]
+      setSelected((prev) => {
+        const n = new Set(prev)
+        for (let k = lo; k <= hi; k++) {
+          if (select) n.add(lignes[k].IDstock_fini)
+          else n.delete(lignes[k].IDstock_fini)
+        }
+        return n
+      })
+      lastClick.current = { index, select }
+    } else {
+      const willSelect = !selected.has(lignes[index].IDstock_fini)
+      toggle(lignes[index].IDstock_fini)
+      lastClick.current = { index, select: willSelect }
+    }
+  }
+  const allSelected = lignes.length > 0 && lignes.every((l) => selected.has(l.IDstock_fini))
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(lignes.map((l) => l.IDstock_fini)))
+  const selPoids = lignes.filter((l) => selected.has(l.IDstock_fini)).reduce((s, l) => s + l.poids, 0)
+  const today = new Date().toLocaleDateString('fr-FR')
+
   return (
     <>
       {isLoading ? <SectionSpinner /> : lignes.length === 0 ? <SectionEmpty text="Aucune expédition" /> : (
         <>
-          <div className="rounded-lg border border-border/60 overflow-x-auto bg-card shadow-sm scrollbar-transparent">
+          {/* min-h-0 + default flex-shrink: the table takes its natural height
+              on short lists and scrolls internally on long ones. */}
+          <div className="min-h-0 overflow-auto rounded-lg border border-border/60 bg-card shadow-sm scrollbar-transparent">
             <table className="w-full text-xs">
-              <thead className={thHead}><tr>
+              <thead className={cn(thHead, 'sticky top-0 z-10 bg-zinc-100')}><tr>
+                {selectMode && (
+                  <th className="px-2 py-1.5 w-7">
+                    <input type="checkbox" checked={allSelected} onChange={toggleAll} title="Tout sélectionner"
+                      className="h-3.5 w-3.5 rounded border-input accent-accent cursor-pointer align-middle" />
+                  </th>
+                )}
                 <th className="px-2 py-1.5 text-left font-semibold">Expédié le</th>
                 <th className="px-2 py-1.5 text-left font-semibold">Expé N°</th>
                 <th className="px-2 py-1.5 text-left font-semibold">Référence</th>
@@ -2188,7 +2358,19 @@ function MarchandiseTab({ clientId }: { clientId: number }) {
               </tr></thead>
               <tbody>
                 {lignes.map((l, i) => (
-                  <tr key={`${l.IDexpedition}-${l.piece}-${i}`} className="border-b border-border/40 last:border-b-0 hover:bg-accent/5">
+                  <tr key={`${l.IDexpedition}-${l.piece}-${i}`}
+                    onClick={selectMode ? (e) => handleRowClick(i, e.shiftKey) : undefined}
+                    className={cn('border-b border-border/40 last:border-b-0',
+                      // select-none: Shift+click must extend the selection, not select text
+                      selectMode && 'cursor-pointer select-none',
+                      selectMode && selected.has(l.IDstock_fini) ? 'bg-accent/10' : 'hover:bg-accent/5')}>
+                    {selectMode && (
+                      <td className="px-2 py-1.5">
+                        <input type="checkbox" checked={selected.has(l.IDstock_fini)} onChange={() => {}}
+                          onClick={(e) => { e.stopPropagation(); handleRowClick(i, e.shiftKey) }}
+                          className="h-3.5 w-3.5 rounded border-input accent-accent cursor-pointer align-middle" />
+                      </td>
+                    )}
                     <td className="px-2 py-1.5 whitespace-nowrap">{l.date && /\d{8}/.test(l.date) ? formatHfsqlDate(l.date) : '—'}</td>
                     <td className="px-2 py-1.5 tabular-nums">{l.IDexpedition}</td>
                     <td className="px-2 py-1.5 truncate max-w-[150px]" title={l.ref}>{l.ref || '—'}</td>
@@ -2201,9 +2383,44 @@ function MarchandiseTab({ clientId }: { clientId: number }) {
               </tbody>
             </table>
           </div>
-          {data?.capped && <p className="text-[11px] text-muted-foreground italic mt-2">400 pièces les plus récentes affichées.</p>}
+          {canRetour && !selectMode && (
+            <div className="flex-shrink-0 flex items-center justify-between gap-2 mt-2">
+              <p className="text-[11px] text-muted-foreground italic">{data?.capped ? '400 pièces les plus récentes affichées.' : ''}</p>
+              <Button variant="outline" size="sm" onClick={() => setSelectMode(true)}>
+                <ArchiveRestore className="h-3.5 w-3.5 mr-1.5" />Reprendre des pièces
+              </Button>
+            </div>
+          )}
+          {(!canRetour || selectMode) && data?.capped && (
+            <p className="flex-shrink-0 text-[11px] text-muted-foreground italic mt-2">400 pièces les plus récentes affichées.</p>
+          )}
+          {selectMode && (
+            <div className="flex-shrink-0 mt-2 flex items-center gap-2 px-3 py-2 rounded-lg border border-accent/30 bg-accent/10 shadow-sm">
+              <span className="text-xs font-medium">
+                {selected.size === 0
+                  ? 'Sélectionnez les pièces à reprendre'
+                  : `${selected.size} pièce${selected.size > 1 ? 's' : ''} sélectionnée${selected.size > 1 ? 's' : ''} · ${fmtNum(selPoids, 2)} kg`}
+              </span>
+              <Button variant="outline" size="sm" className="ml-auto" onClick={exitSelectMode} disabled={retourMut.isPending}>
+                Annuler
+              </Button>
+              <Button size="sm" onClick={() => setConfirmOpen(true)} disabled={selected.size === 0 || retourMut.isPending}>
+                <ArchiveRestore className="h-3.5 w-3.5 mr-1.5" />Remettre en stock
+              </Button>
+            </div>
+          )}
         </>
       )}
+      <ConfirmDialog
+        open={confirmOpen}
+        variant="default"
+        title="Remettre en stock"
+        description={`${selected.size} pièce${selected.size > 1 ? 's' : ''} sera${selected.size > 1 ? 'ont' : ''} retirée${selected.size > 1 ? 's' : ''} de la marchandise expédiée et réapparaîtra${selected.size > 1 ? 'ont' : ''} dans Finis > Stock avec l'observation « Récupéré chez ${clientNom} le ${today} ».`}
+        confirmLabel="Remettre en stock"
+        isPending={retourMut.isPending}
+        onCancel={() => setConfirmOpen(false)}
+        onConfirm={() => retourMut.mutate()}
+      />
     </>
   )
 }

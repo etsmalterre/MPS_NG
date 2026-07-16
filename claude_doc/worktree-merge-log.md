@@ -10,6 +10,33 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-16 — feat/gestion-client (2nd landing)
+Clients › Gestion — **Associated refs + retour marchandise + 2 permissions + sidebar card
+polish.** (1) Associated refs (legacy model reverse-engineered from data:
+`ref_fini.associee` = messy CSV of associated IDref_fini defined in Finis › Références;
+checking one in the legacy "Référence client" modal creates a hidden `designation_client`
+child — designation "Reference Associée", `caché=1`, `unite=0`, no coloris rows — whose id
+is stored in the parent's `associee` CSV): the refs list now filters `caché=1` (the "Reference
+Associée 027A" ghost cards are gone), returns `associees: IDref_fini[]` per ref (link-icon
+count on the card), new lookup `GET /clients/lookups/refs-associees?ref_fini=X`, and the
+settings dialog gets a "Références associées" checklist (between Coloris and Fils, legacy
+order) synced by `syncAssociees()` (delete unchecked children / insert checked / keep parent
+CSV in sync). Verified with a full uncheck/recheck DB round-trip on 224A (client 111).
+(2) Marchandise expédiée: "Reprendre des pièces" button (bottom right) enters a selection
+mode — checkbox column + select-all + Shift-click range selection, gold action bar with
+count/kg + Annuler + "Remettre en stock" (ConfirmDialog) → new
+`POST /clients/:id/marchandise/retour-stock` unlinks rolls (`IDligne_expedition=0`) and
+appends "Récupéré chez {client} le {dd/MM/yyyy}" to `observations` (read repaired via
+fixEncoding, written via sqlText; scope-guarded to rolls actually shipped to that client).
+Tab restructured: table scrolls internally with sticky header, bars are flex siblings (fixes
+the overlapping sticky bar). (3) Two new permissions in "Gestion client":
+`gestion_references` (gates references POST/PUT + settings dialog/add button — without it
+edit mode behaves like view mode on the tab) and `retour_marchandise` (gates the whole
+reprendre flow + endpoint); both verified 403 for a non-admin. (4) Contacts/Adresses sidebar
+cards livened: initials avatar (gold for principal), gold star Principal(e) badge pinned top
+right, hue-coded doc chips (Commande sky / BL teal / Facture orange / Soumission amber),
+tel/mailto links, address icon box follows type (Truck teal / Receipt orange / MapPin gold).
+
 ## 2026-07-16 — feat/expe
 Clients › Expéditions — **Print + email for expéditions diverses (previously "En
 developpement" placeholders) + Ml label fix on the formelle BL.** New
