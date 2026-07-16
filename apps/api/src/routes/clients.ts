@@ -573,13 +573,23 @@ clientsRouter.delete('/:id', async (req: Request, res: Response) => {
 
 // Shared label resolvers. colori_ecru / ref_fini_colori reject SELECT * — use
 // explicit columns. ref_fini / ref_ecru tolerate explicit columns too.
-async function mapRefFini(ids: number[]): Promise<Map<number, { reference: string; avec_teinture: number }>> {
-  const m = new Map<number, { reference: string; avec_teinture: number }>()
+async function mapRefFini(ids: number[]): Promise<Map<number, { reference: string; designation: string; avec_teinture: number }>> {
+  const m = new Map<number, { reference: string; designation: string; avec_teinture: number }>()
   const uniq = [...new Set(ids.filter((x) => Number.isInteger(x) && x > 0))]
   if (!uniq.length) return m
-  const rows = await query<Record<string, unknown>>(`SELECT IDref_fini, reference, avec_teinture FROM ref_fini WHERE IDref_fini IN (${uniq.join(',')})`)
-  const fixed = await fixEncoding(rows, 'ref_fini', 'IDref_fini', ['reference'])
-  for (const r of fixed) m.set(numOf(r.IDref_fini), { reference: strOf(r.reference) ?? '', avec_teinture: numOf(r.avec_teinture) })
+  const rows = await query<Record<string, unknown>>(`SELECT IDref_fini, reference, designation, avec_teinture FROM ref_fini WHERE IDref_fini IN (${uniq.join(',')})`)
+  const fixed = await fixEncoding(rows, 'ref_fini', 'IDref_fini', ['reference', 'designation'])
+  for (const r of fixed) m.set(numOf(r.IDref_fini), { reference: strOf(r.reference) ?? '', designation: strOf(r.designation) ?? '', avec_teinture: numOf(r.avec_teinture) })
+  return m
+}
+/** ref_ecru with designation (for the client references catalogue). */
+async function mapRefEcruFull(ids: number[]): Promise<Map<number, { reference: string; designation: string }>> {
+  const m = new Map<number, { reference: string; designation: string }>()
+  const uniq = [...new Set(ids.filter((x) => Number.isInteger(x) && x > 0))]
+  if (!uniq.length) return m
+  const rows = await query<Record<string, unknown>>(`SELECT IDref_ecru, reference, designation FROM ref_ecru WHERE IDref_ecru IN (${uniq.join(',')})`)
+  const fixed = await fixEncoding(rows, 'ref_ecru', 'IDref_ecru', ['reference', 'designation'])
+  for (const r of fixed) m.set(numOf(r.IDref_ecru), { reference: strOf(r.reference) ?? '', designation: strOf(r.designation) ?? '' })
   return m
 }
 async function mapSimpleRef(table: string, idCol: string, ids: number[]): Promise<Map<number, string>> {
@@ -789,7 +799,7 @@ clientsRouter.get('/:id/references', async (req: Request, res: Response) => {
     if (desigs.length === 0) { res.json([]); return }
 
     const finiMap = await mapRefFini(desigs.map((r) => numOf(r.IDref_fini)))
-    const ecruMap = await mapSimpleRef('ref_ecru', 'IDref_ecru', desigs.map((r) => numOf(r.IDref_ecru)))
+    const ecruMap = await mapRefEcruFull(desigs.map((r) => numOf(r.IDref_ecru)))
 
     const dIds = desigs.map((r) => numOf(r.IDdesignation_client))
     const rccRows = await query<Record<string, unknown>>(`SELECT * FROM ref_client_colori WHERE IDdesignation_client IN (${dIds.join(',')})`)
@@ -827,21 +837,299 @@ clientsRouter.get('/:id/references', async (req: Request, res: Response) => {
       const idFini = numOf(r.IDref_fini)
       const idEcru = numOf(r.IDref_ecru)
       const rf = finiMap.get(idFini)
+      const re = ecruMap.get(idEcru)
       return {
         IDdesignation_client: numOf(r.IDdesignation_client),
         client_ref: strOf(r.designation) ?? '',
         IDref_fini: idFini,
         IDref_ecru: idEcru,
-        ref_interne: idFini > 0 ? (rf?.reference ?? '') : (ecruMap.get(idEcru) ?? ''),
+        ref_interne: idFini > 0 ? (rf?.reference ?? '') : (re?.reference ?? ''),
+        designation: idFini > 0 ? (rf?.designation ?? '') : (re?.designation ?? ''),
         avec_teinture: rf?.avec_teinture ?? 0,
         soumettre: numOf(r.soumettre),
         unite: numOf(r.unite),
+        // Inverted legacy storage: yarns NOT invoiced to the client (CSV of IDref_fil).
+        fil_non_facture: String(pick(r, 'fil_non_facturé', 'fil_non_factur') ?? '')
+          .split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isInteger(n) && n > 0),
         coloris: colorisByDesig.get(numOf(r.IDdesignation_client)) ?? [],
       }
     })
     res.json(out)
   } catch (err) {
     console.error('Error fetching client references:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Référence client settings (designation_client CRUD + coloris dispo + fils facturés) ──
+// designation_client accented columns (archivé, caché, fil_non_facturé) are never
+// named in SQL. Writes use positional INSERT with explicit max+1 PK (verified
+// 2026-07-16: PK stored verbatim, datetime literal 'YYYY-MM-DD HH:MM:SS' accepted);
+// any update goes through delete + positional re-insert preserving the PK and the
+// untouched accented values. Same approach for ref_client_colori (archivé).
+// Physical column orders (from SELECT * key order, confirmed by the write test):
+//   designation_client: IDclient, IDdesignation_client, designation, IDref_fini,
+//     IDref_ecru, archivé, date_modification, associee, caché, soumettre, unite,
+//     fil_non_facturé
+//   ref_client_colori: IDref_client_colori, IDdesignation_client, IDref_fini_colori,
+//     IDcolori_ecru, lst_tranche, contrat, IDphoto_produit, archivé, prevision
+
+function nowDateTime(): string {
+  const d = new Date()
+  const p = (x: number) => String(x).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+async function nextPk(table: string, pkCol: string): Promise<number> {
+  const rows = await query<Record<string, unknown>>(`SELECT MAX(${pkCol}) AS m FROM ${table}`)
+  return numOf(rows[0]?.m) + 1
+}
+
+interface DesignationRow {
+  IDclient: number
+  IDdesignation_client: number
+  designation: string
+  IDref_fini: number
+  IDref_ecru: number
+  archive: number
+  associee: string
+  cache: number
+  soumettre: number
+  unite: number
+  fil_non_facture: string // CSV of IDref_fil, validated digits only
+}
+
+function normalizeDesignationRow(r: Record<string, unknown>): DesignationRow {
+  return {
+    IDclient: numOf(r.IDclient),
+    IDdesignation_client: numOf(r.IDdesignation_client),
+    designation: strOf(r.designation) ?? '',
+    IDref_fini: numOf(r.IDref_fini),
+    IDref_ecru: numOf(r.IDref_ecru),
+    archive: numOf(pick(r, 'archivé', 'archiv')),
+    associee: strOf(r.associee) ?? '',
+    cache: numOf(pick(r, 'caché', 'cach')),
+    soumettre: numOf(r.soumettre),
+    unite: numOf(r.unite),
+    fil_non_facture: strOf(pick(r, 'fil_non_facturé', 'fil_non_factur')) ?? '',
+  }
+}
+
+async function insertDesignationPositional(row: DesignationRow, dateModification: string): Promise<void> {
+  await query(
+    `INSERT INTO designation_client VALUES (${row.IDclient}, ${row.IDdesignation_client}, ${sqlText(row.designation)}, ` +
+      `${row.IDref_fini}, ${row.IDref_ecru}, ${row.archive}, '${dateModification}', ${sqlText(row.associee)}, ` +
+      `${row.cache}, ${row.soumettre}, ${row.unite}, '${row.fil_non_facture}')`,
+  )
+}
+
+interface RccRow {
+  IDref_client_colori: number
+  IDdesignation_client: number
+  IDref_fini_colori: number
+  IDcolori_ecru: number
+  lst_tranche: string
+  contrat: number
+  IDphoto_produit: number
+  archive: number
+  prevision: number
+}
+
+async function readRccRows(did: number): Promise<RccRow[]> {
+  const rows = await query<Record<string, unknown>>(`SELECT * FROM ref_client_colori WHERE IDdesignation_client = ${did}`)
+  return rows.map((r) => ({
+    IDref_client_colori: numOf(r.IDref_client_colori),
+    IDdesignation_client: numOf(r.IDdesignation_client),
+    IDref_fini_colori: numOf(r.IDref_fini_colori),
+    IDcolori_ecru: numOf(r.IDcolori_ecru),
+    lst_tranche: strOf(r.lst_tranche) ?? '',
+    contrat: numOf(r.contrat),
+    IDphoto_produit: numOf(r.IDphoto_produit),
+    archive: numOf(pick(r, 'archivé', 'archiv')),
+    prevision: numOf(r.prevision),
+  }))
+}
+
+async function insertRccPositional(row: RccRow): Promise<void> {
+  await query(
+    `INSERT INTO ref_client_colori VALUES (${row.IDref_client_colori}, ${row.IDdesignation_client}, ` +
+      `${row.IDref_fini_colori}, ${row.IDcolori_ecru}, '${esc(row.lst_tranche)}', ${row.contrat}, ` +
+      `${row.IDphoto_produit}, ${row.archive}, ${row.prevision})`,
+  )
+}
+
+/** Flip the archivé flag on an rcc row (accented column → delete + re-insert,
+ *  PK and tarif linkage — tranche_tarifaire/contrat_tarif key on the rcc id — preserved). */
+async function setRccArchive(row: RccRow, archive: 0 | 1): Promise<void> {
+  await query(`DELETE FROM ref_client_colori WHERE IDref_client_colori = ${row.IDref_client_colori}`)
+  await insertRccPositional({ ...row, archive })
+}
+
+/** Which rcc column the coloris ids of this ref live in
+ *  (project_avec_teinture_coloris_rule: wash → colori_ecru, dye → ref_fini_colori). */
+async function rccColorisColumn(IDref_fini: number): Promise<'IDref_fini_colori' | 'IDcolori_ecru'> {
+  if (IDref_fini <= 0) return 'IDcolori_ecru' // TM ref → wash coloris of the ecru
+  const rows = await query<Record<string, unknown>>(`SELECT avec_teinture FROM ref_fini WHERE IDref_fini = ${IDref_fini}`)
+  return numOf(rows[0]?.avec_teinture) === 0 ? 'IDcolori_ecru' : 'IDref_fini_colori'
+}
+
+/** Reconcile the designation's ref_client_colori rows against the wanted catalog
+ *  coloris ids: unarchive returning ones, archive removed ones, insert new ones. */
+async function syncRccRows(did: number, col: 'IDref_fini_colori' | 'IDcolori_ecru', wantedIds: number[]): Promise<void> {
+  const existing = await readRccRows(did)
+  const wanted = new Set(wantedIds)
+  for (const row of existing) {
+    const rowCol: 'IDref_fini_colori' | 'IDcolori_ecru' = row.IDref_fini_colori > 0 ? 'IDref_fini_colori' : 'IDcolori_ecru'
+    const colorisId = rowCol === 'IDref_fini_colori' ? row.IDref_fini_colori : row.IDcolori_ecru
+    const isWanted = rowCol === col && wanted.has(colorisId)
+    if (isWanted) {
+      wanted.delete(colorisId)
+      if (row.archive === 1) await setRccArchive(row, 0)
+    } else if (row.archive === 0) {
+      await setRccArchive(row, 1)
+    }
+  }
+  let pk = await nextPk('ref_client_colori', 'IDref_client_colori')
+  for (const colorisId of wanted) {
+    await insertRccPositional({
+      IDref_client_colori: pk++,
+      IDdesignation_client: did,
+      IDref_fini_colori: col === 'IDref_fini_colori' ? colorisId : 0,
+      IDcolori_ecru: col === 'IDcolori_ecru' ? colorisId : 0,
+      lst_tranche: '0,1,2,3,4,5,6,7,8',
+      contrat: 0,
+      IDphoto_produit: 0,
+      archive: 0,
+      prevision: 0,
+    })
+  }
+}
+
+const refSettingsBody = z
+  .object({
+    designation: z.string().min(1).max(100),
+    IDref_fini: z.number().int().nonnegative(),
+    IDref_ecru: z.number().int().nonnegative(),
+    soumettre: z.boolean(),
+    unite: z.union([z.literal(1), z.literal(3)]), // 1 = Kg, 3 = Ml
+    fil_non_facture: z.array(z.number().int().positive()).max(50),
+    coloris: z.array(z.number().int().positive()).max(500),
+  })
+  .refine((b) => (b.IDref_fini > 0) !== (b.IDref_ecru > 0), {
+    message: 'Exactly one of IDref_fini / IDref_ecru must be set',
+  })
+
+// POST /api/clients/:id/references — create a client reference (designation_client)
+clientsRouter.post('/:id/references', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const parsed = refSettingsBody.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
+    const b = parsed.data
+    const clientRows = await query<Record<string, unknown>>(`SELECT IDclient FROM client WHERE IDclient = ${id}`)
+    if (clientRows.length === 0) { res.status(404).json({ error: 'Client not found' }); return }
+
+    const newDid = await nextPk('designation_client', 'IDdesignation_client')
+    await insertDesignationPositional(
+      {
+        IDclient: id,
+        IDdesignation_client: newDid,
+        designation: b.designation,
+        IDref_fini: b.IDref_fini,
+        IDref_ecru: b.IDref_ecru,
+        archive: 0,
+        associee: '',
+        cache: 0,
+        soumettre: b.soumettre ? 1 : 0,
+        unite: b.unite,
+        fil_non_facture: b.fil_non_facture.join(','),
+      },
+      nowDateTime(),
+    )
+    const col = await rccColorisColumn(b.IDref_fini)
+    await syncRccRows(newDid, col, b.coloris)
+    res.status(201).json({ IDdesignation_client: newDid })
+  } catch (err) {
+    console.error('Error creating client reference:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// PUT /api/clients/:id/references/:did — update a client reference's settings
+clientsRouter.put('/:id/references/:did', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    const did = parseInt(req.params.did, 10)
+    if (isNaN(id) || isNaN(did)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const parsed = refSettingsBody.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
+    const b = parsed.data
+
+    const rows = await query<Record<string, unknown>>(
+      `SELECT * FROM designation_client WHERE IDdesignation_client = ${did} AND IDclient = ${id}`,
+    )
+    if (rows.length === 0) { res.status(404).json({ error: 'Reference not found' }); return }
+    const original = normalizeDesignationRow(rows[0])
+
+    // Replace the row (accented fil_non_facturé can't be named in an UPDATE);
+    // archivé / caché / associee are preserved from the original.
+    const updated: DesignationRow = {
+      ...original,
+      designation: b.designation,
+      IDref_fini: b.IDref_fini,
+      IDref_ecru: b.IDref_ecru,
+      soumettre: b.soumettre ? 1 : 0,
+      unite: b.unite,
+      fil_non_facture: b.fil_non_facture.join(','),
+    }
+    await query(`DELETE FROM designation_client WHERE IDdesignation_client = ${did}`)
+    try {
+      await insertDesignationPositional(updated, nowDateTime())
+    } catch (err) {
+      // Best-effort restore so the row never silently disappears.
+      try { await insertDesignationPositional(original, nowDateTime()) } catch { /* restore only */ }
+      throw err
+    }
+
+    const col = await rccColorisColumn(b.IDref_fini)
+    await syncRccRows(did, col, b.coloris)
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('Error updating client reference:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/clients/lookups/composition-fils?ref_fini=X | ref_ecru=Y — the yarns
+// composing a ref (composition_ecru of the underlying écru), for the "Fil facturé"
+// checklist of the reference settings dialog.
+clientsRouter.get('/lookups/composition-fils', async (req: Request, res: Response) => {
+  try {
+    const refFini = parseInt(String(req.query.ref_fini ?? ''), 10)
+    const refEcruParam = parseInt(String(req.query.ref_ecru ?? ''), 10)
+    let ecruId = !isNaN(refEcruParam) && refEcruParam > 0 ? refEcruParam : 0
+    if (ecruId === 0 && !isNaN(refFini) && refFini > 0) {
+      const rf = await query<Record<string, unknown>>(`SELECT IDref_ecru FROM ref_fini WHERE IDref_fini = ${refFini}`)
+      ecruId = numOf(rf[0]?.IDref_ecru)
+    }
+    if (ecruId === 0) { res.json([]); return }
+    const compo = await query<Record<string, unknown>>(
+      `SELECT DISTINCT IDref_fil FROM composition_ecru WHERE IDref_ecru = ${ecruId} AND IDref_fil > 0`,
+    )
+    const filIds = [...new Set(compo.map((c) => numOf(c.IDref_fil)).filter((n) => n > 0))]
+    if (filIds.length === 0) { res.json([]); return }
+    const fils = await query<Record<string, unknown>>(
+      `SELECT IDref_fil, reference FROM ref_fil WHERE IDref_fil IN (${filIds.join(',')})`,
+    )
+    const fixed = await fixEncoding(fils, 'ref_fil', 'IDref_fil', ['reference'])
+    res.json(
+      fixed
+        .map((r) => ({ IDref_fil: numOf(r.IDref_fil), reference: strOf(r.reference) ?? '' }))
+        .sort((a, b) => a.reference.localeCompare(b.reference)),
+    )
+  } catch (err) {
+    console.error('Error fetching composition fils:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

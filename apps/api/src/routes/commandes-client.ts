@@ -370,11 +370,11 @@ commandesClientRouter.get('/lookups/refs-ecru', async (req: Request, res: Respon
       if (ids.length === 0) { res.json([]); return }
       idFilter = `WHERE IDref_ecru IN (${ids.join(',')})`
     }
-    const rows = await query<{ IDref_ecru: number; reference: string | null }>(
-      `SELECT IDref_ecru, reference FROM ref_ecru ${idFilter} ORDER BY reference`,
+    const rows = await query<{ IDref_ecru: number; reference: string | null; designation: string | null }>(
+      `SELECT IDref_ecru, reference, designation FROM ref_ecru ${idFilter} ORDER BY reference`,
     )
-    const fixed = await fixEncoding(rows, 'ref_ecru', 'IDref_ecru', ['reference'])
-    res.json(fixed.map((r) => ({ IDref_ecru: Number(r.IDref_ecru), reference: r.reference ?? '' })))
+    const fixed = await fixEncoding(rows, 'ref_ecru', 'IDref_ecru', ['reference', 'designation'])
+    res.json(fixed.map((r) => ({ IDref_ecru: Number(r.IDref_ecru), reference: r.reference ?? '', designation: r.designation ?? '' })))
   } catch (err) {
     console.error('Error fetching refs-ecru lookup:', err)
     res.status(500).json({ error: 'Internal server error' })

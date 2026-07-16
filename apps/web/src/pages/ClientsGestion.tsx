@@ -31,6 +31,7 @@ import {
   Tag,
   History,
   Truck,
+  Send,
   Archive,
   ArchiveRestore,
 } from 'lucide-react'
@@ -1248,7 +1249,7 @@ interface RefColoris {
   IDref_client_colori: number; label: string; coloris_id: number; lst_tranche: string; contrat: number
   tarif_mode: TarifMode; coefficient: number; contrats: ContratTarif[]; contrat_actif: ContratTarif | null; contrat_expire: boolean
 }
-interface ClientReference { IDdesignation_client: number; client_ref: string; IDref_fini: number; IDref_ecru: number; ref_interne: string; avec_teinture: number; soumettre: number; unite: number; coloris: RefColoris[] }
+interface ClientReference { IDdesignation_client: number; client_ref: string; IDref_fini: number; IDref_ecru: number; ref_interne: string; designation: string; avec_teinture: number; soumettre: number; unite: number; fil_non_facture: number[]; coloris: RefColoris[] }
 
 /** Small category tag showing a coloris' non-standard tarif mode on its chip. */
 function TarifModeTag({ c }: { c: RefColoris }) {
@@ -1270,20 +1271,35 @@ function TarifModeTag({ c }: { c: RefColoris }) {
 function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: number; isEditing: boolean; canManageTarifs: boolean }) {
   const [tarif, setTarif] = useState<{ rccId: number; label: string } | null>(null)
   const [tarifMode, setTarifMode] = useState<{ coloris: RefColoris; label: string } | null>(null)
+  // Ref-level settings dialog: { existing: null } = create, { existing: ref } = edit.
+  const [settings, setSettings] = useState<{ existing: ClientReference | null } | null>(null)
   const { data, isLoading } = useQuery<ClientReference[]>({ queryKey: ['client-references', clientId], queryFn: () => apiFetch(`/clients/${clientId}/references`) })
-  // Edit-mode click edits the tarif mode (permission-gated); view-mode click shows the tarif.
+  // Edit-mode chip click edits the tarif mode (permission-gated); view-mode click shows the tarif.
   const tarifEditable = isEditing && canManageTarifs
   return (
     <>
       {isLoading ? <SectionSpinner /> : !data || data.length === 0 ? <SectionEmpty text="Aucune référence client" /> : (
         <div className="space-y-2">
           {data.map((r) => (
-            <div key={r.IDdesignation_client} className={cn('rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3', 'border-l-amber-400/60')}>
+            <div key={r.IDdesignation_client}
+              onClick={isEditing ? () => setSettings({ existing: r }) : undefined}
+              title={isEditing ? 'Modifier la référence' : undefined}
+              className={cn('group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3', 'border-l-amber-400/60',
+                isEditing && 'cursor-pointer hover:border-accent/40 transition-colors')}>
               <div className="flex items-center gap-2">
                 <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-amber-400/10"><Tag className="h-3.5 w-3.5 text-amber-600" /></div>
-                <p className="text-sm font-medium truncate">{r.client_ref || '—'}</p>
-                {r.ref_interne && <Badge variant="outline" className="text-[10px] py-0 flex-shrink-0">{r.ref_interne}</Badge>}
-                {!!r.soumettre && <Badge variant="secondary" className="text-[10px] py-0 ml-auto flex-shrink-0">Soumis</Badge>}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <p className="text-sm font-medium truncate">{r.client_ref || '—'}</p>
+                    {r.ref_interne && <Badge variant="outline" className="text-[10px] py-0 flex-shrink-0">{r.ref_interne}</Badge>}
+                    {r.unite === 1 && <Badge variant="outline" className="text-[10px] py-0 flex-shrink-0">Kg</Badge>}
+                    <div className="flex items-center gap-1.5 ml-auto flex-shrink-0">
+                      {!!r.soumettre && <Badge variant="secondary" className="text-[10px] py-0">Soumis</Badge>}
+                      {isEditing && <Pencil className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />}
+                    </div>
+                  </div>
+                  {r.designation && <p className="text-[11px] text-muted-foreground truncate">{r.designation}</p>}
+                </div>
               </div>
               {r.coloris.length > 0 && (
                 <div className="mt-2 flex flex-wrap gap-1 ml-9">
@@ -1292,7 +1308,8 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
                     const label = `${r.client_ref} · ${c.label}`
                     return (
                       <button key={c.IDref_client_colori} type="button" disabled={!priceable}
-                        onClick={() => {
+                        onClick={(e) => {
+                          e.stopPropagation()
                           if (!priceable) return
                           if (tarifEditable) setTarifMode({ coloris: c, label })
                           else setTarif({ rccId: c.IDref_client_colori, label })
@@ -1316,9 +1333,271 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
           ))}
         </div>
       )}
+      {isEditing && (
+        <Button variant="ghost" size="sm" className="w-full text-muted-foreground hover:text-foreground" onClick={() => setSettings({ existing: null })}>
+          <Plus className="h-4 w-4 mr-1.5" />Ajouter une référence
+        </Button>
+      )}
       <TarifDialog open={tarif !== null} onClose={() => setTarif(null)} clientId={clientId} rccId={tarif?.rccId ?? 0} label={tarif?.label ?? ''} />
       <TarifModeDialog open={tarifMode !== null} onClose={() => setTarifMode(null)} clientId={clientId} target={tarifMode} />
+      <RefSettingsDialog open={settings !== null} existing={settings?.existing ?? null} clientId={clientId} onClose={() => setSettings(null)} />
     </>
+  )
+}
+
+// ── Référence client settings dialog (create / edit, mirrors the legacy "Référence client" window) ──
+
+interface RefFiniLookup { IDref_fini: number; reference: string; designation: string; avec_teinture: number }
+interface RefEcruLookup { IDref_ecru: number; reference: string; designation: string }
+interface CompoFil { IDref_fil: number; reference: string }
+
+/** Two-option segmented control for small exclusive choices (Finition, Unité). */
+function SegmentedPair<T extends string | number>({ options, value, onChange }: {
+  options: { value: T; label: string }[]; value: T; onChange: (v: T) => void
+}) {
+  return (
+    <div className="flex gap-1">
+      {options.map((o) => (
+        <button key={String(o.value)} type="button" onClick={() => onChange(o.value)}
+          className={cn('flex-1 px-3 py-1.5 text-xs rounded-md transition-colors whitespace-nowrap',
+            value === o.value
+              ? 'bg-accent text-accent-foreground shadow-sm font-medium'
+              : 'bg-zinc-100 text-muted-foreground hover:bg-accent/10')}>
+          {o.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function CheckList({ items, isChecked, onToggle, emptyText, isLoading }: {
+  items: { id: number; label: string }[]
+  isChecked: (id: number) => boolean
+  onToggle: (id: number) => void
+  emptyText: string
+  isLoading: boolean
+}) {
+  if (isLoading) return <SectionSpinner />
+  if (items.length === 0) return <p className="text-xs text-muted-foreground italic py-1">{emptyText}</p>
+  return (
+    <div className="max-h-44 overflow-y-auto scrollbar-transparent rounded-md border border-input bg-background p-1 space-y-0.5">
+      {items.map((it) => (
+        <label key={it.id} className="flex items-center gap-2 px-2 py-1 text-sm cursor-pointer hover:bg-accent/5 rounded select-none">
+          <input type="checkbox" checked={isChecked(it.id)} onChange={() => onToggle(it.id)}
+            className="h-4 w-4 rounded border-input text-accent focus:ring-2 focus:ring-ring cursor-pointer flex-shrink-0" />
+          <span className="truncate">{it.label || '—'}</span>
+        </label>
+      ))}
+    </div>
+  )
+}
+
+function RefSettingsDialog({ open, existing, clientId, onClose }: {
+  open: boolean; existing: ClientReference | null; clientId: number; onClose: () => void
+}) {
+  const queryClient = useQueryClient()
+  const isNew = existing === null
+  const [nom, setNom] = useState('')
+  const [finition, setFinition] = useState<'tm' | 'ennobli'>('ennobli')
+  const [refId, setRefId] = useState(0)
+  const [unite, setUnite] = useState<1 | 3>(3)
+  const [soumettre, setSoumettre] = useState(false)
+  const [checkedColoris, setCheckedColoris] = useState<Set<number>>(new Set())
+  // Inverted like the legacy storage: the set holds yarns NOT invoiced (unchecked).
+  const [uncheckedFils, setUncheckedFils] = useState<Set<number>>(new Set())
+  const [error, setError] = useState<string | null>(null)
+
+  const originalRefId = existing ? (existing.IDref_fini > 0 ? existing.IDref_fini : existing.IDref_ecru) : 0
+
+  // Hydrate on open (and when switching between create / different refs).
+  useEffect(() => {
+    if (!open) return
+    setError(null)
+    if (existing) {
+      setNom(existing.client_ref)
+      setFinition(existing.IDref_ecru > 0 ? 'tm' : 'ennobli')
+      setRefId(existing.IDref_fini > 0 ? existing.IDref_fini : existing.IDref_ecru)
+      setUnite(existing.unite === 1 ? 1 : 3)
+      setSoumettre(!!existing.soumettre)
+      setCheckedColoris(new Set(existing.coloris.map((c) => c.coloris_id).filter((x) => x > 0)))
+      setUncheckedFils(new Set(existing.fil_non_facture))
+    } else {
+      setNom(''); setFinition('ennobli'); setRefId(0); setUnite(3); setSoumettre(false)
+      setCheckedColoris(new Set()); setUncheckedFils(new Set())
+    }
+  }, [open, existing])
+
+  const finiQ = useQuery<RefFiniLookup[]>({
+    queryKey: ['lookup-refs-fini'],
+    queryFn: () => apiFetch('/commandes-client/lookups/refs-fini'),
+    enabled: open && finition === 'ennobli',
+  })
+  const ecruQ = useQuery<RefEcruLookup[]>({
+    queryKey: ['lookup-refs-ecru'],
+    queryFn: () => apiFetch('/commandes-client/lookups/refs-ecru'),
+    enabled: open && finition === 'tm',
+  })
+  const colorisQ = useQuery<Array<{ id?: number; IDcolori_ecru?: number; reference: string }>>({
+    queryKey: ['lookup-ref-coloris', finition, refId],
+    queryFn: () => finition === 'ennobli'
+      ? apiFetch(`/commandes-client/lookups/colori-fini?ref_fini=${refId}`)
+      : apiFetch(`/commandes-client/lookups/colori-ecru?ref_ecru=${refId}`),
+    enabled: open && refId > 0,
+  })
+  const filsQ = useQuery<CompoFil[]>({
+    queryKey: ['lookup-compo-fils', finition, refId],
+    queryFn: () => apiFetch(`/clients/lookups/composition-fils?${finition === 'ennobli' ? 'ref_fini' : 'ref_ecru'}=${refId}`),
+    enabled: open && refId > 0,
+  })
+  const coloris = (colorisQ.data ?? []).map((c) => ({ id: c.id ?? c.IDcolori_ecru ?? 0, label: c.reference }))
+  const fils = filsQ.data ?? []
+
+  // Picking a different internal ref resets the per-ref selections (back to the
+  // saved ones when returning to the original ref).
+  const handleRefChange = useCallback((id: number) => {
+    setRefId(id)
+    if (existing && id === originalRefId) {
+      setCheckedColoris(new Set(existing.coloris.map((c) => c.coloris_id).filter((x) => x > 0)))
+      setUncheckedFils(new Set(existing.fil_non_facture))
+    } else {
+      setCheckedColoris(new Set())
+      setUncheckedFils(new Set())
+    }
+  }, [existing, originalRefId])
+  const handleFinitionChange = useCallback((f: 'tm' | 'ennobli') => {
+    if (f === finition) return
+    setFinition(f)
+    const originalIsTm = existing !== null && existing.IDref_ecru > 0
+    handleRefChange(existing && ((f === 'tm') === originalIsTm) ? originalRefId : 0)
+  }, [finition, existing, originalRefId, handleRefChange])
+
+  const saveMut = useMutation({
+    mutationFn: () => {
+      const body = {
+        designation: nom.trim(),
+        IDref_fini: finition === 'ennobli' ? refId : 0,
+        IDref_ecru: finition === 'tm' ? refId : 0,
+        soumettre,
+        unite,
+        // Keep only yarns still in the ref's composition (stale ids drop off).
+        fil_non_facture: [...uncheckedFils].filter((id) => fils.length === 0 || fils.some((f) => f.IDref_fil === id)),
+        coloris: [...checkedColoris],
+      }
+      return isNew
+        ? apiFetch(`/clients/${clientId}/references`, { method: 'POST', body: JSON.stringify(body) })
+        : apiFetch(`/clients/${clientId}/references/${existing.IDdesignation_client}`, { method: 'PUT', body: JSON.stringify(body) })
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['client-references', clientId] })
+      onClose()
+    },
+    onError: (e: unknown) => setError(e instanceof Error ? e.message : 'Erreur lors de l\'enregistrement'),
+  })
+
+  const canSave = nom.trim().length > 0 && refId > 0 && !saveMut.isPending
+
+  return (
+    <Dialog open={open} onOpenChange={() => onClose()}>
+      <DialogContent className="max-w-xl max-h-[85vh] flex flex-col" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Tag className="h-5 w-5 text-accent" />
+            {isNew ? 'Nouvelle référence client' : `Référence client - ${existing.client_ref}`}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="mt-4 flex-1 min-h-0 overflow-y-auto scrollbar-transparent px-1 space-y-3">
+          <LabeledInput label="Nom commercial" value={nom} onChange={setNom} autoFocus={isNew} />
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Finition</label>
+              <SegmentedPair options={[{ value: 'tm', label: 'Tombé de métier' }, { value: 'ennobli', label: 'Ennobli' }]}
+                value={finition} onChange={handleFinitionChange} />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Unité</label>
+              <SegmentedPair options={[{ value: 3 as const, label: 'Ml' }, { value: 1 as const, label: 'Kg' }]}
+                value={unite} onChange={setUnite} />
+            </div>
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Référence interne</label>
+            {finition === 'ennobli' ? (
+              <SearchableCombobox
+                options={finiQ.data ?? []}
+                value={refId}
+                onChange={handleRefChange}
+                getId={(r: RefFiniLookup) => r.IDref_fini}
+                getPrimary={(r: RefFiniLookup) => r.reference}
+                getSecondary={(r: RefFiniLookup) => r.designation}
+                placeholder="Rechercher une référence finie"
+                loading={finiQ.isLoading}
+              />
+            ) : (
+              <SearchableCombobox
+                options={ecruQ.data ?? []}
+                value={refId}
+                onChange={handleRefChange}
+                getId={(r: RefEcruLookup) => r.IDref_ecru}
+                getPrimary={(r: RefEcruLookup) => r.reference}
+                getSecondary={(r: RefEcruLookup) => r.designation}
+                placeholder="Rechercher une référence écrue"
+                loading={ecruQ.isLoading}
+              />
+            )}
+          </div>
+
+          {/* Soumission toggle (§35 pill) */}
+          <div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-lg border border-border/60 bg-white shadow-sm">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5 text-xs font-semibold">
+                <Send className="h-3.5 w-3.5 text-accent" />
+                <span>Soumission</span>
+              </div>
+              <p className="text-[10px] text-muted-foreground mt-0.5">Soumettre une tirelle au client avant réception</p>
+            </div>
+            <button type="button" role="switch" aria-checked={soumettre} onClick={() => setSoumettre(!soumettre)}
+              className={cn('relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full transition-colors',
+                'focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+                soumettre ? 'bg-accent shadow-inner' : 'bg-zinc-300 hover:bg-zinc-400/80')}>
+              <span className={cn('inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200 ease-out',
+                soumettre ? 'translate-x-[18px]' : 'translate-x-0.5')} />
+            </button>
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">
+              Coloris disponibles pour le client{coloris.length > 0 && ` (${[...checkedColoris].filter((id) => coloris.some((c) => c.id === id)).length}/${coloris.length})`}
+            </label>
+            {refId === 0 ? <p className="text-xs text-muted-foreground italic py-1">Sélectionnez d'abord une référence interne</p> : (
+              <CheckList items={coloris.map((c) => ({ id: c.id, label: c.label }))}
+                isChecked={(id) => checkedColoris.has(id)}
+                onToggle={(id) => setCheckedColoris((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })}
+                emptyText="Aucun coloris dans le catalogue de cette référence"
+                isLoading={colorisQ.isLoading} />
+            )}
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Fils facturés au client</label>
+            {refId === 0 ? <p className="text-xs text-muted-foreground italic py-1">Sélectionnez d'abord une référence interne</p> : (
+              <CheckList items={fils.map((f) => ({ id: f.IDref_fil, label: f.reference }))}
+                isChecked={(id) => !uncheckedFils.has(id)}
+                onToggle={(id) => setUncheckedFils((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n })}
+                emptyText="Aucun fil dans la composition de cette référence"
+                isLoading={filsQ.isLoading} />
+            )}
+          </div>
+
+          {error && <p className="text-sm text-destructive">{error}</p>}
+        </div>
+        <DialogFooter className="mt-4">
+          <Button variant="outline" onClick={onClose}>Annuler</Button>
+          <Button onClick={() => saveMut.mutate()} disabled={!canSave}>
+            {saveMut.isPending ? 'Enregistrement...' : 'Enregistrer'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
