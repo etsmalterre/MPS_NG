@@ -761,10 +761,9 @@ function TogglePill({ label, checked, disabled, onChange }: {
   )
 }
 
-// ── Center: Detail Main (tabbed history views) ─────────
-// EXPERIMENT (layout variant): the three sections used to be stacked
-// collapsible cards; they are now header tabs so the active view gets the
-// full panel height. Revert = git revert of the commit introducing this.
+// ── Center: Detail Main (master-tabbed history views) ──
+// "Classeur" layout (mps_designer §39): master tabs switch the center panel
+// between datasets so the active view gets the full panel height.
 
 const MAIN_TABS = [
   { key: 'references', label: 'Références', icon: Tag },

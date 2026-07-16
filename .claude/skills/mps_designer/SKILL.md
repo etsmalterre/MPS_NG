@@ -4,16 +4,17 @@
 
 Design system for **MPS_NG**, the ERP system for **ETS Malterre** (French textile/knitting manufacturer). This document is the single source of truth for all visual patterns — follow it precisely when building new screens or modifying existing ones.
 
-## Reference implementations
+## Reference implementations — the three named layouts
 
-There are **two** gold-standard references in the codebase. Pick the one whose layout matches the use case before writing any code; do not invent a third layout pattern.
+There are **three** gold-standard layouts in the codebase, each with a short name. **Use these names** ("Fiche", "Tableau", "Classeur") when discussing layouts with the user. Pick the one whose layout matches the use case before writing any code; do not invent a fourth layout pattern.
 
-| Screen | File | Use when |
-|---|---|---|
-| **`/fils/gestion`** (3-panel) | `apps/web/src/pages/FilsGestion.tsx` | One entity at a time has rich nested data (contacts, addresses, sub-resources) and the user works on one record start-to-finish. Implements `MasterDetailLayout`, collapsible card sections with status-colored items, side-by-side edit dialogs with file upload + PDF preview, sidebar tabs with inline edit forms, global vs per-section edit state. **§4–§9, §18, §21–§25.** |
-| **`/fils/stock`** (table-centric + slide-in drawer) | `apps/web/src/pages/FilsStock.tsx` | The page is fundamentally a sortable / searchable list of many flat rows; selecting a row reveals a focused detail view, but the row-set is the primary working surface. Implements toolbar (search + filters + create), split-aligned sortable table, right slide-in drawer, embed-mode top-offset, "Nouveau" creation dialog, KV-row drawer cards. **§27.** |
+| Name | Screen | File | Use when |
+|---|---|---|---|
+| **Fiche** (3-panel master-detail) | `/fils/gestion` | `apps/web/src/pages/FilsGestion.tsx` | One entity at a time has rich nested data (contacts, addresses, sub-resources) and the user works on one record start-to-finish. Implements `MasterDetailLayout`, collapsible card sections with status-colored items, side-by-side edit dialogs with file upload + PDF preview, sidebar tabs with inline edit forms, global vs per-section edit state. **§4–§9, §18, §21–§25.** |
+| **Tableau** (table-centric + slide-in drawer) | `/fils/stock` | `apps/web/src/pages/FilsStock.tsx` | The page is fundamentally a sortable / searchable list of many flat rows; selecting a row reveals a focused detail view, but the row-set is the primary working surface. Implements toolbar (search + filters + create), split-aligned sortable table, right slide-in drawer, embed-mode top-offset, "Nouveau" creation dialog, KV-row drawer cards. **§27.** |
+| **Classeur** (Fiche variant: master-tabbed center panel) | `/clients/gestion` | `apps/web/src/pages/ClientsGestion.tsx` | Same 3-panel shell as Fiche, but the center panel holds several independent, read-mostly datasets of which the user consults **one at a time** — a row of master tabs gives the active dataset the full panel height instead of stacked collapsible sections. **§39.** |
 
-When in doubt about a single rule, look at both references. When in doubt about which *layout* to choose, ask the user — do NOT mix patterns from both into a hybrid third design.
+When in doubt about a single rule, look at the references. When in doubt about which *layout* to choose, ask the user — do NOT mix patterns into a hybrid design.
 
 **Every edit-mode screen — regardless of layout — must also plug into the unsaved-changes guard (§28).** This is not optional; it applies to both patterns above.
 
@@ -192,12 +193,12 @@ className="px-4 py-1.5 text-sm font-medium rounded-md transition-colors whitespa
 
 ---
 
-## 4. MasterDetailLayout (3-Panel)
+## 4. MasterDetailLayout (3-Panel) — the "Fiche" layout
 
 Component: `apps/web/src/components/layout/MasterDetailLayout.tsx`
 Hook: `apps/web/src/hooks/useResponsiveLayout.ts`
 
-> **Don't use this for list-heavy screens.** If the page is fundamentally a sortable / searchable / filterable table of many flat rows, use the **table-centric pattern** in §27 instead — that's the layout used by `/fils/stock`.
+> **Don't use this for list-heavy screens.** If the page is fundamentally a sortable / searchable / filterable table of many flat rows, use the **Tableau pattern** in §27 instead — that's the layout used by `/fils/stock`. And if the center panel would stack several large read-mostly datasets consulted one at a time, use the **Classeur variant** (§39).
 
 ### Props
 
@@ -1495,6 +1496,8 @@ The center detail body uses collapsible cards for groups of related items (Certi
 
 **Apply this pattern only when the center panel stacks *multiple* sections** (see §7 multi-section shape). When the center panel is a single primary list — lignes of a commande, soumissions of an étude, mouvements of a stock lot — do NOT use a collapsible Card. Use §31's flex-sibling layout directly. A framing Card with a title + chevron around the only thing on the screen duplicates the detail header, eats space, and lets the user collapse the only interaction surface.
 
+**When the stacked sections are all large, read-mostly datasets consulted one at a time** (history tables, catalogs), prefer the **Classeur** master-tab variant (§39) instead of collapsible cards — tabs give the active dataset the full panel height.
+
 ```tsx
 <Card className="card-premium">
   <CardHeader
@@ -1765,7 +1768,7 @@ Reference: `FilsCommandes.tsx` uses `fmtNum` for list card kg/€, totals footer
 
 ---
 
-## 27. Table-Centric Screen Pattern
+## 27. Table-Centric Screen Pattern — the "Tableau" layout
 
 Reference: **`apps/web/src/pages/FilsStock.tsx`** (`/fils/stock`).
 
@@ -3743,4 +3746,82 @@ Factures and avoirs use a more formal body than the softer rounded-box tables on
 - **Column discipline**: totals values share the MONTANT column's right inset (12pt row padding + 4pt cell padding = `paddingRight: 16`) so every figure on the page aligns in a single column.
 
 Visual verification: mirror `apps/api/src/scripts/dump-facture-pdf.ts` — a synthetic-data render script (no DB) whose output PDF you can open/inspect directly.
+
+---
+
+## 39. "Classeur" — Fiche with a master-tabbed center panel
+
+Reference: **`apps/web/src/pages/ClientsGestion.tsx`** → `DetailMain` + `MAIN_TABS` (Références / Historique des commandes / Marchandise expédiée).
+
+A variant of the **Fiche** (3-panel) layout. Everything else is identical — left list (§5), detail header (§6), right sidebar with tabs (§8), edit mode (§9/§25), unsaved guard (§28) — except the **center panel body**: instead of stacking §23 collapsible section cards, a row of **master tabs** at the top switches the whole center body between the datasets, and the active dataset gets the full panel height.
+
+### 39.1 When Classeur vs Fiche
+
+| Situation | Layout |
+|---|---|
+| Center sections are small/medium and the user scans several together (notes + certs + commandes) | **Fiche** — §23 collapsible cards |
+| Center sections are large, read-mostly row-sets (history tables, catalogs) and only one is consulted at a time | **Classeur** — master tabs (this section) |
+| The center panel IS one single primary list (lignes, soumissions, mouvements) | **Fiche single-list shape** — §7 / §31, no tabs, no cards |
+
+### 39.2 Structure
+
+```tsx
+const MAIN_TABS = [
+  { key: 'references', label: 'Références', icon: Tag },
+  { key: 'historique', label: 'Historique des commandes', icon: History },
+  { key: 'marchandise', label: 'Marchandise expédiée', icon: Truck },
+] as const
+type MainTab = (typeof MAIN_TABS)[number]['key']
+
+function DetailMain({ client, isLoading, hasSelection, ... }) {
+  const [activeTab, setActiveTab] = useState<MainTab>('references')
+  // Land on the main-info tab whenever the selection changes.
+  useEffect(() => { setActiveTab('references') }, [client?.IDclient])
+
+  // …no-selection / loading / null early returns (AFTER the hooks — §28.6)…
+
+  return (
+    <div className="flex-1 min-h-0 flex flex-col">
+      {/* Master tabs — header-submenu style pills on the natural background */}
+      <div className="flex-shrink-0 flex items-center gap-1 border-b border-border/60 pb-2">
+        {MAIN_TABS.map((t) => {
+          const Icon = t.icon
+          const active = activeTab === t.key
+          return (
+            <button key={t.key} type="button" onClick={() => setActiveTab(t.key)}
+              className={cn('flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium rounded-md transition-colors whitespace-nowrap',
+                active ? 'bg-accent text-accent-foreground shadow-sm' : 'text-muted-foreground hover:bg-accent/10 hover:text-accent')}>
+              <Icon className="h-3.5 w-3.5" />{t.label}
+            </button>
+          )
+        })}
+      </div>
+      <div className="flex-1 min-h-0 overflow-auto space-y-2 pt-3 pr-1">
+        {activeTab === 'references' && <ReferencesTab clientId={client.IDclient} ... />}
+        {activeTab === 'historique' && <HistoriqueTab clientId={client.IDclient} />}
+        {activeTab === 'marchandise' && <MarchandiseTab clientId={client.IDclient} />}
+      </div>
+    </div>
+  )
+}
+```
+
+### 39.3 Rules — do not deviate
+
+- **Master tab styling = header submenu tabs (§3)**, NOT the sidebar's zinc tab band (§8): gold pill active (`bg-accent text-accent-foreground shadow-sm`), inactive `text-muted-foreground hover:bg-accent/10 hover:text-accent`, tabs sized to content and left-aligned, `px-4 py-1.5`. This is deliberate — the center panel must NOT be wrapped in a zinc `bg-zinc-100/80` panel with a `bg-zinc-200/50` tab band, or it reads as a duplicate of the right sidebar (that variant was tried and rejected).
+- **Content sits on the natural page background** — no panel wrapper, no border box around the tab body. The only chrome is a `border-b border-border/60 pb-2` divider under the tab row and `pt-3` above the content.
+- **Item cards inside the tabs keep their normal §7 center-panel styling** (zinc `bg-zinc-100/80` item cards with `border-l-4` status edge; tables in white `bg-card shadow-sm` containers) — they are on the page background, so the §8.1 white-card rule for zinc panels does NOT apply.
+- **Default tab = the entity's main info**, and it resets on every selection change via `useEffect` keyed on the record id — the user always lands on the primary dataset, never on a stale tab from the previous record.
+- **Lazy per-tab queries**: tab content components are conditionally mounted, so each tab's `useQuery` fires on first visit only (no `enabled` flag needed). Never lift the three queries to the parent to fetch eagerly — each tab is a real HFSQL query against the shared server.
+- **No count badges in the tab labels** — showing counts on inactive tabs would force all datasets to fetch on every selection, defeating the lazy loading.
+- **Tab state lives in `DetailMain`**, declared before the no-selection/loading early returns (hooks-before-returns, §28.6).
+- Each tab body renders as a **fragment** (spinner / empty / content + its own dialogs) — no redundant wrapping card repeating the tab's name (§8.2 applies here too).
+
+### 39.4 Candidate screens
+
+Any Fiche screen whose center panel would otherwise stack 2+ large read-only history/catalog sections:
+
+- Clients → Gestion ✅ reference implementation (Références / Historique / Marchandise expédiée)
+- Sous-traitants → Gestion — if it ever grows per-sst history tables
+- Réseau → Entreprises — if commandes/recommandations histories grow into full tables
 
