@@ -1268,19 +1268,48 @@ function TarifModeTag({ c }: { c: RefColoris }) {
   return null
 }
 
+/** Accent-insensitive lowercase for the references filter (strips combining marks U+0300..U+036F). */
+const COMBINING_MARKS = new RegExp('[\\u0300-\\u036f]', 'g')
+function normSearch(s: string): string {
+  return s.normalize('NFD').replace(COMBINING_MARKS, '').toLowerCase()
+}
+
 function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: number; isEditing: boolean; canManageTarifs: boolean }) {
   const [tarif, setTarif] = useState<{ rccId: number; label: string } | null>(null)
   const [tarifMode, setTarifMode] = useState<{ coloris: RefColoris; label: string } | null>(null)
   // Ref-level settings dialog: { existing: null } = create, { existing: ref } = edit.
   const [settings, setSettings] = useState<{ existing: ClientReference | null } | null>(null)
+  const [search, setSearch] = useState('')
   const { data, isLoading } = useQuery<ClientReference[]>({ queryKey: ['client-references', clientId], queryFn: () => apiFetch(`/clients/${clientId}/references`) })
+  // The tab stays mounted across client switches; don't carry the filter over.
+  useEffect(() => { setSearch('') }, [clientId])
+  // Multi-criteria filter: every space-separated term must match at least one of
+  // the ref's fields (commercial name, internal ref, designation, coloris labels).
+  const filtered = useMemo(() => {
+    const all = data ?? []
+    const terms = normSearch(search).split(/\s+/).filter(Boolean)
+    if (terms.length === 0) return all
+    return all.filter((r) => {
+      const hay = [r.client_ref, r.ref_interne, r.designation, ...r.coloris.map((c) => c.label)].map(normSearch)
+      return terms.every((t) => hay.some((h) => h.includes(t)))
+    })
+  }, [data, search])
   // Edit-mode chip click edits the tarif mode (permission-gated); view-mode click shows the tarif.
   const tarifEditable = isEditing && canManageTarifs
   return (
     <>
-      {isLoading ? <SectionSpinner /> : !data || data.length === 0 ? <SectionEmpty text="Aucune référence client" /> : (
+      {!isLoading && !!data && data.length > 0 && (
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <input value={search} onChange={(e) => setSearch(e.target.value)}
+            placeholder="Filtrer (réf, désignation, coloris...)"
+            className="w-full h-9 pl-9 pr-3 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring" />
+        </div>
+      )}
+      {isLoading ? <SectionSpinner /> : !data || data.length === 0 ? <SectionEmpty text="Aucune référence client" />
+        : filtered.length === 0 ? <SectionEmpty text="Aucune référence ne correspond à la recherche" /> : (
         <div className="space-y-2">
-          {data.map((r) => (
+          {filtered.map((r) => (
             <div key={r.IDdesignation_client}
               onClick={isEditing ? () => setSettings({ existing: r }) : undefined}
               title={isEditing ? 'Modifier la référence' : undefined}
