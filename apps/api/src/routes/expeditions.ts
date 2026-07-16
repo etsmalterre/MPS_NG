@@ -62,6 +62,8 @@ import { esc, n, dateDigits as dateStr, IS_WINDOWS } from '../lib/sst-shared.js'
 import { stripRtf, wrapRtf } from '../lib/rtf-utils.js'
 import { BonLivraisonPdf, type BonLivraisonPdfData, type BlArticle, type BlLot, type BlPiece } from '../lib/pdf/BonLivraisonPdf.js'
 import { BonLivraisonDiversPdf, type BonLivraisonDiversPdfData, type BlDiversCarton } from '../lib/pdf/BonLivraisonDiversPdf.js'
+import { RapportControlePdf, type RapportControlePdfData, type RcArticle, type RcLot, type RcRow } from '../lib/pdf/RapportControlePdf.js'
+import { InfoMatieresPdf, type InfoMatieresPdfData, type ImArticle, type ImEntry } from '../lib/pdf/InfoMatieresPdf.js'
 import { sendMail } from '../lib/gmail.js'
 import { getUserEmail } from '../lib/user-emails.js'
 
@@ -816,15 +818,20 @@ expeditionsRouter.post('/:kind', async (req: Request, res: Response) => {
       const IDclient = Number(cmdRows[0].IDclient) || 0
       // Auto-fill: livraison address from the order, carrier from the client,
       // donation flag from the order (donation shipments never get a proforma).
-      const clientRows = await query<{ IDtransporteur: number }>(`SELECT IDtransporteur FROM client WHERE IDclient = ${IDclient}`)
+      const clientRows = await query<{ IDtransporteur: number; inclureRapportQualite: number | null }>(
+        `SELECT IDtransporteur, inclureRapportQualite FROM client WHERE IDclient = ${IDclient}`,
+      )
       const idAdresse = d.IDadresse ?? (Number(cmdRows[0].IDadresse_livraison) || 0)
       const idTrans = d.IDtransporteur ?? (Number(clientRows[0]?.IDtransporteur) || 0)
       const donation = d.donation ?? (Number(cmdRows[0].donation) === 1 ? 1 : 0)
+      // Per-shipment mirror of the client's "inclure rapports contrôle" flag —
+      // legacy seeds it from the client at creation time.
+      const inclureRc = Number(clientRows[0]?.inclureRapportQualite) === 1 ? 1 : 0
 
       const before = await maxId('expedition', 'IDexpedition')
       await query(
         `INSERT INTO expedition (IDsociete, IDcommande_client, IDadresse, IDtransporteur, IDcontact, DATE, donation, affiche_observations, est_valide, est_facture, inclureRapportQualite) ` +
-          `VALUES (1, ${n(d.IDcommande_client)}, ${n(idAdresse)}, ${n(idTrans)}, 0, '${date}', ${donation ? 1 : 0}, 1, 0, 0, 0)`,
+          `VALUES (1, ${n(d.IDcommande_client)}, ${n(idAdresse)}, ${n(idTrans)}, 0, '${date}', ${donation ? 1 : 0}, 1, 0, 0, ${inclureRc})`,
       )
       const newId = await newIdAfterInsert('expedition', 'IDexpedition', before)
       res.status(201).json({ id: newId, kind })
@@ -1656,6 +1663,522 @@ expeditionsRouter.get('/formelle/:id/pdf', async (req: Request, res: Response) =
 })
 
 // ════════════════════════════════════════════════════════
+//  RAPPORT DE CONTRÔLE + INFO MATIÈRES (formelle only)
+// ════════════════════════════════════════════════════════
+// Two extra documents that can accompany a formelle expedition (ports of the
+// legacy ETAT_RapportQualité / ETAT_Info_Matiere reports). Both start from the
+// expedition's FINI lines only — écru lines have no QC data or dyeing chain.
+// HFSQL traps honored here (see probe-rc-info-matieres.ts):
+//  - suivilot is read `SELECT *` (accented spec columns must never be named);
+//    only ASCII keys are consumed (lot, *_tirelle, IDsous_traitant, …).
+//  - stock_fil: `SELECT *` AND any list containing certif_bio silently return
+//    0 rows on Windows — explicit ASCII list without the certif block.
+//  - stock_ecru.IDref_commande_source = the tricoteur line that produced the
+//    roll (type 1); IDref_commande_affectation is the ennoblisseur line.
+//  - Transport docs: ged IDtype_doc 3 (bl retour ennoblisseur, on the
+//    suivilot's commande), 4 (bl retour tricoteur), 6 (bl fournisseur,
+//    IDreference = IDcommande_fil).
+
+const trimStr = (v: unknown): string => (v ?? '').toString().trim()
+/** HFSQL "unset" numeric → null (tolerance columns keep 0 when never filled). */
+const zeroNull = (v: unknown): number | null => {
+  const x = Number(v)
+  return Number.isFinite(x) && x !== 0 ? x : null
+}
+
+/** Coloris display label for a fini line — catalog depends on avec_teinture
+ *  (0 = wash-only → colori_ecru, 1/2 = dyed → ref_fini_colori). */
+async function resolveFiniColorisLabel(avecTeinture: number, colId: number): Promise<string> {
+  if (colId <= 0) return ''
+  if (avecTeinture === 0) {
+    const cRows = await query<any>(`SELECT IDcolori_ecru, reference FROM colori_ecru WHERE IDcolori_ecru = ${colId}`)
+    const c = (await fixEncoding(cRows, 'colori_ecru', 'IDcolori_ecru', ['reference']))[0] as any
+    return trimStr(c?.reference)
+  }
+  const cRows = await query<any>(`SELECT IDref_fini_colori, reference FROM ref_fini_colori WHERE IDref_fini_colori = ${colId}`)
+  const c = (await fixEncoding(cRows, 'ref_fini_colori', 'IDref_fini_colori', ['reference']))[0] as any
+  return trimStr(c?.reference)
+}
+
+interface FiniLineCtx {
+  leId: number
+  refId: number
+  titre: string
+  sousTitre: string | null
+  /** ref_fini row with the tolerance columns (laizeHT/poids min-max, stab). */
+  refFini: any | null
+}
+
+interface FormelleFiniCtx {
+  dexp: string | null
+  commandeNumero: number | null
+  refClient: string | null
+  clientNom: string
+  lines: FiniLineCtx[]
+}
+
+/** Shared header + fini-lines context for the RC / Info matières builders.
+ *  Returns null when the expedition doesn't exist; lines may be empty. */
+async function loadFormelleFiniLines(id: number): Promise<FormelleFiniCtx | null> {
+  const rows = await query<any>(
+    `SELECT IDexpedition, IDcommande_client, DATE AS dexp FROM expedition WHERE IDexpedition = ${id} AND IDsociete = 1`,
+  )
+  if (rows.length === 0) return null
+  const h = rows[0]
+  const cmdId = Number(h.IDcommande_client) || 0
+  const cmdRows = cmdId > 0
+    ? await query<any>(`SELECT IDcommande_client, numero, IDclient, ref_client FROM commande_client WHERE IDcommande_client = ${cmdId}`)
+    : []
+  const cmd = (await fixEncoding(cmdRows, 'commande_client', 'IDcommande_client', ['ref_client']))[0] as any
+  const IDclient = Number(cmd?.IDclient) || 0
+  const clientNames = await resolveClientNames([IDclient])
+
+  const leRows = await query<any>(
+    `SELECT IDligne_expedition, IDligne_commande_client FROM ligne_expedition WHERE IDexpedition = ${id} ORDER BY IDligne_expedition`,
+  )
+  const lines: FiniLineCtx[] = []
+  for (const le of leRows as any[]) {
+    const leId = Number(le.IDligne_expedition) || 0
+    const lccId = Number(le.IDligne_commande_client) || 0
+    if (leId === 0 || lccId === 0) continue
+    const lccRows = await query<any>(
+      `SELECT IDligne_commande_client, TYPE AS type_kind, IDreference, IDcolori FROM ligne_commande_client WHERE IDligne_commande_client = ${lccId}`,
+    )
+    if (lccRows.length === 0) continue
+    const lcc = lccRows[0]
+    if (lineStockKind(Number(lcc.type_kind) || 0) !== 'fini') continue
+    const refId = Number(lcc.IDreference) || 0
+    const colId = Number(lcc.IDcolori) || 0
+    const rfRows = refId > 0
+      ? await query<any>(
+          `SELECT IDref_fini, reference, designation, avec_teinture, laizeHT_Min, laizeHT_Max, ` +
+            `poids_Min, poids_Max, stab_hauteur, stab_largeur FROM ref_fini WHERE IDref_fini = ${refId}`,
+        )
+      : []
+    const rf = (await fixEncoding(rfRows, 'ref_fini', 'IDref_fini', ['reference', 'designation']))[0] as any
+    const coloris = await resolveFiniColorisLabel(Number(rf?.avec_teinture) || 0, colId)
+    const titre = [trimStr(rf?.reference), coloris].filter(Boolean).join(' - ') || `Ligne ${lccId}`
+    lines.push({ leId, refId, titre, sousTitre: trimStr(rf?.designation) || null, refFini: rf ?? null })
+  }
+  return {
+    dexp: h.dexp ?? null,
+    commandeNumero: cmd?.numero != null ? Number(cmd.numero) : null,
+    refClient: trimStr(cmd?.ref_client).replace(/\s+/g, ' ') || null,
+    clientNom: clientNames.get(IDclient) ?? '',
+    lines,
+  }
+}
+
+/** Prefer the suivilot row that carries operator data — measurements can be
+ *  negative (stab), so check "any non-zero" plus the free-text columns. */
+function suivilotRowHasData(row: Record<string, unknown>): boolean {
+  const numCols = [
+    'laize_sst', 'poids_sst', 'rendement_sst', 'stabH_sst', 'stabL_sst',
+    'laize_tirelle', 'poids_tirelle', 'rendement_tirelle', 'stabH_tirelle', 'stabL_tirelle',
+  ]
+  if (numCols.some((c) => Number(row[c]) !== 0 && Number.isFinite(Number(row[c])))) return true
+  const textCols = ['observations', 'emplacement_tirelle', 'fin_archivage']
+  return textCols.some((c) => (row[c] ?? '').toString().replace(/\0/g, '').trim() !== '')
+}
+
+/** Distinct shipped lots of a fini line, plus the best suivilot row per lot. */
+async function loadLineLotsWithSuivilot(leId: number, refId: number): Promise<{
+  lots: string[]
+  suiviByLot: Map<string, any>
+  rolls: any[]
+}> {
+  const rollRows = await query<any>(
+    `SELECT IDstock_fini, lot, IDstock_ecru FROM stock_fini WHERE IDligne_expedition = ${leId} ORDER BY lot, numero`,
+  )
+  const rolls = await fixEncoding(rollRows, 'stock_fini', 'IDstock_fini', ['lot'])
+  const lots = [...new Set((rolls as any[]).map((r) => trimStr(r.lot)).filter(Boolean))]
+  const suiviByLot = new Map<string, any>()
+  if (lots.length > 0 && refId > 0) {
+    const suiviRows = await query<any>(
+      `SELECT * FROM suivilot WHERE IDref_fini = ${refId} AND lot IN (${lots.map((l) => `'${esc(l)}'`).join(',')})`,
+    )
+    for (const s of suiviRows as any[]) {
+      const key = trimStr(s.lot)
+      const prev = suiviByLot.get(key)
+      if (!prev || (!suivilotRowHasData(prev) && suivilotRowHasData(s))) suiviByLot.set(key, s)
+    }
+  }
+  return { lots, suiviByLot, rolls: rolls as any[] }
+}
+
+export async function buildRapportControlePdfData(id: number): Promise<RapportControlePdfData | null> {
+  const ctx = await loadFormelleFiniLines(id)
+  if (!ctx || ctx.lines.length === 0) return null
+
+  const articles: RcArticle[] = []
+  for (const line of ctx.lines) {
+    const { lots, suiviByLot } = await loadLineLotsWithSuivilot(line.leId, line.refId)
+    const rf = line.refFini ?? {}
+    // A line whose rolls carry no lot label still prints its tolerance rows.
+    const lotKeys = lots.length > 0 ? lots : ['']
+    const lotBlocks: RcLot[] = lotKeys.map((lot) => {
+      const s = suiviByLot.get(lot) ?? null
+      const rel = (col: string): number | null => (s ? numOf(s[col]) : null)
+      const rows: RcRow[] = [
+        { parametre: 'Laize HT', min: zeroNull(rf.laizeHT_Min), max: zeroNull(rf.laizeHT_Max), releve: rel('laize_tirelle') },
+        { parametre: 'Poids', min: zeroNull(rf.poids_Min), max: zeroNull(rf.poids_Max), releve: rel('poids_tirelle') },
+        { parametre: 'Stab H', min: zeroNull(rf.stab_hauteur), max: null, releve: rel('stabH_tirelle') },
+        { parametre: 'Stab L', min: zeroNull(rf.stab_largeur), max: null, releve: rel('stabL_tirelle') },
+      ]
+      return { lot, hasSuivilot: s != null, rows }
+    })
+    articles.push({ titre: line.titre, sousTitre: line.sousTitre, lots: lotBlocks })
+  }
+  if (articles.length === 0) return null
+
+  return {
+    numero: id,
+    dateLong: formatHfsqlDateLongFr(ctx.dexp),
+    clientNom: ctx.clientNom,
+    commandeNumero: ctx.commandeNumero,
+    refClient: ctx.refClient,
+    articles,
+  }
+}
+
+/** sous_traitant / fournisseur names + pays, batched with encoding repair. */
+async function loadPartnerLookups(sstIds: number[], frsIds: number[]): Promise<{
+  sstNames: Map<number, string>
+  sstPays: Map<number, string>
+  frsNames: Map<number, string>
+  frsPays: Map<number, string>
+}> {
+  const sstNames = new Map<number, string>()
+  const sstPays = new Map<number, string>()
+  const frsNames = new Map<number, string>()
+  const frsPays = new Map<number, string>()
+  if (sstIds.length > 0) {
+    const rows = await fixEncoding(
+      await query<any>(`SELECT IDsous_traitant, nom FROM sous_traitant WHERE IDsous_traitant IN (${sstIds.join(',')})`),
+      'sous_traitant', 'IDsous_traitant', ['nom'],
+    )
+    for (const r of rows as any[]) sstNames.set(Number(r.IDsous_traitant), trimStr(r.nom))
+    const adr = await fixEncoding(
+      await query<any>(`SELECT IDadresse, IDsous_traitant, pays FROM adresse WHERE IDsous_traitant IN (${sstIds.join(',')})`),
+      'adresse', 'IDadresse', ['pays'],
+    )
+    for (const r of adr as any[]) {
+      const k = Number(r.IDsous_traitant)
+      if (!sstPays.has(k) && trimStr(r.pays)) sstPays.set(k, trimStr(r.pays))
+    }
+  }
+  if (frsIds.length > 0) {
+    const rows = await fixEncoding(
+      await query<any>(`SELECT IDfournisseur, nom FROM fournisseur WHERE IDfournisseur IN (${frsIds.join(',')})`),
+      'fournisseur', 'IDfournisseur', ['nom'],
+    )
+    for (const r of rows as any[]) frsNames.set(Number(r.IDfournisseur), trimStr(r.nom))
+    const adr = await fixEncoding(
+      await query<any>(`SELECT IDadresse, IDfournisseur, pays FROM adresse WHERE IDfournisseur IN (${frsIds.join(',')})`),
+      'adresse', 'IDadresse', ['pays'],
+    )
+    for (const r of adr as any[]) {
+      const k = Number(r.IDfournisseur)
+      if (!frsPays.has(k) && trimStr(r.pays)) frsPays.set(k, trimStr(r.pays))
+    }
+  }
+  return { sstNames, sstPays, frsNames, frsPays }
+}
+
+/** ged transport docs for a set of sst commandes, one type_doc at a time. */
+async function loadGedDocs(cmdIds: number[], typeDoc: number): Promise<Map<number, string[]>> {
+  const byCmd = new Map<number, string[]>()
+  if (cmdIds.length === 0) return byCmd
+  const rows = await fixEncoding(
+    await query<any>(
+      `SELECT IDged, nom, IDcommande_sous_traitant FROM ged WHERE IDcommande_sous_traitant IN (${cmdIds.join(',')}) AND IDtype_doc = ${typeDoc}`,
+    ),
+    'ged', 'IDged', ['nom'],
+  )
+  for (const r of rows as any[]) {
+    const k = Number(r.IDcommande_sous_traitant)
+    const nom = trimStr(r.nom)
+    if (!nom) continue
+    const list = byCmd.get(k) ?? []
+    list.push(nom)
+    byCmd.set(k, list)
+  }
+  return byCmd
+}
+
+export async function buildInfoMatieresPdfData(id: number): Promise<InfoMatieresPdfData | null> {
+  const ctx = await loadFormelleFiniLines(id)
+  if (!ctx || ctx.lines.length === 0) return null
+
+  const articles: ImArticle[] = []
+  for (const line of ctx.lines) {
+    const { lots, suiviByLot, rolls } = await loadLineLotsWithSuivilot(line.leId, line.refId)
+
+    // ── Tissu fini: one entry per (ennoblisseur, commande), lots grouped.
+    interface EnnoGroup { sstId: number; cmdId: number; lots: string[] }
+    const ennoGroups = new Map<string, EnnoGroup>()
+    for (const lot of lots) {
+      const s = suiviByLot.get(lot)
+      if (!s) continue
+      const sstId = Number(s.IDsous_traitant) || 0
+      const cmdId = Number(s.IDcommande_sous_traitant) || 0
+      if (sstId === 0) continue
+      const key = `${sstId}:${cmdId}`
+      const g = ennoGroups.get(key) ?? { sstId, cmdId, lots: [] }
+      g.lots.push(lot)
+      ennoGroups.set(key, g)
+    }
+
+    // ── Tombé de métier: écru provenance via IDref_commande_source (type 1).
+    const ecruIds = [...new Set((rolls as any[]).map((r) => Number(r.IDstock_ecru) || 0).filter((x) => x > 0))]
+    const ecruRows = ecruIds.length > 0
+      ? await query<any>(
+          `SELECT IDstock_ecru, IDref_ecru, IDordre_fabrication, IDref_commande_source FROM stock_ecru WHERE IDstock_ecru IN (${ecruIds.join(',')})`,
+        )
+      : []
+    const srcLcsstIds = [...new Set((ecruRows as any[]).map((r) => Number(r.IDref_commande_source) || 0).filter((x) => x > 0))]
+    const ofIds = [...new Set((ecruRows as any[]).map((r) => Number(r.IDordre_fabrication) || 0).filter((x) => x > 0))]
+    const refEcruIds = [...new Set((ecruRows as any[]).map((r) => Number(r.IDref_ecru) || 0).filter((x) => x > 0))]
+
+    const srcLines = srcLcsstIds.length > 0
+      ? await query<any>(
+          `SELECT IDligne_commande_sous_traitant, IDcommande_sous_traitant, TYPE AS type_kind ` +
+            `FROM ligne_commande_sous_traitant WHERE IDligne_commande_sous_traitant IN (${srcLcsstIds.join(',')})`,
+        )
+      : []
+    const tricoLcsst = (srcLines as any[]).filter((l) => Number(l.type_kind) === 1)
+    const tricoCmdIds = [...new Set(tricoLcsst.map((l) => Number(l.IDcommande_sous_traitant) || 0).filter((x) => x > 0))]
+    const tricoCmds = tricoCmdIds.length > 0
+      ? await query<any>(`SELECT IDcommande_sous_traitant, IDsous_traitant FROM commande_sous_traitant WHERE IDcommande_sous_traitant IN (${tricoCmdIds.join(',')})`)
+      : []
+    const refEcruRows = refEcruIds.length > 0
+      ? await fixEncoding(
+          await query<any>(`SELECT IDref_ecru, reference, designation FROM ref_ecru WHERE IDref_ecru IN (${refEcruIds.join(',')})`),
+          'ref_ecru', 'IDref_ecru', ['reference', 'designation'],
+        )
+      : []
+    const ecruLabel = new Map((refEcruRows as any[]).map((r) => [
+      Number(r.IDref_ecru),
+      [trimStr(r.reference), trimStr(r.designation)].filter(Boolean).join(' - '),
+    ]))
+
+    // ── Fil: OF → asso_fil_of → stock_fil (NO certif_bio!) → fournisseur.
+    const assoRows = ofIds.length > 0
+      ? await query<any>(`SELECT IDasso_fil_of, IDordre_fabrication, IDref_fil, IDstock_fil FROM asso_fil_of WHERE IDordre_fabrication IN (${ofIds.join(',')})`)
+      : []
+    const stockFilIds = [...new Set((assoRows as any[]).map((r) => Number(r.IDstock_fil) || 0).filter((x) => x > 0))]
+    const stockFils = stockFilIds.length > 0
+      ? await query<any>(
+          `SELECT IDstock_fil, IDref_fil, IDfournisseur, IDref_fil_commande FROM stock_fil WHERE IDstock_fil IN (${stockFilIds.join(',')})`,
+        )
+      : []
+    const sfById = new Map((stockFils as any[]).map((r) => [Number(r.IDstock_fil), r]))
+    const refFilIds = [...new Set([
+      ...(assoRows as any[]).map((r) => Number(r.IDref_fil) || 0),
+      ...(stockFils as any[]).map((r) => Number(r.IDref_fil) || 0),
+    ].filter((x) => x > 0))]
+
+    const refFilRows = refFilIds.length > 0
+      ? await fixEncoding(
+          await query<any>(`SELECT IDref_fil, reference FROM ref_fil WHERE IDref_fil IN (${refFilIds.join(',')})`),
+          'ref_fil', 'IDref_fil', ['reference'],
+        )
+      : []
+    const refFilLabel = new Map((refFilRows as any[]).map((r) => [Number(r.IDref_fil), trimStr(r.reference)]))
+
+    // Certifications: ref_fil_certif M:N → certificat.nom (deduped labels).
+    const rfcRows = refFilIds.length > 0
+      ? await query<any>(`SELECT IDref_fil_certif, IDref_fil, IDcertificat FROM ref_fil_certif WHERE IDref_fil IN (${refFilIds.join(',')})`)
+      : []
+    const certIds = [...new Set((rfcRows as any[]).map((r) => Number(r.IDcertificat) || 0).filter((x) => x > 0))]
+    const certRows = certIds.length > 0
+      ? await fixEncoding(
+          await query<any>(`SELECT IDcertificat, nom FROM certificat WHERE IDcertificat IN (${certIds.join(',')})`),
+          'certificat', 'IDcertificat', ['nom'],
+        )
+      : []
+    const certName = new Map((certRows as any[]).map((r) => [Number(r.IDcertificat), trimStr(r.nom)]))
+    const certsByRefFil = new Map<number, string[]>()
+    for (const r of rfcRows as any[]) {
+      const k = Number(r.IDref_fil)
+      const nom = certName.get(Number(r.IDcertificat)) ?? ''
+      if (!nom) continue
+      const list = certsByRefFil.get(k) ?? []
+      if (!list.includes(nom)) list.push(nom)
+      certsByRefFil.set(k, list)
+    }
+
+    // Yarn origin country (origine_matiere has accented PK columns → SELECT *,
+    // read only the ASCII keys pays/IDref_fil/IDfournisseur).
+    const origRows = refFilIds.length > 0
+      ? await query<any>(`SELECT * FROM origine_matiere WHERE IDref_fil IN (${refFilIds.join(',')})`)
+      : []
+    const origPays = new Map<number, string>()
+    for (const r of origRows as any[]) {
+      const k = Number(r.IDref_fil) || 0
+      if (k > 0 && !origPays.has(k) && trimStr(r.pays)) origPays.set(k, trimStr(r.pays))
+    }
+
+    // Fil transport docs: stock_fil → ref_fil_commande → ged type 6 on IDcommande_fil.
+    const rfCmdLineIds = [...new Set((stockFils as any[]).map((r) => Number(r.IDref_fil_commande) || 0).filter((x) => x > 0))]
+    const rfCmdRows = rfCmdLineIds.length > 0
+      ? await query<any>(`SELECT IDref_fil_commande, IDcommande_fil FROM ref_fil_commande WHERE IDref_fil_commande IN (${rfCmdLineIds.join(',')})`)
+      : []
+    const cmdFilByLine = new Map((rfCmdRows as any[]).map((r) => [Number(r.IDref_fil_commande), Number(r.IDcommande_fil) || 0]))
+    const cmdFilIds = [...new Set([...cmdFilByLine.values()].filter((x) => x > 0))]
+    const filGedRows = cmdFilIds.length > 0
+      ? await fixEncoding(
+          await query<any>(`SELECT IDged, nom, IDreference FROM ged WHERE IDreference IN (${cmdFilIds.join(',')}) AND IDtype_doc = 6`),
+          'ged', 'IDged', ['nom'],
+        )
+      : []
+    const filDocsByCmd = new Map<number, string[]>()
+    for (const r of filGedRows as any[]) {
+      const k = Number(r.IDreference)
+      const nom = trimStr(r.nom)
+      if (!nom) continue
+      const list = filDocsByCmd.get(k) ?? []
+      list.push(nom)
+      filDocsByCmd.set(k, list)
+    }
+
+    // Batched partner lookups (names + pays) for every partner in this article.
+    const tricoSstByCmd = new Map((tricoCmds as any[]).map((r) => [Number(r.IDcommande_sous_traitant), Number(r.IDsous_traitant) || 0]))
+    const allSstIds = [...new Set([
+      ...[...ennoGroups.values()].map((g) => g.sstId),
+      ...[...tricoSstByCmd.values()],
+    ].filter((x) => x > 0))]
+    const allFrsIds = [...new Set((stockFils as any[]).map((r) => Number(r.IDfournisseur) || 0).filter((x) => x > 0))]
+    const { sstNames, sstPays, frsNames, frsPays } = await loadPartnerLookups(allSstIds, allFrsIds)
+    const [ennoDocs, tricoDocs] = await Promise.all([
+      loadGedDocs([...new Set([...ennoGroups.values()].map((g) => g.cmdId).filter((x) => x > 0))], 3),
+      loadGedDocs(tricoCmdIds, 4),
+    ])
+
+    // ── Assemble the article's entries ──
+    const tissuFini: ImEntry[] = [...ennoGroups.values()].map((g) => {
+      const docs = ennoDocs.get(g.cmdId) ?? []
+      // Prefer docs whose filename matches one of the entry's lots (an sst
+      // commande can carry docs for lots shipped elsewhere).
+      const matching = docs.filter((d) => g.lots.some((lot) => lot && d.toLowerCase().includes(lot.toLowerCase())))
+      return {
+        titre: g.lots.length > 0 ? `Lot ${g.lots.join(', ')}` : null,
+        nom: sstNames.get(g.sstId) ?? `Sous-traitant ${g.sstId}`,
+        pays: sstPays.get(g.sstId) ?? null,
+        transportDocs: matching.length > 0 ? matching : docs,
+      }
+    })
+
+    interface TricoGroup { sstId: number; refEcruId: number; cmdIds: Set<number> }
+    const tricoGroups = new Map<string, TricoGroup>()
+    for (const e of ecruRows as any[]) {
+      const srcId = Number(e.IDref_commande_source) || 0
+      const lcsst = tricoLcsst.find((l) => Number(l.IDligne_commande_sous_traitant) === srcId)
+      if (!lcsst) continue
+      const cmdId = Number(lcsst.IDcommande_sous_traitant) || 0
+      const sstId = tricoSstByCmd.get(cmdId) ?? 0
+      if (sstId === 0) continue
+      const refEcruId = Number(e.IDref_ecru) || 0
+      const key = `${sstId}:${refEcruId}`
+      const g = tricoGroups.get(key) ?? { sstId, refEcruId, cmdIds: new Set<number>() }
+      if (cmdId > 0) g.cmdIds.add(cmdId)
+      tricoGroups.set(key, g)
+    }
+    const tombeMetier: ImEntry[] = [...tricoGroups.values()].map((g) => ({
+      titre: ecruLabel.get(g.refEcruId) || null,
+      nom: sstNames.get(g.sstId) ?? `Sous-traitant ${g.sstId}`,
+      pays: sstPays.get(g.sstId) ?? null,
+      transportDocs: [...g.cmdIds].flatMap((c) => tricoDocs.get(c) ?? []),
+    }))
+
+    interface FilGroup { refFilId: number; frsId: number; cmdFilIds: Set<number> }
+    const filGroups = new Map<string, FilGroup>()
+    for (const a of assoRows as any[]) {
+      const sf = sfById.get(Number(a.IDstock_fil) || 0)
+      const refFilId = Number(a.IDref_fil) || Number(sf?.IDref_fil) || 0
+      if (refFilId === 0) continue
+      const frsId = Number(sf?.IDfournisseur) || 0
+      const key = `${refFilId}:${frsId}`
+      const g = filGroups.get(key) ?? { refFilId, frsId, cmdFilIds: new Set<number>() }
+      const cmdFil = cmdFilByLine.get(Number(sf?.IDref_fil_commande) || 0) ?? 0
+      if (cmdFil > 0) g.cmdFilIds.add(cmdFil)
+      filGroups.set(key, g)
+    }
+    const fils: ImEntry[] = [...filGroups.values()].map((g) => ({
+      titre: refFilLabel.get(g.refFilId) || null,
+      nom: g.frsId > 0 ? frsNames.get(g.frsId) ?? `Fournisseur ${g.frsId}` : '—',
+      pays: origPays.get(g.refFilId) ?? (g.frsId > 0 ? frsPays.get(g.frsId) ?? null : null),
+      certifications: certsByRefFil.get(g.refFilId) ?? [],
+      transportDocs: [...g.cmdFilIds].flatMap((c) => filDocsByCmd.get(c) ?? []),
+    }))
+
+    articles.push({ titre: line.titre, sousTitre: line.sousTitre, tissuFini, tombeMetier, fils })
+  }
+  if (articles.length === 0) return null
+
+  return {
+    numero: id,
+    dateLong: formatHfsqlDateLongFr(ctx.dexp),
+    clientNom: ctx.clientNom,
+    articles,
+  }
+}
+
+async function renderRapportControleBuffer(data: RapportControlePdfData): Promise<Buffer> {
+  return renderToBuffer(
+    React.createElement(RapportControlePdf, { data }) as unknown as React.ReactElement<
+      import('@react-pdf/renderer').DocumentProps
+    >,
+  )
+}
+
+async function renderInfoMatieresBuffer(data: InfoMatieresPdfData): Promise<Buffer> {
+  return renderToBuffer(
+    React.createElement(InfoMatieresPdf, { data }) as unknown as React.ReactElement<
+      import('@react-pdf/renderer').DocumentProps
+    >,
+  )
+}
+
+expeditionsRouter.get('/formelle/:id/rapport-controle/pdf', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const data = await buildRapportControlePdfData(id)
+    if (!data) { res.status(404).json({ error: 'Rapport de contrôle indisponible pour cette expédition.' }); return }
+    const buffer = await renderRapportControleBuffer(data)
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `inline; filename="RC-${id}.pdf"`)
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.send(buffer)
+  } catch (err) {
+    console.error('Error rendering rapport de contrôle PDF:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+expeditionsRouter.get('/formelle/:id/info-matieres/pdf', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const data = await buildInfoMatieresPdfData(id)
+    if (!data) { res.status(404).json({ error: 'Info matières indisponible pour cette expédition.' }); return }
+    const buffer = await renderInfoMatieresBuffer(data)
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `inline; filename="Info-matieres-${id}.pdf"`)
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.send(buffer)
+  } catch (err) {
+    console.error('Error rendering info matières PDF:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ════════════════════════════════════════════════════════
 //  EMAIL — Avis d'expédition (formelle only)
 // ════════════════════════════════════════════════════════
 
@@ -1679,25 +2202,53 @@ interface EmailRecipientPayload { email: string; name?: string; source: 'contact
 async function buildBlEmailDefaults(id: number): Promise<{
   recipients: { selected: EmailRecipientPayload[]; suggestions: EmailRecipientPayload[] }
   subject: string; body: string; clientNom: string
+  optional_attachments: Array<{ id: string; default_checked: boolean }>
 } | null> {
-  const rows = await query<{ IDcommande_client: number }>(
-    `SELECT IDcommande_client FROM expedition WHERE IDexpedition = ${id} AND IDsociete = 1`,
+  const rows = await query<{ IDcommande_client: number; inclureRapportQualite: number | null }>(
+    `SELECT IDcommande_client, inclureRapportQualite FROM expedition WHERE IDexpedition = ${id} AND IDsociete = 1`,
   )
   if (rows.length === 0) return null
   const cmdId = Number(rows[0].IDcommande_client) || 0
+  const expRcFlag = Number(rows[0].inclureRapportQualite) === 1
   const cmdRows = cmdId > 0
     ? await query<{ IDclient: number }>(`SELECT IDclient FROM commande_client WHERE IDcommande_client = ${cmdId}`)
     : []
   const IDclient = Number(cmdRows[0]?.IDclient) || 0
 
-  const [clientNames, contactRows] = await Promise.all([
+  const [clientNames, contactRows, clientFlagRows, leRows] = await Promise.all([
     resolveClientNames([IDclient]),
     IDclient > 0
       ? query<{ IDcontact: number; nom: string | null; prenom: string | null; mail: string | null; envoi_bl: number | null; est_visible: number | null }>(
           `SELECT IDcontact, nom, prenom, mail, envoi_bl, est_visible FROM contact WHERE IDclient = ${IDclient}`,
         )
       : Promise.resolve([]),
+    IDclient > 0
+      ? query<{ inclureRapportQualite: number | null }>(`SELECT inclureRapportQualite FROM client WHERE IDclient = ${IDclient}`)
+      : Promise.resolve([]),
+    query<{ IDligne_commande_client: number }>(
+      `SELECT IDligne_expedition, IDligne_commande_client FROM ligne_expedition WHERE IDexpedition = ${id}`,
+    ),
   ])
+
+  // The RC / Info matières documents only exist for fini lines. Availability
+  // gates whether the dialog shows the checkboxes at all.
+  const lccIds = (leRows as any[]).map((l) => Number(l.IDligne_commande_client) || 0).filter((x) => x > 0)
+  let hasFiniLines = false
+  if (lccIds.length > 0) {
+    const typeRows = await query<any>(
+      `SELECT IDligne_commande_client, TYPE AS type_kind FROM ligne_commande_client WHERE IDligne_commande_client IN (${lccIds.join(',')})`,
+    )
+    hasFiniLines = (typeRows as any[]).some((t) => lineStockKind(Number(t.type_kind) || 0) === 'fini')
+  }
+  // Default: expedition mirror OR live client flag — MPS_NG INSERTs seeded the
+  // mirror to 0 before 2026-07, so the OR keeps those shipments covered.
+  const clientRcFlag = Number((clientFlagRows as any[])[0]?.inclureRapportQualite) === 1
+  const optional_attachments = hasFiniLines
+    ? [
+        { id: 'rapport-controle', default_checked: expRcFlag || clientRcFlag },
+        { id: 'info-matieres', default_checked: false },
+      ]
+    : []
   const clientNom = clientNames.get(IDclient) ?? ''
   const fixedContacts = await fixEncoding(contactRows, 'contact', 'IDcontact', ['nom', 'prenom', 'mail'])
 
@@ -1725,7 +2276,7 @@ async function buildBlEmailDefaults(id: number): Promise<{
     `Nous restons à votre disposition pour toute information complémentaire.\n\n` +
     `Cordialement,\n` +
     `ETS Malterre`
-  return { recipients: { selected, suggestions }, subject, body, clientNom }
+  return { recipients: { selected, suggestions }, subject, body, clientNom, optional_attachments }
 }
 
 expeditionsRouter.get('/formelle/:id/email-defaults', async (req: Request, res: Response) => {
@@ -1752,12 +2303,15 @@ const emailBody = z.object({
   subject: z.string().min(1).max(500),
   body: z.string().min(1).max(20000),
   attach_pdf: z.boolean().optional(),
+  // Optional per-document attachments — formelle only (divers ignores them).
+  attach_rapport_controle: z.boolean().optional(),
+  attach_info_matieres: z.boolean().optional(),
   extra_attachments: z.array(extraAttachmentSchema).optional(),
   dev_skip_send: z.boolean().optional(),
 })
 const ALLOW_DEV_SKIP_SEND = process.env.NODE_ENV !== 'production'
 
-async function logEnvoiEmails(idReference: number, recipients: string[], societe: string, typeDoc: number): Promise<void> {
+async function logEnvoiEmails(idReference: number, recipients: string[], societe: string, typeDoc: number, notes = ''): Promise<void> {
   if (recipients.length === 0) return
   const ts = nowHfsqlDatetime()
   for (const raw of recipients) {
@@ -1767,12 +2321,12 @@ async function logEnvoiEmails(idReference: number, recipients: string[], societe
       if (IS_WINDOWS) {
         await query(
           `INSERT INTO envoi_email (DATE, adresse, société, IDreference, invalidé, notes, IDtype_doc)
-           VALUES ('${ts}', ${sqlText(addr)}, ${sqlText(societe || '')}, ${idReference}, 0, '', ${typeDoc})`,
+           VALUES ('${ts}', ${sqlText(addr)}, ${sqlText(societe || '')}, ${idReference}, 0, ${sqlText(notes)}, ${typeDoc})`,
         )
       } else {
         await query(
           `INSERT INTO envoi_email (DATE, adresse, IDreference, notes, IDtype_doc)
-           VALUES ('${ts}', ${sqlText(addr)}, ${idReference}, '', ${typeDoc})`,
+           VALUES ('${ts}', ${sqlText(addr)}, ${idReference}, ${sqlText(notes)}, ${typeDoc})`,
         )
       }
     } catch (e) {
@@ -1818,6 +2372,24 @@ expeditionsRouter.post('/formelle/:id/email', async (req: Request, res: Response
         const buffer = await renderBlPdfBuffer(data)
         attachments.push({ filename: `BL-${id}.pdf`, content: buffer, contentType: 'application/pdf' })
       }
+      // Ticked optional documents — fail loudly when the data can't be built
+      // (the user explicitly asked for the attachment; never skip silently).
+      if (parsed.data.attach_rapport_controle === true) {
+        const rc = await buildRapportControlePdfData(id)
+        if (!rc) {
+          res.status(400).json({ error: 'rc_indisponible', message: 'Rapport de contrôle indisponible pour cette expédition.' })
+          return
+        }
+        attachments.push({ filename: `RC-${id}.pdf`, content: await renderRapportControleBuffer(rc), contentType: 'application/pdf' })
+      }
+      if (parsed.data.attach_info_matieres === true) {
+        const im = await buildInfoMatieresPdfData(id)
+        if (!im) {
+          res.status(400).json({ error: 'im_indisponible', message: 'Info matières indisponible pour cette expédition.' })
+          return
+        }
+        attachments.push({ filename: `Info-matieres-${id}.pdf`, content: await renderInfoMatieresBuffer(im), contentType: 'application/pdf' })
+      }
       for (const a of parsed.data.extra_attachments ?? []) {
         attachments.push({ filename: a.filename, content: Buffer.from(a.content_base64, 'base64'), contentType: a.content_type })
       }
@@ -1838,7 +2410,14 @@ expeditionsRouter.post('/formelle/:id/email', async (req: Request, res: Response
       const names = await resolveClientNames([Number(cr[0]?.IDclient) || 0])
       societe = names.get(Number(cr[0]?.IDclient) || 0) ?? ''
     } catch { /* informational */ }
-    await logEnvoiEmails(id, allRecipients, societe, TYPE_DOC_AVIS_EXPEDITION)
+    // Audit note records which documents rode along (e.g. "BL+RC+IM") — the
+    // send is still logged under the avis d'expédition type_doc like legacy.
+    const noteParts = [
+      ...(parsed.data.attach_pdf !== false ? ['BL'] : []),
+      ...(parsed.data.attach_rapport_controle === true ? ['RC'] : []),
+      ...(parsed.data.attach_info_matieres === true ? ['IM'] : []),
+    ]
+    await logEnvoiEmails(id, allRecipients, societe, TYPE_DOC_AVIS_EXPEDITION, noteParts.join('+'))
 
     res.json({ ok: true, messageId })
   } catch (err) {

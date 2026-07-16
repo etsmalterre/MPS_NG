@@ -18,6 +18,7 @@ import {
   AtSign,
   Printer,
   Layers,
+  ClipboardCheck,
   Package,
   Link2,
   Unlink,
@@ -221,6 +222,7 @@ export function ClientsExpeditions() {
   const [editIDAdresse, setEditIDAdresse] = useState(0)
   const [editIDContact, setEditIDContact] = useState(0)
   const [editDonation, setEditDonation] = useState(0)
+  const [editInclureRc, setEditInclureRc] = useState(0) // inclureRapportQualite (formelle)
   const [editObservation, setEditObservation] = useState('')
   const [editIDClient, setEditIDClient] = useState(0) // divers
   const [editRefClient, setEditRefClient] = useState('') // divers
@@ -268,6 +270,7 @@ export function ClientsExpeditions() {
       IDadresse: detail.IDadresse ?? 0,
       IDcontact: detail.IDcontact ?? 0,
       donation: detail.donation ?? 0,
+      inclureRc: detail.inclureRapportQualite ?? 0,
       observation: detail.observation_bl ?? '',
       IDclient: detail.IDclient ?? 0,
       refClient: detail.ref_client ?? '',
@@ -277,6 +280,7 @@ export function ClientsExpeditions() {
     setEditIDAdresse(snapshot.IDadresse as number)
     setEditIDContact(snapshot.IDcontact as number)
     setEditDonation(snapshot.donation as number)
+    setEditInclureRc(snapshot.inclureRc as number)
     setEditObservation(snapshot.observation as string)
     setEditIDClient(snapshot.IDclient as number)
     setEditRefClient(snapshot.refClient as string)
@@ -296,12 +300,13 @@ export function ClientsExpeditions() {
     if (editIDAdresse !== o.IDadresse) return true
     if (editIDContact !== o.IDcontact) return true
     if (editDonation !== o.donation) return true
+    if (editInclureRc !== o.inclureRc) return true
     if (editObservation !== o.observation) return true
     if (editIDClient !== o.IDclient) return true
     if (editRefClient !== o.refClient) return true
     if (linesDirty) return true
     return false
-  }, [isEditing, editDate, editIDTransporteur, editIDAdresse, editIDContact, editDonation, editObservation, editIDClient, editRefClient, linesDirty])
+  }, [isEditing, editDate, editIDTransporteur, editIDAdresse, editIDContact, editDonation, editInclureRc, editObservation, editIDClient, editRefClient, linesDirty])
 
   const saveHeaderMut = useMutation({
     mutationFn: () => apiFetch(`/expeditions/${bucket}/${selectedId}`, {
@@ -314,6 +319,7 @@ export function ClientsExpeditions() {
               IDadresse: editIDAdresse || 0,
               IDcontact: editIDContact || 0,
               donation: editDonation ? 1 : 0,
+              inclureRapportQualite: editInclureRc ? 1 : 0,
               observation_bl: editObservation,
             }
           : {
@@ -440,6 +446,7 @@ export function ClientsExpeditions() {
             editIDAdresse={editIDAdresse} onEditIDAdresseChange={setEditIDAdresse}
             editIDContact={editIDContact} onEditIDContactChange={setEditIDContact}
             editDonation={editDonation} onEditDonationChange={setEditDonation}
+            editInclureRc={editInclureRc} onEditInclureRcChange={setEditInclureRc}
             editObservation={editObservation} onEditObservationChange={setEditObservation}
             editIDClient={editIDClient} onEditIDClientChange={setEditIDClient}
             editRefClient={editRefClient} onEditRefClientChange={setEditRefClient}
@@ -479,7 +486,10 @@ export function ClientsExpeditions() {
         onConfirm={() => { if (selectedId !== null) deleteMut.mutate(selectedId) }}
       />
 
-      {/* Email: real send flow for both kinds (BL / BL divers PDF attached). */}
+      {/* Email: real send flow for both kinds (BL / BL divers PDF attached).
+          Formelle additionally offers the tickable rapport de contrôle / info
+          matières attachments — availability + RC default come from the
+          email-defaults endpoint (optional_attachments). */}
       {selectedId !== null && (
         <SendEmailDialog
           open={emailOpen}
@@ -489,7 +499,17 @@ export function ClientsExpeditions() {
           loadDefaults={() => apiFetch(`/expeditions/${bucket}/${selectedId}/email-defaults`)}
           pdfUrl={`${API_URL}/expeditions/${bucket}/${selectedId}/pdf`}
           pdfAttachmentLabel={bucket === 'formelle' ? `BL-${selectedId}.pdf` : `BL-divers-${selectedId}.pdf`}
-          onSend={(p) => postEmail(`${API_URL}/expeditions/${bucket}/${selectedId}/email`, p, { includeAttachPdf: true })}
+          optionalServerAttachments={bucket === 'formelle' ? [
+            { id: 'rapport-controle', label: `RC-${selectedId}.pdf`, url: `${API_URL}/expeditions/formelle/${selectedId}/rapport-controle/pdf`, defaultChecked: false },
+            { id: 'info-matieres', label: `Info-matieres-${selectedId}.pdf`, url: `${API_URL}/expeditions/formelle/${selectedId}/info-matieres/pdf`, defaultChecked: false },
+          ] : undefined}
+          onSend={(p) => postEmail(`${API_URL}/expeditions/${bucket}/${selectedId}/email`, p, {
+            includeAttachPdf: true,
+            extraBody: bucket === 'formelle' ? {
+              attach_rapport_controle: p.optionalAttachments?.['rapport-controle'] ?? false,
+              attach_info_matieres: p.optionalAttachments?.['info-matieres'] ?? false,
+            } : {},
+          })}
         />
       )}
     </>
@@ -668,6 +688,61 @@ function StatePill({ facturee, className }: { facturee: boolean; className?: str
 
 // ── Center: Detail Header ──────────────────────────────
 
+/** Print button for formelle expeditions — a small popover menu offering the
+ *  three printable documents (avis d'expédition / rapport de contrôle / info
+ *  matières). Divers keeps the plain one-click Printer button (BL only). */
+function PrintMenuButton({ expeditionId }: { expeditionId: number }) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  // Click outside to close the menu.
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [menuOpen])
+
+  const openDoc = (path: string) => {
+    window.open(`${API_URL}/expeditions/formelle/${expeditionId}${path}`, '_blank')
+    setMenuOpen(false)
+  }
+
+  const items = [
+    { label: "Avis d'expédition", icon: Truck, path: '/pdf' },
+    { label: 'Rapport de contrôle', icon: ClipboardCheck, path: '/rapport-controle/pdf' },
+    { label: 'Info matières', icon: Layers, path: '/info-matieres/pdf' },
+  ]
+
+  return (
+    <div ref={rootRef} className="relative">
+      <Button variant="outline" size="icon" className="h-9 w-9" title="Imprimer" onClick={() => setMenuOpen((v) => !v)}>
+        <Printer className="h-4 w-4" />
+      </Button>
+      {menuOpen && (
+        <div className="absolute top-full right-0 mt-1 w-56 rounded-lg border bg-white shadow-lg overflow-hidden z-50">
+          {items.map((item) => {
+            const ItemIcon = item.icon
+            return (
+              <button
+                key={item.path}
+                type="button"
+                onClick={() => openDoc(item.path)}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left transition-colors hover:bg-zinc-100"
+              >
+                <ItemIcon className="h-4 w-4 text-muted-foreground" />
+                {item.label}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function DetailHeader({
   expedition, isLoading, isEditing, editable,
   onStartEdit, onCancelEdit, onSave, isSaving,
@@ -733,9 +808,13 @@ function DetailHeader({
               </>
             ) : (
               <>
-                <Button variant="outline" size="icon" className="h-9 w-9" title="Imprimer" onClick={onPrintClick}>
-                  <Printer className="h-4 w-4" />
-                </Button>
+                {expedition.kind === 'formelle' ? (
+                  <PrintMenuButton expeditionId={expedition.id} />
+                ) : (
+                  <Button variant="outline" size="icon" className="h-9 w-9" title="Imprimer" onClick={onPrintClick}>
+                    <Printer className="h-4 w-4" />
+                  </Button>
+                )}
                 <Button variant="outline" size="icon" className="h-9 w-9" title="Envoyer un email" onClick={onEmailClick}>
                   <AtSign className="h-4 w-4" />
                 </Button>
@@ -1570,6 +1649,7 @@ function DetailSidebar({
   editIDAdresse, onEditIDAdresseChange,
   editIDContact, onEditIDContactChange,
   editDonation, onEditDonationChange,
+  editInclureRc, onEditInclureRcChange,
   editObservation, onEditObservationChange,
   editIDClient, onEditIDClientChange,
   editRefClient, onEditRefClientChange,
@@ -1582,6 +1662,7 @@ function DetailSidebar({
   editIDAdresse: number; onEditIDAdresseChange: (v: number) => void
   editIDContact: number; onEditIDContactChange: (v: number) => void
   editDonation: number; onEditDonationChange: (v: number) => void
+  editInclureRc: number; onEditInclureRcChange: (v: number) => void
   editObservation: string; onEditObservationChange: (v: string) => void
   editIDClient: number; onEditIDClientChange: (v: number) => void
   editRefClient: string; onEditRefClientChange: (v: string) => void
@@ -1649,6 +1730,7 @@ function DetailSidebar({
               editIDAdresse={editIDAdresse} onEditIDAdresseChange={onEditIDAdresseChange}
               editIDContact={editIDContact} onEditIDContactChange={onEditIDContactChange}
               editDonation={editDonation} onEditDonationChange={onEditDonationChange}
+              editInclureRc={editInclureRc} onEditInclureRcChange={onEditInclureRcChange}
               editObservation={editObservation} onEditObservationChange={onEditObservationChange}
               editIDClient={editIDClient} onEditIDClientChange={onEditIDClientChange}
               editRefClient={editRefClient} onEditRefClientChange={onEditRefClientChange}
@@ -1705,6 +1787,7 @@ function InfoTab({
   editIDAdresse, onEditIDAdresseChange,
   editIDContact, onEditIDContactChange,
   editDonation, onEditDonationChange,
+  editInclureRc, onEditInclureRcChange,
   editObservation, onEditObservationChange,
   editIDClient, onEditIDClientChange,
   editRefClient, onEditRefClientChange,
@@ -1720,6 +1803,7 @@ function InfoTab({
   editIDAdresse: number; onEditIDAdresseChange: (v: number) => void
   editIDContact: number; onEditIDContactChange: (v: number) => void
   editDonation: number; onEditDonationChange: (v: number) => void
+  editInclureRc: number; onEditInclureRcChange: (v: number) => void
   editObservation: string; onEditObservationChange: (v: string) => void
   editIDClient: number; onEditIDClientChange: (v: number) => void
   editRefClient: string; onEditRefClientChange: (v: string) => void
@@ -1764,6 +1848,11 @@ function InfoTab({
             <KV label="Donation" value={isEditing ? (
               <ToggleSwitch value={editDonation === 1} onChange={(v) => onEditDonationChange(v ? 1 : 0)} />
             ) : (expedition.donation ? 'Oui' : 'Non')} />
+            {/* Per-shipment mirror of the client's inclureRapportQualite —
+                drives the "Rapport de contrôle" default in the email dialog. */}
+            <KV label="Rapport de contrôle" value={isEditing ? (
+              <ToggleSwitch value={editInclureRc === 1} onChange={(v) => onEditInclureRcChange(v ? 1 : 0)} />
+            ) : (expedition.inclureRapportQualite ? 'Oui' : 'Non')} />
           </>
         )}
       </div>

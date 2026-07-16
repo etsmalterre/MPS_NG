@@ -3358,13 +3358,16 @@ commandesClientRouter.post('/:id/lignes/:ligneId/expedier', async (req: Request,
       `SELECT IDclient, IDadresse_livraison, donation FROM commande_client WHERE IDcommande_client = ${commandeId} AND IDsociete = 1`,
     )
     if (cmdRows.length === 0) { res.status(400).json({ error: 'Commande introuvable' }); return }
-    const clientRows = await query<{ IDtransporteur: number }>(
-      `SELECT IDtransporteur FROM client WHERE IDclient = ${Number(cmdRows[0].IDclient) || 0}`,
+    const clientRows = await query<{ IDtransporteur: number; inclureRapportQualite: number | null }>(
+      `SELECT IDtransporteur, inclureRapportQualite FROM client WHERE IDclient = ${Number(cmdRows[0].IDclient) || 0}`,
     )
+    // Per-shipment mirror of the client's "inclure rapports contrôle" flag —
+    // legacy seeds it from the client at creation time.
+    const inclureRc = Number(clientRows[0]?.inclureRapportQualite) === 1 ? 1 : 0
     const today = dateStr(new Date().toISOString().slice(0, 10))
     await query(
       `INSERT INTO expedition (IDsociete, IDcommande_client, IDadresse, IDtransporteur, IDcontact, DATE, donation, affiche_observations, est_valide, est_facture, inclureRapportQualite)
-       VALUES (1, ${commandeId}, ${Number(cmdRows[0].IDadresse_livraison) || 0}, ${Number(clientRows[0]?.IDtransporteur) || 0}, 0, '${today}', ${Number(cmdRows[0].donation) === 1 ? 1 : 0}, 1, 0, 0, 0)`,
+       VALUES (1, ${commandeId}, ${Number(cmdRows[0].IDadresse_livraison) || 0}, ${Number(clientRows[0]?.IDtransporteur) || 0}, 0, '${today}', ${Number(cmdRows[0].donation) === 1 ? 1 : 0}, 1, 0, 0, ${inclureRc})`,
     )
     const expRows = await query<{ IDexpedition: number }>(
       `SELECT IDexpedition FROM expedition WHERE IDcommande_client = ${commandeId} ORDER BY IDexpedition DESC`,

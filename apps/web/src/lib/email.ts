@@ -22,6 +22,12 @@ export interface EmailDefaults {
   cc?: string[]
   subject: string
   body: string
+  /** Server-driven state for the dialog's optional (tickable) attachments.
+   *  When present, only the listed ids are shown and each one's initial
+   *  checked state comes from `default_checked` (e.g. rapport de contrôle
+   *  pre-ticked when the client's inclureRapportQualite flag is set). When
+   *  absent, the dialog falls back to the caller-side `defaultChecked`. */
+  optional_attachments?: Array<{ id: string; default_checked: boolean }>
 }
 
 export interface SendPayload {
@@ -36,6 +42,11 @@ export interface SendPayload {
   /** User-uploaded files from the attachment picker. Sent to the server
    *  as base64-encoded `extra_attachments` alongside the server-rendered PDF. */
   userAttachments: File[]
+  /** Checked-state of the dialog's optional server attachments, keyed by
+   *  attachment id (e.g. { 'rapport-controle': true, 'info-matieres': false }).
+   *  The caller maps these ids to endpoint-specific flags via postEmail's
+   *  `extraBody` — they are never sent under this generic key. */
+  optionalAttachments?: Record<string, boolean>
   /** Dev-only: skip the actual Gmail send, but still run every server-side
    *  side effect (envoi_email log, sstatut transitions). Used by the "Faux
    *  envoi" button in the dialog to test status transitions without spamming

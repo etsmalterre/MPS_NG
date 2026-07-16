@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   AtSign,
+  Check,
   Mail,
   FileText,
   Loader2,
@@ -49,6 +50,20 @@ export interface ExtraServerAttachment {
   url: string
 }
 
+/** Server-rendered attachment the user can tick on/off (e.g. rapport de
+ *  contrôle / info matières on expedition emails). Shown as a chip with a
+ *  leading checkbox; previewable even when unticked. The checked map goes
+ *  out on SendPayload.optionalAttachments and the caller converts it to
+ *  endpoint flags. When the defaults fetch returns `optional_attachments`,
+ *  it drives both visibility (unlisted ids are hidden) and the initial
+ *  checked state; `defaultChecked` is only the fallback. */
+export interface OptionalServerAttachment {
+  id: string
+  label: string
+  url: string
+  defaultChecked: boolean
+}
+
 interface SendEmailDialogProps {
   open: boolean
   onClose: () => void
@@ -72,6 +87,8 @@ interface SendEmailDialogProps {
   pdfAttachmentLabel?: string
   /** Always-attached server documents (CGV…). Non-removable chips. */
   extraServerAttachments?: ExtraServerAttachment[]
+  /** Optional (tickable) server documents — see OptionalServerAttachment. */
+  optionalServerAttachments?: OptionalServerAttachment[]
 }
 
 export function SendEmailDialog({
@@ -84,6 +101,7 @@ export function SendEmailDialog({
   pdfUrl,
   pdfAttachmentLabel = 'document.pdf',
   extraServerAttachments,
+  optionalServerAttachments,
 }: SendEmailDialogProps) {
   // ── Form state ───────────────────────────────────────
   const [selectedRecipients, setSelectedRecipients] = useState<EmailRecipient[]>([])
@@ -101,6 +119,10 @@ export function SendEmailDialog({
    *  the file again). Blob URLs are created on add and revoked on remove
    *  or on dialog close. */
   const [userAttachments, setUserAttachments] = useState<UserAttachment[]>([])
+  /** Checked-state of the optional server attachments, keyed by id. Seeded
+   *  on hydration from the defaults' optional_attachments (fallback: each
+   *  prop entry's defaultChecked). */
+  const [optionalChecked, setOptionalChecked] = useState<Record<string, boolean>>({})
   /** Which attachment is currently shown in the right-pane viewer.
    *  'server' → the pdfUrl prop; a string id → a user attachment by id;
    *  null → empty state. */
@@ -122,6 +144,19 @@ export function SendEmailDialog({
     enabled: open,
   })
 
+  // Visible optional attachments: when the defaults fetch returns
+  // optional_attachments, it is authoritative — only ids it lists are shown
+  // (the server knows availability, e.g. "no fini lines → no rapport de
+  // contrôle"). Without the field, every prop entry is shown.
+  const visibleOptional = useMemo<OptionalServerAttachment[]>(() => {
+    const props = optionalServerAttachments ?? []
+    if (props.length === 0) return []
+    const serverList = defaults?.optional_attachments
+    if (!serverList) return props
+    const allowed = new Set(serverList.map((o) => o.id))
+    return props.filter((a) => allowed.has(a.id))
+  }, [optionalServerAttachments, defaults])
+
   // Hydrate form fields once defaults arrive, then leave them editable.
   // Also set the initial preview target: 'server' when a pdfUrl is present,
   // otherwise null (user will add a file or stay with the empty state).
@@ -132,9 +167,17 @@ export function SendEmailDialog({
     setCc((defaults.cc ?? []).join(', '))
     setSubject(defaults.subject)
     setBody(defaults.body)
+    // Initial checked state: server default_checked wins over the prop fallback.
+    const serverById = new Map((defaults.optional_attachments ?? []).map((o) => [o.id, o.default_checked]))
+    const checked: Record<string, boolean> = {}
+    for (const a of optionalServerAttachments ?? []) {
+      if (defaults.optional_attachments && !serverById.has(a.id)) continue
+      checked[a.id] = serverById.get(a.id) ?? a.defaultChecked
+    }
+    setOptionalChecked(checked)
     setPreviewedId(pdfUrl ? 'server' : extraServerAttachments?.[0]?.id ?? null)
     setHydrated(true)
-  }, [open, defaults, hydrated, pdfUrl, extraServerAttachments])
+  }, [open, defaults, hydrated, pdfUrl, extraServerAttachments, optionalServerAttachments])
 
   // Reset all local state when the dialog closes so re-opening fetches fresh
   // defaults and starts from a clean slate. Blob URLs for user attachments
@@ -152,6 +195,7 @@ export function SendEmailDialog({
       prev.forEach((a) => URL.revokeObjectURL(a.blobUrl))
       return []
     })
+    setOptionalChecked({})
     setPreviewedId(null)
     setErrorMessage(null)
     setSuccessMessage(null)
@@ -270,6 +314,10 @@ export function SendEmailDialog({
     setPreviewedId(id)
   }, [])
 
+  const toggleOptional = useCallback((id: string) => {
+    setOptionalChecked((prev) => ({ ...prev, [id]: !prev[id] }))
+  }, [])
+
   const openFilePicker = useCallback(() => {
     fileInputRef.current?.click()
   }, [])
@@ -298,6 +346,9 @@ export function SendEmailDialog({
         body,
         attachPdf: pdfUrl ? attachPdf : false,
         userAttachments: userAttachments.map((a) => a.file),
+        optionalAttachments: Object.fromEntries(
+          visibleOptional.map((a) => [a.id, optionalChecked[a.id] === true]),
+        ),
       })
       setSuccessMessage('Email envoyé avec succès')
       setTimeout(() => onClose(), 1200)
@@ -306,7 +357,7 @@ export function SendEmailDialog({
     } finally {
       setIsSending(false)
     }
-  }, [selectedRecipients, subject, cc, body, attachPdf, userAttachments, pdfUrl, onSend, onClose])
+  }, [selectedRecipients, subject, cc, body, attachPdf, userAttachments, pdfUrl, onSend, onClose, visibleOptional, optionalChecked])
 
   // Dev-only "Faux envoi" — short-circuits to vincent@etsmalterre.com with
   // dev_skip_send=true so the backend logs envoi_email + flips sstatut
@@ -325,6 +376,7 @@ export function SendEmailDialog({
         body: body || '[Faux envoi dev — pas de corps]',
         attachPdf: false,
         userAttachments: [],
+        optionalAttachments: {},
         devSkipSend: true,
       })
       setSuccessMessage('Faux envoi enregistré (statut mis à jour, aucun email réel envoyé)')
@@ -355,6 +407,10 @@ export function SendEmailDialog({
       if (extra) {
         return { kind: 'server-pdf', url: `${extra.url}#view=FitH` }
       }
+      const optional = visibleOptional.find((a) => a.id === previewedId)
+      if (optional) {
+        return { kind: 'server-pdf', url: `${optional.url}#view=FitH` }
+      }
       const att = userAttachments.find((a) => a.id === previewedId)
       if (att) {
         const type = att.file.type
@@ -368,7 +424,7 @@ export function SendEmailDialog({
       }
     }
     return { kind: 'empty' }
-  }, [previewedId, pdfUrl, attachPdf, userAttachments, extraServerAttachments])
+  }, [previewedId, pdfUrl, attachPdf, userAttachments, extraServerAttachments, visibleOptional])
 
   // ── Render ───────────────────────────────────────────
   return (
@@ -644,6 +700,52 @@ export function SendEmailDialog({
                       </button>
                     </div>
                   )}
+
+                  {/* Optional server documents (rapport de contrôle, info
+                      matières…) — leading checkbox toggles whether the API
+                      attaches them; the chip body previews (even unticked). */}
+                  {visibleOptional.map((a) => {
+                    const isChecked = optionalChecked[a.id] === true
+                    return (
+                      <div
+                        key={a.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => selectPreview(a.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault()
+                            selectPreview(a.id)
+                          }
+                        }}
+                        className={cn(
+                          'inline-flex items-center gap-1.5 rounded-md bg-white border shadow-sm text-xs py-1 px-2 text-foreground cursor-pointer transition-colors',
+                          previewedId === a.id
+                            ? 'border-accent ring-2 ring-accent/60'
+                            : 'border-border/60 hover:bg-zinc-50',
+                        )}
+                        title={isChecked ? `${a.label} - sera joint à l'email` : `${a.label} - non joint (cochez pour l'ajouter)`}
+                      >
+                        <button
+                          type="button"
+                          role="checkbox"
+                          aria-checked={isChecked}
+                          onClick={(e) => { e.stopPropagation(); toggleOptional(a.id) }}
+                          className={cn(
+                            'h-3.5 w-3.5 rounded-[3px] border flex items-center justify-center flex-shrink-0 transition-colors',
+                            isChecked
+                              ? 'bg-accent border-accent text-accent-foreground'
+                              : 'bg-white border-border hover:border-accent/60',
+                          )}
+                          title={isChecked ? 'Ne pas joindre' : 'Joindre à l\'email'}
+                        >
+                          {isChecked && <Check className="h-2.5 w-2.5" strokeWidth={3} />}
+                        </button>
+                        <FileText className={cn('h-3 w-3 flex-shrink-0', isChecked ? 'text-accent' : 'text-muted-foreground/60')} />
+                        <span className={cn('max-w-[180px] truncate', !isChecked && 'text-muted-foreground/70')}>{a.label}</span>
+                      </div>
+                    )
+                  })}
 
                   {/* Always-attached server documents (CGV…) — click to
                       preview, no ✕: the API attaches them unconditionally. */}

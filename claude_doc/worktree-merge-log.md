@@ -10,6 +10,34 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-16 — feat/expe
+Clients › Expéditions — **Rapport de contrôle + Info matières PDFs, tickable email
+attachments, print menu.** Two new branded documents port the legacy reports
+(`ETAT_RapportQualité` / `ETAT_Info_Matiere`): `RapportControlePdf.tsx` (per-lot 5-column
+table LOT · PARAMÈTRE · MIN · MAX · RELEVÉE; tolerances from `ref_fini`
+laizeHT/poids/stab columns, relevé = in-house `suivilot.*_tirelle`, colored green/red
+within/out of tolerance like legacy) and `InfoMatieresPdf.tsx` (per-article traceability:
+Tissu Fini = ennoblisseur via suivilot + ged type-3 docs; Tombé de métier = tricoteur via
+`stock_ecru.IDref_commande_source` (lcsst type 1 — affectation is the ennoblisseur!) +
+ged type 4; Fil = fournisseur via asso_fil_of→stock_fil, certifs `ref_fil_certif`→
+`certificat`, ged type 6 on `IDcommande_fil`, pays from `origine_matiere`/adresse).
+Endpoints: `GET /expeditions/formelle/:id/rapport-controle/pdf` + `/info-matieres/pdf`
+(404 when no fini lines). Email flow: `SendEmailDialog` gained `optionalServerAttachments`
+— checkbox chips previewable even unticked; visibility + defaults come from
+`email-defaults.optional_attachments` (RC pre-ticked when `expedition.inclureRapportQualite
+OR client.inclureRapportQualite`; IM always unticked; omitted for écru-only/divers). POST
+gains `attach_rapport_controle`/`attach_info_matieres` (400 if ticked but unavailable);
+`logEnvoiEmails` now records the attachment set in `notes` ("BL+RC+IM"), still type_doc
+14/16. Fix: both expedition INSERTs seeded `inclureRapportQualite` 0 — now copied from the
+client. UI: formelle print button is a 3-entry popover menu (avis / RC / info matières);
+new "Rapport de contrôle" ToggleSwitch in the sidebar Info tab (edit mode). HFSQL traps
+discovered (memories saved): `stock_fil` SELECT * OR any list containing `certif_bio`
+silently returns 0 rows on Windows — name ASCII columns without the certif block; suivilot
+has no allongement columns. Probe/dump scripts: `probe-rc-info-matieres.ts`,
+`dump-rapport-controle-pdf.ts`, `dump-info-matieres-pdf.ts` (synthetic + `--exp` live).
+Verified live on exp 11669 (PDFs vs legacy samples RC12162/Info_Matière, defaults,
+gating, notes logging, 404s, divers untouched).
+
 ## 2026-07-16 — feat/commandes-client
 Clients › Commandes — **Affectation tab notes-as-icons + gated observation editing + 2 new
 permissions.** (1) Roll cards in the line drawer's Affectation tab (and the shared RollRow

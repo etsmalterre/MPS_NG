@@ -2381,7 +2381,17 @@ function ExpeditionTab({
           loadDefaults={() => apiFetch(`/expeditions/formelle/${emailExpId}/email-defaults`)}
           pdfUrl={`${API_URL}/expeditions/formelle/${emailExpId}/pdf`}
           pdfAttachmentLabel={`BL-${emailExpId}.pdf`}
-          onSend={(p) => postEmail(`${API_URL}/expeditions/formelle/${emailExpId}/email`, p, { includeAttachPdf: true })}
+          optionalServerAttachments={[
+            { id: 'rapport-controle', label: `RC-${emailExpId}.pdf`, url: `${API_URL}/expeditions/formelle/${emailExpId}/rapport-controle/pdf`, defaultChecked: false },
+            { id: 'info-matieres', label: `Info-matieres-${emailExpId}.pdf`, url: `${API_URL}/expeditions/formelle/${emailExpId}/info-matieres/pdf`, defaultChecked: false },
+          ]}
+          onSend={(p) => postEmail(`${API_URL}/expeditions/formelle/${emailExpId}/email`, p, {
+            includeAttachPdf: true,
+            extraBody: {
+              attach_rapport_controle: p.optionalAttachments?.['rapport-controle'] ?? false,
+              attach_info_matieres: p.optionalAttachments?.['info-matieres'] ?? false,
+            },
+          })}
         />
       )}
 
