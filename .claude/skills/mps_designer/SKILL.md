@@ -11,7 +11,7 @@ There are **three** gold-standard layouts in the codebase, each with a short nam
 | Name | Screen | File | Use when |
 |---|---|---|---|
 | **Fiche** (3-panel master-detail) | `/fils/gestion` | `apps/web/src/pages/FilsGestion.tsx` | One entity at a time has rich nested data (contacts, addresses, sub-resources) and the user works on one record start-to-finish. Implements `MasterDetailLayout`, collapsible card sections with status-colored items, side-by-side edit dialogs with file upload + PDF preview, sidebar tabs with inline edit forms, global vs per-section edit state. **§4–§9, §18, §21–§25.** |
-| **Tableau** (table-centric + slide-in drawer) | `/fils/stock` | `apps/web/src/pages/FilsStock.tsx` | The page is fundamentally a sortable / searchable list of many flat rows; selecting a row reveals a focused detail view, but the row-set is the primary working surface. Implements toolbar (search + filters + create), split-aligned sortable table, right slide-in drawer, embed-mode top-offset, "Nouveau" creation dialog, KV-row drawer cards. **§27.** |
+| **Tableau** (table-centric + slide-in drawer) | `/fils/stock` | `apps/web/src/pages/FilsStock.tsx` | The page is fundamentally a sortable / searchable list of many flat rows; selecting a row reveals a focused detail view, but the row-set is the primary working surface. Implements toolbar (search + filters + create), split-aligned sortable table, right slide-in drawer, embed-mode top-offset, "Nouveau" creation dialog, KV-row drawer cards, mobile card list below `md`. **§27, §40.** |
 | **Classeur** (Fiche variant: master-tabbed center panel) | `/clients/gestion` | `apps/web/src/pages/ClientsGestion.tsx` | Same 3-panel shell as Fiche, but the center panel holds several independent, read-mostly datasets of which the user consults **one at a time** — a row of master tabs gives the active dataset the full panel height instead of stacked collapsible sections. **§39.** |
 
 When in doubt about a single rule, look at the references. When in doubt about which *layout* to choose, ask the user — do NOT mix patterns into a hybrid design.
@@ -1146,13 +1146,20 @@ Always use `variant="gold"` for the "Modifier" button at the top right of every 
 
 ## 15. Responsive Breakpoints
 
+Full mobile/tablet doctrine (card lists, drawers, dialogs, toolbars, regression harness) in **§40**.
+
 | Breakpoint | Tailwind | Layout Effect |
 |-----------|----------|---------------|
-| < 1024px | default | Mobile: sidebar hidden, hamburger menu |
+| < 640px | default | Toolbars wrap (§40.5); dialog form grids collapse to 1 column (§40.6) |
+| < 768px | default | **Table-centric screens: card list replaces the table** (§40.2–§40.3); drawers full-width + X close (§40.4) |
+| ≥ 768px | `md:` | Table-centric screens: split table (§27.3) |
+| < 1024px | default | Sidebar hidden, hamburger menu (`MobileNav`) |
 | ≥ 1024px | `lg:` | Desktop: sidebar visible |
 | < 1240px | — | MasterDetail: stacked (1 column) |
 | 1240–1400px | — | MasterDetail: compact (2 columns, sidebar drawer) |
 | ≥ 1400px | — | MasterDetail: full (3 columns) |
+
+Two **independent** systems coexist: Tailwind breakpoints (`sm`/`md`/`lg`) drive the shell and the table-centric screens; the JS `useResponsiveLayout` hook (1240/1400, `matchMedia`) drives `MasterDetailLayout`. Do not merge them and do not add phone modes to the hook — phone behavior for master-detail screens is "stacked", which already works below 1240.
 
 ---
 
@@ -1919,7 +1926,7 @@ The active sort column gets `text-accent` (gold) **and** a directional arrow ico
 
 ### 27.5 Right slide-in drawer
 
-The drawer is `position: fixed`, width `440px`, slides in from the right edge. It is **separate** from the page flex layout — it overlays the table.
+The drawer is `position: fixed`, width `w-full max-w-[440px]` (440px on any viewport ≥ 440px; full-width on phones — see §40.4), slides in from the right edge. It is **separate** from the page flex layout — it overlays the table.
 
 #### Top offset (handles embed mode)
 
@@ -1930,7 +1937,7 @@ const embed = searchParams.get('embed') === 'true'
 <div
   ref={drawerRef}
   className={cn(
-    'fixed right-0 bottom-0 w-[440px] bg-white border-l border-border/60 shadow-xl z-30 transition-transform duration-300 flex flex-col',
+    'fixed right-0 bottom-0 w-full max-w-[440px] bg-white border-l border-border/60 shadow-xl z-30 transition-transform duration-300 flex flex-col',
     embed ? 'top-0' : 'top-14',                       // critical — embed mode has no header
     open ? 'translate-x-0' : 'translate-x-full'
   )}
@@ -2025,7 +2032,7 @@ function KV({ label, value, mono }: { label: string; value: React.ReactNode; mon
 
 #### Outside-click dismissal
 
-Clicking anywhere outside the drawer closes it — *except* clicking another row in the table, which switches the selection. The handler reads the `data-stock-row` marker (§27.3):
+Clicking anywhere outside the drawer closes it — *except* clicking another row in the table (or a mobile card, §40.3), which switches the selection. The handler reads the `data-stock-row` marker (§27.3). The selector is `[data-stock-row]`, NOT `tr[data-stock-row]` — the mobile card list uses `div`s carrying the same marker:
 
 ```tsx
 useEffect(() => {
@@ -2034,13 +2041,15 @@ useEffect(() => {
     const target = e.target as Node | null
     if (!target) return
     if (drawerRef.current?.contains(target)) return  // inside drawer → keep open
-    if ((target as Element).closest?.('tr[data-stock-row]')) return  // row click → table handles it
+    if ((target as Element).closest?.('[data-stock-row]')) return  // row/card click → selection handles it
     onClose()
   }
   document.addEventListener('mousedown', handleMouseDown)
   return () => document.removeEventListener('mousedown', handleMouseDown)
 }, [id, onClose])
 ```
+
+Below `md` the drawer covers the full viewport, so outside-click can never fire — a **mobile-only X close button** in the drawer header is mandatory (see §40.4).
 
 ### 27.6 Foreign-key display columns
 
@@ -2062,8 +2071,10 @@ When building a new screen of this type, the result must have:
 - [ ] All drawer rows use `KV` (label left / value right)
 - [ ] `highlight={isEditing}` on every section card, even read-only ones
 - [ ] FK columns rendered via joined display name, never `#${id}`
-- [ ] Outside-click closes drawer, ignoring clicks on `tr[data-stock-row]`
+- [ ] Outside-click closes drawer, ignoring clicks on `[data-stock-row]` (selector must match the mobile cards too)
 - [ ] Create dialog wired through React Query mutation with `onMutationSuccess` invalidation, auto-selects the new row in the drawer
+- [ ] **Responsive (§40)**: table `hidden md:flex` + card list `md:hidden` sharing the same state; mobile sort row; drawer `w-full max-w-[440px]` + mobile X close; dialog grid `grid-cols-1 sm:grid-cols-2` with `col-span-full`; toolbar `flex-wrap` with Nouveau kept top-right via `order-*`
+- [ ] **Desktop screenshot baselines captured BEFORE any responsive/CSS change** and green after (§40.7)
 
 If any box is unchecked, do not mark the screen complete.
 
@@ -3825,4 +3836,88 @@ Any Fiche screen whose center panel would otherwise stack 2+ large read-only his
 - Clients → Gestion ✅ reference implementation (Références / Historique / Marchandise expédiée)
 - Sous-traitants → Gestion — if it ever grows per-sst history tables
 - Réseau → Entreprises — if commandes/recommandations histories grow into full tables
+
+---
+
+## 40. Responsive doctrine — tablet / Galaxy Z Fold / phone
+
+Reference: **`apps/web/src/pages/FilsStock.tsx`** (`StockLotCard`, `CardKV`, mobile sort row, drawer X close) + **`apps/web/e2e/`** (the regression harness). Established July 2026 as the pilot for the app-wide responsive rollout. Targets: tablets (768–1024), Z Fold unfolded (~717px CSS), phones (360–430), Z Fold cover screen (~345px — the narrowest supported width).
+
+### 40.1 The prime directive: desktop pixels never change
+
+Every responsive change must be **additive**: existing markup gets `hidden md:*`, new mobile markup gets `md:hidden`, form grids gain `sm:` gates, flex order swaps use `order-*` utilities that preserve DOM order at `sm`+. Never restructure or restyle desktop rendering "while you're in there". Proof is mechanical, not visual: capture Playwright desktop baselines BEFORE the first CSS change (§40.7) and keep them green after every edit — during the work, temporarily set `maxDiffPixels: 0` to prove strict pixel identity.
+
+Layout-family map (which screens need work):
+- **Table-centric (§27)** — the responsive gap; this section is mostly about them. Done: FilsStock ✅. To port: FinisStock (twin, incl. its 440px drawer), TombeMetierStock, RapportCommandesSst.
+- **Master-detail (§4)** — already handled by `useResponsiveLayout` (stacked below 1240). Do not touch.
+- **Dashboard** — already responsive (`sm:`/`lg:` grid).
+
+### 40.2 Table-centric screens: card list below `md`
+
+**Breakpoint is `md` (768px)** — stock Tailwind, no custom screens. Z Fold unfolded (~717px) deliberately gets cards: 10+ fixed-layout columns at 717px are unreadable, and unfolded-Fold is a handheld. Tablets (768+) keep the table with its existing `truncate` cells.
+
+Structure inside the §27.3 table card container — loading/error/empty branches stay shared ABOVE both siblings:
+
+```tsx
+{/* Desktop table (md+) — split header/body sharing one colgroup */}
+<div className="hidden md:flex md:flex-col flex-1 min-h-0">
+  {/* header <table> + scrolling body <table> exactly as §27.3 */}
+</div>
+
+{/* Mobile card list (< md) — same rows, selection and sort state as the table */}
+<div className="md:hidden flex-1 min-h-0 flex flex-col">
+  {/* sort row (§40.3) */}
+  <div className="flex-1 min-h-0 overflow-y-auto scrollbar-transparent p-2 space-y-2 bg-zinc-100/80">
+    {filteredSorted.map((r) => (
+      <StockLotCard key={r.id} row={r} isSelected={...} onClick={() => handleRowClick(r.id)} />
+    ))}
+  </div>
+</div>
+```
+
+**No logic duplication** — the cards consume the exact same `filteredSorted`, `selectedId`, `handleRowClick` (and therefore the unsaved-changes guard) as the table. Only row markup is rendered twice; one branch is `display:none` at any width.
+
+### 40.3 The card pattern (`StockLotCard` / `CardKV`)
+
+- Container: `rounded-lg border p-3 cursor-pointer transition-colors shadow-sm`; selected `bg-accent/10 border-accent ring-1 ring-accent`, unselected `bg-white border-border/60 hover:border-accent/40`. Cards sit on a `bg-zinc-100/80` panel (§5 list-item language).
+- **Must carry `data-stock-row`** and the same onClick as the table row — this is what keeps the drawer's outside-click logic working (§27.5).
+- Header row: primary field (`text-sm font-medium truncate`) + right-aligned icon cluster mirroring the table's trailing icon column (Leaf/Recycle/"T" badge).
+- Second line: secondary identifier (`text-xs text-muted-foreground`).
+- Body: 2-col grid of `CardKV` (label `text-[10px] uppercase tracking-wide text-muted-foreground`, value `text-xs truncate`, `tabular-nums` for numbers, `font-semibold` on the value users scan for — e.g. Stock).
+- Optional footer after a `border-t border-border/40`: comment (italic, truncate) left, date right.
+- Keep card components **in-file** next to the page (like `SortHeader`) until a second screen ports the pattern — then extract to `components/stock/`.
+
+**Mobile sort row** — table headers disappear with the table, so sorting gets a compact `md:hidden` row above the cards, styled like the table header band (`bg-zinc-200/60 border-b border-border/60 px-2 py-1.5`): a `TRI` micro-label, a full-width `PopoverSelect` (`hideEmpty`, options = the `COLUMNS` labels, `id = index + 1`) that changes `sort.key` keeping the current direction, and a ghost `h-9 w-9` icon button toggling `asc`/`desc` (ArrowUp/ArrowDown, French titles "Tri croissant"/"Tri décroissant").
+
+### 40.4 Drawers on phones
+
+- Width: **`w-full max-w-[440px]`** (never bare `w-[440px]`). `position: fixed` makes `w-full` = viewport width, capped at 440 on anything wider — desktop pixels identical, phones get full width. `translate-x-full` off-screen transform still works.
+- `top-14` is safe at all widths (header is `h-14` everywhere; `embed` mode still swaps to `top-0`).
+- **Mobile X close is mandatory**: at full width there is no "outside" left to tap, so without it the drawer is un-dismissable. Ghost `h-8 w-8 md:hidden` icon button with `title="Fermer"`, last sibling in the drawer header row, calling the guarded `onClose` (never a raw `setSelectedId(null)` — it must route through the §28 unsaved-changes guard).
+
+### 40.5 Toolbars on phones
+
+- Toolbar container gains `flex-wrap` (no-op while nothing wraps).
+- **The primary/create action ("Nouveau") stays in the top-right corner at every width** — user-confirmed rule. On phones it shares row 1 with the search; the filter checkbox wraps to row 2. Implement with order utilities so desktop DOM order (search, checkbox, button) and pixels are untouched:
+  - search wrapper: `order-1 flex-1 min-w-0`
+  - checkbox label: `order-3 sm:order-2 w-full sm:w-auto`
+  - Nouveau button: `order-2 sm:order-3 flex-shrink-0`
+- Long search placeholders just clip natively — do NOT shorten the string (that would change desktop pixels).
+
+### 40.6 Dialogs on phones
+
+- The `dialog.tsx` primitive's centering wrapper carries `p-4` so no dialog is ever edge-to-edge. (Desktop no-op: every dialog is narrower than viewport − 32px.)
+- Form grids: `grid grid-cols-1 sm:grid-cols-2` — never a bare `grid-cols-2`.
+- Full-width items inside those grids: **`col-span-full`, never `col-span-2`** (identical at 2 columns; `col-span-2` overflows a 1-column grid).
+- Tall dialogs: `DialogContent` gets `max-h-[90dvh] overflow-y-auto` so the form scrolls inside a 720px-tall phone viewport (use `dvh`, not `vh` — mobile browser chrome).
+
+### 40.7 Screenshot-regression harness (the safety net)
+
+Lives in `apps/web/e2e/` (Playwright, chromium only, own vite server on **port 3200** — clear of worktree slots 3000–3006). Full policy in `apps/web/e2e/README.md`. Key rules:
+
+- **Entire `/api/` layer is fixture-mocked** (`support/mock-api.ts`): vite runs with `VITE_API_URL=/api` so one `page.route('**/api/**')` intercepts everything; unmocked endpoints fulfill 500 and fail the test via the `afterEach` `unmatched` assertion. `page.clock.setFixedTime` freezes `Date.now()` (row ages, default dates).
+- **Workflow for any risky UI change**: capture baselines from the UNTOUCHED screen in their own commit, then every edit must keep `test:e2e` green (`maxDiffPixels: 0` temporarily to prove pixel identity).
+- Projects: `desktop-1920`, `desktop-1366`, `tablet-768` run the standard spec (table layout); `fold-open-717`, `phone-390`, `fold-cover-345` run only `*-responsive.spec.ts` (card layout) via `testMatch`.
+- Baselines are machine-specific (system-ui fonts) — regenerate locally, never trust cross-machine diffs. Not wired into turbo `test`; run explicitly: `pnpm --filter @mps/web test:e2e`.
+- **Adding a screen to the rollout**: capture its API responses into `e2e/fixtures/`, add routes in `mock-api.ts`, write a `<screen>.spec.ts` (default + drawer/dialog + edit states), bless desktop baselines BEFORE touching the screen, then do the §40.2–§40.6 edits, then add its `*-responsive.spec.ts` snapshots.
 
