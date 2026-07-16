@@ -1309,11 +1309,12 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
   useEffect(() => {
     if (drawerRefId !== null && !filtered.some((r) => r.IDdesignation_client === drawerRefId)) setDrawerRefId(null)
   }, [filtered, drawerRefId])
-  // Bring the selected card into view once the list has shrunk under the drawer.
+  // Slide the selected card to the very top of the shrunk band so the drawer
+  // gets all the remaining vertical space.
   useEffect(() => {
     if (drawerRefId === null) return
     requestAnimationFrame(() => {
-      document.querySelector(`[data-ref-card="${drawerRefId}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+      document.querySelector(`[data-ref-card="${drawerRefId}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
     })
   }, [drawerRefId])
 
@@ -1330,7 +1331,9 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
       {isLoading ? <SectionSpinner /> : !data || data.length === 0 ? <SectionEmpty text="Aucune référence client" />
         : filtered.length === 0 ? <SectionEmpty text="Aucune référence ne correspond à la recherche" /> : (
         <div className={cn('overflow-auto space-y-2 p-1 scrollbar-transparent',
-          drawerOpen ? 'flex-shrink-0 max-h-[40%]' : 'flex-1 min-h-0')}>
+          // Open drawer: collapse the list to a one-card band (selected card pinned
+          // at its top, next card peeking to hint the list still scrolls).
+          drawerOpen ? 'flex-shrink-0 max-h-[84px]' : 'flex-1 min-h-0')}>
           {filtered.map((r) => (
             <div key={r.IDdesignation_client} data-ref-card={r.IDdesignation_client}
               onClick={() => setDrawerRefId((prev) => (prev === r.IDdesignation_client ? null : r.IDdesignation_client))}
@@ -1346,7 +1349,11 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
                     {r.ref_interne && <Badge variant="outline" className="text-[10px] py-0 flex-shrink-0">{r.ref_interne}</Badge>}
                     {r.unite === 1 && <Badge variant="outline" className="text-[10px] py-0 flex-shrink-0">Kg</Badge>}
                     <div className="flex items-center gap-1.5 ml-auto flex-shrink-0">
-                      {!!r.soumettre && <Badge variant="secondary" className="text-[10px] py-0">Soumis</Badge>}
+                      {!!r.soumettre && (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border bg-amber-100 text-amber-800 border-amber-200 whitespace-nowrap">
+                          À soumettre
+                        </span>
+                      )}
                       <span className="text-[11px] text-muted-foreground tabular-nums flex items-center gap-1">
                         <Palette className="h-3 w-3" />{r.coloris.length}
                       </span>
