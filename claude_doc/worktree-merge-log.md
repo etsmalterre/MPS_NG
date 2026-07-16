@@ -10,6 +10,32 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-16 — feat/stock-fil
+Fils › Stock + Finis › Stock — **responsive rollout step 1+2 (tablet / Z Fold / phone) +
+Playwright screenshot-regression harness.** (1) New e2e harness in `apps/web/e2e/`
+(@playwright/test, chromium-only, own vite server on port 3200 with `VITE_API_URL=/api`):
+the whole `/api/` layer is fixture-mocked (`support/mock-api.ts`, unmocked endpoints 500
+loudly), `Date.now()` frozen via `page.clock`, baselines committed per-machine (system-ui
+fonts — policy in `e2e/README.md`). 6 viewport projects: desktop-1920/1366 + tablet-768 run
+the table specs, fold-open-717 / phone-390 / fold-cover-345 run the `*-responsive` specs.
+Workflow: bless desktop baselines on the UNTOUCHED screen first, then every responsive edit
+must keep them green (proven at `maxDiffPixels: 0`). Scripts: `test:e2e`, `test:e2e:update`
+(NOT in turbo test). (2) Both stock screens are now responsive, all changes additive
+(desktop pixel-identical): below `md` the split tables become card lists sharing the same
+rows/sort/selection/guard state (`StockLotCard` / `StockFiniCard` in-file; shared `CardKV`
++ generic `MobileSortRow` in `components/stock/StockCardParts.tsx`); FinisStock's edit-mode
+multi-select works on cards with the checkbox CSS-driven via a `data-editing` group
+attribute (zero re-renders on mode toggle); drawers are `w-full max-w-[440px]` with a
+mobile-only X close routed through the unsaved guard; outside-click selector widened to
+`[data-stock-row]`; all dialogs get `max-h-[90dvh] overflow-y-auto` + `grid-cols-1
+sm:grid-cols-2` + `col-span-full`; the dialog primitive gained `p-4`. (3) Phone toolbar
+rules (user-confirmed): primary actions stay top-right via `order-*` swaps, text buttons
+collapse to icon-only (`hidden sm:inline` label + `title`), the Mode édition badge takes
+its own row; FinisStock totalizer stays on ONE line at 345px (labels hidden below `sm`,
+kg/Ml units carry the meaning), selection summary on its own row. (4) Doctrine recorded in
+`mps_designer` §40 (+ §15/§27 refreshed). Remaining table-centric ports: TombeMetierStock,
+RapportCommandesSst.
+
 ## 2026-07-16 — feat/expe
 Clients › Expéditions — **Rapport de contrôle + Info matières PDFs, tickable email
 attachments, print menu.** Two new branded documents port the legacy reports
