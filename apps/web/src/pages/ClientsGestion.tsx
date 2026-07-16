@@ -1336,8 +1336,13 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
           drawerOpen ? 'flex-shrink-0 max-h-[84px]' : 'flex-1 min-h-0')}>
           {filtered.map((r) => (
             <div key={r.IDdesignation_client} data-ref-card={r.IDdesignation_client}
-              onClick={() => setDrawerRefId((prev) => (prev === r.IDdesignation_client ? null : r.IDdesignation_client))}
-              title={drawerRefId === r.IDdesignation_client ? 'Masquer les coloris' : 'Voir les coloris'}
+              // Edit mode: the card click is reserved for the settings dialog (§31.3);
+              // the drawer only opens from view mode.
+              onClick={() => {
+                if (isEditing) setSettings({ existing: r })
+                else setDrawerRefId((prev) => (prev === r.IDdesignation_client ? null : r.IDdesignation_client))
+              }}
+              title={isEditing ? 'Modifier la référence' : drawerRefId === r.IDdesignation_client ? 'Masquer les coloris' : 'Voir les coloris'}
               className={cn('group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3', 'border-l-amber-400/60',
                 'cursor-pointer hover:bg-zinc-100 hover:border-accent/40 transition-colors',
                 drawerRefId === r.IDdesignation_client && 'ring-1 ring-accent bg-accent/[0.06] border-accent/50')}>
@@ -1357,13 +1362,7 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
                       <span className="text-[11px] text-muted-foreground tabular-nums flex items-center gap-1">
                         <Palette className="h-3 w-3" />{r.coloris.length}
                       </span>
-                      {isEditing && (
-                        <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
-                          title="Modifier la référence"
-                          onClick={(e) => { e.stopPropagation(); setSettings({ existing: r }) }}>
-                          <Pencil className="h-3 w-3" />
-                        </Button>
-                      )}
+                      {isEditing && <Pencil className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />}
                     </div>
                   </div>
                   {r.designation && <p className="text-[11px] text-muted-foreground truncate">{r.designation}</p>}
