@@ -792,21 +792,22 @@ function DetailMain({ client, isLoading, hasSelection, isEditing, canManageTarif
   if (!client) return null
 
   return (
-    <div className="flex-1 min-h-0 rounded-xl border flex flex-col overflow-hidden bg-zinc-100/80">
-      <div className="flex border-b p-1 gap-1 rounded-t-xl bg-zinc-200/50">
+    <div className="flex-1 min-h-0 flex flex-col">
+      {/* Master tabs — header-submenu style pills on the natural background */}
+      <div className="flex-shrink-0 flex items-center gap-1 border-b border-border/60 pb-2">
         {MAIN_TABS.map((t) => {
           const Icon = t.icon
           const active = activeTab === t.key
           return (
             <button key={t.key} type="button" onClick={() => setActiveTab(t.key)}
-              className={cn('flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-md transition-colors',
-                active ? 'bg-accent text-accent-foreground shadow-sm' : 'text-muted-foreground hover:bg-accent/10')}>
+              className={cn('flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium rounded-md transition-colors whitespace-nowrap',
+                active ? 'bg-accent text-accent-foreground shadow-sm' : 'text-muted-foreground hover:bg-accent/10 hover:text-accent')}>
               <Icon className="h-3.5 w-3.5" />{t.label}
             </button>
           )
         })}
       </div>
-      <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-transparent">
+      <div className="flex-1 min-h-0 overflow-auto space-y-2 pt-3 pr-1">
         {/* Commercial sub-views (tarif modes editable in edit mode, permission-gated) */}
         {activeTab === 'references' && <ReferencesTab clientId={client.IDclient} isEditing={isEditing} canManageTarifs={canManageTarifs} />}
         {activeTab === 'historique' && <HistoriqueTab clientId={client.IDclient} />}
@@ -1278,7 +1279,7 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs }: { clientId: num
       {isLoading ? <SectionSpinner /> : !data || data.length === 0 ? <SectionEmpty text="Aucune référence client" /> : (
         <div className="space-y-2">
           {data.map((r) => (
-            <div key={r.IDdesignation_client} className={cn('rounded-lg border-l-4 border border-border/60 bg-card shadow-sm p-3', 'border-l-amber-400/60')}>
+            <div key={r.IDdesignation_client} className={cn('rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3', 'border-l-amber-400/60')}>
               <div className="flex items-center gap-2">
                 <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-amber-400/10"><Tag className="h-3.5 w-3.5 text-amber-600" /></div>
                 <p className="text-sm font-medium truncate">{r.client_ref || '—'}</p>
