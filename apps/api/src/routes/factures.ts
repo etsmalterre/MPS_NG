@@ -229,11 +229,11 @@ async function loadModePaiementLabel(id: number): Promise<string | null> {
   return (fixed[0]?.libelle ?? null) as string | null
 }
 
-interface EcheanceRule { libelle: string | null; type: number; nb_jours: number; jour: number }
+export interface EcheanceRule { libelle: string | null; type: number; nb_jours: number; jour: number }
 
 /** Echeance row incl. the calculation params (TYPE is a reserved word — comes
  *  back as the uppercase key, like facture.DATE/TYPE). */
-async function loadEcheanceRule(id: number): Promise<EcheanceRule | null> {
+export async function loadEcheanceRule(id: number): Promise<EcheanceRule | null> {
   if (!(id > 0)) return null
   const rows = await query<any>(`SELECT * FROM echeance WHERE IDecheance = ${id}`)
   if (rows.length === 0) return null
@@ -257,7 +257,7 @@ async function loadEcheanceRule(id: number): Promise<EcheanceRule | null> {
  *    TYPE 5 → "<nb> jours, fin de mois, le <jour>": TYPE 3 then + jour days
  *             (= the <jour>th of the following month)
  *  Returns "dd/mm/yyyy" or null. */
-function computeDateEcheance(dateYmd: string | null | undefined, ech: EcheanceRule | null): string | null {
+export function computeDateEcheance(dateYmd: string | null | undefined, ech: EcheanceRule | null): string | null {
   if (!ech) return null
   const s = String(dateYmd ?? '')
   if (!/^\d{8}$/.test(s)) return null

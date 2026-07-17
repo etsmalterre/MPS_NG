@@ -30,6 +30,7 @@ import { renderToBuffer } from '@react-pdf/renderer'
 import React from 'react'
 import { query, queryRaw, fixEncoding } from '../lib/hfsql-auto.js'
 import { CommandeClientPdf, type CommandeClientPdfData } from '../lib/pdf/CommandeClientPdf.js'
+import { FacturePdf, type FacturePdfData } from '../lib/pdf/FacturePdf.js'
 import { CgvPdf } from '../lib/pdf/CgvPdf.js'
 import { calcLignePriceClient } from '../lib/pricing-ligne-client.js'
 import { calcTarifSST } from '../lib/pricing-sst.js'
@@ -40,6 +41,7 @@ import { userHasPermission } from '../lib/permissions.js'
 import { isEffectiveAdmin } from '../lib/auth.js'
 import { IS_WINDOWS, esc, n, dateDigits as dateStr, addWorkingDays } from '../lib/sst-shared.js'
 import { createKnitOrder, TRICOTAGE_MALTERRE_ID } from './commandes-sous-traitant.js'
+import { computeDateEcheance, loadEcheanceRule } from './factures.js'
 import { repairAliased, repairAllJoins } from './stock-fini.js'
 import { fetchDefectsByEcru, defautSummary } from './stock-ecru.js'
 
@@ -3702,6 +3704,116 @@ commandesClientRouter.get('/:id/pdf', async (req: Request, res: Response) => {
 })
 
 // ════════════════════════════════════════════════════════
+//  FACTURE PROFORMA  (commande-based, generated on the fly)
+// ════════════════════════════════════════════════════════
+//
+// A proforma invoice derived straight from the commande header + lines —
+// NEVER persisted to facturation (no facture_prov row, no proforma numero
+// consumed). Rendered with the same FacturePdf template as facturation
+// proformas ("Facture proforma" title, bank-coordinates card, non-contractual
+// mention) so clients see one consistent proforma look, extended with the
+// commande's remise / frais de port totals rows. Dated at generation time.
+
+// Proforma numero = 1 000 000 + commande numero (e.g. commande 3658 →
+// proforma N°1003658). The offset guarantees it can never collide with the
+// numbers issued by clients/facturation — definitive facture.numero (~9k)
+// and facturation-proforma IDfacture_prov (~13k) are both far below 1M —
+// while staying purely numeric and deterministic (same commande → same
+// proforma number on every re-print/re-send).
+const PROFORMA_NUMERO_OFFSET = 1_000_000
+
+/** Today as HFSQL YYYYMMDD. */
+function todayHfsqlDate(): string {
+  const d = new Date()
+  const pad = (x: number) => String(x).padStart(2, '0')
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`
+}
+
+export async function buildProformaPdfData(id: number): Promise<FacturePdfData | null> {
+  const base = await buildClientPdfData(id)
+  if (!base) return null
+
+  const hdr = await query<{ IDclient: number; IDecheance: number }>(
+    `SELECT IDclient, IDecheance FROM commande_client WHERE IDcommande_client = ${id}`,
+  )
+  const IDclient = Number(hdr[0]?.IDclient) || 0
+  const IDecheance = Number(hdr[0]?.IDecheance) || 0
+
+  // Billing defaults from the client row — the same source facture creation
+  // uses (factures.ts billingDefaults): the client's VAT number and, when the
+  // client carries its own TVA rate, that rate instead of the ETM default.
+  let numTva: string | null = null
+  let tvaRate = base.tvaRate
+  if (IDclient > 0) {
+    try {
+      const cli = await query<{ num_tva: string | null; IDtva: number | null }>(
+        `SELECT num_tva, IDtva FROM client WHERE IDclient = ${IDclient}`,
+      )
+      numTva = ((cli[0]?.num_tva ?? '').toString().trim()) || null
+      const IDtva = Number(cli[0]?.IDtva) || 0
+      if (IDtva > 0) {
+        const tv = await query<{ valeur: number | null }>(`SELECT valeur FROM tva WHERE IDtva = ${IDtva}`)
+        if (tv.length > 0) tvaRate = Number(tv[0].valeur) || 0
+      }
+    } catch { /* keep defaults */ }
+  }
+
+  const todayYmd = todayHfsqlDate()
+  const echRule = await loadEcheanceRule(IDecheance)
+
+  return {
+    numero: String(PROFORMA_NUMERO_OFFSET + (Number(base.numero) || id)),
+    refCommande: base.numero,
+    type: 1,
+    isProforma: true,
+    dateFacture: formatHfsqlDateLongFr(todayYmd),
+    clientNom: base.clientNom,
+    numTva,
+    adresseFacturation: base.adresseFacturation,
+    modePaiement: base.modePaiement,
+    echeance: base.echeance,
+    echeanceDate: computeDateEcheance(todayYmd, echRule),
+    tvaRate,
+    remise: base.remise,
+    fraisPort: base.fraisPort,
+    lignes: base.lignes.map((l) => ({
+      designation: [l.ref_label, l.colori_reference].filter((s) => s && s.trim()).join(' - ') || '—',
+      quantite: l.quantite,
+      unite: l.unite_label,
+      prix: l.prix,
+      montant: l.montant,
+    })),
+  }
+}
+
+async function renderProformaPdfBuffer(data: FacturePdfData): Promise<Buffer> {
+  return renderToBuffer(
+    React.createElement(FacturePdf, { data }) as unknown as React.ReactElement<
+      import('@react-pdf/renderer').DocumentProps
+    >,
+  )
+}
+
+commandesClientRouter.get('/:id/proforma/pdf', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const data = await buildProformaPdfData(id)
+    if (!data) { res.status(404).json({ error: 'Commande not found' }); return }
+    const buffer = await renderProformaPdfBuffer(data)
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `inline; filename="proforma-${data.numero}.pdf"`)
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.send(buffer)
+  } catch (err) {
+    console.error('Error rendering commande-client proforma PDF:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ════════════════════════════════════════════════════════
 //  EMAIL  (bon de commande client → Gmail)
 // ════════════════════════════════════════════════════════
 
@@ -3714,7 +3826,7 @@ interface EmailDefaultsPayload {
   numero: string
 }
 
-async function buildEmailDefaults(id: number): Promise<EmailDefaultsPayload | null> {
+async function buildEmailDefaults(id: number, variant: 'confirmation' | 'proforma' = 'confirmation'): Promise<EmailDefaultsPayload | null> {
   const rows = await query<{ IDclient: number; numero: number | null }>(
     `SELECT IDclient, numero FROM commande_client WHERE IDcommande_client = ${id}`,
   )
@@ -3746,6 +3858,17 @@ async function buildEmailDefaults(id: number): Promise<EmailDefaultsPayload | nu
     if (displayName) recipient.name = displayName
     if (c.envoi_commande === 1) selected.push(recipient)
     else suggestions.push(recipient)
+  }
+
+  if (variant === 'proforma') {
+    const subject = `Facture proforma - Commande N°${numero} - ETS Malterre`
+    const body =
+      `Bonjour,\n\n` +
+      `Veuillez trouver ci-joint notre facture proforma relative à votre commande N°${numero}.\n\n` +
+      `Nous restons à votre disposition pour toute information complémentaire.\n\n` +
+      `Cordialement,\n` +
+      `ETS Malterre`
+    return { recipients: { selected, suggestions }, subject, body, clientNom, numero }
   }
 
   // Order recap in the body itself so key terms are verifiable without
@@ -3792,6 +3915,19 @@ commandesClientRouter.get('/:id/email-defaults', async (req: Request, res: Respo
   }
 })
 
+commandesClientRouter.get('/:id/proforma/email-defaults', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const defaults = await buildEmailDefaults(id, 'proforma')
+    if (!defaults) { res.status(404).json({ error: 'Commande not found' }); return }
+    res.json(defaults)
+  } catch (err) {
+    console.error('Error building proforma email defaults:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 const extraAttachmentSchema = z.object({
   filename: z.string().min(1).max(255),
   content_base64: z.string().min(1),
@@ -3808,7 +3944,7 @@ const emailBody = z.object({
 })
 const ALLOW_DEV_SKIP_SEND = process.env.NODE_ENV !== 'production'
 
-async function logEnvoiEmails(idTypeDoc: number, idReference: number, recipients: string[], societe: string): Promise<void> {
+async function logEnvoiEmails(idTypeDoc: number, idReference: number, recipients: string[], societe: string, notes = ''): Promise<void> {
   if (recipients.length === 0) return
   const ts = nowHfsqlDatetime()
   for (const raw of recipients) {
@@ -3818,13 +3954,13 @@ async function logEnvoiEmails(idTypeDoc: number, idReference: number, recipients
       if (IS_WINDOWS) {
         await query(
           `INSERT INTO envoi_email (DATE, adresse, société, IDreference, invalidé, notes, IDtype_doc)
-           VALUES ('${ts}', ${sqlText(addr)}, ${sqlText(societe || '')}, ${idReference}, 0, '', ${idTypeDoc})`,
+           VALUES ('${ts}', ${sqlText(addr)}, ${sqlText(societe || '')}, ${idReference}, 0, ${sqlText(notes)}, ${idTypeDoc})`,
         )
       } else {
         // Linux bridge can't tokenize accented société/invalidé — omit (HFSQL zero-fills).
         await query(
           `INSERT INTO envoi_email (DATE, adresse, IDreference, notes, IDtype_doc)
-           VALUES ('${ts}', ${sqlText(addr)}, ${idReference}, '', ${idTypeDoc})`,
+           VALUES ('${ts}', ${sqlText(addr)}, ${idReference}, ${sqlText(notes)}, ${idTypeDoc})`,
         )
       }
     } catch (e) {
@@ -3900,6 +4036,75 @@ commandesClientRouter.post('/:id/email', async (req: Request, res: Response) => 
   }
 })
 
+// Proforma variant: attaches the on-the-fly proforma PDF, NO CGV (matches
+// facturation emails), and logs with notes='proforma' so the historique tab
+// can label these sends distinctly. Nothing is written to facturation.
+commandesClientRouter.post('/:id/proforma/email', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
+    const parsed = emailBody.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
+    const devSkip = parsed.data.dev_skip_send === true && ALLOW_DEV_SKIP_SEND
+
+    let messageId: string
+    if (devSkip) {
+      messageId = `dev-skip-${Date.now()}`
+      console.log(`[dev-skip-send] commande_client #${id} proforma — fake send to ${parsed.data.to.join(', ')}`)
+    } else {
+      const senderEmail = await getUserEmail(req.userId)
+      if (!senderEmail) {
+        res.status(400).json({
+          error: 'no_sender_email',
+          message: "Aucune adresse email n'est associée à votre compte. Un administrateur doit en définir une dans Paramètres › Utilisateurs.",
+        })
+        return
+      }
+      const userRows = await query<{ prenom: string | null; nom: string | null }>(
+        `SELECT prenom, nom FROM utilisateur WHERE IDutilisateur = ${req.userId}`,
+      )
+      const fixedUser = await fixEncoding(userRows, 'utilisateur', 'IDutilisateur', ['prenom', 'nom'])
+      const u = (fixedUser[0] as any) ?? null
+      const displayName = u ? [u.prenom, u.nom].filter((s: string | null) => s && s.trim()).map((s: string) => s.trim()).join(' ') : ''
+      const fromName = displayName ? `${displayName} - ETS Malterre` : 'ETS Malterre'
+
+      const attachments: Array<{ filename: string; content: Buffer; contentType: string }> = []
+      if (parsed.data.attach_pdf !== false) {
+        const data = await buildProformaPdfData(id)
+        if (!data) { res.status(404).json({ error: 'Commande not found' }); return }
+        const buffer = await renderProformaPdfBuffer(data)
+        attachments.push({ filename: `proforma-${data.numero}.pdf`, content: buffer, contentType: 'application/pdf' })
+      }
+      for (const a of parsed.data.extra_attachments ?? []) {
+        attachments.push({ filename: a.filename, content: Buffer.from(a.content_base64, 'base64'), contentType: a.content_type })
+      }
+      messageId = await sendMail({
+        from: senderEmail, fromName, to: parsed.data.to, cc: parsed.data.cc,
+        subject: parsed.data.subject, body: parsed.data.body,
+        attachments: attachments.length > 0 ? attachments : undefined,
+      })
+    }
+
+    // Audit: same envoi_email ledger as confirmations (IDtype_doc=7) but
+    // tagged notes='proforma' — the historique read splits the label on it.
+    const allRecipients = [...parsed.data.to, ...(parsed.data.cc ?? [])]
+    let societe = ''
+    try {
+      const cr = await query<{ IDclient: number }>(`SELECT IDclient FROM commande_client WHERE IDcommande_client = ${id}`)
+      const names = await resolveClientNames([Number(cr[0]?.IDclient) || 0])
+      societe = names.get(Number(cr[0]?.IDclient) || 0) ?? ''
+    } catch { /* informational */ }
+    await logEnvoiEmails(TYPE_DOC_COMMANDE_CLIENT, id, allRecipients, societe, 'proforma')
+
+    res.json({ ok: true, messageId })
+  } catch (err) {
+    console.error('Error sending commande-client proforma email:', err)
+    const message = err instanceof Error ? err.message : 'Internal server error'
+    res.status(500).json({ error: 'send_failed', message })
+  }
+})
+
 // ════════════════════════════════════════════════════════
 //  HISTORIQUE  (envoi_email timeline for this commande)
 // ════════════════════════════════════════════════════════
@@ -3912,20 +4117,24 @@ commandesClientRouter.get('/:id/historique', async (req: Request, res: Response)
     // accented → omit on Linux; read base columns only.
     // adresse is an email (ASCII) so no encoding repair is needed. société is
     // accented → never named. DATE is a reserved word, returned as `DATE`.
-    const rows = await query<{ adresse: string | null; DATE: string | null }>(
-      `SELECT adresse, DATE FROM envoi_email WHERE IDreference = ${id} AND IDtype_doc = ${TYPE_DOC_COMMANDE_CLIENT}`,
+    const rows = await query<{ adresse: string | null; DATE: string | null; notes: string | null }>(
+      `SELECT adresse, DATE, notes FROM envoi_email WHERE IDreference = ${id} AND IDtype_doc = ${TYPE_DOC_COMMANDE_CLIENT}`,
     )
-    // Group by send timestamp (one event, possibly multiple recipients).
-    const byDate = new Map<string, { DATE: string; recipients: string[] }>()
+    // Group by send timestamp + document kind (one event, possibly multiple
+    // recipients). notes='proforma' marks commande-based proforma sends —
+    // they share IDtype_doc=7 with confirmations.
+    const byDate = new Map<string, { DATE: string; proforma: boolean; recipients: string[] }>()
     for (const r of rows as any[]) {
       const dt = (r.DATE ?? '').toString()
-      const acc = byDate.get(dt) ?? { DATE: dt, recipients: [] as string[] }
+      const proforma = (r.notes ?? '').toString().trim() === 'proforma'
+      const key = `${dt}|${proforma ? 'p' : 'c'}`
+      const acc = byDate.get(key) ?? { DATE: dt, proforma, recipients: [] as string[] }
       const addr = (r.adresse ?? '').toString().trim()
       if (addr) acc.recipients.push(addr)
-      byDate.set(dt, acc)
+      byDate.set(key, acc)
     }
     const events = Array.from(byDate.values())
-      .map((e) => ({ kind: 'email' as const, type_label: 'Confirmation de commande', recipients: e.recipients, DATE: e.DATE }))
+      .map((e) => ({ kind: 'email' as const, type_label: e.proforma ? 'Facture proforma' : 'Confirmation de commande', recipients: e.recipients, DATE: e.DATE }))
       .sort((a, b) => (a.DATE < b.DATE ? 1 : -1))
     res.json(events)
   } catch (err) {

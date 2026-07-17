@@ -27,6 +27,8 @@ import {
   Printer,
   AtSign,
   FileText,
+  FileCheck2,
+  ReceiptText,
   Upload,
   Layers,
   Box,
@@ -61,6 +63,9 @@ import { EtatPill } from '@/lib/etat-stock-fini'
 // ── Types ──────────────────────────────────────────────
 
 type ClientPhase = 'a_affecter' | 'partielle' | 'terminee'
+
+/** Which printable/emailable document the header menus target. */
+type CommandeDocKind = 'confirmation' | 'proforma'
 
 interface CommandeListRow {
   IDcommande_client: number
@@ -353,7 +358,8 @@ export function ClientsCommandes() {
   const [isEditing, setIsEditing] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [affectationLineId, setAffectationLineId] = useState<number | null>(null)
-  const [emailModalOpen, setEmailModalOpen] = useState(false)
+  // Which document the email dialog targets — null = dialog closed.
+  const [emailDoc, setEmailDoc] = useState<CommandeDocKind | null>(null)
   const [autoEditForId, setAutoEditForId] = useState<number | null>(null)
   const [deleteCommandeConfirmOpen, setDeleteCommandeConfirmOpen] = useState(false)
 
@@ -564,8 +570,11 @@ export function ClientsCommandes() {
             onSave={() => saveHeaderMut.mutate()}
             isSaving={saveHeaderMut.isPending}
             onDelete={() => setDeleteCommandeConfirmOpen(true)}
-            onPrintClick={() => { if (selectedId !== null) window.open(`${API_URL}/commandes-client/${selectedId}/pdf`, '_blank') }}
-            onEmailClick={() => setEmailModalOpen(true)}
+            onPrintDoc={(doc) => {
+              if (selectedId === null) return
+              window.open(`${API_URL}/commandes-client/${selectedId}${doc === 'proforma' ? '/proforma/pdf' : '/pdf'}`, '_blank')
+            }}
+            onEmailDoc={setEmailDoc}
           />
         }
         detail={
@@ -630,17 +639,21 @@ export function ClientsCommandes() {
 
       {selectedId !== null && (
         <SendEmailDialog
-          open={emailModalOpen}
-          onClose={() => setEmailModalOpen(false)}
+          open={emailDoc !== null}
+          onClose={() => setEmailDoc(null)}
           contextLabel={detail?.client_nom ?? undefined}
-          queryKey={['commande-client-email-defaults', selectedId]}
-          loadDefaults={() => apiFetch(`/commandes-client/${selectedId}/email-defaults`)}
-          pdfUrl={`${API_URL}/commandes-client/${selectedId}/pdf`}
-          pdfAttachmentLabel={`confirmation-commande-${selectedId}.pdf`}
-          extraServerAttachments={[
+          queryKey={['commande-client-email-defaults', selectedId, emailDoc ?? 'confirmation']}
+          loadDefaults={() => apiFetch(`/commandes-client/${selectedId}${emailDoc === 'proforma' ? '/proforma' : ''}/email-defaults`)}
+          pdfUrl={`${API_URL}/commandes-client/${selectedId}${emailDoc === 'proforma' ? '/proforma' : ''}/pdf`}
+          pdfAttachmentLabel={emailDoc === 'proforma'
+            // 1_000_000 offset mirrors PROFORMA_NUMERO_OFFSET in the API —
+            // the proforma numero that can't collide with facturation's.
+            ? `proforma-${detail?.numero ? 1_000_000 + Number(detail.numero) : selectedId}.pdf`
+            : `confirmation-commande-${selectedId}.pdf`}
+          extraServerAttachments={emailDoc === 'proforma' ? undefined : [
             { id: 'cgv', label: 'CGV - ETS Malterre.pdf', url: `${API_URL}/commandes-client/cgv/pdf` },
           ]}
-          onSend={(p) => postEmail(`${API_URL}/commandes-client/${selectedId}/email`, p, { includeAttachPdf: true })}
+          onSend={(p) => postEmail(`${API_URL}/commandes-client/${selectedId}${emailDoc === 'proforma' ? '/proforma' : ''}/email`, p, { includeAttachPdf: true })}
         />
       )}
     </>
@@ -775,10 +788,59 @@ function CommandeList({
 
 // ── Center: Detail Header ──────────────────────────────
 
+/** Icon button opening a small popover menu — the print/email header buttons
+ *  use it to pick which document (confirmation vs proforma) to act on.
+ *  Pattern: PrintMenuButton in ClientsExpeditions.tsx. */
+function DocMenuButton({ icon: TriggerIcon, title, items, onSelect }: {
+  icon: ComponentType<{ className?: string }>
+  title: string
+  items: Array<{ key: CommandeDocKind; label: string; icon: ComponentType<{ className?: string }> }>
+  onSelect: (key: CommandeDocKind) => void
+}) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  // Click outside to close the menu.
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [menuOpen])
+
+  return (
+    <div ref={rootRef} className="relative">
+      <Button variant="outline" size="icon" className="h-9 w-9" title={title} onClick={() => setMenuOpen((v) => !v)}>
+        <TriggerIcon className="h-4 w-4" />
+      </Button>
+      {menuOpen && (
+        <div className="absolute top-full right-0 mt-1 w-64 rounded-lg border bg-white shadow-lg overflow-hidden z-50">
+          {items.map((item) => {
+            const ItemIcon = item.icon
+            return (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => { onSelect(item.key); setMenuOpen(false) }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left transition-colors hover:bg-zinc-100"
+              >
+                <ItemIcon className="h-4 w-4 text-muted-foreground" />
+                {item.label}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function DetailHeader({
   commande, isLoading, isEditing, canEdit,
   onStartEdit, onCancelEdit, onSave, isSaving,
-  onDelete, onPrintClick, onEmailClick,
+  onDelete, onPrintDoc, onEmailDoc,
 }: {
   commande: CommandeDetail | null
   isLoading: boolean
@@ -789,10 +851,15 @@ function DetailHeader({
   onSave: () => void
   isSaving: boolean
   onDelete: () => void
-  onPrintClick: () => void
-  onEmailClick: () => void
+  onPrintDoc: (doc: CommandeDocKind) => void
+  onEmailDoc: (doc: CommandeDocKind) => void
 }) {
   if (!commande && !isLoading) return null
+  // Donation orders never produce an invoice — no proforma menu entry.
+  const docItems: Array<{ key: CommandeDocKind; label: string; icon: ComponentType<{ className?: string }> }> = [
+    { key: 'confirmation', label: 'Confirmation de commande', icon: FileCheck2 },
+    ...(commande?.donation === 1 ? [] : [{ key: 'proforma' as const, label: 'Facture proforma', icon: ReceiptText }]),
+  ]
   return (
     <div className="flex-shrink-0 pt-0.5">
       <div className="flex items-center gap-3">
@@ -838,12 +905,8 @@ function DetailHeader({
               </>
             ) : (
               <>
-                <Button variant="outline" size="icon" className="h-9 w-9" title="Imprimer" onClick={onPrintClick}>
-                  <Printer className="h-4 w-4" />
-                </Button>
-                <Button variant="outline" size="icon" className="h-9 w-9" title="Envoyer un email" onClick={onEmailClick}>
-                  <AtSign className="h-4 w-4" />
-                </Button>
+                <DocMenuButton icon={Printer} title="Imprimer" items={docItems} onSelect={onPrintDoc} />
+                <DocMenuButton icon={AtSign} title="Envoyer un email" items={docItems} onSelect={onEmailDoc} />
                 {canEdit && (
                   <Button variant="gold" size="sm" onClick={onStartEdit}>
                     <Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier

@@ -17,6 +17,7 @@ import {
   ClockIcon,
   MessageSquareIcon,
   LandmarkIcon,
+  TagIcon,
   type AddressBlockData,
 } from './MalterreDocument.js'
 import { colors, company, sizes } from './theme.js'
@@ -52,6 +53,15 @@ export interface FacturePdfData {
   echeanceDate?: string | null
   /** TVA rate as a percentage (e.g. 20). */
   tvaRate: number
+  /** Optional absolute discount in € (commande-based proformas). Rendered as
+   *  a negative totals row when > 0; regular factures never pass it. */
+  remise?: number
+  /** Optional shipping cost in € HT (commande-based proformas). */
+  fraisPort?: number
+  /** Commande numero this document derives from (commande-based proformas) —
+   *  shown as an "N° commande" meta row so the client can link the proforma
+   *  back to their order despite the offset proforma numero. */
+  refCommande?: string
   lignes: Array<{
     designation: string
     quantite: number
@@ -215,9 +225,12 @@ export function FacturePdf({ data }: { data: FacturePdfData }) {
   const clientAddress = buildClientAddress(data)
 
   const totalHT = data.lignes.reduce((s, l) => s + (Number(l.montant) || 0), 0)
+  const remise = Number(data.remise) || 0
+  const fraisPort = Number(data.fraisPort) || 0
+  const netHT = totalHT - remise + fraisPort
   const tvaRate = Number(data.tvaRate) || 0
-  const tva = totalHT * (tvaRate / 100)
-  const ttc = totalHT + tva
+  const tva = netHT * (tvaRate / 100)
+  const ttc = netHT + tva
 
   return (
     <MalterreDocument
@@ -232,6 +245,13 @@ export function FacturePdf({ data }: { data: FacturePdfData }) {
         </View>
         <View style={styles.topRowSlot}>
           <View style={styles.comboCard}>
+            {data.refCommande ? (
+              <View style={styles.comboMetaRow}>
+                <View style={styles.comboMetaIconBox}><TagIcon /></View>
+                <Text style={styles.comboMetaLabel}>N° commande</Text>
+                <Text style={styles.comboMetaValue}>{`N°${data.refCommande}`}</Text>
+              </View>
+            ) : null}
             {data.numTva ? (
               <View style={styles.comboMetaRow}>
                 <View style={styles.comboMetaIconBox}><MessageSquareIcon /></View>
@@ -299,6 +319,18 @@ export function FacturePdf({ data }: { data: FacturePdfData }) {
             <Text style={styles.totalLabel}>Total HT</Text>
             <Text style={styles.totalValue}>{`${fmtNum(totalHT, 2)} €`}</Text>
           </View>
+          {remise > 0 ? (
+            <View style={styles.totalRow}>
+              <Text style={styles.totalLabel}>Remise</Text>
+              <Text style={styles.totalValue}>{`-${fmtNum(remise, 2)} €`}</Text>
+            </View>
+          ) : null}
+          {fraisPort > 0 ? (
+            <View style={styles.totalRow}>
+              <Text style={styles.totalLabel}>Frais de port</Text>
+              <Text style={styles.totalValue}>{`${fmtNum(fraisPort, 2)} €`}</Text>
+            </View>
+          ) : null}
           <View style={[styles.totalRow, styles.totalRowDivided]}>
             <Text style={styles.totalLabel}>{`TVA (${fmtNum(tvaRate, tvaRate % 1 === 0 ? 0 : 1)} %)`}</Text>
             <Text style={styles.totalValue}>{`${fmtNum(tva, 2)} €`}</Text>

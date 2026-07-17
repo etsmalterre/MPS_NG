@@ -10,6 +10,30 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-17 — feat/commandes-client
+Clients › Commandes — **print/email contextual menus + on-the-fly Facture proforma.**
+The detail-header Printer and AtSign buttons are now `DocMenuButton` popover menus
+(ClientsExpeditions `PrintMenuButton` pattern) choosing between "Confirmation de commande"
+(existing flow, unchanged) and a new "Facture proforma" generated straight from the
+commande header + lines — NEVER persisted to facturation (no `facture_prov` row, no
+proforma sequence consumed). Rendering reuses `FacturePdf` with `isProforma: true` (bank
+card, proforma title) extended with optional `remise`/`fraisPort` totals rows (TVA on net
+HT; regular factures unaffected) and an optional `refCommande` "N° commande" meta row.
+**Numbering: proforma numero = 1_000_000 + commande numero** (`PROFORMA_NUMERO_OFFSET`,
+e.g. 3658 → N°1003658) — deterministic, purely numeric, and structurally collision-free
+vs facturation's sequences (facture.numero ≈ 9k, IDfacture_prov ≈ 13k). Endpoints on
+`commandes-client.ts`: `GET /:id/proforma/pdf` (filename `proforma-<numero>.pdf`),
+`GET /:id/proforma/email-defaults` (same `envoi_commande=1` recipient logic, proforma
+subject/body), `POST /:id/proforma/email` (proforma PDF attached, **no CGV** — matches
+facturation; logs `envoi_email` with `notes='proforma'`). `/:id/historique` now reads
+`notes` and labels events "Facture proforma" vs "Confirmation de commande" (grouping key
+= timestamp + kind). Data builder `buildProformaPdfData` reuses `buildClientPdfData` +
+client `num_tva`/client `IDtva` rate (fallback ETM default), dated at generation time,
+échéance date via `computeDateEcheance`/`loadEcheanceRule` (now exported from
+`factures.ts`). Frontend: `emailDoc` state parameterizes the single `SendEmailDialog`
+(endpoints, attachment label with mirrored offset, CGV chip confirmation-only); donation
+commandes hide the proforma menu entry (donations never invoice).
+
 ## 2026-07-17 — feat/stock-ecru
 Tombé Métier › Stock — **responsive rollout step 3 (tablet / Z Fold / phone).** Same §40
 treatment as Fils/Finis Stock, all changes additive (desktop + tablet proven pixel-identical
