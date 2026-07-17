@@ -12,6 +12,11 @@ import stockFiniProvenance50366 from '../fixtures/stock-fini-provenance-50366.js
 import stockFiniEtats from '../fixtures/stock-fini-etats.json' with { type: 'json' }
 import stockFiniRefs from '../fixtures/stock-fini-refs.json' with { type: 'json' }
 import stockFiniMagasins from '../fixtures/stock-fini-magasins.json' with { type: 'json' }
+import stockEcru from '../fixtures/stock-ecru.json' with { type: 'json' }
+import stockEcruDetail53363 from '../fixtures/stock-ecru-detail-53363.json' with { type: 'json' }
+import stockEcruProvenance53363 from '../fixtures/stock-ecru-provenance-53363.json' with { type: 'json' }
+import stockEcruRefs from '../fixtures/stock-ecru-refs.json' with { type: 'json' }
+import stockEcruMagasins from '../fixtures/stock-ecru-magasins.json' with { type: 'json' }
 
 const stockDetails: Record<string, unknown> = {
   '1783': stockFilDetail1783,
@@ -23,6 +28,14 @@ const stockFiniDetails: Record<string, unknown> = {
 
 const stockFiniProvenances: Record<string, unknown> = {
   '50366': stockFiniProvenance50366,
+}
+
+const stockEcruDetails: Record<string, unknown> = {
+  '53363': stockEcruDetail53363,
+}
+
+const stockEcruProvenances: Record<string, unknown> = {
+  '53363': stockEcruProvenance53363,
 }
 
 export interface MockApi {
@@ -61,6 +74,16 @@ export async function installMockApi(page: Page): Promise<MockApi> {
     if (finiProv && stockFiniProvenances[finiProv[1]]) return json(stockFiniProvenances[finiProv[1]])
     const finiDetail = url.pathname.match(/^\/api\/stock\/fini\/(\d+)$/)
     if (finiDetail && stockFiniDetails[finiDetail[1]]) return json(stockFiniDetails[finiDetail[1]])
+
+    // Same fixture regardless of ?statut= — the specs never switch the filter.
+    if (url.pathname === '/api/stock/ecru') return json(stockEcru)
+    if (url.pathname === '/api/stock/ecru/lookups/refs') return json(stockEcruRefs)
+    if (url.pathname === '/api/stock/ecru/lookups/magasins') return json(stockEcruMagasins)
+    if (url.pathname === '/api/stock/ecru/lookups/coloris') return json([])
+    const ecruProv = url.pathname.match(/^\/api\/stock\/ecru\/(\d+)\/provenance$/)
+    if (ecruProv && stockEcruProvenances[ecruProv[1]]) return json(stockEcruProvenances[ecruProv[1]])
+    const ecruDetail = url.pathname.match(/^\/api\/stock\/ecru\/(\d+)$/)
+    if (ecruDetail && stockEcruDetails[ecruDetail[1]]) return json(stockEcruDetails[ecruDetail[1]])
 
     unmatched.push(`${route.request().method()} ${url.pathname}${url.search}`)
     return route.fulfill({ status: 500, json: { error: 'e2e: unmocked endpoint' } })
