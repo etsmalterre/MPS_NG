@@ -3180,7 +3180,7 @@ The shared `SendEmailDialog` covers every email-enabled screen. Apply to:
 - Sous-traitants → Commandes — contact flag `envoi_commande`
 - Clients → Commandes — contact flag `envoi_commande`
 - Clients → Devis — contact flag `envoi_soumission`
-- Clients → Facturation ✅ implemented (proforma + définitive; proforma sends are NOT logged to `envoi_email` — id-space collision with definitive ids on the shared `IDtype_doc` — and the proforma PDF carries the bank-coordinates card)
+- Clients → Facturation ✅ implemented (proforma + définitive; proforma sends are NOT logged to `envoi_email` — id-space collision with definitive ids on the shared `IDtype_doc`; both PDFs carry the bank-coordinates card)
 - Transport → Expéditions / Livraisons — contact flag `envoi_bl`
 
 A new document screen needs:

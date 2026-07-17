@@ -10,6 +10,33 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-17 — feat/facturation
+Clients › Facturation — **batch convert + lifecycle/PDF/email polish** on the existing
+proforma/définitive screen. (1) **Conversion is now a MOVE**: `POST /prov/:id/convert`
+copies the header + lines into `facture`/`ligne_facture` (fresh definitive numero) then
+DELETES the proforma — the `IDexpedition_divers` converted-marker scheme and all its UI
+("Converti → N°", "Voir la facture" button, converted locks) are removed; expeditions stay
+`est_facture=1` because their lines are now referenced by `ligne_facture` (the batch-delete
+reopen logic checks that ledger). DB had zero converted rows, so nothing was orphaned.
+(2) **"Convertir des factures"** — third batch button on the proforma list (between Générer
+and Supprimer) opening a pick-and-convert dialog; new `POST /prov/convert-batch {ids}`
+converts each via the shared `convertProforma()` helper and returns
+`{converted:[{prov_id, IDfacture, numero, client_nom}], skipped}`; the delete and convert
+pickers share one generic `ProformaPickDialog`, results render in `BatchResultDialog`
+("Proforma N°X → N°Y · client"). (3) **Frais de port in `/prov/generate`** — legacy rule
+reverse-engineered from the live ledger: ONE line "Frais de port" (qty 1, unite '', prix =
+`commande_client.frais_port`, `IDligne_expedition=0`) per contributing commande with
+`frais_port > 0`, charged on EVERY invoicing run, never multiplied by the number of
+expeditions (facture 4952 = 5 avis / 1 port line; commande 3329 = port on 4 successive
+factures). (4) **Bank coordinates card on ALL facture PDFs** (was proforma-only).
+(5) **Email default body** now "Bonjour, / Veuillez trouver ci-joint notre {facture|avoir}
+N°X. / Bonne réception, / Belle journée,". (6) **Per-line domain icons**: API resolves
+`stock_kind` ('fini'|'ecru'|'divers') per line via `ligne_expedition →
+ligne_commande_client.TYPE`; LineCard shows FiniRollIcon / TmRollIcon / Package (same
+glyphs as ClientsExpeditions). Verified E2E on the local dev DB (20-check script: convert
+deletes prov, batch convert, port-line generation with rollback, PDF text extraction);
+inspect/verify scripts kept under `apps/api/src/scripts/`.
+
 ## 2026-07-16 — feat/stock-fil
 Fils › Stock + Finis › Stock — **responsive rollout step 1+2 (tablet / Z Fold / phone) +
 Playwright screenshot-regression harness.** (1) New e2e harness in `apps/web/e2e/`

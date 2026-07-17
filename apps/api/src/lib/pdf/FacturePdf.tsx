@@ -168,7 +168,7 @@ const styles = StyleSheet.create({
   grandLabel: { fontSize: sizes.fontLg, color: colors.primary, fontWeight: 900, letterSpacing: 0.6, lineHeight: 1.25 },
   grandValue: { fontSize: sizes.fontLg, color: colors.primary, fontWeight: 900, textAlign: 'right', lineHeight: 1.25 },
 
-  // ── Bank coordinates card (proforma only) ────────────
+  // ── Bank coordinates card ────────────────────────────
   // Pinned to the bottom of the last page, just above the footer band: the
   // spacer soaks up the remaining vertical space, the card never splits.
   bottomSpacer: { flexGrow: 1, minHeight: 14 },
@@ -310,31 +310,28 @@ export function FacturePdf({ data }: { data: FacturePdfData }) {
         </View>
       </View>
 
-      {/* Proforma only: bank coordinates at the bottom of the last page,
-          just above the footer — proformas are paid before delivery. */}
-      {isProforma ? (
-        <>
-          <View style={styles.bottomSpacer} />
-          <View style={styles.bankCard} wrap={false}>
-            <View style={styles.bankHeaderRow}>
-              <LandmarkIcon />
-              <Text style={styles.bankTitle}>COORDONNÉES BANCAIRES</Text>
-            </View>
-            <View style={styles.bankRow}>
-              <Text style={styles.bankLabel}>Titulaire du compte</Text>
-              <Text style={styles.bankValue}>{company.bank.holder}</Text>
-            </View>
-            <View style={styles.bankRow}>
-              <Text style={styles.bankLabel}>IBAN</Text>
-              <Text style={styles.bankValue}>{company.bank.iban}</Text>
-            </View>
-            <View style={styles.bankRow}>
-              <Text style={styles.bankLabel}>BIC</Text>
-              <Text style={styles.bankValue}>{company.bank.bic}</Text>
-            </View>
-          </View>
-        </>
-      ) : null}
+      {/* Bank coordinates at the bottom of the last page, just above the
+          footer — on the proforma (paid before delivery) AND the definitive
+          invoice (the client pays against it). */}
+      <View style={styles.bottomSpacer} />
+      <View style={styles.bankCard} wrap={false}>
+        <View style={styles.bankHeaderRow}>
+          <LandmarkIcon />
+          <Text style={styles.bankTitle}>COORDONNÉES BANCAIRES</Text>
+        </View>
+        <View style={styles.bankRow}>
+          <Text style={styles.bankLabel}>Titulaire du compte</Text>
+          <Text style={styles.bankValue}>{company.bank.holder}</Text>
+        </View>
+        <View style={styles.bankRow}>
+          <Text style={styles.bankLabel}>IBAN</Text>
+          <Text style={styles.bankValue}>{company.bank.iban}</Text>
+        </View>
+        <View style={styles.bankRow}>
+          <Text style={styles.bankLabel}>BIC</Text>
+          <Text style={styles.bankValue}>{company.bank.bic}</Text>
+        </View>
+      </View>
     </MalterreDocument>
   )
 }

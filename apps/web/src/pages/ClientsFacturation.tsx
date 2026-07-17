@@ -24,8 +24,10 @@ import {
   Lock,
   FileText,
   FilePlus2,
-  ArrowRight,
+  Package,
 } from 'lucide-react'
+import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
+import { TmRollIcon } from '@/components/icons/TmRollIcon'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
@@ -59,10 +61,11 @@ interface FactureListRow {
   total_tva: number
   total_ttc: number
   nb_lignes: number
-  converted: boolean
-  IDfacture_def: number
-  numero_def: number | null
 }
+
+// Domain kind of a line — drives the per-line icon (fini roll / tombé-de-métier
+// roll / Package for divers & manual lines), same glyphs as ClientsExpeditions.
+type LineStockKind = 'fini' | 'ecru' | 'divers'
 
 interface LigneFacture {
   IDligne_facture: number
@@ -72,6 +75,7 @@ interface LigneFacture {
   unite: string
   prix: number
   montant: number
+  stock_kind: LineStockKind
 }
 
 interface AdresseLite {
@@ -93,9 +97,6 @@ interface AdresseLookup extends AdresseLite {
 interface FactureDetail {
   id: number
   kind: Kind
-  converted: boolean
-  IDfacture_def: number
-  numero_def: number | null
   IDclient: number
   client_nom: string
   numero: number | null
@@ -123,10 +124,15 @@ interface GenerateSummary {
   created: Array<{ id: number; numero: number; client_nom: string; nb_lignes: number; nb_expeditions: number }>
   skipped: { internes: number; donations: number; vides: number }
 }
-interface DeleteAllSummary { deleted: number; kept_converted: number; expeditions_reouvertes: number }
+interface DeleteAllSummary { deleted: number; expeditions_reouvertes: number }
+interface ConvertBatchSummary {
+  converted: Array<{ prov_id: number; IDfacture: number; numero: number; client_nom: string }>
+  skipped: number
+}
 type BatchResult =
   | ({ action: 'generate' } & GenerateSummary)
   | ({ action: 'deleteAll' } & DeleteAllSummary)
+  | ({ action: 'convertBatch' } & ConvertBatchSummary)
 
 interface ClientLite { IDclient: number; nom: string }
 interface ModePaiement { IDmode_paiement: number; libelle: string }
@@ -181,8 +187,9 @@ export function ClientsFacturation() {
   const [convertConfirmOpen, setConvertConfirmOpen] = useState(false)
   const [convertResult, setConvertResult] = useState<{ numero: number } | null>(null)
   // Batch actions on the proforma list panel (generate from expeditions /
-  // pick-and-delete open proformas).
+  // pick-and-convert / pick-and-delete proformas).
   const [generateConfirmOpen, setGenerateConfirmOpen] = useState(false)
+  const [convertBatchOpen, setConvertBatchOpen] = useState(false)
   const [deleteBatchOpen, setDeleteBatchOpen] = useState(false)
   const [batchResult, setBatchResult] = useState<BatchResult | null>(null)
 
@@ -214,8 +221,8 @@ export function ClientsFacturation() {
     enabled: selectedId !== null,
   })
 
-  // A proforma is editable only while it is still open (not converted).
-  const editable = !!detail && detail.kind === 'prov' && !detail.converted
+  // Only proformas are editable (a definitive facture is locked at creation).
+  const editable = !!detail && detail.kind === 'prov'
 
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['factures'] })
@@ -223,7 +230,7 @@ export function ClientsFacturation() {
   }, [queryClient, bucket, selectedId])
 
   const startEdit = useCallback(() => {
-    if (!detail || detail.kind !== 'prov' || detail.converted) return
+    if (!detail || detail.kind !== 'prov') return
     const snapshot = {
       date: hfsqlDateToInput(detail.date),
       type: detail.type ?? 1,
@@ -341,8 +348,27 @@ export function ClientsFacturation() {
     },
   })
 
+  const convertBatchMut = useMutation({
+    mutationFn: (ids: number[]): Promise<ConvertBatchSummary> =>
+      apiFetch('/factures/prov/convert-batch', { method: 'POST', body: JSON.stringify({ ids }) }),
+    onSuccess: (r) => {
+      // Converted proformas vanish from the prov bucket (they moved to the
+      // definitive ledger) — same next-selection dance as the batch delete.
+      const goneSet = new Set(r.converted.map((c) => c.prov_id))
+      const cached = queryClient.getQueryData<FactureListRow[]>(['factures', bucket, typeFilter, debouncedQuery]) ?? []
+      const remaining = cached.filter((f) => !goneSet.has(f.id))
+      queryClient.invalidateQueries({ queryKey: ['factures'] })
+      setIsEditing(false)
+      if (bucket === 'prov' && selectedId !== null && goneSet.has(selectedId)) {
+        setSelectedId(remaining.length > 0 ? remaining[0].id : null)
+      }
+      setConvertBatchOpen(false)
+      setBatchResult({ action: 'convertBatch', ...r })
+    },
+  })
+
   useEffect(() => {
-    if (autoEditForId !== null && detail?.id === autoEditForId && detail.kind === 'prov' && !detail.converted) {
+    if (autoEditForId !== null && detail?.id === autoEditForId && detail.kind === 'prov') {
       startEdit()
       setAutoEditForId(null)
     }
@@ -366,11 +392,6 @@ export function ClientsFacturation() {
 
   const handleTypeFilterChange = useCallback((t: 'all' | 'facture' | 'avoir') => {
     guard.guardAction(() => { setIsEditing(false); setTypeFilter(t); setSelectedId(null) })
-  }, [guard])
-
-  // Jump to a definitive facture from a converted proforma's link.
-  const handleViewDefinitive = useCallback((defId: number) => {
-    guard.guardAction(() => { setIsEditing(false); setBucket('def'); setSelectedId(defId) })
   }, [guard])
 
   const rows = factures ?? []
@@ -400,6 +421,7 @@ export function ClientsFacturation() {
             onTypeFilterChange={handleTypeFilterChange}
             onNew={() => setCreateOpen(true)}
             onGenerate={() => setGenerateConfirmOpen(true)}
+            onConvertBatch={() => setConvertBatchOpen(true)}
             onDeleteBatch={() => setDeleteBatchOpen(true)}
             isEditing={isEditing}
             canEdit={canEditFactures}
@@ -419,7 +441,6 @@ export function ClientsFacturation() {
             onPrintClick={() => { if (selectedId !== null) window.open(`${API_URL}/factures/${bucket}/${selectedId}/pdf`, '_blank') }}
             onEmailClick={() => setEmailModalOpen(true)}
             onConvertClick={() => setConvertConfirmOpen(true)}
-            onViewDefinitive={handleViewDefinitive}
             canEdit={canEditFactures}
           />
         }
@@ -481,7 +502,7 @@ export function ClientsFacturation() {
         open={convertConfirmOpen}
         variant="default"
         title="Convertir en facture"
-        description="Une facture définitive sera créée à partir de ce proforma, avec un numéro de facture officiel. Le proforma sera conservé en lecture seule."
+        description="Une facture définitive sera créée à partir de ce proforma, avec un numéro de facture officiel. Le proforma sera ensuite supprimé."
         confirmLabel="Convertir"
         isPending={convertMut.isPending}
         onCancel={() => setConvertConfirmOpen(false)}
@@ -499,11 +520,32 @@ export function ClientsFacturation() {
         onConfirm={() => generateMut.mutate()}
       />
 
-      <DeleteProformasDialog
+      <ProformaPickDialog
+        open={convertBatchOpen}
+        isPending={convertBatchMut.isPending}
+        onClose={() => setConvertBatchOpen(false)}
+        onConfirm={(ids) => convertBatchMut.mutate(ids)}
+        title="Convertir des factures proforma"
+        titleIcon={<FileCheck className="h-5 w-5 text-accent" />}
+        intro="Sélectionnez les proformas à convertir : chacun deviendra une facture définitive avec un numéro officiel, puis sera supprimé."
+        emptyText="Aucun proforma à convertir"
+        confirmLabel="Convertir"
+        confirmVariant="default"
+        confirmIcon={<FileCheck className="h-3.5 w-3.5 mr-1.5" />}
+      />
+
+      <ProformaPickDialog
         open={deleteBatchOpen}
         isPending={deleteBatchMut.isPending}
         onClose={() => setDeleteBatchOpen(false)}
         onConfirm={(ids) => deleteBatchMut.mutate(ids)}
+        title="Supprimer des factures proforma"
+        titleIcon={<Trash2 className="h-5 w-5 text-destructive" />}
+        intro="Sélectionnez les proformas à supprimer : leurs expéditions redeviendront facturables."
+        emptyText="Aucun proforma à supprimer"
+        confirmLabel="Supprimer"
+        confirmVariant="destructive"
+        confirmIcon={<Trash2 className="h-3.5 w-3.5 mr-1.5" />}
       />
 
       <BatchResultDialog result={batchResult} onClose={() => setBatchResult(null)} />
@@ -556,7 +598,9 @@ function BatchResultDialog({ result, onClose }: { result: BatchResult | null; on
           <DialogTitle className="flex items-center gap-2">
             {result?.action === 'deleteAll'
               ? <><Trash2 className="h-5 w-5 text-accent" />Proformas supprimés</>
-              : <><FilePlus2 className="h-5 w-5 text-accent" />Factures générées</>}
+              : result?.action === 'convertBatch'
+                ? <><FileCheck className="h-5 w-5 text-accent" />Factures converties</>
+                : <><FilePlus2 className="h-5 w-5 text-accent" />Factures générées</>}
           </DialogTitle>
         </DialogHeader>
         <div className="mt-4">
@@ -603,12 +647,37 @@ function BatchResultDialog({ result, onClose }: { result: BatchResult | null; on
                   {result.expeditions_reouvertes} expédition{result.expeditions_reouvertes > 1 ? 's' : ''} à nouveau facturable{result.expeditions_reouvertes > 1 ? 's' : ''}.
                 </p>
               )}
-              {result.kept_converted > 0 && (
-                <p className="text-xs text-muted-foreground mt-1">
-                  {result.kept_converted} proforma{result.kept_converted > 1 ? 's' : ''} converti{result.kept_converted > 1 ? 's' : ''} conservé{result.kept_converted > 1 ? 's' : ''}.
-                </p>
-              )}
             </div>
+          )}
+          {result?.action === 'convertBatch' && (
+            result.converted.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-6 text-muted-foreground text-center">
+                <Receipt className="h-12 w-12 mb-3 opacity-40" />
+                <p className="text-sm font-medium">Aucun proforma converti</p>
+              </div>
+            ) : (
+              <>
+                <p className="text-sm text-muted-foreground mb-3">
+                  {result.converted.length} facture{result.converted.length > 1 ? 's' : ''} définitive{result.converted.length > 1 ? 's' : ''} créée{result.converted.length > 1 ? 's' : ''} :
+                </p>
+                <div className="space-y-1.5 max-h-64 overflow-y-auto scrollbar-transparent p-0.5">
+                  {result.converted.map((c) => (
+                    <div key={c.IDfacture} className="flex items-center gap-2 p-2 rounded-md border border-border/60 bg-zinc-100/80 text-sm">
+                      <FileCheck className="h-4 w-4 text-green-600 flex-shrink-0" />
+                      <span className="text-muted-foreground flex-shrink-0 tabular-nums">Proforma N° {c.prov_id}</span>
+                      <span className="text-muted-foreground flex-shrink-0">→</span>
+                      <span className="font-medium flex-shrink-0 tabular-nums">N° {c.numero}</span>
+                      <span className="text-muted-foreground truncate flex-1">{c.client_nom || '—'}</span>
+                    </div>
+                  ))}
+                </div>
+                {result.skipped > 0 && (
+                  <p className="text-xs text-muted-foreground mt-3">
+                    {result.skipped} proforma{result.skipped > 1 ? 's' : ''} introuvable{result.skipped > 1 ? 's' : ''} (liste obsolète).
+                  </p>
+                )}
+              </>
+            )
           )}
         </div>
       </DialogContent>
@@ -616,29 +685,39 @@ function BatchResultDialog({ result, onClose }: { result: BatchResult | null; on
   )
 }
 
-// ── Delete proformas (pick-and-delete) ─────────────────
+// ── Proforma batch picker (convert / delete) ───────────
 
-/** Selection dialog for the "Supprimer des factures" batch action: lists every
- *  OPEN proforma (converted ones are locked history and excluded) with
- *  checkboxes, a select-all header, and a destructive confirm. The dialog
- *  itself is the confirmation surface — no second ConfirmDialog. */
-function DeleteProformasDialog({ open, isPending, onClose, onConfirm }: {
+/** Selection dialog shared by the "Convertir des factures" and "Supprimer des
+ *  factures" batch actions: lists every proforma with checkboxes and a
+ *  select-all header. The dialog itself is the confirmation surface — no
+ *  second ConfirmDialog. */
+function ProformaPickDialog({
+  open, isPending, onClose, onConfirm,
+  title, titleIcon, intro, emptyText, confirmLabel, confirmVariant, confirmIcon,
+}: {
   open: boolean
   isPending: boolean
   onClose: () => void
   onConfirm: (ids: number[]) => void
+  title: string
+  titleIcon: React.ReactNode
+  intro: string
+  emptyText: string
+  confirmLabel: string
+  confirmVariant: 'default' | 'destructive'
+  confirmIcon: React.ReactNode
 }) {
   const [selected, setSelected] = useState<Set<number>>(new Set())
 
   // Independent of the list panel's search/type filters — the user picks from
-  // ALL open proformas. Key shares the ['factures'] root so the existing
+  // ALL proformas. Key shares the ['factures'] root so the existing
   // batch-mutation invalidations refresh it too.
   const { data, isLoading } = useQuery<FactureListRow[]>({
-    queryKey: ['factures', 'prov-deletable'],
+    queryKey: ['factures', 'prov-pick'],
     queryFn: () => apiFetch('/factures?status=prov&type=all&q=&limit=200'),
     enabled: open,
   })
-  const rows = useMemo(() => (data ?? []).filter((r) => !r.converted), [data])
+  const rows = data ?? []
 
   // Fresh selection every time the dialog opens.
   useEffect(() => { if (open) setSelected(new Set()) }, [open])
@@ -658,7 +737,7 @@ function DeleteProformasDialog({ open, isPending, onClose, onConfirm }: {
       <DialogContent className="max-w-lg" onClose={() => { if (!isPending) onClose() }}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Trash2 className="h-5 w-5 text-destructive" />Supprimer des factures proforma
+            {titleIcon}{title}
           </DialogTitle>
         </DialogHeader>
         <div className="mt-4">
@@ -667,14 +746,11 @@ function DeleteProformasDialog({ open, isPending, onClose, onConfirm }: {
           ) : rows.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-8 text-muted-foreground text-center">
               <Receipt className="h-12 w-12 mb-3 opacity-40" />
-              <p className="text-sm font-medium">Aucun proforma à supprimer</p>
-              <p className="text-xs mt-1">Les proformas convertis en facture définitive sont conservés.</p>
+              <p className="text-sm font-medium">{emptyText}</p>
             </div>
           ) : (
             <>
-              <p className="text-sm text-muted-foreground">
-                Sélectionnez les proformas à supprimer — leurs expéditions redeviendront facturables.
-              </p>
+              <p className="text-sm text-muted-foreground">{intro}</p>
               <label className="flex items-center gap-2 mt-3 px-2 py-1.5 text-sm font-medium cursor-pointer select-none rounded-md hover:bg-accent/5">
                 <input
                   type="checkbox"
@@ -729,14 +805,14 @@ function DeleteProformasDialog({ open, isPending, onClose, onConfirm }: {
         <DialogFooter className="mt-4">
           <Button variant="outline" onClick={onClose} disabled={isPending}>Annuler</Button>
           <Button
-            variant="destructive"
+            variant={confirmVariant}
             disabled={selected.size === 0 || isPending}
             onClick={() => onConfirm(Array.from(selected))}
           >
             {isPending
               ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-              : <Trash2 className="h-3.5 w-3.5 mr-1.5" />}
-            Supprimer{selected.size > 0 ? ` (${selected.size})` : ''}
+              : confirmIcon}
+            {confirmLabel}{selected.size > 0 ? ` (${selected.size})` : ''}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -752,7 +828,7 @@ function FactureList({
   searchQuery, onSearchChange,
   bucket, onBucketChange,
   typeFilter, onTypeFilterChange,
-  onNew, onGenerate, onDeleteBatch, isEditing, canEdit,
+  onNew, onGenerate, onConvertBatch, onDeleteBatch, isEditing, canEdit,
 }: {
   rows: FactureListRow[]
   isLoading: boolean
@@ -768,6 +844,7 @@ function FactureList({
   onTypeFilterChange: (t: 'all' | 'facture' | 'avoir') => void
   onNew: () => void
   onGenerate: () => void
+  onConvertBatch: () => void
   onDeleteBatch: () => void
   isEditing: boolean
   canEdit: boolean
@@ -850,7 +927,6 @@ function FactureList({
           const isSelected = selectedId === row.id
           const chip = typeChip(row.type)
           const ttc = signed(row.total_ttc, row.type)
-          const isConverted = row.kind === 'prov' && row.converted
           return (
             <div
               key={row.id}
@@ -858,7 +934,6 @@ function FactureList({
               className={cn(
                 'p-3 border rounded-lg cursor-pointer transition-all bg-white',
                 isSelected ? 'border-accent ring-1 ring-accent' : 'border-border hover:border-accent/50',
-                isConverted && !isSelected && 'opacity-70',
               )}
             >
               <div className="flex items-center gap-2">
@@ -871,12 +946,6 @@ function FactureList({
               <p className="text-xs text-muted-foreground mt-1 truncate">{row.client_nom || '—'}</p>
               <div className="flex items-center gap-2 mt-1 text-[11px] text-muted-foreground">
                 {row.date && <span>{formatHfsqlDate(row.date)}</span>}
-                {isConverted && (
-                  <span className="px-1.5 py-0.5 rounded bg-zinc-200 text-zinc-600 font-medium inline-flex items-center gap-1">
-                    <FileCheck className="h-2.5 w-2.5" />
-                    Converti{row.numero_def ? ` → N° ${row.numero_def}` : ''}
-                  </span>
-                )}
                 <span className="ml-auto text-muted-foreground/70">{row.nb_lignes} ligne{row.nb_lignes > 1 ? 's' : ''}</span>
                 <span className={cn('px-1.5 py-0.5 rounded bg-accent/10 font-medium tabular-nums', row.type === 2 ? 'text-red-600' : 'text-foreground')}>
                   {fmtNum(ttc, 2)} €
@@ -889,9 +958,9 @@ function FactureList({
 
       {/* Batch actions — proforma bucket only: definitive invoices are
           immutable once created (the API 409s any mutation on them), so
-          batch generate/delete only ever operates on proformas. Pinned
-          above the footer (flex sibling of the scrollable list, so they
-          stay visible however long the list is). Disabled during edit
+          batch generate/convert/delete only ever operates on proformas.
+          Pinned above the footer (flex sibling of the scrollable list, so
+          they stay visible however long the list is). Disabled during edit
           mode rather than hidden: batch operations while a proforma edit
           is in flight would be destructive. Hidden entirely without the
           edit_factures permission (API gates the endpoints too). */}
@@ -899,6 +968,15 @@ function FactureList({
         <div className="flex-shrink-0 p-3 border-t bg-zinc-200/50 space-y-1.5">
           <Button size="sm" className="w-full" onClick={onGenerate} disabled={isEditing}>
             <FilePlus2 className="h-3.5 w-3.5 mr-1.5" />Générer les factures
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={onConvertBatch}
+            disabled={isEditing}
+            className="w-full"
+          >
+            <FileCheck className="h-3.5 w-3.5 mr-1.5" />Convertir des factures
           </Button>
           <Button
             size="sm"
@@ -929,7 +1007,7 @@ function FactureList({
 function DetailHeader({
   facture, isLoading, isEditing, editable,
   onStartEdit, onCancelEdit, onSave, isSaving,
-  onDelete, onPrintClick, onEmailClick, onConvertClick, onViewDefinitive,
+  onDelete, onPrintClick, onEmailClick, onConvertClick,
   canEdit,
 }: {
   facture: FactureDetail | null
@@ -944,13 +1022,11 @@ function DetailHeader({
   onPrintClick: () => void
   onEmailClick: () => void
   onConvertClick: () => void
-  onViewDefinitive: (defId: number) => void
   canEdit: boolean
 }) {
   if (!facture && !isLoading) return null
   const chip = facture ? typeChip(facture.type) : null
   const isProforma = facture?.kind === 'prov'
-  const isConverted = !!facture?.converted
   return (
     <div className="flex-shrink-0 pt-0.5">
       <div className="flex items-center gap-3">
@@ -969,11 +1045,7 @@ function DetailHeader({
               <div className="flex items-center gap-2 flex-shrink-0">
                 {chip && <span className={cn('px-2 py-0.5 rounded text-xs font-medium', chip.classes)}>{chip.label}</span>}
                 {isProforma ? (
-                  isConverted ? (
-                    <Badge variant="secondary" className="text-xs gap-1"><FileCheck className="h-3 w-3" />Proforma · converti</Badge>
-                  ) : (
-                    <Badge className="bg-amber-400/15 text-amber-700 border border-amber-500/30 text-xs gap-1"><FileText className="h-3 w-3" />Proforma</Badge>
-                  )
+                  <Badge className="bg-amber-400/15 text-amber-700 border border-amber-500/30 text-xs gap-1"><FileText className="h-3 w-3" />Proforma</Badge>
                 ) : (
                   <Badge variant="secondary" className="text-xs gap-1"><Lock className="h-3 w-3" />Définitive</Badge>
                 )}
@@ -1006,13 +1078,6 @@ function DetailHeader({
               </>
             ) : (
               <>
-                {/* Converted proforma: jump to its definitive facture */}
-                {isProforma && isConverted && facture.IDfacture_def > 0 && (
-                  <Button variant="outline" size="sm" onClick={() => onViewDefinitive(facture.IDfacture_def)} title="Voir la facture définitive">
-                    Voir la facture{facture.numero_def ? ` N° ${facture.numero_def}` : ''}
-                    <ArrowRight className="h-3.5 w-3.5 ml-1.5" />
-                  </Button>
-                )}
                 <Button variant="outline" size="icon" className="h-9 w-9" title="Imprimer" onClick={onPrintClick}>
                   <Printer className="h-4 w-4" />
                 </Button>
@@ -1205,12 +1270,16 @@ function LineCard({
   const descLines = String(line.designation ?? '').split(/\r?\n/).filter((s) => s.trim().length > 0)
   const title = descLines[0] || '—'
   const rest = descLines.slice(1)
+  // Domain glyph per line kind: fini roll / tombé-de-métier (écru) roll — the
+  // same icons as ClientsExpeditions line cards. Divers/manual lines keep Package.
+  const LineIcon = line.stock_kind === 'fini' ? FiniRollIcon : line.stock_kind === 'ecru' ? TmRollIcon : Package
+  const lineIconSize = line.stock_kind === 'divers' ? 'h-3.5 w-3.5' : 'h-5 w-5'
   return (
     <div className={cn('group rounded-lg border-l-4 border border-border/60 bg-zinc-100/80 p-3', 'border-l-amber-400/60')}>
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-start gap-2 min-w-0">
           <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-amber-400/10 mt-0.5">
-            <Layers className="h-3.5 w-3.5 text-amber-600" />
+            <LineIcon className={cn(lineIconSize, 'text-amber-600')} />
           </div>
           <div className="min-w-0">
             <p className="text-sm font-medium">{title}</p>
