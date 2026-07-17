@@ -386,9 +386,7 @@ export function TombeMetierStock() {
             </Badge>
           </div>
         )}
-        {/* min-w below sm keeps the search usable — it forces the w-40 statut
-            select to wrap to row 2 instead of crushing the input to icon width */}
-        <div className="relative order-1 sm:order-2 flex-1 min-w-[150px] sm:min-w-0">
+        <div className="relative order-1 sm:order-2 flex-1 min-w-0">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <input
             type="text"
@@ -399,24 +397,31 @@ export function TombeMetierStock() {
           />
         </div>
 
-        <div className="w-40 flex-shrink-0 order-4 sm:order-3">
-          <PopoverSelect
-            options={STATUT_OPTIONS}
-            value={statut}
-            onChange={(v) => setStatut(v as StatutCode)}
-            hideEmpty
-          />
-        </div>
+        {/* Below sm this wrapper is a full-width row of its own, so the statut
+            select + checkbox can NEVER share row 1 and push the action buttons
+            off the top-right corner. At sm+ display:contents dissolves the
+            wrapper — both children join the toolbar flex directly with their
+            own sm:order, keeping desktop pixels identical. */}
+        <div className="order-4 w-full flex items-center gap-3 sm:contents">
+          <div className="w-40 flex-shrink-0 sm:order-3">
+            <PopoverSelect
+              options={STATUT_OPTIONS}
+              value={statut}
+              onChange={(v) => setStatut(v as StatutCode)}
+              hideEmpty
+            />
+          </div>
 
-        <label className="flex items-center gap-2 text-sm cursor-pointer select-none flex-shrink-0 order-5 sm:order-4">
-          <input
-            type="checkbox"
-            checked={secondChoix}
-            onChange={(e) => setSecondChoix(e.target.checked)}
-            className="h-4 w-4 rounded border-input text-accent focus:ring-2 focus:ring-ring cursor-pointer"
-          />
-          <span>2ᵉ choix</span>
-        </label>
+          <label className="flex items-center gap-2 text-sm cursor-pointer select-none flex-shrink-0 sm:order-4">
+            <input
+              type="checkbox"
+              checked={secondChoix}
+              onChange={(e) => setSecondChoix(e.target.checked)}
+              className="h-4 w-4 rounded border-input text-accent focus:ring-2 focus:ring-ring cursor-pointer"
+            />
+            <span>2ᵉ choix</span>
+          </label>
+        </div>
 
         {!isEditing ? (
           <div className="flex items-center gap-2 flex-shrink-0 order-2 sm:order-5">
