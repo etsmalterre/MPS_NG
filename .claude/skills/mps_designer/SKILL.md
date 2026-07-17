@@ -3848,7 +3848,7 @@ Reference: **`apps/web/src/pages/FilsStock.tsx`** (`StockLotCard`, `CardKV`, mob
 Every responsive change must be **additive**: existing markup gets `hidden md:*`, new mobile markup gets `md:hidden`, form grids gain `sm:` gates, flex order swaps use `order-*` utilities that preserve DOM order at `sm`+. Never restructure or restyle desktop rendering "while you're in there". Proof is mechanical, not visual: capture Playwright desktop baselines BEFORE the first CSS change (§40.7) and keep them green after every edit — during the work, temporarily set `maxDiffPixels: 0` to prove strict pixel identity.
 
 Layout-family map (which screens need work):
-- **Table-centric (§27)** — the responsive gap; this section is mostly about them. Done: FilsStock ✅, FinisStock ✅ (incl. edit-mode multi-select cards — checkbox is CSS-driven via a `data-editing` group attribute on the card container, same trick as the tbody, so edit-mode toggles re-render zero cards). To port: TombeMetierStock, RapportCommandesSst.
+- **Table-centric (§27)** — the responsive gap; this section is mostly about them. Done: FilsStock ✅, FinisStock ✅ (incl. edit-mode multi-select cards — checkbox is CSS-driven via a `data-editing` group attribute on the card container, same trick as the tbody, so edit-mode toggles re-render zero cards), TombeMetierStock ✅ (adds a toolbar `PopoverSelect` filter: give the search wrapper `min-w-[150px] sm:min-w-0` so the w-40 select deterministically wraps to row 2 below `sm` instead of crushing the search to icon width). To port: RapportCommandesSst.
 - **Master-detail (§4)** — already handled by `useResponsiveLayout` (stacked below 1240). Do not touch.
 - **Dashboard** — already responsive (`sm:`/`lg:` grid).
 

@@ -44,6 +44,7 @@ import { fmtNum } from '@/lib/format'
 import { apiFetch } from '@/lib/api'
 import { useHasPermission } from '@/contexts/PermissionsContext'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
+import { CardKV, MobileSortRow } from '@/components/stock/StockCardParts'
 
 // ── Types ──────────────────────────────────────────────
 
@@ -373,15 +374,21 @@ export function TombeMetierStock() {
 
   return (
     <div className="h-full flex flex-col gap-3 min-h-0">
-      {/* Toolbar */}
-      <div className="flex-shrink-0 flex items-center gap-3">
+      {/* Toolbar — below sm: search + actions share row 1 (actions stay top-right),
+          badge, statut filter and checkbox wrap below. Desktop order/pixels unchanged. */}
+      <div className="flex-shrink-0 flex flex-wrap items-center gap-3">
+        {/* Badge wrapper takes the full row below sm so it doesn't crush the search */}
         {isEditing && (
-          <Badge className="bg-accent text-accent-foreground gap-1 shadow-sm flex-shrink-0">
-            <Pencil className="h-3 w-3" />
-            Mode édition
-          </Badge>
+          <div className="order-3 sm:order-1 w-full sm:w-auto flex-shrink-0">
+            <Badge className="bg-accent text-accent-foreground gap-1 shadow-sm">
+              <Pencil className="h-3 w-3" />
+              Mode édition
+            </Badge>
+          </div>
         )}
-        <div className="relative flex-1 min-w-0">
+        {/* min-w below sm keeps the search usable — it forces the w-40 statut
+            select to wrap to row 2 instead of crushing the input to icon width */}
+        <div className="relative order-1 sm:order-2 flex-1 min-w-[150px] sm:min-w-0">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <input
             type="text"
@@ -392,7 +399,7 @@ export function TombeMetierStock() {
           />
         </div>
 
-        <div className="w-40 flex-shrink-0">
+        <div className="w-40 flex-shrink-0 order-4 sm:order-3">
           <PopoverSelect
             options={STATUT_OPTIONS}
             value={statut}
@@ -401,7 +408,7 @@ export function TombeMetierStock() {
           />
         </div>
 
-        <label className="flex items-center gap-2 text-sm cursor-pointer select-none flex-shrink-0">
+        <label className="flex items-center gap-2 text-sm cursor-pointer select-none flex-shrink-0 order-5 sm:order-4">
           <input
             type="checkbox"
             checked={secondChoix}
@@ -412,25 +419,25 @@ export function TombeMetierStock() {
         </label>
 
         {!isEditing ? (
-          <div className="flex items-center gap-2 flex-shrink-0">
+          <div className="flex items-center gap-2 flex-shrink-0 order-2 sm:order-5">
             {canCreate && (
-              <Button size="sm" onClick={() => setCreateOpen(true)}>
-                <Plus className="h-3.5 w-3.5 mr-1" />
-                Nouveau
+              <Button size="sm" onClick={() => setCreateOpen(true)} title="Nouveau">
+                <Plus className="h-3.5 w-3.5 sm:mr-1" />
+                <span className="hidden sm:inline">Nouveau</span>
               </Button>
             )}
             {/* Edit mode is the gateway to batch-edit (edit perm) AND cut (cut
                 perm) — show it if the user can do either; hide it entirely if
                 they can do neither. */}
             {(canEdit || canCut) && (
-              <Button variant="gold" size="sm" onClick={enterEditMode}>
-                <Pencil className="h-3.5 w-3.5 mr-1.5" />
-                Modifier
+              <Button variant="gold" size="sm" onClick={enterEditMode} title="Modifier">
+                <Pencil className="h-3.5 w-3.5 sm:mr-1.5" />
+                <span className="hidden sm:inline">Modifier</span>
               </Button>
             )}
           </div>
         ) : (
-          <div className="flex items-center gap-2 flex-shrink-0">
+          <div className="flex items-center gap-2 flex-shrink-0 order-2 sm:order-5">
             {canCut && selectedRollIds.size === 1 && (
               <Button
                 variant="outline"
@@ -453,9 +460,9 @@ export function TombeMetierStock() {
                 <Pencil className="h-4 w-4" />
               </Button>
             )}
-            <Button size="sm" onClick={exitEditMode}>
-              <X className="h-3.5 w-3.5 mr-1.5" />
-              Terminer
+            <Button size="sm" onClick={exitEditMode} title="Terminer">
+              <X className="h-3.5 w-3.5 sm:mr-1.5" />
+              <span className="hidden sm:inline">Terminer</span>
             </Button>
           </div>
         )}
@@ -479,6 +486,8 @@ export function TombeMetierStock() {
           </div>
         ) : (
           <>
+            {/* Desktop table (md+) — split header/body sharing one colgroup */}
+            <div className="hidden md:flex md:flex-col flex-1 min-h-0">
             {/* Header table (non-scrolling) */}
             <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
               <colgroup>
@@ -527,19 +536,46 @@ export function TombeMetierStock() {
                 </tbody>
               </table>
             </div>
+            </div>
+
+            {/* Mobile card list (< md) — same rows, selection, sort and edit-mode
+                state as the table. data-editing drives the card checkboxes via CSS
+                (same trick as the tbody) so toggling edit mode re-renders no card. */}
+            <div className="md:hidden flex-1 min-h-0 flex flex-col">
+              <MobileSortRow columns={COLUMNS} sort={sort} onSortChange={setSort} />
+              <div
+                className="group flex-1 min-h-0 overflow-y-auto scrollbar-transparent p-2 space-y-2 bg-zinc-100/80"
+                data-editing={isEditing ? 'true' : 'false'}
+              >
+                {filteredSorted.map((r) => (
+                  <StockEcruCard
+                    key={r.IDstock_ecru}
+                    row={r}
+                    selected={
+                      isEditing ? selectedRollIds.has(r.IDstock_ecru) : r.IDstock_ecru === selectedId
+                    }
+                    onRowClick={onRowClick}
+                  />
+                ))}
+              </div>
+            </div>
           </>
         )}
       </div>
 
-      {/* Totalizer — standalone summary bar, detached from the table */}
+      {/* Totalizer — standalone summary bar, detached from the table.
+          Below sm the "Poids total" label disappears (the kg unit is
+          self-explanatory) and the value shrinks one step so the whole bar
+          stays on ONE line even at 345px. The edit-mode selection summary gets
+          its own row. Desktop (sm+) unchanged. */}
       {!isLoading && !isError && filteredSorted.length > 0 && (
-        <div className="flex-shrink-0 flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-zinc-100/80 shadow-sm px-4 py-2.5">
-          <div className="flex items-center gap-2 text-sm">
+        <div className="flex-shrink-0 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/60 bg-zinc-100/80 shadow-sm px-4 py-2.5">
+          <div className={cn('flex flex-wrap items-center gap-2 text-sm', selCount > 0 && 'w-full sm:w-auto')}>
             <Package className="h-4 w-4 text-accent" />
             <span className="font-semibold">{rollCount}</span>
             <span className="text-muted-foreground">pièce{rollCount > 1 ? 's' : ''}</span>
             {selCount > 0 && (
-              <span className="ml-3 pl-3 border-l border-border/60 flex items-center gap-1.5 text-accent">
+              <span className="w-full sm:w-auto sm:ml-3 sm:pl-3 sm:border-l border-border/60 flex flex-wrap items-center gap-1.5 text-accent">
                 <Check className="h-3.5 w-3.5" />
                 <span className="font-semibold tabular-nums">{selCount}</span>
                 <span>sélectionnée{selCount > 1 ? 's' : ''}</span>
@@ -548,9 +584,9 @@ export function TombeMetierStock() {
               </span>
             )}
           </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-xs uppercase tracking-wide text-muted-foreground">Poids total</span>
-            <span className="text-base font-bold tabular-nums">{fmtNum(totalPoids, 1)} kg</span>
+          <div className="flex items-baseline gap-1.5 sm:gap-2">
+            <span className="hidden sm:inline text-xs uppercase tracking-wide text-muted-foreground whitespace-nowrap">Poids total</span>
+            <span className="text-sm sm:text-base font-bold tabular-nums whitespace-nowrap">{fmtNum(totalPoids, 1)} kg</span>
           </div>
         </div>
       )}
@@ -705,7 +741,7 @@ function CutRollDialog({
 
   return (
     <Dialog open={open && !!row} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-lg" onClose={onClose}>
+      <DialogContent className="max-w-lg max-h-[90dvh] overflow-y-auto" onClose={onClose}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Scissors className="h-5 w-5 text-accent" />
@@ -940,7 +976,7 @@ function BatchEditDialog({
 
   return (
     <Dialog open={open && count > 0} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-md" onClose={onClose}>
+      <DialogContent className="max-w-md max-h-[90dvh] overflow-y-auto" onClose={onClose}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Layers className="h-5 w-5 text-accent" />
@@ -1169,7 +1205,7 @@ function CreateEcruRollDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl" onClose={() => onOpenChange(false)}>
+      <DialogContent className="max-w-xl max-h-[90dvh] overflow-y-auto" onClose={() => onOpenChange(false)}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <FabricRollIcon className="h-5 w-5 text-accent" />
@@ -1177,8 +1213,8 @@ function CreateEcruRollDialog({
           </DialogTitle>
         </DialogHeader>
 
-        <div className="grid grid-cols-2 gap-3 mt-4">
-          <div className="col-span-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
+          <div className="col-span-full">
             <label className="text-xs text-muted-foreground mb-1 block">Référence *</label>
             <SearchableCombobox<RefEcruOption>
               options={refsQuery.data ?? []}
@@ -1192,7 +1228,7 @@ function CreateEcruRollDialog({
             />
           </div>
 
-          <div className="col-span-2">
+          <div className="col-span-full">
             <label className="text-xs text-muted-foreground mb-1 block">Coloris *</label>
             <PopoverSelect
               options={(colorisQuery.data ?? []).map((c) => ({ id: c.id, primary: c.reference ?? '' }))}
@@ -1263,7 +1299,7 @@ function CreateEcruRollDialog({
             </label>
           </div>
 
-          <div className="col-span-2">
+          <div className="col-span-full">
             <label className="text-xs text-muted-foreground mb-1 block">Observations</label>
             <textarea
               value={observations}
@@ -1358,6 +1394,75 @@ const StockRow = memo(function StockRow({
   )
 })
 
+// ── Mobile card (below md) ─────────────────────────────
+// Same memo discipline as StockRow: `selected` is the only changing prop, and
+// the edit-mode checkbox is CSS-driven via the container's data-editing group
+// attribute, so edit-mode toggles re-render zero cards.
+
+const StockEcruCard = memo(function StockEcruCard({
+  row,
+  selected,
+  onRowClick,
+}: {
+  row: StockEcruRow
+  selected: boolean
+  onRowClick: (id: number, shiftKey: boolean) => void
+}) {
+  return (
+    <div
+      data-stock-row
+      onClick={(e) => onRowClick(row.IDstock_ecru, e.shiftKey)}
+      className={cn(
+        'rounded-lg border p-3 cursor-pointer transition-colors shadow-sm group-data-[editing=true]:select-none',
+        selected ? 'bg-accent/10 border-accent ring-1 ring-accent' : 'bg-white border-border/60 hover:border-accent/40',
+      )}
+    >
+      <div className="flex items-center gap-2">
+        <div
+          className={cn(
+            'h-5 w-5 rounded border flex-shrink-0 items-center justify-center transition-colors hidden group-data-[editing=true]:flex',
+            selected ? 'bg-accent border-accent text-accent-foreground' : 'bg-white border-input',
+          )}
+        >
+          {selected && <Check className="h-3.5 w-3.5" />}
+        </div>
+        <p className="text-sm font-medium truncate flex-1 min-w-0">{row.ref_ecru ?? '—'}</p>
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {!!row.second_choix && (
+            <Badge variant="outline" className="text-[10px] py-0 border-red-300 text-red-700">2ᵉ</Badge>
+          )}
+          {!!row.IDref_commande_affectation && (
+            <Badge className="bg-sky-100 text-sky-700 border-sky-200 gap-1 text-[10px] py-0">
+              <Send className="h-2.5 w-2.5" />
+              Teinture
+            </Badge>
+          )}
+        </div>
+      </div>
+      <p className="text-xs text-muted-foreground mt-0.5 truncate">{row.coloris_reference ?? '—'}</p>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 mt-2">
+        <CardKV label="Numéro" value={row.numero ?? '—'} mono />
+        <CardKV label="Poids" value={formatKg(row.poids)} mono strong />
+        <CardKV label="Lot" value={row.lot ?? '—'} mono />
+        <CardKV label="Magasin" value={row.magasin_nom ?? '—'} />
+        <CardKV label="N° Cmd" value={row.commande_numero ?? '—'} mono />
+        <CardKV label="Client" value={row.client_nom ?? '—'} />
+      </div>
+      {!!row.defauts?.trim() && (
+        <p className="text-[11px] text-red-700 mt-2 truncate" title={row.defauts.trim()}>
+          {row.defauts.trim()}
+        </p>
+      )}
+      {!!(row.date_saisie || row.observations?.trim()) && (
+        <div className="flex items-center justify-between gap-2 mt-2 pt-2 border-t border-border/40 text-[11px] text-muted-foreground">
+          <span className="truncate italic">{row.observations?.trim() ?? ''}</span>
+          <span className="flex-shrink-0 tabular-nums">{row.date_saisie ? formatHfsqlDate(row.date_saisie) : ''}</span>
+        </div>
+      )}
+    </div>
+  )
+})
+
 // ── Sort header cell ───────────────────────────────────
 
 interface SortHeaderProps {
@@ -1429,7 +1534,8 @@ function StockEcruDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
       const target = e.target as Node | null
       if (!target) return
       if (drawerRef.current?.contains(target)) return
-      if ((target as Element).closest?.('tr[data-stock-row]')) return
+      // Table rows or mobile cards both carry data-stock-row — they switch selection themselves
+      if ((target as Element).closest?.('[data-stock-row]')) return
       onClose()
     }
     document.addEventListener('mousedown', handleMouseDown)
@@ -1496,7 +1602,7 @@ function StockEcruDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
     <div
       ref={drawerRef}
       className={cn(
-        'fixed right-0 bottom-0 w-[440px] bg-white border-l border-border/60 shadow-xl z-30 transition-transform duration-300 flex flex-col',
+        'fixed right-0 bottom-0 w-full max-w-[440px] bg-white border-l border-border/60 shadow-xl z-30 transition-transform duration-300 flex flex-col',
         embed ? 'top-0' : 'top-14',
         open ? 'translate-x-0' : 'translate-x-full',
       )}
@@ -1567,6 +1673,16 @@ function StockEcruDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
                 )}
               </div>
             )}
+            {/* Mobile-only close — at full drawer width there is no "outside" left to tap */}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 flex-shrink-0 -mt-0.5 md:hidden"
+              onClick={onClose}
+              title="Fermer"
+            >
+              <X className="h-4 w-4" />
+            </Button>
           </div>
         </div>
 
