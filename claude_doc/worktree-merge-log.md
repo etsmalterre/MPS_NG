@@ -10,6 +10,29 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-17 — feat/stock-ecru
+Tombé Métier › Stock — **responsive rollout step 3 (tablet / Z Fold / phone).** Same §40
+treatment as Fils/Finis Stock, all changes additive (desktop + tablet proven pixel-identical
+at `maxDiffPixels: 0` after every edit). (1) e2e coverage first: stock-ecru fixtures captured
+from the live dev API (28-row list with défauts/observations/2ᵉ choix/magasin variety,
+detail + provenance for the first-sorted row, trimmed refs/magasins lookups), mock routes,
+`tombe-metier-stock.spec.ts` desktop baselines blessed on the untouched screen, then
+`tombe-metier-stock-responsive.spec.ts` (13 mobile tests across fold-open-717 / phone-390 /
+fold-cover-345). (2) Below `md` the 13-column table becomes a card list (`StockEcruCard`
+in-file, shared `CardKV`/`MobileSortRow`): ref + coloris + 2ᵉ/Teinture badges,
+numéro/poids/lot/magasin/cmd/client grid, red défauts line, observations + date footer;
+memo'd with the edit-mode checkbox CSS-driven via `data-editing` (zero re-renders on mode
+toggle); multi-select taps work on cards. (3) Drawer `w-full max-w-[440px]` + `md:hidden` X
+close; outside-click selector widened to `[data-stock-row]`; the three dialogs (create, cut,
+batch) get `max-h-[90dvh] overflow-y-auto`, create grid collapses to 1 column below `sm`;
+one-line totalizer below `sm`. (4) **New toolbar rule (user-flagged at ~620px):** `order-*`
+swaps alone don't pin the actions top-right when the toolbar has more than a checkbox —
+flex-wrap only wraps on overflow, so the `w-40` statut select could share row 1 and push
+the buttons off the corner. Fix: the select + checkbox live in an
+`order-4 w-full … sm:contents` wrapper (forced full-width row 2 below `sm`, dissolved at
+`sm`+). Recorded in `mps_designer` §40.5 + §40.1. Remaining table-centric port:
+RapportCommandesSst.
+
 ## 2026-07-17 — feat/facturation
 Clients › Facturation — **batch convert + lifecycle/PDF/email polish** on the existing
 proforma/définitive screen. (1) **Conversion is now a MOVE**: `POST /prov/:id/convert`
