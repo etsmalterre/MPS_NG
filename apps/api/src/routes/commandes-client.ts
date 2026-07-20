@@ -1254,11 +1254,16 @@ commandesClientRouter.put('/:id', async (req: Request, res: Response) => {
   }
 })
 
-// Binary est_soldee toggle (sidebar footer pill).
+// Binary est_soldee toggle (sidebar footer pill) — gated on its own
+// cloture_commande_client permission (NOT edit_commandes_client: closing /
+// reopening is a distinct responsibility from editing the commande).
 commandesClientRouter.put('/:id/etat', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    if (req.userId === undefined) { res.status(401).json({ error: 'not authenticated' }); return }
+    const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'cloture_commande_client')
+    if (!allowed) { res.status(403).json({ error: 'permission denied: cloture_commande_client' }); return }
     const est = Number(req.body?.est_soldee) === 1 ? 1 : 0
     await query(`UPDATE commande_client SET est_soldee = ${est} WHERE IDcommande_client = ${id}`)
     res.json({ ok: true, est_soldee: est })

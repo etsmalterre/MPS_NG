@@ -210,7 +210,7 @@ export function ClientsDevis() {
     return () => clearTimeout(t)
   }, [searchQuery])
 
-  const { data: devis, isLoading, isError, error } = useQuery<DevisListRow[]>({
+  const { data: devis, isLoading, isError, error, isFetching } = useQuery<DevisListRow[]>({
     queryKey: ['devis', statusFilter, debouncedQuery],
     queryFn: () => apiFetch(`/devis?status=${statusFilter}&q=${encodeURIComponent(debouncedQuery)}&limit=200`),
   })
@@ -352,10 +352,16 @@ export function ClientsDevis() {
   const rows = devis ?? []
 
   useEffect(() => {
-    if (isEditing || rows.length === 0) return
+    if (isEditing || isFetching) return
+    if (rows.length === 0) {
+      // List settled empty (search with no hits, or the last row left the
+      // current bucket) — clear the stale selection so the placeholder shows.
+      if (selectedId !== null) setSelectedId(null)
+      return
+    }
     const stillVisible = selectedId !== null && rows.some((c) => c.IDDevis_etm === selectedId)
     if (!stillVisible) setSelectedId(rows[0].IDDevis_etm)
-  }, [rows, selectedId, isEditing])
+  }, [rows, selectedId, isEditing, isFetching])
 
   return (
     <>
@@ -486,7 +492,12 @@ export function ClientsDevis() {
           loadDefaults={() => apiFetch(`/devis/${selectedId}/email-defaults`)}
           pdfUrl={`${API_URL}/devis/${selectedId}/pdf`}
           pdfAttachmentLabel={`devis-${selectedId}.pdf`}
-          onSend={(p) => postEmail(`${API_URL}/devis/${selectedId}/email`, p, { includeAttachPdf: true })}
+          onSend={async (p) => {
+            await postEmail(`${API_URL}/devis/${selectedId}/email`, p, { includeAttachPdf: true })
+            // The send logs an envoi_email row server-side — refresh the
+            // historique tab without a manual reload.
+            queryClient.invalidateQueries({ queryKey: ['devis-historique', selectedId] })
+          }}
         />
       )}
     </>

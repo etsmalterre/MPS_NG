@@ -35,6 +35,20 @@ export const PERMISSION_KEYS = [
     category: 'Commandes client',
   },
   {
+    key: 'cloture_commande_client',
+    label: 'Clôturer / rouvrir une commande',
+    description:
+      'Affiche le bouton « Clôturer » / « Rouvrir » sur la pastille d’état et autorise le changement d’état d’une commande dans Clients > Commandes.',
+    category: 'Commandes client',
+  },
+  {
+    key: 'deverrouiller_tarifs',
+    label: 'Déverrouiller les tarifs',
+    description:
+      'Affiche le cadenas « Déverrouiller le prix » dans le dialogue de ligne de commande et autorise la saisie manuelle d’un prix à la place du tarif calculé dans Clients > Commandes.',
+    category: 'Commandes client',
+  },
+  {
     key: 'donation_commande_client',
     label: 'Marquer une commande comme donation',
     description:

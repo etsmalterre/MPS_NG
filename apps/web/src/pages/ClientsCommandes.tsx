@@ -534,7 +534,13 @@ export function ClientsCommandes() {
   // the refetch settles, so the stale list wouldn't yet contain it — resetting
   // here would clobber the new selection (and break the auto-enter-edit flow).
   useEffect(() => {
-    if (isEditing || isFetching || rows.length === 0) return
+    if (isEditing || isFetching) return
+    if (rows.length === 0) {
+      // List settled empty (e.g. the only search hit was just clôturée out of
+      // the current bucket) — clear the stale selection so the placeholder shows.
+      if (selectedId !== null) setSelectedId(null)
+      return
+    }
     const stillVisible = selectedId !== null && rows.some((c) => c.IDcommande_client === selectedId)
     if (!stillVisible) setSelectedId(rows[0].IDcommande_client)
   }, [rows, selectedId, isEditing, isFetching])
@@ -653,7 +659,12 @@ export function ClientsCommandes() {
           extraServerAttachments={emailDoc === 'proforma' ? undefined : [
             { id: 'cgv', label: 'CGV - ETS Malterre.pdf', url: `${API_URL}/commandes-client/cgv/pdf` },
           ]}
-          onSend={(p) => postEmail(`${API_URL}/commandes-client/${selectedId}${emailDoc === 'proforma' ? '/proforma' : ''}/email`, p, { includeAttachPdf: true })}
+          onSend={async (p) => {
+            await postEmail(`${API_URL}/commandes-client/${selectedId}${emailDoc === 'proforma' ? '/proforma' : ''}/email`, p, { includeAttachPdf: true })
+            // Both sends log an envoi_email row server-side — refresh the
+            // historique tab without a manual reload.
+            queryClient.invalidateQueries({ queryKey: ['commande-client-historique', selectedId] })
+          }}
         />
       )}
     </>
@@ -1625,19 +1636,18 @@ function LineCard({
           <p className="text-[11px] text-muted-foreground italic">{line.commentaire.trim()}</p>
         </div>
       )}
-      {/* Affectation gauge for écru/fini lines */}
+      {/* Affectation gauge for écru/fini lines — single row: bar left, quantities right */}
       {canAffect && (
-        <div className="mt-2 ml-9">
-          <div className="flex items-center justify-between text-[10px] text-muted-foreground tabular-nums mb-0.5">
-            <span>Affecté</span>
-            <span>{fmtNum(line.affecte, 1)} / {fmtNum(line.quantite, 1)} {line.unite_label}</span>
-          </div>
-          <div className="h-1.5 rounded-full bg-zinc-200 overflow-hidden">
+        <div className="mt-2 ml-9 flex items-center gap-2">
+          <div className="h-1.5 flex-1 rounded-full bg-zinc-200 overflow-hidden">
             <div
               className={cn('h-full rounded-full transition-all', pct >= 99.9 ? 'bg-green-500' : 'bg-accent')}
               style={{ width: `${pct}%` }}
             />
           </div>
+          <span className="text-xs text-muted-foreground tabular-nums flex-shrink-0">
+            {fmtNum(line.affecte, 1)} / {fmtNum(line.quantite, 1)} {line.unite_label}
+          </span>
         </div>
       )}
     </div>
@@ -3600,6 +3610,9 @@ function LineFormDialog({
   // is read-only (the legacy padlock). New lines start locked (auto); existing
   // lines start unlocked so a previously-saved/overridden price is preserved.
   const [priceLocked, setPriceLocked] = useState(true)
+  // Manual price override is permission-gated: without it the padlock is hidden
+  // and tariff-priced lines (écru/fini) keep their computed/saved price.
+  const canUnlockPrice = useHasPermission('deverrouiller_tarifs')
   // Debounced quantity for the auto-price query (avoid a request per keystroke).
   const [debouncedQuantite, setDebouncedQuantite] = useState('')
 
@@ -3656,8 +3669,10 @@ function LineFormDialog({
     }
   }, [priceLocked, priceInfo])
 
-  // Price input is read-only only while the tariff is actively driving it.
+  // Price input is read-only while the tariff is actively driving it, and for
+  // tariff-priced types whenever the user lacks the déverrouiller permission.
   const autoPriceActive = priceLocked && priceableType && !!priceInfo?.priceable && priceInfo.prix != null
+  const priceReadOnly = autoPriceActive || (priceableType && !canUnlockPrice)
 
   // Reference lookups per type. Écru/fini are restricted to the references
   // assigned to this client in designation_client (the buyable catalogue);
@@ -3787,10 +3802,10 @@ function LineFormDialog({
                   type="number"
                   value={form.prix}
                   onChange={(e) => setForm({ ...form, prix: e.target.value })}
-                  readOnly={autoPriceActive}
-                  className={cn(inputClass, autoPriceActive && 'bg-zinc-100 text-muted-foreground cursor-not-allowed')}
+                  readOnly={priceReadOnly}
+                  className={cn(inputClass, priceReadOnly && 'bg-zinc-100 text-muted-foreground cursor-not-allowed')}
                 />
-                {priceableType && (
+                {priceableType && canUnlockPrice && (
                   <button
                     type="button"
                     onClick={() => setPriceLocked((v) => !v)}
@@ -3824,21 +3839,33 @@ function LineFormDialog({
             )
           })()}
           {/* Commercial nudge: within 15% of the next (cheaper) tariff tranche —
-              suggest the employee propose the round-up to the customer. */}
-          {hasPriceInputs && priceInfo?.priceable && priceInfo.nearNextTranche && priceInfo.nextTranchePrix != null && (() => {
+              Tricobot suggests the employee propose the round-up to the customer. */}
+          {hasPriceInputs && priceInfo?.priceable && !priceInfo.exact && priceInfo.nearNextTranche && priceInfo.nextTranchePrix != null && (() => {
             const saving = priceInfo.prix && priceInfo.prix > 0
               ? Math.round(((priceInfo.prix - priceInfo.nextTranchePrix!) / priceInfo.prix) * 100)
               : 0
             return (
-              <div className="flex items-start gap-2 rounded-md border border-gold/50 bg-gold/10 px-2.5 py-2 -mt-1">
-                <Sparkles className="h-4 w-4 text-amber-600 mt-0.5 flex-shrink-0" />
-                <p className="text-xs text-amber-900 leading-snug">
-                  Plus que <b>{fmtNum(priceInfo.nextTrancheGapQty)} {priceInfo.unite_label}</b> pour atteindre{' '}
-                  <b>{priceInfo.nextTrancheRolls} rouleaux</b> et passer à{' '}
-                  <b>{fmtNum(priceInfo.nextTranchePrix!, 2)} €</b>/{priceInfo.unite_label}
-                  {saving > 0 ? <> (<b>−{saving}%</b>)</> : null}.{' '}
-                  <span className="text-amber-700">À proposer au client&nbsp;?</span>
-                </p>
+              <div className="flex items-end gap-2 -mt-1">
+                <img
+                  src="/tricobot/tricobot-wave.png"
+                  alt="Tricobot"
+                  className="h-14 w-14 flex-shrink-0 object-contain"
+                  draggable={false}
+                />
+                {/* Speech bubble — tail points at Tricobot */}
+                <div className="relative flex-1 rounded-md border border-gold/50 bg-gold/10 px-2.5 py-2">
+                  <div className="absolute -left-[5px] bottom-4 h-2.5 w-2.5 rotate-45 border-l border-b border-gold/50 bg-gold/10" />
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-700 mb-0.5 flex items-center gap-1">
+                    <Sparkles className="h-3 w-3" />Tricobot
+                  </p>
+                  <p className="text-xs text-amber-900 leading-snug">
+                    Plus que <b>{fmtNum(priceInfo.nextTrancheGapQty)} {priceInfo.unite_label}</b> pour atteindre{' '}
+                    <b>{priceInfo.nextTrancheRolls} rouleaux</b> et passer à{' '}
+                    <b>{fmtNum(priceInfo.nextTranchePrix!, 2)} €</b>/{priceInfo.unite_label}
+                    {saving > 0 ? <> (<b>−{saving}%</b>)</> : null}.{' '}
+                    <span className="text-amber-700">À proposer au client&nbsp;?</span>
+                  </p>
+                </div>
               </div>
             )
           })()}
@@ -3990,6 +4017,8 @@ function DetailSidebar({
 }
 
 function StatusFooter({ etat, onToggle, isToggling, disabled }: { etat: number; onToggle: () => void; isToggling: boolean; disabled: boolean }) {
+  // Closing/reopening is permission-gated — without it the pill is display-only.
+  const canCloture = useHasPermission('cloture_commande_client')
   const isTerminee = etat === 1
   const Icon = isTerminee ? CheckCircle2 : Clock
   const label = isTerminee ? 'Terminée' : 'En cours'
@@ -4001,15 +4030,17 @@ function StatusFooter({ etat, onToggle, isToggling, disabled }: { etat: number; 
         <Icon className="h-4 w-4 flex-shrink-0" />
         <span className="text-sm font-bold uppercase tracking-wide truncate">{label}</span>
       </div>
-      <button
-        type="button"
-        onClick={onToggle}
-        disabled={disabled || isToggling}
-        title={isTerminee ? 'Marquer en cours' : 'Marquer terminée'}
-        className="px-3.5 bg-white/15 hover:bg-white/25 active:bg-white/30 disabled:bg-white/5 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-semibold border-l border-white/25 flex items-center gap-1.5 transition-colors"
-      >
-        <ActionIcon className="h-3.5 w-3.5" />{actionLabel}
-      </button>
+      {canCloture && (
+        <button
+          type="button"
+          onClick={onToggle}
+          disabled={disabled || isToggling}
+          title={isTerminee ? 'Marquer en cours' : 'Marquer terminée'}
+          className="px-3.5 bg-white/15 hover:bg-white/25 active:bg-white/30 disabled:bg-white/5 disabled:opacity-60 disabled:cursor-not-allowed text-white text-xs font-semibold border-l border-white/25 flex items-center gap-1.5 transition-colors"
+        >
+          <ActionIcon className="h-3.5 w-3.5" />{actionLabel}
+        </button>
+      )}
     </div>
   )
 }

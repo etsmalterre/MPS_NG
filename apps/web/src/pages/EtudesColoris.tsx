@@ -519,7 +519,13 @@ export function EtudesColoris() {
   // in the search bar auto-selects the first visible étude. Skip while editing
   // so we never discard unsaved changes out from under the user.
   useEffect(() => {
-    if (isEditing || filteredEtudes.length === 0) return
+    if (isEditing) return
+    if (filteredEtudes.length === 0) {
+      // No visible rows (empty search result, or the last row left the current
+      // filter) — clear the stale selection so the placeholder shows.
+      if (selectedId !== null) setSelectedId(null)
+      return
+    }
     const stillVisible =
       selectedId !== null && filteredEtudes.some((e) => e.IDetude_col === selectedId)
     if (!stillVisible) setSelectedId(filteredEtudes[0].IDetude_col)

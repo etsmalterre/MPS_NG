@@ -333,7 +333,13 @@ export function ProspectsDemandes() {
   // Covers both the initial load and search narrowing the list. Skip while
   // editing so we never discard unsaved changes out from under the user.
   useEffect(() => {
-    if (isEditing || filtered.length === 0) return
+    if (isEditing) return
+    if (filtered.length === 0) {
+      // No visible rows (empty search result, or the last row left the current
+      // filter) — clear the stale selection so the placeholder shows.
+      if (selectedId !== null) setSelectedId(null)
+      return
+    }
     const stillVisible = selectedId !== null && filtered.some((d) => d.IDprospect === selectedId)
     if (!stillVisible) setSelectedId(filtered[0].IDprospect)
   }, [filtered, selectedId, isEditing])

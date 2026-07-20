@@ -10,6 +10,36 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-20 — feat/commande-client
+Clients screens — **UX/permission fixes batch.** (1) **Historique refreshes instantly after
+email sends**: `onSend` now invalidates the matching historique query after `postEmail`
+(`facture-historique` in ClientsFacturation, `commande-client-historique` in ClientsCommandes
+— confirmation AND proforma —, `devis-historique` in ClientsDevis), mirroring the
+SousTraitantsCommandes pattern; previously the tab only updated on reload. (2) **Empty-list
+selection clear**: every master-detail "keep the selection valid" effect now clears
+`selectedId` (→ placeholder) when the visible list settles empty — e.g. search narrowed to
+one commande then "Clôturer" moves it out of the bucket; previously the stale detail stayed.
+Server-filtered screens (ClientsCommandes/Facturation/Devis/Expeditions) gate the clear on
+`isFetching` (newly destructured where missing) so an in-flight search refetch never wipes a
+valid selection; client-filtered screens (EtudesColoris, FilsCommandes, ClientsGestion,
+ProspectsDemandes, QualiteSuiviLots, TombeMetierReferences) clear directly. (3) **Line-card
+affectation gauge compacted**: single row — bar left (flex-1), `affecté / commandé` +unit
+right at `text-xs` — the "Affecté" label row is gone. (4) **New permission
+`cloture_commande_client`** ("Clôturer / rouvrir une commande", Commandes client category):
+`PUT /commandes-client/:id/etat` now 403s without it and the StatusFooter pill hides its
+toggle button (pill stays as read-only display). (5) **New permission `deverrouiller_tarifs`**
+("Déverrouiller les tarifs"): the LineFormDialog price padlock only renders with it, and
+without it the Prix input is read-only for tariff-priced types (écru/fini; divers stays
+manual) — UI-level gating, line endpoints still accept `prix` under `edit_commandes_client`.
+(6) **Tricobot tariff nudge**: the next-tranche commercial nudge is now a Tricobot speech
+bubble (`/tricobot/tricobot-wave.png` avatar, gold bubble with tail + "✨ Tricobot" label),
+and `pricing-ligne-client.ts geom()` treats a quantity within 1% of a roll of a clean
+multiple as **exact rounded to the NEAREST roll count** (users type whole Ml against
+fractional roll sizes) — fixes 1402 Ml reading "> 24 Rouleaux" and "Plus que 0 Ml" nudges;
+exact quantities get the better tranche price and never show the nudge (`!priceInfo.exact`
+guard added client-side too). Verified against live tariff data (078A@1402 exact 6,77 €;
+138A@1255 still nudges 29 Ml → 3,49 €; 138A@1284 exact 3,49 €).
+
 ## 2026-07-17 — feat/commandes-client
 Clients › Commandes — **print/email contextual menus + on-the-fly Facture proforma.**
 The detail-header Printer and AtSign buttons are now `DocMenuButton` popover menus

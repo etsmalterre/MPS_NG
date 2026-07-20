@@ -119,13 +119,20 @@ function nextTranche(
   }
 }
 
-/** Roll geometry from a quantity and the per-roll size (same unit). */
+/** Roll geometry from a quantity and the per-roll size (same unit).
+ *  Users type whole Ml/Kg while roll sizes are fractional (poids × rounded
+ *  rendement), so "spot on" must tolerate the rounding: any quantity within 1%
+ *  of a roll of a clean multiple counts as exact (rounded to the NEAREST roll
+ *  count, not floored) — otherwise 171 Ml on 85,7 Ml rolls reads as "> 1
+ *  rouleau" with a silly "plus que 0 Ml" nudge instead of a clean 2 rolls. */
 function geom(quantite: number, rollSize: number): { nRolls: number; cleanQty: number; exact: boolean } {
   const rollsFloat = quantite / rollSize
+  const nearest = Math.round(rollsFloat)
+  if (nearest >= 1 && Math.abs(quantite - nearest * rollSize) <= rollSize * 0.01) {
+    return { nRolls: nearest, cleanQty: round2(nearest * rollSize), exact: true }
+  }
   const nRolls = Math.floor(rollsFloat + 1e-6)
-  const cleanQty = round2(nRolls * rollSize)
-  const exact = nRolls >= 1 && Math.abs(quantite - nRolls * rollSize) < rollSize * 1e-4
-  return { nRolls, cleanQty, exact }
+  return { nRolls, cleanQty: round2(nRolls * rollSize), exact: false }
 }
 
 export async function calcLignePriceClient(p: {

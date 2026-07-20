@@ -550,7 +550,13 @@ export function TombeMetierReferences() {
   // Skip while a just-created row is pending: its id is set before the list refetch
   // lands, so it isn't in `filtered` yet and we'd otherwise clobber the selection.
   useEffect(() => {
-    if (isEditing || filtered.length === 0 || autoEditForId !== null) return
+    if (isEditing || autoEditForId !== null) return
+    if (filtered.length === 0) {
+      // No visible rows (empty search result, or the last row left the current
+      // filter) — clear the stale selection so the placeholder shows.
+      if (selectedId !== null) setSelectedId(null)
+      return
+    }
     const stillVisible = selectedId !== null && filtered.some((r) => r.IDref_ecru === selectedId)
     if (!stillVisible) setSelectedId(filtered[0].IDref_ecru)
   }, [filtered, selectedId, isEditing, autoEditForId])

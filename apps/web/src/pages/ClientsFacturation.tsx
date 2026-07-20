@@ -210,7 +210,7 @@ export function ClientsFacturation() {
     return () => clearTimeout(t)
   }, [searchQuery])
 
-  const { data: factures, isLoading, isError, error } = useQuery<FactureListRow[]>({
+  const { data: factures, isLoading, isError, error, isFetching } = useQuery<FactureListRow[]>({
     queryKey: ['factures', bucket, typeFilter, debouncedQuery],
     queryFn: () => apiFetch(`/factures?status=${bucket}&type=${typeFilter}&q=${encodeURIComponent(debouncedQuery)}&limit=200`),
   })
@@ -397,10 +397,16 @@ export function ClientsFacturation() {
   const rows = factures ?? []
 
   useEffect(() => {
-    if (isEditing || rows.length === 0) return
+    if (isEditing || isFetching) return
+    if (rows.length === 0) {
+      // List settled empty (search with no hits, or the last row left the
+      // current bucket) — clear the stale selection so the placeholder shows.
+      if (selectedId !== null) setSelectedId(null)
+      return
+    }
     const stillVisible = selectedId !== null && rows.some((f) => f.id === selectedId)
     if (!stillVisible) setSelectedId(rows[0].id)
-  }, [rows, selectedId, isEditing])
+  }, [rows, selectedId, isEditing, isFetching])
 
   return (
     <>
@@ -574,7 +580,12 @@ export function ClientsFacturation() {
           loadDefaults={() => apiFetch(`/factures/${bucket}/${selectedId}/email-defaults`)}
           pdfUrl={`${API_URL}/factures/${bucket}/${selectedId}/pdf`}
           pdfAttachmentLabel={`${bucket === 'prov' ? 'proforma' : detail?.type === 2 ? 'avoir' : 'facture'}-${detail?.numero ?? selectedId}.pdf`}
-          onSend={(p) => postEmail(`${API_URL}/factures/${bucket}/${selectedId}/email`, p, { includeAttachPdf: true })}
+          onSend={async (p) => {
+            await postEmail(`${API_URL}/factures/${bucket}/${selectedId}/email`, p, { includeAttachPdf: true })
+            // The send logs an envoi_email row server-side — refresh the
+            // historique tab without a manual reload (kind === bucket).
+            queryClient.invalidateQueries({ queryKey: ['facture-historique', bucket, selectedId] })
+          }}
         />
       )}
     </>

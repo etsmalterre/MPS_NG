@@ -266,7 +266,13 @@ export function ClientsGestion() {
 
   // Keep selection valid against the (search/filter-narrowed) list.
   useEffect(() => {
-    if (isEditing || filtered.length === 0) return
+    if (isEditing) return
+    if (filtered.length === 0) {
+      // No visible rows (empty search result, or the last row left the current
+      // filter) — clear the stale selection so the placeholder shows.
+      if (selectedId !== null) setSelectedId(null)
+      return
+    }
     const stillVisible = selectedId !== null && filtered.some((c) => c.IDclient === selectedId)
     if (!stillVisible) setSelectedId(filtered[0].IDclient)
   }, [filtered, selectedId, isEditing])

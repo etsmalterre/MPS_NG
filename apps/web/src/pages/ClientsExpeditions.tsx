@@ -237,7 +237,7 @@ export function ClientsExpeditions() {
 
   // Infinite list: pages of 200, cursor = last row id (API `before`). Search returns a single page.
   const {
-    data: rowPages, isLoading, isError, error,
+    data: rowPages, isLoading, isError, error, isFetching,
     fetchNextPage, hasNextPage, isFetchingNextPage,
   } = useInfiniteQuery({
     queryKey: ['expeditions', bucket, stateFilter, debouncedQuery],
@@ -376,10 +376,16 @@ export function ClientsExpeditions() {
   const list = useMemo(() => (rowPages?.pages ?? []).flat(), [rowPages])
 
   useEffect(() => {
-    if (isEditing || list.length === 0) return
+    if (isEditing || isFetching) return
+    if (list.length === 0) {
+      // List settled empty (search with no hits, or the last row left the
+      // current bucket) — clear the stale selection so the placeholder shows.
+      if (selectedId !== null) setSelectedId(null)
+      return
+    }
     const stillVisible = selectedId !== null && list.some((r) => r.id === selectedId)
     if (!stillVisible) setSelectedId(list[0].id)
-  }, [list, selectedId, isEditing])
+  }, [list, selectedId, isEditing, isFetching])
 
   return (
     <>

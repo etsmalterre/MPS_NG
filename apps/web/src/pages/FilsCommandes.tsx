@@ -412,7 +412,13 @@ export function FilsCommandes() {
   // typing in the search bar auto-selects the first visible commande. Skip
   // while editing so we never discard unsaved changes out from under the user.
   useEffect(() => {
-    if (isEditing || filtered.length === 0) return
+    if (isEditing) return
+    if (filtered.length === 0) {
+      // No visible rows (empty search result, or the last row left the current
+      // filter) — clear the stale selection so the placeholder shows.
+      if (selectedId !== null) setSelectedId(null)
+      return
+    }
     const stillVisible = selectedId !== null && filtered.some((c) => c.IDcommande_fil === selectedId)
     if (!stillVisible) setSelectedId(filtered[0].IDcommande_fil)
   }, [filtered, selectedId, isEditing])

@@ -402,7 +402,13 @@ export function QualiteSuiviLots() {
   // Keep the selection valid against the (search-filtered) list. Skip while
   // editing so we never discard unsaved changes.
   useEffect(() => {
-    if (isEditing || filtered.length === 0) return
+    if (isEditing) return
+    if (filtered.length === 0) {
+      // No visible rows (empty search result, or the last row left the current
+      // filter) — clear the stale selection so the placeholder shows.
+      if (selectedId !== null) setSelectedId(null)
+      return
+    }
     const stillVisible = selectedId !== null && filtered.some((l) => l.IDsuivilot === selectedId)
     if (!stillVisible) setSelectedId(filtered[0].IDsuivilot)
   }, [filtered, selectedId, isEditing])
