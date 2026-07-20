@@ -5,15 +5,21 @@
 // Permissions are toggled inline (no edit mode). Each toggle immediately PUTs
 // the new grant set to /api/permissions/users/:id and refreshes the list.
 
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import { Navigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Search, Loader2, AlertCircle, Shield, Check, Mail, Save } from 'lucide-react'
-import { apiFetch } from '@/lib/api'
+import {
+  Search, Loader2, AlertCircle, Shield, Check, Mail, Save,
+  Image as ImageIcon, PenLine, Trash2,
+} from 'lucide-react'
+import { apiFetch, API_URL } from '@/lib/api'
 import { useUser } from '@/contexts/UserContext'
 import { usePermissions } from '@/contexts/PermissionsContext'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { Button } from '@/components/ui/button'
+import { Avatar } from '@/components/ui/avatar'
+import { SignaturePreview } from '@/components/ui/signature-preview'
+import { userPhotoUrl } from '@/components/profile/ProfileModal'
 import { cn } from '@/lib/utils'
 
 // ── Types ──────────────────────────────────────────────
@@ -31,6 +37,15 @@ interface UserEmailRow {
   prenom: string | null
   nom: string | null
   email: string | null
+}
+
+interface UserProfileRow {
+  IDutilisateur: number
+  prenom: string | null
+  nom: string | null
+  signatureHtml: string | null
+  hasPhoto: boolean
+  photoVersion: number | null
 }
 
 interface PermissionKeyDef {
@@ -112,6 +127,19 @@ export function SettingsUtilisateurs() {
     return map
   }, [emails])
 
+  // Per-user photo + HTML signature (admin-managed, JSON side-store).
+  const { data: profiles } = useQuery<UserProfileRow[]>({
+    queryKey: ['user-profiles'],
+    queryFn: () => apiFetch<UserProfileRow[]>('/user-profiles/users'),
+    enabled: viewerIsAdmin,
+  })
+
+  const profileByUserId = useMemo(() => {
+    const map = new Map<number, UserProfileRow>()
+    if (profiles) for (const p of profiles) map.set(p.IDutilisateur, p)
+    return map
+  }, [profiles])
+
   const setEmailMut = useMutation({
     mutationFn: ({ id, email }: { id: number; email: string }) =>
       apiFetch<{ IDutilisateur: number; email: string | null }>(
@@ -184,6 +212,7 @@ export function SettingsUtilisateurs() {
       detail={
         <DetailBody
           user={selected}
+          profile={selected ? profileByUserId.get(selected.IDutilisateur) ?? null : null}
           currentEmail={selected ? emailByUserId.get(selected.IDutilisateur) ?? '' : ''}
           onSaveEmail={(email) => {
             if (!selected) return
@@ -339,10 +368,11 @@ function DetailHeader({ user }: { user: PermissionUser | null }) {
 // ── Center: Detail Body (permission toggles) ──────────
 
 function DetailBody({
-  user, currentEmail, onSaveEmail, isSavingEmail, emailSaveError,
+  user, profile, currentEmail, onSaveEmail, isSavingEmail, emailSaveError,
   keys, isUpdating, onToggle,
 }: {
   user: PermissionUser | null
+  profile: UserProfileRow | null
   currentEmail: string
   onSaveEmail: (email: string) => void
   isSavingEmail: boolean
@@ -388,6 +418,13 @@ function DetailBody({
         onSave={onSaveEmail}
         isSaving={isSavingEmail}
         saveError={emailSaveError}
+      />
+
+      <PhotoEditor user={user} profile={profile} />
+
+      <SignatureEditor
+        userId={user.IDutilisateur}
+        currentSignature={profile?.signatureHtml ?? ''}
       />
 
       {isVin && (
@@ -543,6 +580,216 @@ function EmailEditor({
           <p className="text-xs text-destructive flex items-center gap-1">
             <AlertCircle className="h-3 w-3" />
             {saveError}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Photo editor card ─────────────────────────────────
+// Admin picks an image file → immediate upload (multipart, raw fetch — the
+// shared apiFetch forces a JSON Content-Type). Photo is stored on disk
+// server-side; the ?v=<photoVersion> query string busts caches after upload.
+
+const MAX_PHOTO_BYTES = 5 * 1024 * 1024
+
+function PhotoEditor({ user, profile }: { user: PermissionUser; profile: UserProfileRow | null }) {
+  const { user: viewer } = useUser()
+  const queryClient = useQueryClient()
+  const fileRef = useRef<HTMLInputElement | null>(null)
+  const [uploadError, setUploadError] = useState<string | null>(null)
+
+  const userId = user.IDutilisateur
+  const hasPhoto = profile?.hasPhoto ?? false
+
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ['user-profiles'] })
+    // Editing one's own photo must refresh the header avatar too.
+    if (viewer && viewer.IDutilisateur === userId) {
+      queryClient.invalidateQueries({ queryKey: ['user-profile-me'] })
+    }
+  }
+
+  const uploadMut = useMutation({
+    mutationFn: async (file: File) => {
+      const fd = new FormData()
+      fd.append('photo', file)
+      const res = await fetch(`${API_URL}/user-profiles/users/${userId}/photo`, {
+        method: 'PUT',
+        body: fd,
+        credentials: 'include',
+      })
+      if (!res.ok) throw new Error(`Erreur HTTP ${res.status}`)
+      return res.json()
+    },
+    onSuccess: invalidate,
+    onError: (err) => setUploadError(err instanceof Error ? err.message : 'Erreur'),
+  })
+
+  const deleteMut = useMutation({
+    mutationFn: () => apiFetch(`/user-profiles/users/${userId}/photo`, { method: 'DELETE' }),
+    onSuccess: invalidate,
+  })
+
+  const handlePick = (file: File | undefined) => {
+    if (!file) return
+    setUploadError(null)
+    if (file.size > MAX_PHOTO_BYTES) {
+      setUploadError("L'image dépasse la limite de 5 Mo.")
+      return
+    }
+    uploadMut.mutate(file)
+  }
+
+  return (
+    <div className="rounded-lg border border-border/60 bg-white shadow-sm">
+      <div className="px-4 py-2 border-b border-border/60 bg-zinc-100/80 rounded-t-lg flex items-center gap-2">
+        <ImageIcon className="h-3.5 w-3.5 text-accent" />
+        <p className="text-xs font-bold text-primary uppercase tracking-wide">Photo</p>
+      </div>
+      <div className="p-4 space-y-2">
+        <div className="flex items-center gap-4">
+          <Avatar
+            className="h-16 w-16 text-lg"
+            src={hasPhoto ? userPhotoUrl(userId, profile?.photoVersion ?? null) : undefined}
+            alt={displayName(user)}
+            fallback={initials(user)}
+          />
+          <div className="flex items-center gap-2">
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/gif"
+              className="hidden"
+              onClick={(e) => { (e.target as HTMLInputElement).value = '' }}
+              onChange={(e) => handlePick(e.target.files?.[0])}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={uploadMut.isPending}
+              onClick={() => fileRef.current?.click()}
+            >
+              {uploadMut.isPending ? (
+                <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Envoi…</>
+              ) : (
+                <><ImageIcon className="h-3.5 w-3.5 mr-1.5" />Choisir une photo…</>
+              )}
+            </Button>
+            {hasPhoto && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-destructive hover:text-destructive"
+                disabled={deleteMut.isPending}
+                onClick={() => deleteMut.mutate()}
+              >
+                {deleteMut.isPending ? (
+                  <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                ) : (
+                  <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+                )}
+                Supprimer la photo
+              </Button>
+            )}
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Affichée dans l'en-tête de l'application et dans « Mon profil ». Formats acceptés : JPG, PNG, WebP, GIF (5 Mo max).
+        </p>
+        {uploadError && (
+          <p className="text-xs text-destructive flex items-center gap-1">
+            <AlertCircle className="h-3 w-3" />
+            {uploadError}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Signature editor card ─────────────────────────────
+// Raw HTML textarea + live sandboxed preview. Same draft-state pattern as
+// EmailEditor: local draft, Enregistrer enabled only when dirty.
+
+function SignatureEditor({
+  userId, currentSignature,
+}: {
+  userId: number
+  currentSignature: string
+}) {
+  const { user: viewer } = useUser()
+  const queryClient = useQueryClient()
+  const [draft, setDraft] = useState(currentSignature)
+
+  // Reset draft whenever the selected user changes, OR when the persisted
+  // value changes after a save.
+  useEffect(() => {
+    setDraft(currentSignature)
+  }, [userId, currentSignature])
+
+  const isDirty = draft !== currentSignature
+
+  const saveMut = useMutation({
+    mutationFn: () =>
+      apiFetch(`/user-profiles/users/${userId}/signature`, {
+        method: 'PUT',
+        body: JSON.stringify({ signatureHtml: draft }),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['user-profiles'] })
+      if (viewer && viewer.IDutilisateur === userId) {
+        queryClient.invalidateQueries({ queryKey: ['user-profile-me'] })
+      }
+    },
+  })
+
+  return (
+    <div className="rounded-lg border border-border/60 bg-white shadow-sm">
+      <div className="px-4 py-2 border-b border-border/60 bg-zinc-100/80 rounded-t-lg flex items-center gap-2">
+        <PenLine className="h-3.5 w-3.5 text-accent" />
+        <p className="text-xs font-bold text-primary uppercase tracking-wide">Signature email</p>
+        <div className="ml-auto">
+          <Button
+            size="sm"
+            onClick={() => saveMut.mutate()}
+            disabled={!isDirty || saveMut.isPending}
+          >
+            {saveMut.isPending ? (
+              <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Enregistrement…</>
+            ) : (
+              <><Save className="h-3.5 w-3.5 mr-1.5" />Enregistrer</>
+            )}
+          </Button>
+        </div>
+      </div>
+      <div className="p-4 space-y-3">
+        <p className="text-xs text-muted-foreground">
+          Collez ici le code HTML de la signature (copiée depuis Gmail/Outlook). Elle sera ajoutée
+          automatiquement au bas des emails envoyés par cet utilisateur. Préférez des images hébergées
+          (URL) plutôt qu'intégrées.
+        </p>
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          rows={7}
+          spellCheck={false}
+          placeholder="<div>…code HTML de la signature…</div>"
+          className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-ring resize-y min-h-[160px]"
+        />
+        <div className="space-y-1">
+          <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">Aperçu</p>
+          {draft.trim() ? (
+            <SignaturePreview html={draft} />
+          ) : (
+            <p className="text-sm text-muted-foreground italic">Aucune signature</p>
+          )}
+        </div>
+        {saveMut.error instanceof Error && (
+          <p className="text-xs text-destructive flex items-center gap-1">
+            <AlertCircle className="h-3 w-3" />
+            {saveMut.error.message}
           </p>
         )}
       </div>

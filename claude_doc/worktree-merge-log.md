@@ -10,6 +10,30 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-20 — feat/signature
+**User profiles: photo + HTML email signature, "Mon profil" modal, auto-signature on
+outgoing emails.** New JSON side-store `apps/api/src/lib/user-profiles.ts` (mirrors
+`user-emails.ts`; the HFSQL `utilisateur` table has no photo/signature columns) keeping
+`signatureHtml` in `data/user-profiles.json` and photos as disk files under
+`data/user-photos/<id>.<ext>`. New router `user-profiles.ts` at `/api/user-profiles`:
+`GET /me`, admin `GET /users`, `GET /users/:id/photo` (self-or-admin; CORP cross-origin +
+immutable cache keyed by `?v=<photoVersion>`), admin `PUT /users/:id/signature` (raw HTML,
+200 KB cap, empty clears), `PUT /users/:id/photo` (multipart, 5 MB, jpeg/png/webp/gif),
+`DELETE /users/:id/photo`. **Email integration in one place**: `gmail.ts sendMail` resolves
+the sender's signature from the `from` address via `getSignatureForEmail()` and
+`buildMimeMessage` appends it to BOTH alternative parts (raw HTML after the escaped body
+div; `signatureToPlain()` conversion in text/plain) — zero changes to the ~13 send call
+sites; no signature → byte-identical output. Covered by `gmail.test.ts` (first vitest suite
+in apps/api). Frontend: header avatar shows the photo when set (Avatar now resets its
+error state on src change); user dropdown gains a "Mon profil" item for everyone opening a
+view-only modal (`components/profile/ProfileModal.tsx` — prénom/nom, email from
+`/user-emails/me`, photo, signature rendered in the new sandboxed-iframe
+`ui/signature-preview.tsx`); Paramètres › Utilisateurs gains two admin cards under the
+email card — PhotoEditor (immediate multipart upload via raw fetch + credentials, delete,
+5 Mo client pre-check) and SignatureEditor (raw-HTML textarea + live preview, EmailEditor
+draft pattern); SendEmailDialog shows a read-only "Signature — ajoutée automatiquement à
+l'envoi" preview strip under the Message field when the sender has one.
+
 ## 2026-07-20 — feat/commande-client
 Clients screens — **UX/permission fixes batch.** (1) **Historique refreshes instantly after
 email sends**: `onSend` now invalidates the matching historique query after `postEmail`

@@ -17,6 +17,7 @@
 
 import * as fs from 'node:fs'
 import { google } from 'googleapis'
+import { getSignatureForEmail } from './user-profiles.js'
 
 type JwtClient = InstanceType<typeof google.auth.JWT>
 
@@ -90,6 +91,10 @@ export interface SendMailOptions {
    *  strips the markers. */
   body: string
   attachments?: SendMailAttachment[]
+  /** Sender's HTML signature, appended after the body in both MIME parts.
+   *  When undefined, sendMail() resolves it from the `from` address via the
+   *  user-profiles store; pass null to explicitly send without a signature. */
+  signatureHtml?: string | null
 }
 
 // ── Body rendering (plain + HTML alternative) ────────────
@@ -99,6 +104,26 @@ const BOLD_RE = /\*\*([^*]+)\*\*/g
 /** Plain-text part: body with `**bold**` markers stripped. */
 function bodyToPlain(body: string): string {
   return body.replace(BOLD_RE, '$1')
+}
+
+/** Crude HTML → plain-text conversion for the signature in the text/plain
+ *  alternative: block-level closers become newlines, tags are stripped,
+ *  common entities decoded, blank lines collapsed. */
+export function signatureToPlain(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|tr|table|h[1-6]|li)>/gi, '\n')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 function escapeHtml(s: string): string {
@@ -150,15 +175,24 @@ export function buildMimeMessage(opts: SendMailOptions): Buffer {
   headers.push(`Subject: ${encodeHeader(opts.subject)}`)
   headers.push('MIME-Version: 1.0')
 
+  // Sender's signature: raw HTML appended after the escaped body div (it is
+  // trusted admin-entered markup), converted to text for the plain part.
+  const sig = opts.signatureHtml?.trim() ? opts.signatureHtml : null
+  const plainBody =
+    bodyToPlain(opts.body) + (sig ? `${crlf}${crlf}${signatureToPlain(sig)}` : '')
+  const htmlBody =
+    bodyToHtml(opts.body) +
+    (sig ? `<br><br>${crlf}<div class="mps-signature">${sig}</div>` : '')
+
   const altPart =
     `--${altBoundary}${crlf}` +
     `Content-Type: text/plain; charset="UTF-8"${crlf}` +
     `Content-Transfer-Encoding: 8bit${crlf}${crlf}` +
-    bodyToPlain(opts.body) + crlf +
+    plainBody + crlf +
     `--${altBoundary}${crlf}` +
     `Content-Type: text/html; charset="UTF-8"${crlf}` +
     `Content-Transfer-Encoding: 8bit${crlf}${crlf}` +
-    bodyToHtml(opts.body) + crlf +
+    htmlBody + crlf +
     `--${altBoundary}--${crlf}`
 
   if (!hasAttachments) {
@@ -205,8 +239,17 @@ export async function sendMail(opts: SendMailOptions): Promise<string> {
     throw new Error('At least one recipient required')
   }
 
+  // Resolve the sender's signature from the user-profiles store unless the
+  // caller passed one explicitly (null = explicitly none). Every send route
+  // sets `from` via getUserEmail(req.userId), so the address identifies the
+  // sending user; no match / no signature → null → message unchanged.
+  const signatureHtml =
+    opts.signatureHtml !== undefined
+      ? opts.signatureHtml
+      : await getSignatureForEmail(opts.from)
+
   const client = getClientForSubject(opts.from)
-  const mime = buildMimeMessage(opts)
+  const mime = buildMimeMessage({ ...opts, signatureHtml })
 
   // Gmail expects the raw message base64url-encoded (not plain base64).
   const raw = mime

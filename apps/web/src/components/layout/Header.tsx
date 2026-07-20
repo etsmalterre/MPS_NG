@@ -1,10 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useLocation, NavLink } from 'react-router-dom'
-import { Menu, Maximize2, Minimize2, LogOut } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
+import { Menu, Maximize2, Minimize2, LogOut, CircleUser } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Avatar } from '@/components/ui/avatar'
 import { getActiveMenu } from '@/config/navigation'
 import { cn } from '@/lib/utils'
+import { apiFetch } from '@/lib/api'
 import { useUser, canSwitchUser } from '@/contexts/UserContext'
+import { ProfileModal, userPhotoUrl, type UserProfileMe } from '@/components/profile/ProfileModal'
 
 interface HeaderProps {
   onMenuClick: () => void
@@ -18,7 +22,19 @@ export function Header({ onMenuClick }: HeaderProps) {
   const { user, logout } = useUser()
   const allowSwitch = canSwitchUser(user)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
   const userMenuRef = useRef<HTMLDivElement | null>(null)
+
+  // Profile (photo + signature) of the logged-in user — drives the avatar
+  // photo in the header and the "Mon profil" modal.
+  const { data: profileMe } = useQuery<UserProfileMe>({
+    queryKey: ['user-profile-me'],
+    queryFn: () => apiFetch<UserProfileMe>('/user-profiles/me'),
+    enabled: !!user,
+  })
+  const photoUrl = user && profileMe?.hasPhoto
+    ? userPhotoUrl(user.IDutilisateur, profileMe.photoVersion)
+    : undefined
 
   // Close the user menu when clicking outside
   useEffect(() => {
@@ -130,28 +146,43 @@ export function Header({ onMenuClick }: HeaderProps) {
             onClick={() => setUserMenuOpen((o) => !o)}
             title={userDisplay || 'Utilisateur'}
             className={cn(
-              'h-9 w-9 rounded-full flex items-center justify-center font-heading font-bold text-sm shadow-sm transition-all',
+              'h-9 w-9 rounded-full flex items-center justify-center font-heading font-bold text-sm shadow-sm transition-all overflow-hidden',
               'bg-gold text-gold-foreground',
               'hover:ring-2 hover:ring-gold/40 hover:shadow-md'
             )}
           >
-            {userInitials}
+            {photoUrl ? (
+              <Avatar className="h-9 w-9" src={photoUrl} alt={userDisplay} fallback={userInitials} />
+            ) : (
+              userInitials
+            )}
           </button>
           {userMenuOpen && user && (
             <div className="absolute right-0 top-full mt-2 w-56 rounded-lg border border-border bg-white shadow-lg p-3 z-50">
               <div className="flex items-center gap-3">
-                <div className="h-10 w-10 rounded-full bg-gold flex items-center justify-center text-gold-foreground font-heading font-bold shadow-sm flex-shrink-0">
-                  {userInitials}
-                </div>
+                {photoUrl ? (
+                  <Avatar className="h-10 w-10 flex-shrink-0" src={photoUrl} alt={userDisplay} fallback={userInitials} />
+                ) : (
+                  <div className="h-10 w-10 rounded-full bg-gold flex items-center justify-center text-gold-foreground font-heading font-bold shadow-sm flex-shrink-0">
+                    {userInitials}
+                  </div>
+                )}
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-bold text-primary truncate">{userDisplay}</p>
                   <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Utilisateur actif</p>
                 </div>
               </div>
+              <button
+                onClick={() => { setUserMenuOpen(false); setProfileOpen(true) }}
+                className="mt-3 w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-accent/10 hover:text-accent transition-colors border-t border-border/60 pt-3"
+              >
+                <CircleUser className="h-3 w-3" />
+                Mon profil
+              </button>
               {allowSwitch && (
                 <button
                   onClick={() => { setUserMenuOpen(false); void logout() }}
-                  className="mt-3 w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-accent/10 hover:text-accent transition-colors border-t border-border/60 pt-3"
+                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-accent/10 hover:text-accent transition-colors"
                 >
                   <LogOut className="h-3 w-3" />
                   Changer d'utilisateur
@@ -161,6 +192,8 @@ export function Header({ onMenuClick }: HeaderProps) {
           )}
         </div>
       </div>
+
+      <ProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
     </header>
   )
 }

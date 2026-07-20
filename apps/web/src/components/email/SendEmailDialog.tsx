@@ -15,6 +15,8 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
+import { SignaturePreview } from '@/components/ui/signature-preview'
+import { apiFetch } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import {
   EMAIL_REGEX,
@@ -143,6 +145,15 @@ export function SendEmailDialog({
     queryFn: loadDefaults,
     enabled: open,
   })
+
+  // Sender's HTML signature — appended server-side at send time; shown here
+  // read-only so the user knows what the recipient will see.
+  const { data: profileMe } = useQuery<{ signatureHtml: string | null }>({
+    queryKey: ['user-profile-me'],
+    queryFn: () => apiFetch<{ signatureHtml: string | null }>('/user-profiles/me'),
+    enabled: open,
+  })
+  const signatureHtml = profileMe?.signatureHtml ?? null
 
   // Visible optional attachments: when the defaults fetch returns
   // optional_attachments, it is authoritative — only ids it lists are shown
@@ -572,6 +583,14 @@ export function SendEmailDialog({
                     <p className="flex-shrink-0 text-[10px] text-muted-foreground">
                       Astuce : le texte entouré de ** apparaîtra en <strong>gras</strong> dans l'email envoyé.
                     </p>
+                    {signatureHtml && (
+                      <div className="flex-shrink-0 space-y-1">
+                        <p className="text-[10px] text-muted-foreground">
+                          Signature — ajoutée automatiquement à l'envoi
+                        </p>
+                        <SignaturePreview html={signatureHtml} className="min-h-0 h-28" />
+                      </div>
+                    )}
                   </div>
                 </div>
 

@@ -11,6 +11,12 @@ const Avatar = React.forwardRef<HTMLDivElement, AvatarProps>(
   ({ className, src, alt, fallback, ...props }, ref) => {
     const [hasError, setHasError] = React.useState(false)
 
+    // A new src (e.g. freshly uploaded photo with a new cache-buster) must
+    // get a fresh chance to load even if the previous one 404'd.
+    React.useEffect(() => {
+      setHasError(false)
+    }, [src])
+
     return (
       <div
         ref={ref}
