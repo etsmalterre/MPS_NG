@@ -102,6 +102,7 @@ interface LigneCommande {
   total_metrage: number
   total_poids: number
   affecte: number
+  expedie: number
 }
 
 interface RollLite {
@@ -1557,6 +1558,22 @@ function DonationPickerDialog({
   )
 }
 
+// Micro label + value stat block used on line cards — same label/value
+// language as the mobile CardKV (uppercase micro label, tabular value).
+function LineStat({ label, value, className, valueClass }: {
+  label: string
+  value: string
+  className?: string
+  valueClass?: string
+}) {
+  return (
+    <div className={className}>
+      <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">{label}</p>
+      <p className={cn('text-xs font-semibold tabular-nums', valueClass)}>{value}</p>
+    </div>
+  )
+}
+
 function LineCard({
   line, isEditing, linesLocked, isDrawerOpen, onEdit, onDelete, onOpenAffectation,
 }: {
@@ -1617,16 +1634,29 @@ function LineCard({
           )}
         </div>
       </div>
-      <div className="flex items-center gap-3 mt-2 ml-9 text-[11px] text-muted-foreground tabular-nums">
-        <span>{fmtNum(line.quantite, 1)} {line.unite_label}</span>
-        {line.prix > 0 && <span>× {fmtNum(line.prix, 2)} €</span>}
-        {line.montant > 0 && <span className="font-medium text-foreground">→ {fmtNum(line.montant, 2)} €</span>}
+      {/* Stat row — mirrors the PDF lines-table vocabulary (Commandé ·
+          Expédié · Prix u. · Montant), expedition date pinned right with
+          its urgency color. Single source for the ordered quantity. */}
+      <div className="mt-2 ml-9 flex flex-wrap items-end gap-x-6 gap-y-1.5">
+        <LineStat label="Commandé" value={`${fmtNum(line.quantite, 1)} ${line.unite_label}`} />
+        {canAffect && (
+          <LineStat
+            label="Expédié"
+            value={`${fmtNum(line.expedie, 1)} ${line.unite_label}`}
+            valueClass={target > 0 && line.expedie >= target - 0.001 ? 'text-green-600' : undefined}
+          />
+        )}
+        {line.prix > 0 && <LineStat label="Prix u." value={`${fmtNum(line.prix, 2)} €`} />}
+        {line.montant > 0 && <LineStat label="Montant" value={`${fmtNum(line.montant, 2)} €`} />}
         {line.date_livraison && (() => {
           const u = deliveryUrgency(line.date_livraison, 0)
           return (
-            <span className={cn('ml-auto', u === 'late' && 'font-bold text-red-600', u === 'soon' && 'font-bold text-amber-600')}>
-              Livraison {formatHfsqlDate(line.date_livraison)}
-            </span>
+            <LineStat
+              label="Expédition"
+              value={formatHfsqlDate(line.date_livraison)}
+              className="ml-auto text-right"
+              valueClass={u === 'late' ? 'text-red-600' : u === 'soon' ? 'text-amber-600' : undefined}
+            />
           )
         })()}
       </div>
@@ -1646,7 +1676,7 @@ function LineCard({
             />
           </div>
           <span className="text-xs text-muted-foreground tabular-nums flex-shrink-0">
-            {fmtNum(line.affecte, 1)} / {fmtNum(line.quantite, 1)} {line.unite_label}
+            Affecté {fmtNum(line.affecte, 1)} / {fmtNum(line.quantite, 1)} {line.unite_label}
           </span>
         </div>
       )}
@@ -3172,7 +3202,7 @@ function CreateEnnoblisseurOrderDialog({
             <input type="date" value={dateCommande} onChange={(e) => setDateCommande(e.target.value)} className={inputCls} />
           </div>
           <div className="space-y-1">
-            <label className="text-xs font-medium text-muted-foreground">Date livraison</label>
+            <label className="text-xs font-medium text-muted-foreground">Date d'expédition</label>
             <input type="date" value={dateLivraison} onChange={(e) => setDateLivraison(e.target.value)} className={inputCls} />
           </div>
         </div>
@@ -3869,7 +3899,7 @@ function LineFormDialog({
               </div>
             )
           })()}
-          <LabeledInput label="Date livraison" type="date" value={form.date_livraison} onChange={(v) => setForm({ ...form, date_livraison: v })} />
+          <LabeledInput label="Date d'expédition" type="date" value={form.date_livraison} onChange={(v) => setForm({ ...form, date_livraison: v })} />
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Commentaire</label>
             <textarea value={form.commentaire} onChange={(e) => setForm({ ...form, commentaire: e.target.value })} rows={2}

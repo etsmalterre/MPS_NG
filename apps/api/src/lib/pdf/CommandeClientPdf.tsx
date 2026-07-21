@@ -2,7 +2,7 @@
 // confirmation / bon de commande client). Renders inside the shared
 // MalterreDocument frame. Single-flow (no page-2 stock section): a header with
 // the client + billing/delivery addresses + payment terms, a lines table
-// (ref/coloris · qté+unité · prix u. · montant · livraison), and a totals block
+// (ref/coloris · qté+unité · prix u. · montant · expédition), and a totals block
 // (HT, remise, frais de port, TVA, TTC).
 
 import React from 'react'
@@ -290,7 +290,7 @@ export function CommandeClientPdf({ data }: { data: CommandeClientPdfData }) {
           <Text style={[styles.tableHeaderCell, styles.colQty]}>QTÉ</Text>
           <Text style={[styles.tableHeaderCell, styles.colPU]}>PRIX U.</Text>
           <Text style={[styles.tableHeaderCell, styles.colMontant]}>MONTANT</Text>
-          <Text style={[styles.tableHeaderCell, styles.colLiv]}>LIVRAISON</Text>
+          <Text style={[styles.tableHeaderCell, styles.colLiv]}>EXPÉDITION</Text>
         </View>
         {data.lignes.map((l, i) => (
           <View key={i} style={styles.tableRow}>

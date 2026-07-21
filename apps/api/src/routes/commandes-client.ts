@@ -880,8 +880,8 @@ function resolveColorisLabel(maps: ResolvedMaps, IDcolori: number, typeKind: num
  *  Needs each line's ref to resolve the rendement, hence the meta input. */
 async function lineReservationAggregates(
   lines: Array<{ id: number; typeKind: number; refId: number }>,
-): Promise<Map<number, { nb_rolls: number; total_metrage: number; total_poids: number }>> {
-  const out = new Map<number, { nb_rolls: number; total_metrage: number; total_poids: number }>()
+): Promise<Map<number, { nb_rolls: number; total_metrage: number; total_poids: number; exp_metrage: number; exp_poids: number }>> {
+  const out = new Map<number, { nb_rolls: number; total_metrage: number; total_poids: number; exp_metrage: number; exp_poids: number }>()
   const metas = lines.filter((l) => l.id > 0)
   if (metas.length === 0) return out
   const inList = metas.map((l) => l.id).join(',')
@@ -910,18 +910,18 @@ async function lineReservationAggregates(
   }
 
   const [ecru, fini, trico] = await Promise.all([
-    query<{ IDligne_commande_client: number; metrage: number | null; poids: number | null }>(
-      `SELECT IDligne_commande_client, metrage, poids FROM stock_ecru WHERE IDligne_commande_client IN (${inList})`,
+    query<{ IDligne_commande_client: number; metrage: number | null; poids: number | null; IDligne_expedition_ETM: number | null }>(
+      `SELECT IDligne_commande_client, metrage, poids, IDligne_expedition_ETM FROM stock_ecru WHERE IDligne_commande_client IN (${inList})`,
     ),
-    query<{ IDligne_commande_client: number; metrage: number | null; poids: number | null }>(
-      `SELECT IDligne_commande_client, metrage, poids FROM stock_fini WHERE IDligne_commande_client IN (${inList})`,
+    query<{ IDligne_commande_client: number; metrage: number | null; poids: number | null; IDligne_expedition: number | null; IDetat_stock_fini: number | null }>(
+      `SELECT IDligne_commande_client, metrage, poids, IDligne_expedition, IDetat_stock_fini FROM stock_fini WHERE IDligne_commande_client IN (${inList})`,
     ),
     query<{ IDligne_commande_client: number; poids_affecte: number | null }>(
       `SELECT IDligne_commande_client, poids_affecte FROM affectation_cmd_tricotage WHERE IDligne_commande_client IN (${inList})`,
     ),
   ])
   const acc = (lid: number) => {
-    const a = out.get(lid) ?? { nb_rolls: 0, total_metrage: 0, total_poids: 0 }
+    const a = out.get(lid) ?? { nb_rolls: 0, total_metrage: 0, total_poids: 0, exp_metrage: 0, exp_poids: 0 }
     out.set(lid, a)
     return a
   }
@@ -929,9 +929,16 @@ async function lineReservationAggregates(
     const lid = Number(r.IDligne_commande_client) || 0
     if (lid === 0) continue
     const a = acc(lid)
+    const metrage = Number(r.metrage) || 0
+    const poids = Number(r.poids) || 0
     a.nb_rolls += 1
-    a.total_metrage += Number(r.metrage) || 0
-    a.total_poids += Number(r.poids) || 0
+    a.total_metrage += metrage
+    a.total_poids += poids
+    // Shipped = état Expédié or attached to an expedition line.
+    if (Number(r.IDetat_stock_fini) === 4 || (Number(r.IDligne_expedition) || 0) > 0) {
+      a.exp_metrage += metrage
+      a.exp_poids += poids
+    }
   }
   for (const r of ecru) {
     const lid = Number(r.IDligne_commande_client) || 0
@@ -939,9 +946,14 @@ async function lineReservationAggregates(
     const a = acc(lid)
     const poids = Number(r.poids) || 0
     const rdt = rdtByLine.get(lid) ?? 0
+    const metrage = rdt > 0 ? poids * rdt : Number(r.metrage) || 0
     a.nb_rolls += 1
-    a.total_metrage += rdt > 0 ? poids * rdt : Number(r.metrage) || 0
+    a.total_metrage += metrage
     a.total_poids += poids
+    if ((Number(r.IDligne_expedition_ETM) || 0) > 0) {
+      a.exp_metrage += metrage
+      a.exp_poids += poids
+    }
   }
   for (const r of trico) {
     const lid = Number(r.IDligne_commande_client) || 0
@@ -954,6 +966,8 @@ async function lineReservationAggregates(
   for (const a of out.values()) {
     a.total_metrage = round2c(a.total_metrage)
     a.total_poids = round2c(a.total_poids)
+    a.exp_metrage = round2c(a.exp_metrage)
+    a.exp_poids = round2c(a.exp_poids)
   }
   return out
 }
@@ -1029,7 +1043,7 @@ commandesClientRouter.get('/:id', async (req: Request, res: Response) => {
       const refId = Number(l.IDreference) || 0
       const colId = Number(l.IDcolori) || 0
       const resolved = resolveRefLabel(maps, refId, typeKind)
-      const agg = aggMap.get(Number(l.IDligne_commande_client)) ?? { nb_rolls: 0, total_metrage: 0, total_poids: 0 }
+      const agg = aggMap.get(Number(l.IDligne_commande_client)) ?? { nb_rolls: 0, total_metrage: 0, total_poids: 0, exp_metrage: 0, exp_poids: 0 }
       const qty = Number(l.quantite) || 0
       const prix = Number(l.prix) || 0
       return {
@@ -1054,6 +1068,7 @@ commandesClientRouter.get('/:id', async (req: Request, res: Response) => {
         total_metrage: agg.total_metrage,
         total_poids: agg.total_poids,
         affecte: lineDim(l.unite) === 'metrage' ? agg.total_metrage : agg.total_poids,
+        expedie: lineDim(l.unite) === 'metrage' ? agg.exp_metrage : agg.exp_poids,
       }
     })
 
@@ -3885,7 +3900,7 @@ async function buildEmailDefaults(id: number, variant: 'confirmation' | 'proform
       const lines = pdfData.lignes.map((l) => {
         const ref = [l.ref_label, l.colori_reference].filter((s) => s && s.trim()).join(' - ')
         const qty = `${l.quantite.toLocaleString('fr-FR').replace(/[\u202f\u00a0]/g, ' ')} ${l.unite_label}`.trim()
-        const liv = l.date_livraison ? ` - livraison ${l.date_livraison}` : ''
+        const liv = l.date_livraison ? ` - expédition ${l.date_livraison}` : ''
         return `  •  ${ref || 'Ligne'} : ${qty}${liv}`
       })
       recap = `Récapitulatif :\n${lines.join('\n')}\n\n`

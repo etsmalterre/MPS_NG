@@ -10,6 +10,26 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-21 — feat/commande-client
+Clients › Commandes — **"Expédition" wording + Commandé/Expédié on line cards.**
+(1) **Terminology**: every user-facing "livraison / date de livraison" around the client
+order date now reads "expédition" — line-card labels and the two "Date d'expédition" form
+inputs in ClientsCommandes, the confirmation PDF's lines-table column header
+(LIVRAISON → EXPÉDITION in `CommandeClientPdf.tsx`), and the per-line recap in the
+confirmation email body (`- expédition <date>`). DB columns (`date_livraison`) and the
+delivery-address labels ("Adresse de livraison") are untouched. (2) **Per-line shipped
+quantity**: `lineReservationAggregates` in `commandes-client.ts` now also sums shipped
+rolls (fini: `IDetat_stock_fini = 4` or `IDligne_expedition > 0`; écru:
+`IDligne_expedition_ETM > 0`, with the same rendement conversion) into
+`exp_metrage`/`exp_poids`, exposed on detail lines as `expedie` in the line's dim —
+no extra queries, just added columns on existing selects. (3) **Line card redesign**:
+the old `qty × prix → montant` shorthand row is replaced by a labeled stat row mirroring
+the PDF table vocabulary — Commandé · Expédié · Prix u. · Montant, with the Expédition
+date pinned right keeping its urgency color (new `LineStat` micro label/value block,
+CardKV language). Expédié turns green when fully shipped; the affectation gauge counter
+is now labeled "Affecté … / …" so reserved vs shipped can't be confused. Divers lines
+skip Expédié but share the same row shape.
+
 ## 2026-07-21 — feat/signature
 **Structured signature template + Malterre design + Paramètres › Utilisateurs master tabs.**
 Signatures are no longer pasted HTML blobs — they render server-side from per-user fields
