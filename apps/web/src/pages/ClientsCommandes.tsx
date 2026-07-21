@@ -1806,6 +1806,10 @@ function AffectationDrawer({
   // Combined affecté (rolls + écru at the dyer × rendement + tricotage
   // allocations) — the legacy "854 / 800 Ml" gauge, computed server-side.
   const reserved = data?.affecte_total ?? linked.reduce((s, r) => s + (dim === 'metrage' ? (Number(r.metrage) || 0) : (Number(r.poids) || 0)), 0)
+  // Sum of the listed affected rolls only (unlike `reserved`, which also
+  // counts écru at the dyer and tricotage allocations) — shown in the
+  // section heading so it always matches the rows below.
+  const linkedQty = linked.reduce((s, r) => s + (dim === 'metrage' ? (Number(r.metrage) || 0) : (Number(r.poids) || 0)), 0)
 
   // Shippable = affected rolls not already on an expedition. The selection is
   // re-filtered against the live payload so a refetch can't leave stale ids.
@@ -1896,7 +1900,7 @@ function AffectationDrawer({
               <section>
                 <div className="flex items-center justify-between mb-1.5">
                   <h3 className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
-                    Affecté à la commande ({linked.length})
+                    Affecté à la commande ({linked.length} · {fmtNum(linkedQty, 1)} {dim === 'metrage' ? 'Ml' : 'kg'})
                   </h3>
                   {obsToggle}
                 </div>
@@ -4361,6 +4365,21 @@ interface GedDocument {
 }
 interface TypeDoc { IDtype_doc: number; nom: string }
 
+// A facture from the facturation ledger auto-discovered via the expedition
+// chain (commande → expedition → ligne_expedition → ligne_facture).
+interface CommandeFactureRow {
+  kind: 'def' | 'prov'
+  id: number
+  numero: number | null
+  date: string | null
+  type: number // 1 = facture, 2 = avoir
+}
+
+function factureLabel(f: CommandeFactureRow): string {
+  const word = f.kind === 'prov' ? 'Proforma' : f.type === 2 ? 'Avoir' : 'Facture'
+  return `${word} N°${f.numero ?? f.id}`
+}
+
 function DocsTab({ commande, isEditing }: { commande: CommandeDetail; isEditing: boolean }) {
   const queryClient = useQueryClient()
   const commandeId = commande.IDcommande_client
@@ -4370,7 +4389,12 @@ function DocsTab({ commande, isEditing }: { commande: CommandeDetail; isEditing:
     queryKey: docsQueryKey,
     queryFn: () => apiFetch(`/commandes-client/${commandeId}/documents`),
   })
+  const { data: factures } = useQuery<CommandeFactureRow[]>({
+    queryKey: ['commande-client-factures', commandeId],
+    queryFn: () => apiFetch(`/commandes-client/${commandeId}/factures`),
+  })
 
+  const [viewFacture, setViewFacture] = useState<CommandeFactureRow | null>(null)
   const [viewDoc, setViewDoc] = useState<GedDocument | null>(null)
   const [editingDoc, setEditingDoc] = useState<GedDocument | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
@@ -4392,11 +4416,33 @@ function DocsTab({ commande, isEditing }: { commande: CommandeDetail; isEditing:
       {!!error && (
         <div className="flex items-center gap-1.5 py-3 text-xs text-destructive"><AlertCircle className="h-3.5 w-3.5" /><span>Erreur de chargement</span></div>
       )}
-      {!isLoading && !error && !data?.length && (
+      {!isLoading && !error && !data?.length && !factures?.length && (
         <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
           <FileText className="h-10 w-10 mb-3 opacity-40" />
           <p className="text-sm font-medium">Aucun document</p>
-          <p className="text-[11px] mt-1 text-center">Les bons de commande, confirmations et autres documents liés à cette commande apparaîtront ici.</p>
+          <p className="text-[11px] mt-1 text-center">Les factures, bons de commande, confirmations et autres documents liés à cette commande apparaîtront ici.</p>
+        </div>
+      )}
+      {!!factures?.length && (
+        <div className="space-y-2">
+          {factures.map((f) => (
+            <div
+              key={`${f.kind}-${f.id}`}
+              onClick={() => setViewFacture(f)}
+              className="group p-3 rounded-lg border bg-card shadow-sm cursor-pointer hover:border-accent/40 transition-colors"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-accent/10"><ReceiptText className="h-3.5 w-3.5 text-accent" /></div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium truncate">{factureLabel(f)}</p>
+                  <p className="text-[11px] text-muted-foreground truncate">
+                    {f.kind === 'prov' ? 'Facture proforma' : f.type === 2 ? 'Avoir' : 'Facture définitive'}
+                    {f.date && f.date.length === 8 ? ` · ${formatHfsqlDate(f.date)}` : ''}
+                  </p>
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       )}
       {!!data?.length && (
@@ -4441,6 +4487,7 @@ function DocsTab({ commande, isEditing }: { commande: CommandeDetail; isEditing:
         </Button>
       )}
 
+      <FactureViewDialog facture={viewFacture} onClose={() => setViewFacture(null)} />
       <DocViewDialog commandeId={commandeId} doc={viewDoc} onClose={() => setViewDoc(null)} />
       <DocCreateEditDialog
         open={createOpen || editingDoc !== null}
@@ -4625,6 +4672,23 @@ function DocViewDialog({ commandeId, doc, onClose }: { commandeId: number; doc: 
           </div>
         </DialogContent>
       )}
+    </Dialog>
+  )
+}
+
+// Chrome-free viewer for an auto-discovered facture — the PDF is rendered on
+// the fly by the facturation API, so no HEAD pre-check is needed.
+function FactureViewDialog({ facture, onClose }: { facture: CommandeFactureRow | null; onClose: () => void }) {
+  if (!facture) return null
+  return (
+    <Dialog open={!!facture} onOpenChange={() => onClose()}>
+      <div className="relative z-50 w-[60vw] max-w-3xl h-[95vh]" onClick={(e) => e.stopPropagation()}>
+        <iframe
+          src={`${API_URL}/factures/${facture.kind}/${facture.id}/pdf#view=FitH`}
+          className="w-full h-full rounded-lg"
+          title={factureLabel(facture)}
+        />
+      </div>
     </Dialog>
   )
 }

@@ -910,8 +910,14 @@ async function lineReservationAggregates(
   }
 
   const [ecru, fini, trico] = await Promise.all([
+    // Écru only counts while still écru: a roll already dyed into a stock_fini
+    // (IDstock_ecru back-pointer) is represented by that fini roll — counting
+    // its écru form too double-counted the gauge (commande 3643 showed
+    // 4 404,8 / 1 635,0 Ml). Same NOT EXISTS as the available-écru pools.
     query<{ IDligne_commande_client: number; metrage: number | null; poids: number | null; IDligne_expedition_ETM: number | null }>(
-      `SELECT IDligne_commande_client, metrage, poids, IDligne_expedition_ETM FROM stock_ecru WHERE IDligne_commande_client IN (${inList})`,
+      `SELECT se.IDligne_commande_client, se.metrage, se.poids, se.IDligne_expedition_ETM
+       FROM stock_ecru se WHERE se.IDligne_commande_client IN (${inList})
+         AND NOT EXISTS (SELECT 1 FROM stock_fini sfx WHERE sfx.IDstock_ecru = se.IDstock_ecru)`,
     ),
     query<{ IDligne_commande_client: number; metrage: number | null; poids: number | null; IDligne_expedition: number | null; IDetat_stock_fini: number | null }>(
       `SELECT IDligne_commande_client, metrage, poids, IDligne_expedition, IDetat_stock_fini FROM stock_fini WHERE IDligne_commande_client IN (${inList})`,
@@ -4300,6 +4306,96 @@ commandesClientRouter.delete('/:id/documents/:idged', async (req: Request, res: 
     res.json({ ok: true })
   } catch (err) {
     console.error('Error deleting commande-client document:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ── Factures liées (auto-discovered, shown in the Docs tab) ──
+//
+// The facturation ledger carries no usable direct commande FK
+// (facture.IDcommande_client is always 0 — verified live 2026-07); the
+// reliable link is commande → expedition.IDcommande_client →
+// ligne_expedition → ligne_facture(_prov).IDligne_expedition. Returns the
+// definitive factures / avoirs plus still-open facturation proformas covering
+// this commande's shipments. Legacy ligne_facture rows predating the
+// IDligne_expedition link simply won't be found — the Docs tab only shows the
+// invoice "when it can be found".
+commandesClientRouter.get('/:id/factures', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const chunk500 = <T,>(arr: T[]): T[][] => {
+      const out: T[][] = []
+      for (let i = 0; i < arr.length; i += 500) out.push(arr.slice(i, i + 500))
+      return out
+    }
+
+    const expRows = await query<{ IDexpedition: number }>(
+      `SELECT IDexpedition FROM expedition WHERE IDcommande_client = ${id}`,
+    )
+    const expIds = expRows.map((r) => Number(r.IDexpedition)).filter((x) => x > 0)
+    if (expIds.length === 0) { res.json([]); return }
+
+    const leIds: number[] = []
+    for (const chunk of chunk500(expIds)) {
+      const rows = await query<{ IDligne_expedition: number }>(
+        `SELECT IDligne_expedition FROM ligne_expedition WHERE IDexpedition IN (${chunk.join(',')})`,
+      )
+      for (const r of rows) { const v = Number(r.IDligne_expedition); if (v > 0) leIds.push(v) }
+    }
+    if (leIds.length === 0) { res.json([]); return }
+
+    const defIds = new Set<number>()
+    const provIds = new Set<number>()
+    for (const chunk of chunk500(leIds)) {
+      const defRows = await query<{ IDfacture: number }>(
+        `SELECT IDfacture FROM ligne_facture WHERE IDligne_expedition IN (${chunk.join(',')})`,
+      )
+      for (const r of defRows) { const v = Number(r.IDfacture); if (v > 0) defIds.add(v) }
+      const provRows = await query<{ IDfacture_prov: number }>(
+        `SELECT IDfacture_prov FROM ligne_facture_prov WHERE IDligne_expedition IN (${chunk.join(',')})`,
+      )
+      for (const r of provRows) { const v = Number(r.IDfacture_prov); if (v > 0) provIds.add(v) }
+    }
+
+    // DATE / TYPE are reserved words — select them uppercase (same trick as
+    // factures.ts). Display numero convention: definitive shows its numero
+    // column, proforma shows its PK (facture_prov.numero is vestigial).
+    const out: Array<{ kind: 'def' | 'prov'; id: number; numero: number | null; date: string | null; type: number }> = []
+    for (const chunk of chunk500(Array.from(defIds))) {
+      const rows = await query<any>(
+        `SELECT IDfacture, numero, DATE, TYPE FROM facture WHERE IDfacture IN (${chunk.join(',')})`,
+      )
+      for (const r of rows) {
+        out.push({
+          kind: 'def',
+          id: Number(r.IDfacture),
+          numero: r.numero != null ? Number(r.numero) : null,
+          date: r.DATE != null ? String(r.DATE) : null,
+          type: Number(r.TYPE) || 1,
+        })
+      }
+    }
+    for (const chunk of chunk500(Array.from(provIds))) {
+      const rows = await query<any>(
+        `SELECT IDfacture_prov, DATE, TYPE FROM facture_prov WHERE IDfacture_prov IN (${chunk.join(',')})`,
+      )
+      for (const r of rows) {
+        out.push({
+          kind: 'prov',
+          id: Number(r.IDfacture_prov),
+          numero: Number(r.IDfacture_prov),
+          date: r.DATE != null ? String(r.DATE) : null,
+          type: Number(r.TYPE) || 1,
+        })
+      }
+    }
+    // Definitive first, then proformas; newest first within each group.
+    out.sort((a, b) => (a.kind === b.kind ? b.id - a.id : a.kind === 'def' ? -1 : 1))
+    res.json(out)
+  } catch (err) {
+    console.error('Error listing commande-client factures:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

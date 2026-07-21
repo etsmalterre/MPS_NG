@@ -10,6 +10,27 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-21 — feat/commande-client (2)
+Clients › Commandes — **invoice auto-surfaced in Docs, affecté gauge de-doubled, drawer
+metrage total.** (1) **Facture in the Docs tab**: new `GET /commandes-client/:id/factures`
+walks commande → `expedition.IDcommande_client` → `ligne_expedition` →
+`ligne_facture(_prov).IDligne_expedition` and returns the definitive factures/avoirs plus
+open facturation proformas covering the order's shipments (`facture.IDcommande_client` is
+always 0 in live data — the chain is the only reliable link; pre-link legacy rows simply
+aren't found). The Docs tab renders them as read-only cards (gold `ReceiptText`, "Facture
+N°9097 · Facture définitive · date") above the ged documents, opening the facturation PDF
+(`/factures/:kind/:id/pdf`) in the chrome-free viewer; orphaned `ligne_facture_prov` rows
+are naturally excluded by the header lookup. (2) **Affecté gauge fix**: the per-line
+"Affecté X / Y Ml" aggregate (`lineReservationAggregates`) counted écru rolls that had
+already been dyed into `stock_fini` rolls — the same fabric twice (commande 3643 showed
+4 404,8 / 1 635,0 Ml; truth is 1 866,0). The écru leg now carries the same
+`NOT EXISTS (stock_fini.IDstock_ecru = se.IDstock_ecru)` guard as the available-écru
+pools, so écru only counts while still écru (at the dyer). Restores real under-coverage
+signals (two 3643 lines went from green to amber). (3) **Affectation drawer**: the
+"Affecté à la commande (N)" heading now also shows the summed quantity of the listed
+rolls in the line's dim — "(42 · 1 866,0 Ml)" — deliberately summing the displayed rolls,
+not `affecte_total` (which also counts écru at the dyer + tricotage planning).
+
 ## 2026-07-21 — feat/facturation
 Clients › Facturation — **XImport accounting export + "non envoyé" red urgency on the
 Définitives list.** (1) **XImport**: new `apps/api/src/lib/ximport.ts` renders the Sage
@@ -35,6 +56,8 @@ ones, hides at zero, and auto-releases when the last red row leaves. Emailing a 
 invalidates the list so the frame clears live; auto-select drives off the filtered rows;
 the pill resets on bucket switch; proformas never flag (they don't log sends —
 id-collision rule in the file header).
+
+## 2026-07-21 — feat/dev-resilience
 Dev tooling — **spin-up paths tell the truth about whether the app actually works.**
 Motivated by a session lost to two silent failures. (1) **Wedged HFSQL connect**: an API
 whose cached `connectionPromise` never resolved served `/api/health` 200 while every data
