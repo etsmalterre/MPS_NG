@@ -10,6 +10,31 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-21 — feat/signature
+**Structured signature template + Malterre design + Paramètres › Utilisateurs master tabs.**
+Signatures are no longer pasted HTML blobs — they render server-side from per-user fields
+through one company template. New `apps/api/src/lib/signature-template.ts`:
+`SignatureFields { displayName, fonction, telFixe, email }`, `renderSignatureHtml()`
+(email-client-safe tables + inline styles), `hasSignatureContent()`, and the logo as either
+a `cid:` inline MIME part (outgoing mail — instant display, no remote fetch) or a data: URI
+(in-app previews), from the new `assets/logo-m-email.png` badge (240px, 32px corner radius).
+Approved design: 96px logo, 3px gold vertical bar exactly matching the logo height, 20px
+bold name, fonction alone in blue uppercase (no "— ETS MALTERRE" suffix), single
+"Tél. :" line (the Mobile field was removed everywhere), blue mailto link. `gmail.ts`
+gains `inlineImages` support — the alternative pair wraps in multipart/related with
+Content-ID parts (shared `base64Lines` helper); `sendMail()` resolves signature + inline
+images together via `getSignatureForEmail()` which now returns `{ html, inlineImages }`.
+`user-profiles.ts` stores structured `signature` fields (legacy `signatureHtml` still
+honored until fields are saved, then superseded); router adds
+`POST /user-profiles/signature-preview` (renders the exact template for the admin form) and
+`PUT /users/:id/signature` now takes fields (Zod-validated). Frontend
+(SettingsUtilisateurs): SignatureEditor becomes a 4-field form (Nom affiché / Fonction /
+Téléphone / Email affiché) with a debounced live server-rendered preview + legacy-signature
+warning; the whole center panel is restructured into the **Classeur** master-tab pattern
+(§39) — "Profil" tab (email / photo / signature cards) and "Permissions" tab (admin notice +
+category toggle cards), tab resets to Profil on selection change. Tests:
+`signature-template.test.ts` (render/escape/plain-fallback) + extended `gmail.test.ts`.
+
 ## 2026-07-20 — feat/signature
 **User profiles: photo + HTML email signature, "Mon profil" modal, auto-signature on
 outgoing emails.** New JSON side-store `apps/api/src/lib/user-profiles.ts` (mirrors

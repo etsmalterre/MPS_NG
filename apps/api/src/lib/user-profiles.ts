@@ -1,7 +1,12 @@
-// JSON-file-backed per-user profile store (HTML email signature + photo
+// JSON-file-backed per-user profile store (email-signature fields + photo
 // metadata) with module-load cache. Photos themselves live on disk under
 // data/user-photos/<IDutilisateur>.<ext> — only { ext, updatedAt } goes in
 // the JSON file, so the store stays small enough to rewrite atomically.
+//
+// Signatures are structured fields rendered through lib/signature-template.ts.
+// Entries written before that switch may still carry a legacy `signatureHtml`
+// blob (pasted Gmail/Outlook HTML) — it keeps working for sends/previews
+// until fields are saved for that user, which supersedes it.
 //
 // ⚠️ TODO migration (after the data migration phase is complete):
 // Replace this JSON file backend with real database storage. The public API
@@ -14,6 +19,14 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { getAllUserEmails } from './user-emails.js'
+import {
+  hasSignatureContent,
+  renderSignatureHtml,
+  signatureLogoInlineImage,
+  SIGNATURE_LOGO_CID,
+  type SignatureFields,
+  type InlineImage,
+} from './signature-template.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -24,6 +37,9 @@ const PHOTOS_DIR = path.join(DATA_DIR, 'user-photos')
 export type PhotoExt = 'jpg' | 'png' | 'webp' | 'gif'
 
 interface UserProfileEntry {
+  /** Structured signature fields (current format) */
+  signature?: SignatureFields
+  /** Legacy pasted HTML — honored only while no structured fields exist */
   signatureHtml?: string
   photo?: { ext: PhotoExt; updatedAt: number }
 }
@@ -35,7 +51,9 @@ interface UserProfilesFile {
 }
 
 export interface UserProfile {
-  signatureHtml: string | null
+  signature: SignatureFields | null
+  /** Legacy pasted HTML, present only when no structured fields are stored */
+  legacySignatureHtml: string | null
   photo: { ext: PhotoExt; updatedAt: number } | null
 }
 
@@ -75,10 +93,23 @@ async function saveUserProfiles(file: UserProfilesFile): Promise<void> {
   cache = file
 }
 
+function normalizeFields(f: SignatureFields | undefined): SignatureFields | null {
+  if (!f) return null
+  const clean: SignatureFields = {
+    displayName: (f.displayName ?? '').trim(),
+    fonction: (f.fonction ?? '').trim(),
+    telFixe: (f.telFixe ?? '').trim(),
+    email: (f.email ?? '').trim(),
+  }
+  return hasSignatureContent(clean) ? clean : null
+}
+
 function normalizeEntry(entry: UserProfileEntry | undefined): UserProfile {
-  const sig = entry?.signatureHtml
+  const signature = normalizeFields(entry?.signature)
+  const legacy = entry?.signatureHtml
   return {
-    signatureHtml: sig && sig.trim() ? sig : null,
+    signature,
+    legacySignatureHtml: !signature && legacy && legacy.trim() ? legacy : null,
     photo: entry?.photo ?? null,
   }
 }
@@ -89,18 +120,22 @@ export async function getUserProfile(userId: number): Promise<UserProfile> {
   return normalizeEntry(file.users[String(userId)])
 }
 
-/** Overwrite a user's HTML signature. Pass empty string to clear. */
-export async function setUserSignature(userId: number, html: string): Promise<void> {
+/** Overwrite a user's signature fields. All-blank fields clear the
+ *  signature entirely. Saving fields also drops any legacy pasted HTML —
+ *  the structured fields supersede it. */
+export async function setUserSignature(userId: number, fields: SignatureFields): Promise<void> {
   const file = await loadUserProfiles()
   const key = String(userId)
   const nextUsers = { ...file.users }
   const entry: UserProfileEntry = { ...nextUsers[key] }
-  if (html.trim()) {
-    entry.signatureHtml = html
+  const clean = normalizeFields(fields)
+  delete entry.signatureHtml
+  if (clean) {
+    entry.signature = clean
   } else {
-    delete entry.signatureHtml
+    delete entry.signature
   }
-  if (entry.signatureHtml === undefined && entry.photo === undefined) {
+  if (entry.signature === undefined && entry.photo === undefined) {
     delete nextUsers[key]
   } else {
     nextUsers[key] = entry
@@ -143,7 +178,7 @@ export async function clearUserPhoto(userId: number): Promise<void> {
   const nextUsers = { ...file.users }
   const entry: UserProfileEntry = { ...nextUsers[key] }
   delete entry.photo
-  if (entry.signatureHtml === undefined) {
+  if (entry.signature === undefined && entry.signatureHtml === undefined) {
     delete nextUsers[key]
   } else {
     nextUsers[key] = entry
@@ -175,17 +210,35 @@ export async function getAllUserProfiles(): Promise<Record<number, UserProfile>>
   return out
 }
 
-/** Reverse lookup: the HTML signature of the user whose stored email address
+export interface ResolvedSignature {
+  html: string
+  /** Images referenced from `html` via cid: — embedded by gmail.ts as a
+   *  multipart/related section. Empty for legacy pasted-HTML signatures. */
+  inlineImages: InlineImage[]
+}
+
+/** Reverse lookup: the signature of the user whose stored email address
  *  matches `email` (case-insensitive), or null. Used by lib/gmail.ts to
- *  append the sender's signature without touching any send call site. */
-export async function getSignatureForEmail(email: string): Promise<string | null> {
+ *  append the sender's signature without touching any send call site.
+ *  Structured fields render through the company template with the logo as
+ *  an inline cid: image; legacy pasted HTML is passed through as-is. */
+export async function getSignatureForEmail(email: string): Promise<ResolvedSignature | null> {
   const target = email.trim().toLowerCase()
   if (!target) return null
   const allEmails = await getAllUserEmails()
   for (const [idStr, addr] of Object.entries(allEmails)) {
     if (addr.trim().toLowerCase() === target) {
       const profile = await getUserProfile(Number(idStr))
-      return profile.signatureHtml
+      if (profile.signature) {
+        return {
+          html: renderSignatureHtml(profile.signature, `cid:${SIGNATURE_LOGO_CID}`),
+          inlineImages: [signatureLogoInlineImage()],
+        }
+      }
+      if (profile.legacySignatureHtml) {
+        return { html: profile.legacySignatureHtml, inlineImages: [] }
+      }
+      return null
     }
   }
   return null

@@ -1,6 +1,7 @@
 // Settings > Utilisateurs — admin-only page for managing per-user permissions.
 // Built on the canonical 3-panel MasterDetailLayout: searchable user list on
-// the left, a header + permission toggle cards in the centre, info on the right.
+// the left, a header + a Classeur-style master-tabbed centre (Profil = email /
+// photo / signature cards, Permissions = toggle cards per category).
 //
 // Permissions are toggled inline (no edit mode). Each toggle immediately PUTs
 // the new grant set to /api/permissions/users/:id and refreshes the list.
@@ -10,7 +11,7 @@ import { Navigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Search, Loader2, AlertCircle, Shield, Check, Mail, Save,
-  Image as ImageIcon, PenLine, Trash2,
+  Image as ImageIcon, PenLine, Trash2, User as UserIcon,
 } from 'lucide-react'
 import { apiFetch, API_URL } from '@/lib/api'
 import { useUser } from '@/contexts/UserContext'
@@ -39,10 +40,29 @@ interface UserEmailRow {
   email: string | null
 }
 
+interface SignatureFields {
+  displayName: string
+  fonction: string
+  telFixe: string
+  email: string
+}
+
+const EMPTY_SIGNATURE: SignatureFields = {
+  displayName: '',
+  fonction: '',
+  telFixe: '',
+  email: '',
+}
+
 interface UserProfileRow {
   IDutilisateur: number
   prenom: string | null
   nom: string | null
+  /** Structured signature fields (null when none saved yet) */
+  signature: SignatureFields | null
+  /** True when the user still has an old pasted-HTML signature */
+  hasLegacySignature: boolean
+  /** Rendered signature HTML (template, data-URI logo) or legacy HTML */
   signatureHtml: string | null
   hasPhoto: boolean
   photoVersion: number | null
@@ -365,7 +385,13 @@ function DetailHeader({ user }: { user: PermissionUser | null }) {
   )
 }
 
-// ── Center: Detail Body (permission toggles) ──────────
+// ── Center: Detail Body (Profil / Permissions master tabs) ──────────
+
+const MAIN_TABS = [
+  { key: 'profil', label: 'Profil', icon: UserIcon },
+  { key: 'permissions', label: 'Permissions', icon: Shield },
+] as const
+type MainTab = (typeof MAIN_TABS)[number]['key']
 
 function DetailBody({
   user, profile, currentEmail, onSaveEmail, isSavingEmail, emailSaveError,
@@ -381,6 +407,11 @@ function DetailBody({
   isUpdating: boolean
   onToggle: (key: string, nextValue: boolean) => void
 }) {
+  const [activeTab, setActiveTab] = useState<MainTab>('profil')
+
+  // Land back on the main-info tab whenever the selection changes.
+  useEffect(() => { setActiveTab('profil') }, [user?.IDutilisateur])
+
   // Group keys by category. Hooks must run before the early return below,
   // so this useMemo lives here even though `user` may be null.
   const grouped = useMemo(() => {
@@ -405,63 +436,98 @@ function DetailBody({
   const isVin = isVincent(user)
   const grantedSet = new Set(user.granted)
 
-  // Email card stays at the very top; the "Tableau de bord" section sits just
-  // below it, then all other permission categories.
+  // The "Tableau de bord" section leads the permission list, then all other
+  // permission categories.
   const dashboardGroup = grouped.find(([cat]) => cat === 'Tableau de bord')
   const otherGroups = grouped.filter(([cat]) => cat !== 'Tableau de bord')
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-auto pr-1 scrollbar-transparent">
-      <EmailEditor
-        userId={user.IDutilisateur}
-        currentEmail={currentEmail}
-        onSave={onSaveEmail}
-        isSaving={isSavingEmail}
-        saveError={emailSaveError}
-      />
+    <div className="flex-1 min-h-0 flex flex-col">
+      {/* Master tabs — header-submenu style pills on the natural background */}
+      <div className="flex-shrink-0 flex items-center gap-1 border-b border-border/60 pb-2">
+        {MAIN_TABS.map((t) => {
+          const Icon = t.icon
+          const active = activeTab === t.key
+          return (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => setActiveTab(t.key)}
+              className={cn(
+                'flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium rounded-md transition-colors whitespace-nowrap',
+                active
+                  ? 'bg-accent text-accent-foreground shadow-sm'
+                  : 'text-muted-foreground hover:bg-accent/10 hover:text-accent',
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" />{t.label}
+            </button>
+          )
+        })}
+      </div>
 
-      <PhotoEditor user={user} profile={profile} />
+      {/* px-1/pb-1 keep focus rings and hover borders clear of the overflow clip */}
+      <div className="flex-1 min-h-0 overflow-auto space-y-4 pt-3 px-1 pb-1 scrollbar-transparent">
+        {activeTab === 'profil' && (
+          <>
+            <EmailEditor
+              userId={user.IDutilisateur}
+              currentEmail={currentEmail}
+              onSave={onSaveEmail}
+              isSaving={isSavingEmail}
+              saveError={emailSaveError}
+            />
 
-      <SignatureEditor
-        userId={user.IDutilisateur}
-        currentSignature={profile?.signatureHtml ?? ''}
-      />
+            <PhotoEditor user={user} profile={profile} />
 
-      {isVin && (
-        <div className="flex items-start gap-3 p-3 rounded-lg border border-accent/40 bg-accent/[0.06]">
-          <Shield className="h-4 w-4 text-accent flex-shrink-0 mt-0.5" />
-          <div>
-            <p className="text-sm font-bold text-primary">Cet utilisateur est administrateur</p>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              Les administrateurs disposent automatiquement de toutes les permissions, indépendamment des
-              cases ci-dessous. Aucun toggle ne peut leur retirer un droit.
-            </p>
-          </div>
-        </div>
-      )}
+            <SignatureEditor
+              user={user}
+              profile={profile}
+              currentEmail={currentEmail}
+            />
+          </>
+        )}
 
-      {dashboardGroup && (
-        <CategorySection
-          category={dashboardGroup[0]}
-          items={dashboardGroup[1]}
-          isVin={isVin}
-          isUpdating={isUpdating}
-          grantedSet={grantedSet}
-          onToggle={onToggle}
-        />
-      )}
+        {activeTab === 'permissions' && (
+          <>
+            {isVin && (
+              <div className="flex items-start gap-3 p-3 rounded-lg border border-accent/40 bg-accent/[0.06]">
+                <Shield className="h-4 w-4 text-accent flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-bold text-primary">Cet utilisateur est administrateur</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Les administrateurs disposent automatiquement de toutes les permissions, indépendamment des
+                    cases ci-dessous. Aucun toggle ne peut leur retirer un droit.
+                  </p>
+                </div>
+              </div>
+            )}
 
-      {otherGroups.map(([category, items]) => (
-        <CategorySection
-          key={category}
-          category={category}
-          items={items}
-          isVin={isVin}
-          isUpdating={isUpdating}
-          grantedSet={grantedSet}
-          onToggle={onToggle}
-        />
-      ))}
+            {dashboardGroup && (
+              <CategorySection
+                category={dashboardGroup[0]}
+                items={dashboardGroup[1]}
+                isVin={isVin}
+                isUpdating={isUpdating}
+                grantedSet={grantedSet}
+                onToggle={onToggle}
+              />
+            )}
+
+            {otherGroups.map(([category, items]) => (
+              <CategorySection
+                key={category}
+                category={category}
+                items={items}
+                isVin={isVin}
+                isUpdating={isUpdating}
+                grantedSet={grantedSet}
+                onToggle={onToggle}
+              />
+            ))}
+          </>
+        )}
+      </div>
     </div>
   )
 }
@@ -710,32 +776,100 @@ function PhotoEditor({ user, profile }: { user: PermissionUser; profile: UserPro
 }
 
 // ── Signature editor card ─────────────────────────────
-// Raw HTML textarea + live sandboxed preview. Same draft-state pattern as
-// EmailEditor: local draft, Enregistrer enabled only when dirty.
+// The signature is generated server-side from a company template — the admin
+// only fills a handful of fields (nom, fonction, téléphone, email). A live
+// preview renders the exact template via POST /signature-preview (debounced).
+// Same draft-state pattern as EmailEditor: local draft, Enregistrer enabled
+// only when dirty. Saving all-empty fields clears the signature.
+
+// Company switchboard — default landline prefill for a fresh signature.
+const COMPANY_TEL = '03 22 35 36 66'
+
+function sigFieldsEqual(a: SignatureFields, b: SignatureFields): boolean {
+  return (
+    a.displayName.trim() === b.displayName.trim() &&
+    a.fonction.trim() === b.fonction.trim() &&
+    a.telFixe.trim() === b.telFixe.trim() &&
+    a.email.trim() === b.email.trim()
+  )
+}
+
+function sigHasContent(f: SignatureFields): boolean {
+  return Object.values(f).some((v) => v.trim() !== '')
+}
 
 function SignatureEditor({
-  userId, currentSignature,
+  user, profile, currentEmail,
 }: {
-  userId: number
-  currentSignature: string
+  user: PermissionUser
+  profile: UserProfileRow | null
+  currentEmail: string
 }) {
   const { user: viewer } = useUser()
   const queryClient = useQueryClient()
-  const [draft, setDraft] = useState(currentSignature)
+  const userId = user.IDutilisateur
+
+  const stored = profile?.signature ?? null
+  const storedKey = JSON.stringify(stored)
+
+  // Prefill source for users without a saved signature. Read through a ref
+  // so the reset effect below doesn't need name/email in its deps (which
+  // would clobber in-progress edits whenever the email card saves).
+  const prefillRef = useRef({ name: '', email: '' })
+  prefillRef.current = { name: displayName(user), email: currentEmail }
+
+  const initialDraft = (): SignatureFields =>
+    stored ?? {
+      displayName: prefillRef.current.name === '—' ? '' : prefillRef.current.name,
+      fonction: '',
+      telFixe: COMPANY_TEL,
+      email: prefillRef.current.email,
+    }
+
+  const [draft, setDraft] = useState<SignatureFields>(initialDraft)
 
   // Reset draft whenever the selected user changes, OR when the persisted
   // value changes after a save.
   useEffect(() => {
-    setDraft(currentSignature)
-  }, [userId, currentSignature])
+    setDraft(initialDraft())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, storedKey])
 
-  const isDirty = draft !== currentSignature
+  // The email mapping loads in parallel — if it arrives after the initial
+  // prefill, fill the still-empty email field (never overwrite typed input).
+  useEffect(() => {
+    if (!stored && currentEmail) {
+      setDraft((d) => (d.email === '' ? { ...d, email: currentEmail } : d))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentEmail])
+
+  const isDirty = !sigFieldsEqual(draft, stored ?? EMPTY_SIGNATURE)
+
+  // Debounce the draft, then render the preview through the server template.
+  const [debouncedDraft, setDebouncedDraft] = useState(draft)
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedDraft(draft), 350)
+    return () => clearTimeout(t)
+  }, [draft])
+
+  const { data: preview } = useQuery<{ html: string }>({
+    queryKey: ['signature-preview', debouncedDraft],
+    queryFn: () =>
+      apiFetch<{ html: string }>('/user-profiles/signature-preview', {
+        method: 'POST',
+        body: JSON.stringify({ signature: debouncedDraft }),
+      }),
+    enabled: sigHasContent(debouncedDraft),
+    staleTime: 5 * 60 * 1000,
+    placeholderData: (prev) => prev,
+  })
 
   const saveMut = useMutation({
-    mutationFn: () =>
+    mutationFn: (fields: SignatureFields) =>
       apiFetch(`/user-profiles/users/${userId}/signature`, {
         method: 'PUT',
-        body: JSON.stringify({ signatureHtml: draft }),
+        body: JSON.stringify({ signature: fields }),
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['user-profiles'] })
@@ -745,15 +879,33 @@ function SignatureEditor({
     },
   })
 
+  const setField = (key: keyof SignatureFields) => (value: string) =>
+    setDraft((d) => ({ ...d, [key]: value }))
+
+  const showPreview = sigHasContent(draft) && !!preview?.html
+
   return (
     <div className="rounded-lg border border-border/60 bg-white shadow-sm">
       <div className="px-4 py-2 border-b border-border/60 bg-zinc-100/80 rounded-t-lg flex items-center gap-2">
         <PenLine className="h-3.5 w-3.5 text-accent" />
         <p className="text-xs font-bold text-primary uppercase tracking-wide">Signature email</p>
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-1.5">
+          {stored !== null && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-destructive hover:text-destructive"
+              disabled={saveMut.isPending}
+              onClick={() => saveMut.mutate(EMPTY_SIGNATURE)}
+              title="Supprimer la signature de cet utilisateur"
+            >
+              <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+              Effacer
+            </Button>
+          )}
           <Button
             size="sm"
-            onClick={() => saveMut.mutate()}
+            onClick={() => saveMut.mutate(draft)}
             disabled={!isDirty || saveMut.isPending}
           >
             {saveMut.isPending ? (
@@ -766,22 +918,34 @@ function SignatureEditor({
       </div>
       <div className="p-4 space-y-3">
         <p className="text-xs text-muted-foreground">
-          Collez ici le code HTML de la signature (copiée depuis Gmail/Outlook). Elle sera ajoutée
-          automatiquement au bas des emails envoyés par cet utilisateur. Préférez des images hébergées
-          (URL) plutôt qu'intégrées.
+          La signature est générée automatiquement au format Malterre à partir des champs
+          ci-dessous. Le logo est intégré directement dans l'email envoyé (affichage immédiat
+          chez le destinataire, sans téléchargement).
         </p>
-        <textarea
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          rows={7}
-          spellCheck={false}
-          placeholder="<div>…code HTML de la signature…</div>"
-          className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-ring resize-y min-h-[160px]"
-        />
+        {profile?.hasLegacySignature && (
+          <p className="text-xs text-amber-700 flex items-start gap-1.5 p-2 rounded-md border border-amber-300/60 bg-amber-50">
+            <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-px" />
+            <span>
+              Cet utilisateur utilise encore une ancienne signature HTML collée. Elle restera
+              utilisée pour les envois tant que les champs ci-dessous ne sont pas enregistrés.
+            </span>
+          </p>
+        )}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <SigField label="Nom affiché" value={draft.displayName} onChange={setField('displayName')} placeholder="Prénom Nom" />
+          <SigField label="Fonction" value={draft.fonction} onChange={setField('fonction')} placeholder="Gérant, Comptabilité…" />
+          <SigField label="Téléphone" value={draft.telFixe} onChange={setField('telFixe')} placeholder={COMPANY_TEL} />
+          <SigField
+            label="Email affiché"
+            value={draft.email}
+            onChange={setField('email')}
+            placeholder="prenom.nom@etsmalterre.com"
+          />
+        </div>
         <div className="space-y-1">
           <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">Aperçu</p>
-          {draft.trim() ? (
-            <SignaturePreview html={draft} />
+          {showPreview ? (
+            <SignaturePreview html={preview.html} className="min-h-[150px]" />
           ) : (
             <p className="text-sm text-muted-foreground italic">Aucune signature</p>
           )}
@@ -793,6 +957,32 @@ function SignatureEditor({
           </p>
         )}
       </div>
+    </div>
+  )
+}
+
+// ── Small labeled text input used by the signature form ─
+
+function SigField({
+  label, value, onChange, placeholder, className,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  placeholder?: string
+  className?: string
+}) {
+  return (
+    <div className={cn('space-y-1', className)}>
+      <label className="text-xs font-medium text-muted-foreground">{label}</label>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        autoComplete="off"
+        className="w-full h-8 px-2.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+      />
     </div>
   )
 }

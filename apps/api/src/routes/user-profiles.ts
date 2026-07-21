@@ -1,13 +1,17 @@
-// User-profiles routes — admin-managed per-user photo + HTML email signature.
+// User-profiles routes — admin-managed per-user photo + email signature.
 // JSON-file backed via lib/user-profiles.ts (photos on disk under
-// data/user-photos/). The signature is appended to outgoing emails by
-// lib/gmail.ts; the photo feeds the header avatar + "Mon profil" modal.
+// data/user-photos/). Signatures are structured fields rendered through the
+// company template (lib/signature-template.ts); the rendered HTML is
+// appended to outgoing emails by lib/gmail.ts (logo as inline cid: image)
+// and returned here with a data-URI logo for in-app previews. The photo
+// feeds the header avatar + "Mon profil" modal.
 //
 // Endpoints:
 //   GET    /api/user-profiles/me               — current user's profile
 //   GET    /api/user-profiles/users            — admin only, every user + profile
 //   GET    /api/user-profiles/users/:id/photo  — self or admin, raw image bytes
-//   PUT    /api/user-profiles/users/:id/signature — admin only, set/clear signature
+//   PUT    /api/user-profiles/users/:id/signature — admin only, set/clear fields
+//   POST   /api/user-profiles/signature-preview — admin only, render fields → HTML
 //   PUT    /api/user-profiles/users/:id/photo  — admin only, multipart upload
 //   DELETE /api/user-profiles/users/:id/photo  — admin only
 
@@ -24,7 +28,14 @@ import {
   getUserPhotoPath,
   getAllUserProfiles,
   type PhotoExt,
+  type UserProfile,
 } from '../lib/user-profiles.js'
+import {
+  hasSignatureContent,
+  renderSignatureHtml,
+  signatureLogoDataUri,
+  type SignatureFields,
+} from '../lib/signature-template.js'
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -56,15 +67,31 @@ const EXT_TO_MIME: Record<PhotoExt, string> = {
   gif: 'image/gif',
 }
 
-// Pasted Outlook/Gmail signatures with data-URI images can get big — allow up
-// to 200 KB of HTML.
-const putSignatureBody = z.object({
-  signatureHtml: z.string().max(200_000),
+const signatureFieldsSchema = z.object({
+  displayName: z.string().max(120),
+  fonction: z.string().max(120),
+  telFixe: z.string().max(40),
+  email: z.string().max(200),
 })
 
-function profilePayload(p: { signatureHtml: string | null; photo: { updatedAt: number } | null }) {
+const putSignatureBody = z.object({
+  signature: signatureFieldsSchema,
+})
+
+const EMPTY_PROFILE: UserProfile = { signature: null, legacySignatureHtml: null, photo: null }
+
+/** Shared payload shape. `signatureHtml` is the RENDERED signature (template
+ *  with data-URI logo for previews), or the raw legacy pasted HTML when the
+ *  user has no structured fields yet. */
+function profilePayload(p: UserProfile) {
+  const signatureHtml =
+    p.signature !== null
+      ? renderSignatureHtml(p.signature, signatureLogoDataUri())
+      : p.legacySignatureHtml
   return {
-    signatureHtml: p.signatureHtml,
+    signature: p.signature,
+    hasLegacySignature: p.signature === null && p.legacySignatureHtml !== null,
+    signatureHtml,
     hasPhoto: p.photo !== null,
     photoVersion: p.photo?.updatedAt ?? null,
   }
@@ -112,7 +139,7 @@ userProfilesRouter.get('/users', async (req: Request, res: Response) => {
     const payload = Array.from(seen.values())
       .map((u) => ({
         ...u,
-        ...profilePayload(allProfiles[u.IDutilisateur] ?? { signatureHtml: null, photo: null }),
+        ...profilePayload(allProfiles[u.IDutilisateur] ?? EMPTY_PROFILE),
       }))
       .sort((a, b) => {
         const an = (a.nom ?? '').localeCompare(b.nom ?? '', 'fr')
@@ -182,13 +209,30 @@ userProfilesRouter.put('/users/:id/signature', async (req: Request, res: Respons
     return
   }
   try {
-    await setUserSignature(id, parsed.data.signatureHtml)
+    await setUserSignature(id, parsed.data.signature)
     const profile = await getUserProfile(id)
     res.json({ IDutilisateur: id, ...profilePayload(profile) })
   } catch (err) {
     console.error('Error updating user signature:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
+})
+
+// ── POST /api/user-profiles/signature-preview ──────────
+// Admin only. Renders draft fields through the company template (data-URI
+// logo) so the editor can show a live preview while typing, without saving.
+userProfilesRouter.post('/signature-preview', (req: Request, res: Response) => {
+  if (!requireAdmin(req, res)) return
+  const parsed = putSignatureBody.safeParse(req.body)
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid body', details: parsed.error.issues })
+    return
+  }
+  const fields: SignatureFields = parsed.data.signature
+  const html = hasSignatureContent(fields)
+    ? renderSignatureHtml(fields, signatureLogoDataUri())
+    : ''
+  res.json({ html })
 })
 
 // ── PUT /api/user-profiles/users/:id/photo ─────────────

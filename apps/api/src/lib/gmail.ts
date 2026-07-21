@@ -18,6 +18,7 @@
 import * as fs from 'node:fs'
 import { google } from 'googleapis'
 import { getSignatureForEmail } from './user-profiles.js'
+import type { InlineImage } from './signature-template.js'
 
 type JwtClient = InstanceType<typeof google.auth.JWT>
 
@@ -95,6 +96,11 @@ export interface SendMailOptions {
    *  When undefined, sendMail() resolves it from the `from` address via the
    *  user-profiles store; pass null to explicitly send without a signature. */
   signatureHtml?: string | null
+  /** Images the signature references via `cid:` (e.g. the company logo).
+   *  Embedded as a multipart/related section so they display instantly with
+   *  no remote fetch. Ignored when the signature is absent. Resolved by
+   *  sendMail() together with signatureHtml when both are undefined. */
+  inlineImages?: InlineImage[]
 }
 
 // ── Body rendering (plain + HTML alternative) ────────────
@@ -158,12 +164,20 @@ function formatFrom(email: string, name?: string): string {
   return `${encodeHeader(name)} <${email}>`
 }
 
+/** Base64-encode in 76-char lines (RFC 2045). */
+function base64Lines(content: Buffer): string {
+  const b64 = content.toString('base64')
+  return b64.match(/.{1,76}/g)?.join('\r\n') ?? b64
+}
+
 /** Build a RFC 2822 MIME message as a single Buffer. The body is always a
  *  multipart/alternative pair (text/plain + text/html) so `**bold**` markup
- *  renders; with attachments it nests inside a multipart/mixed envelope. */
+ *  renders; signature inline images (cid:) wrap it in multipart/related;
+ *  with attachments everything nests inside a multipart/mixed envelope. */
 export function buildMimeMessage(opts: SendMailOptions): Buffer {
   const boundary = `----=_MPS_${Date.now()}_${Math.random().toString(36).slice(2)}`
   const altBoundary = `${boundary}_alt`
+  const relBoundary = `${boundary}_rel`
   const hasAttachments = (opts.attachments?.length ?? 0) > 0
   const crlf = '\r\n'
 
@@ -195,9 +209,40 @@ export function buildMimeMessage(opts: SendMailOptions): Buffer {
     htmlBody + crlf +
     `--${altBoundary}--${crlf}`
 
+  // Inline images are only meaningful when the signature that references
+  // them made it into the message.
+  const inlineImages = sig ? opts.inlineImages ?? [] : []
+
+  // Body section: the alternative pair, wrapped in multipart/related when
+  // inline (cid:) images are present.
+  let bodyContentType: string
+  let bodyPart: string
+  if (inlineImages.length > 0) {
+    bodyContentType = `multipart/related; boundary="${relBoundary}"; type="multipart/alternative"`
+    bodyPart =
+      `--${relBoundary}${crlf}` +
+      `Content-Type: multipart/alternative; boundary="${altBoundary}"${crlf}${crlf}` +
+      altPart +
+      inlineImages
+        .map(
+          (img) =>
+            `--${relBoundary}${crlf}` +
+            `Content-Type: ${img.contentType}; name="${img.filename}"${crlf}` +
+            `Content-Transfer-Encoding: base64${crlf}` +
+            `Content-ID: <${img.cid}>${crlf}` +
+            `Content-Disposition: inline; filename="${img.filename}"${crlf}${crlf}` +
+            base64Lines(img.content) + crlf,
+        )
+        .join('') +
+      `--${relBoundary}--${crlf}`
+  } else {
+    bodyContentType = `multipart/alternative; boundary="${altBoundary}"`
+    bodyPart = altPart
+  }
+
   if (!hasAttachments) {
-    headers.push(`Content-Type: multipart/alternative; boundary="${altBoundary}"`)
-    return Buffer.from(headers.join(crlf) + crlf + crlf + altPart, 'utf8')
+    headers.push(`Content-Type: ${bodyContentType}`)
+    return Buffer.from(headers.join(crlf) + crlf + crlf + bodyPart, 'utf8')
   }
 
   headers.push(`Content-Type: multipart/mixed; boundary="${boundary}"`)
@@ -205,10 +250,10 @@ export function buildMimeMessage(opts: SendMailOptions): Buffer {
   const parts: (string | Buffer)[] = []
   parts.push(headers.join(crlf) + crlf + crlf)
 
-  // Body part — the alternative pair nested inside the mixed envelope
+  // Body part — alternative (or related) section nested inside the mixed envelope
   parts.push(`--${boundary}${crlf}`)
-  parts.push(`Content-Type: multipart/alternative; boundary="${altBoundary}"${crlf}${crlf}`)
-  parts.push(altPart)
+  parts.push(`Content-Type: ${bodyContentType}${crlf}${crlf}`)
+  parts.push(bodyPart)
 
   // Attachment parts
   for (const att of opts.attachments!) {
@@ -216,10 +261,7 @@ export function buildMimeMessage(opts: SendMailOptions): Buffer {
     parts.push(`Content-Type: ${att.contentType}; name="${att.filename}"${crlf}`)
     parts.push(`Content-Transfer-Encoding: base64${crlf}`)
     parts.push(`Content-Disposition: attachment; filename="${att.filename}"${crlf}${crlf}`)
-    // Base64-encode in 76-char lines (RFC 2045)
-    const b64 = att.content.toString('base64')
-    const wrapped = b64.match(/.{1,76}/g)?.join(crlf) ?? b64
-    parts.push(wrapped + crlf)
+    parts.push(base64Lines(att.content) + crlf)
   }
 
   parts.push(`--${boundary}--${crlf}`)
@@ -243,13 +285,16 @@ export async function sendMail(opts: SendMailOptions): Promise<string> {
   // caller passed one explicitly (null = explicitly none). Every send route
   // sets `from` via getUserEmail(req.userId), so the address identifies the
   // sending user; no match / no signature → null → message unchanged.
-  const signatureHtml =
-    opts.signatureHtml !== undefined
-      ? opts.signatureHtml
-      : await getSignatureForEmail(opts.from)
+  let signatureHtml = opts.signatureHtml
+  let inlineImages = opts.inlineImages
+  if (signatureHtml === undefined) {
+    const resolved = await getSignatureForEmail(opts.from)
+    signatureHtml = resolved?.html ?? null
+    inlineImages = resolved?.inlineImages
+  }
 
   const client = getClientForSubject(opts.from)
-  const mime = buildMimeMessage({ ...opts, signatureHtml })
+  const mime = buildMimeMessage({ ...opts, signatureHtml, inlineImages })
 
   // Gmail expects the raw message base64url-encoded (not plain base64).
   const raw = mime

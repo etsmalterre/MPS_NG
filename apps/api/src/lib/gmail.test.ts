@@ -36,6 +36,53 @@ describe('buildMimeMessage signature handling', () => {
   })
 })
 
+describe('buildMimeMessage inline images (cid:)', () => {
+  const LOGO = {
+    cid: 'logo-malterre@etsmalterre.com',
+    contentType: 'image/png',
+    filename: 'logo-malterre.png',
+    content: Buffer.from('fake-png-bytes'),
+  }
+
+  it('wraps the alternative pair in multipart/related and embeds the image', () => {
+    const mime = buildMimeMessage({
+      ...baseOpts,
+      signatureHtml: SIG,
+      inlineImages: [LOGO],
+    }).toString('utf8')
+    expect(mime).toContain('multipart/related')
+    expect(mime).toContain('type="multipart/alternative"')
+    expect(mime).toContain('Content-ID: <logo-malterre@etsmalterre.com>')
+    expect(mime).toContain('Content-Disposition: inline; filename="logo-malterre.png"')
+    expect(mime).toContain(LOGO.content.toString('base64'))
+  })
+
+  it('nests related inside mixed when attachments are present', () => {
+    const mime = buildMimeMessage({
+      ...baseOpts,
+      signatureHtml: SIG,
+      inlineImages: [LOGO],
+      attachments: [
+        { filename: 'doc.pdf', content: Buffer.from('%PDF-fake'), contentType: 'application/pdf' },
+      ],
+    }).toString('utf8')
+    expect(mime).toContain('multipart/mixed')
+    expect(mime).toContain('multipart/related')
+    expect(mime).toContain('Content-ID: <logo-malterre@etsmalterre.com>')
+    expect(mime).toContain('Content-Disposition: attachment; filename="doc.pdf"')
+  })
+
+  it('drops inline images when the signature is absent', () => {
+    const mime = buildMimeMessage({
+      ...baseOpts,
+      signatureHtml: null,
+      inlineImages: [LOGO],
+    }).toString('utf8')
+    expect(mime).not.toContain('multipart/related')
+    expect(mime).not.toContain('Content-ID:')
+  })
+})
+
 describe('signatureToPlain', () => {
   it('converts block tags to newlines, strips the rest, decodes entities', () => {
     expect(signatureToPlain('<div>Ligne 1</div><div>A &amp; B&nbsp;&lt;ok&gt;</div>'))
