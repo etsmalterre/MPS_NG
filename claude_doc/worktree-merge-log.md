@@ -10,7 +10,31 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
-## 2026-07-21 — feat/dev-resilience
+## 2026-07-21 — feat/facturation
+Clients › Facturation — **XImport accounting export + "non envoyé" red urgency on the
+Définitives list.** (1) **XImport**: new `apps/api/src/lib/ximport.ts` renders the Sage
+fixed-width `XImport.txt` (142-char CRLF records, Latin-1) for one day's definitive
+invoices — 3 écritures per facture (client tiers TTC / compte de vente HT / TVA), journal
+`VT`, pied `O2003`, accents ASCII-flattened. Column layout reverse-engineered
+byte-for-byte from two legacy WinDev files and pinned by `ximport.test.ts` (byte-identical
+reproduction incl. the avoir case: **avoir = D/C reversed on all 3 lines + no échéance
+date**; exonération keeps its 3rd line with an empty compte and 0.00). Échéance dates
+reuse `computeDateEcheance`, falling back to the invoice date for TYPE-1 ("à réception")
+rules, matching legacy output. Routes: `GET /factures/ximport/summary?date=` (preview
+counts + total TTC) and `GET /factures/ximport?date=` (download, Latin-1). UI: an
+**XImport button pinned above the list footer, Définitives bucket only** (read-only → no
+permission gate), opening a dialog with a date picker (default today), a live summary
+card (factures / avoirs / total TTC), and a download button disabled on empty days.
+(2) **Non envoyé**: list rows now carry `est_envoye` (definitive only — batched `DISTINCT
+IDreference` probe of `envoi_email` on `IDtype_doc` 19; `IDreference` = `IDfacture`,
+verified to be the same convention legacy writes, so WinDev-sent invoices read as sent).
+Unsent definitive cards get the §30 red urgency frame (inset left strip, red hover +
+selection ring); a number-only **red count pill next to the search bar** (same design as
+the SousTraitantsCommandes urgency pills) toggles filtering the view to just the unsent
+ones, hides at zero, and auto-releases when the last red row leaves. Emailing a facture
+invalidates the list so the frame clears live; auto-select drives off the filtered rows;
+the pill resets on bucket switch; proformas never flag (they don't log sends —
+id-collision rule in the file header).
 Dev tooling — **spin-up paths tell the truth about whether the app actually works.**
 Motivated by a session lost to two silent failures. (1) **Wedged HFSQL connect**: an API
 whose cached `connectionPromise` never resolved served `/api/health` 200 while every data

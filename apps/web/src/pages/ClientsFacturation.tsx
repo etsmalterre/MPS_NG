@@ -24,7 +24,9 @@ import {
   Lock,
   FileText,
   FilePlus2,
+  FileDown,
   Package,
+  CalendarDays,
 } from 'lucide-react'
 import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
 import { TmRollIcon } from '@/components/icons/TmRollIcon'
@@ -61,6 +63,9 @@ interface FactureListRow {
   total_tva: number
   total_ttc: number
   nb_lignes: number
+  /** Definitive only: 1 when at least one email send is logged in
+   *  envoi_email. Proformas always report 1 (they never log sends). */
+  est_envoye: number
 }
 
 // Domain kind of a line — drives the per-line icon (fini roll / tombé-de-métier
@@ -134,6 +139,14 @@ type BatchResult =
   | ({ action: 'deleteAll' } & DeleteAllSummary)
   | ({ action: 'convertBatch' } & ConvertBatchSummary)
 
+interface XImportSummary {
+  date: string
+  nb_factures: number
+  nb_avoirs: number
+  nb_lignes: number
+  total_ttc: number
+}
+
 interface ClientLite { IDclient: number; nom: string }
 interface ModePaiement { IDmode_paiement: number; libelle: string }
 interface Echeance { IDecheance: number; libelle: string }
@@ -192,6 +205,11 @@ export function ClientsFacturation() {
   const [convertBatchOpen, setConvertBatchOpen] = useState(false)
   const [deleteBatchOpen, setDeleteBatchOpen] = useState(false)
   const [batchResult, setBatchResult] = useState<BatchResult | null>(null)
+  // XImport accounting export (definitive bucket only).
+  const [ximportOpen, setXimportOpen] = useState(false)
+  // "Non envoyé" red filter pill (definitive bucket only) — mirrors the
+  // Sous-traitants › Commandes urgency pills.
+  const [nonEnvoyeOn, setNonEnvoyeOn] = useState(false)
 
   // Edit-mode header draft.
   const [editDate, setEditDate] = useState('')
@@ -387,14 +405,23 @@ export function ClientsFacturation() {
 
   const handleBucketChange = useCallback((b: Kind) => {
     if (b === bucket) return
-    guard.guardAction(() => { setIsEditing(false); setBucket(b); setSelectedId(null) })
+    guard.guardAction(() => { setIsEditing(false); setBucket(b); setSelectedId(null); setNonEnvoyeOn(false) })
   }, [guard, bucket])
 
   const handleTypeFilterChange = useCallback((t: 'all' | 'facture' | 'avoir') => {
     guard.guardAction(() => { setIsEditing(false); setTypeFilter(t); setSelectedId(null) })
   }, [guard])
 
-  const rows = factures ?? []
+  const allRows = factures ?? []
+  // "Non envoyé" (red) count within the current view — definitive bucket only.
+  const nonEnvoyeCount = bucket === 'def' ? allRows.filter((f) => !f.est_envoye).length : 0
+  const rows = bucket === 'def' && nonEnvoyeOn ? allRows.filter((f) => !f.est_envoye) : allRows
+
+  // Auto-release the filter when the last red row leaves the view (e.g. the
+  // facture just got emailed) so the list doesn't sit on an empty filter.
+  useEffect(() => {
+    if (nonEnvoyeOn && !isFetching && nonEnvoyeCount === 0) setNonEnvoyeOn(false)
+  }, [nonEnvoyeOn, isFetching, nonEnvoyeCount])
 
   useEffect(() => {
     if (isEditing || isFetching) return
@@ -429,6 +456,10 @@ export function ClientsFacturation() {
             onGenerate={() => setGenerateConfirmOpen(true)}
             onConvertBatch={() => setConvertBatchOpen(true)}
             onDeleteBatch={() => setDeleteBatchOpen(true)}
+            onXImport={() => setXimportOpen(true)}
+            nonEnvoyeCount={nonEnvoyeCount}
+            nonEnvoyeOn={nonEnvoyeOn}
+            onToggleNonEnvoye={() => setNonEnvoyeOn((v) => !v)}
             isEditing={isEditing}
             canEdit={canEditFactures}
           />
@@ -556,6 +587,8 @@ export function ClientsFacturation() {
 
       <BatchResultDialog result={batchResult} onClose={() => setBatchResult(null)} />
 
+      <XImportDialog open={ximportOpen} onClose={() => setXimportOpen(false)} />
+
       <Dialog open={convertResult !== null} onOpenChange={(o) => { if (!o) setConvertResult(null) }}>
         <DialogContent className="max-w-sm" onClose={() => setConvertResult(null)}>
           <DialogHeader>
@@ -583,8 +616,10 @@ export function ClientsFacturation() {
           onSend={async (p) => {
             await postEmail(`${API_URL}/factures/${bucket}/${selectedId}/email`, p, { includeAttachPdf: true })
             // The send logs an envoi_email row server-side — refresh the
-            // historique tab without a manual reload (kind === bucket).
+            // historique tab without a manual reload (kind === bucket), and
+            // the list so the "non envoyé" red frame clears.
             queryClient.invalidateQueries({ queryKey: ['facture-historique', bucket, selectedId] })
+            queryClient.invalidateQueries({ queryKey: ['factures'] })
           }}
         />
       )}
@@ -691,6 +726,102 @@ function BatchResultDialog({ result, onClose }: { result: BatchResult | null; on
             )
           )}
         </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ── XImport export dialog (definitive bucket) ──────────
+
+/** Pick a day → preview how many definitive invoices it holds → download the
+ *  fixed-width XImport.txt accounting file for that day. Mirrors the legacy
+ *  "Date des factures à envoyer en compta" prompt. */
+function XImportDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [date, setDate] = useState('')
+
+  // Fresh default (today) every time the dialog opens.
+  useEffect(() => {
+    if (open) {
+      const t = new Date()
+      const pad = (x: number) => String(x).padStart(2, '0')
+      setDate(`${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`)
+    }
+  }, [open])
+
+  const dateDigits = date.replace(/-/g, '')
+  const dateValid = /^\d{8}$/.test(dateDigits)
+
+  const { data: summary, isFetching } = useQuery<XImportSummary>({
+    queryKey: ['factures', 'ximport-summary', dateDigits],
+    queryFn: () => apiFetch(`/factures/ximport/summary?date=${dateDigits}`),
+    enabled: open && dateValid,
+  })
+
+  const nbDocs = (summary?.nb_factures ?? 0) + (summary?.nb_avoirs ?? 0)
+
+  const download = () => {
+    window.open(`${API_URL}/factures/ximport?date=${dateDigits}`, '_blank')
+    onClose()
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent className="max-w-sm" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <FileDown className="h-5 w-5 text-accent" />Export XImport
+          </DialogTitle>
+        </DialogHeader>
+        <div className="mt-4 space-y-3">
+          <p className="text-sm text-muted-foreground">
+            Le fichier XImport.txt contiendra les écritures comptables de toutes les factures définitives du jour sélectionné.
+          </p>
+          <div className="space-y-1">
+            <label className="text-xs font-medium text-muted-foreground">Date des factures à envoyer en compta</label>
+            <input
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              className="w-full h-9 px-2.5 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+          {/* Preview of what the file will contain for the picked day. */}
+          {dateValid && (
+            <div className="rounded-lg border border-border/60 bg-zinc-100/80 p-3">
+              {isFetching ? (
+                <div className="flex items-center justify-center py-2"><Loader2 className="h-4 w-4 animate-spin text-accent" /></div>
+              ) : nbDocs === 0 ? (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <CalendarDays className="h-4 w-4 flex-shrink-0" />
+                  Aucune facture définitive à cette date
+                </div>
+              ) : (
+                <div className="space-y-1 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Factures</span>
+                    <span className="font-medium tabular-nums">{summary?.nb_factures ?? 0}</span>
+                  </div>
+                  {(summary?.nb_avoirs ?? 0) > 0 && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Avoirs</span>
+                      <span className="font-medium tabular-nums">{summary?.nb_avoirs}</span>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between pt-1 border-t border-border/60">
+                    <span className="text-muted-foreground">Total TTC</span>
+                    <span className="font-semibold tabular-nums">{fmtNum(summary?.total_ttc ?? 0, 2)} €</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        <DialogFooter className="mt-4">
+          <Button variant="outline" onClick={onClose}>Annuler</Button>
+          <Button onClick={download} disabled={!dateValid || isFetching || nbDocs === 0}>
+            <FileDown className="h-3.5 w-3.5 mr-1.5" />Générer le fichier
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -839,7 +970,9 @@ function FactureList({
   searchQuery, onSearchChange,
   bucket, onBucketChange,
   typeFilter, onTypeFilterChange,
-  onNew, onGenerate, onConvertBatch, onDeleteBatch, isEditing, canEdit,
+  onNew, onGenerate, onConvertBatch, onDeleteBatch, onXImport,
+  nonEnvoyeCount, nonEnvoyeOn, onToggleNonEnvoye,
+  isEditing, canEdit,
 }: {
   rows: FactureListRow[]
   isLoading: boolean
@@ -857,22 +990,48 @@ function FactureList({
   onGenerate: () => void
   onConvertBatch: () => void
   onDeleteBatch: () => void
+  onXImport: () => void
+  nonEnvoyeCount: number
+  nonEnvoyeOn: boolean
+  onToggleNonEnvoye: () => void
   isEditing: boolean
   canEdit: boolean
 }) {
   return (
     <div className="flex flex-col h-full rounded-lg border shadow-sm bg-zinc-100/80">
       <div className="p-3 border-b rounded-t-lg bg-zinc-200/50 space-y-2">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <input
-            type="text"
-            placeholder="Rechercher (n°, client...)"
-            value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
-            autoComplete="off"
-            className="w-full h-9 pl-9 pr-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-          />
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1 min-w-0">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <input
+              type="text"
+              placeholder="Rechercher (n°, client...)"
+              value={searchQuery}
+              onChange={(e) => onSearchChange(e.target.value)}
+              autoComplete="off"
+              className="w-full h-9 pl-9 pr-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+          {/* "Non envoyé" red pill — definitive bucket only, hidden when the
+              current view has no unsent facture. Number-only toggle flush to
+              the search input, mirroring the SousTraitantsCommandes urgency
+              pills. */}
+          {bucket === 'def' && nonEnvoyeCount > 0 && (
+            <button
+              type="button"
+              onClick={onToggleNonEnvoye}
+              aria-pressed={nonEnvoyeOn}
+              title="Factures non envoyées"
+              className={cn(
+                'h-7 min-w-[1.75rem] px-1.5 inline-flex items-center justify-center rounded-md text-xs font-semibold tabular-nums border transition-colors flex-shrink-0',
+                nonEnvoyeOn
+                  ? 'bg-red-500 text-white border-red-500 shadow-sm'
+                  : 'bg-red-500/10 text-red-700 border-red-500/30 hover:bg-red-500/20'
+              )}
+            >
+              {nonEnvoyeCount}
+            </button>
+          )}
         </div>
         {/* Category switch — proforma drafts vs issued (definitive) invoices.
             Prominent bordered segmented control: this picks which set of
@@ -938,13 +1097,20 @@ function FactureList({
           const isSelected = selectedId === row.id
           const chip = typeChip(row.type)
           const ttc = signed(row.total_ttc, row.type)
+          // Definitive facture never emailed → red urgency frame (inset left
+          // strip + red selection ring), same visual language as the
+          // Sous-traitants › Commandes deadline cards (mps_designer §30).
+          const isNonEnvoye = row.kind === 'def' && !row.est_envoye
           return (
             <div
               key={row.id}
               onClick={() => onSelect(row.id)}
               className={cn(
                 'p-3 border rounded-lg cursor-pointer transition-all bg-white',
-                isSelected ? 'border-accent ring-1 ring-accent' : 'border-border hover:border-accent/50',
+                isSelected
+                  ? (isNonEnvoye ? 'border-red-500 ring-1 ring-red-500' : 'border-accent ring-1 ring-accent')
+                  : (isNonEnvoye ? 'border-border hover:border-red-500/50' : 'border-border hover:border-accent/50'),
+                isNonEnvoye && 'shadow-[inset_4px_0_0_0_rgb(239_68_68)]',
               )}
             >
               <div className="flex items-center gap-2">
@@ -997,6 +1163,17 @@ function FactureList({
             className="w-full text-destructive border-destructive/30 hover:bg-destructive/10 hover:text-destructive"
           >
             <Trash2 className="h-3.5 w-3.5 mr-1.5" />Supprimer des factures
+          </Button>
+        </div>
+      )}
+
+      {/* XImport — definitive bucket only: exports one day's issued invoices
+          as the fixed-width accounting file (legacy FI_Facturation_ETM
+          "envoyer en compta" flow). Read-only, so no permission gate. */}
+      {bucket === 'def' && (
+        <div className="flex-shrink-0 p-3 border-t bg-zinc-200/50">
+          <Button size="sm" variant="outline" className="w-full" onClick={onXImport}>
+            <FileDown className="h-3.5 w-3.5 mr-1.5" />XImport
           </Button>
         </div>
       )}

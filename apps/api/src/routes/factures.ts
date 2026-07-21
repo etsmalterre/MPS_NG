@@ -54,6 +54,7 @@ import { FacturePdf, type FacturePdfData } from '../lib/pdf/FacturePdf.js'
 import { sendMail } from '../lib/gmail.js'
 import { getUserEmail } from '../lib/user-emails.js'
 import { IS_WINDOWS, esc, n, dateDigits as dateStr } from '../lib/sst-shared.js'
+import { buildXImportFile, type XImportEntry } from '../lib/ximport.js'
 import { userHasPermission } from '../lib/permissions.js'
 import { isEffectiveAdmin } from '../lib/auth.js'
 
@@ -454,6 +455,132 @@ facturesRouter.get('/lookups/tva', async (_req: Request, res: Response) => {
 })
 
 // ════════════════════════════════════════════════════════
+//  XIMPORT  (accounting export of one day's definitive invoices)
+// ════════════════════════════════════════════════════════
+
+/** Resolve one day's definitive invoices into XImport entries (ordered by
+ *  numero, like the legacy export). Shared by the summary + download routes. */
+async function loadXImportEntries(date: string): Promise<XImportEntry[]> {
+  // DATE/TYPE are reserved words → uppercase keys. SELECT * is safe here.
+  const factures = await query<any>(
+    `SELECT * FROM facture WHERE IDsociete = 1 AND DATE = '${date}' ORDER BY numero`,
+  )
+  if (factures.length === 0) return []
+
+  const ids = factures.map((f: any) => Number(f.IDfacture)).filter(Boolean)
+  const clientIds = factures.map((f: any) => Number(f.IDclient)).filter(Boolean)
+
+  const [clients, tvaRows, codeRows, totalsMap] = await Promise.all([
+    (async () => {
+      const uniq = Array.from(new Set(clientIds))
+      if (uniq.length === 0) return [] as any[]
+      const rows = await query<any>(
+        `SELECT IDclient, nom, compte FROM client WHERE IDclient IN (${uniq.join(',')})`,
+      )
+      return fixEncoding(rows, 'client', 'IDclient', ['nom'])
+    })(),
+    (async () => {
+      const rows = await query<any>(`SELECT IDtva, compte, valeur, libelle_compte FROM tva`)
+      return fixEncoding(rows, 'tva', 'IDtva', ['libelle_compte'])
+    })(),
+    (async () => {
+      const rows = await query<any>(`SELECT IDcode_comptable, numero, libelle FROM code_comptable`)
+      return fixEncoding(rows, 'code_comptable', 'IDcode_comptable', ['libelle'])
+    })(),
+    lineTotals('def', ids),
+  ])
+
+  const clientMap = new Map(clients.map((c: any) => [Number(c.IDclient), c]))
+  const tvaMap = new Map(tvaRows.map((t: any) => [Number(t.IDtva), t]))
+  const codeMap = new Map(codeRows.map((c: any) => [Number(c.IDcode_comptable), c]))
+
+  // Échéance rules are shared across invoices — resolve each id once.
+  const echeanceIds = Array.from(new Set(factures.map((f: any) => Number(f.IDecheance) || 0)))
+  const echeances = new Map<number, EcheanceRule | null>(
+    await Promise.all(echeanceIds.map(async (id) => [id, await loadEcheanceRule(id)] as const)),
+  )
+
+  const round2 = (v: number) => Math.round(v * 100) / 100
+
+  return factures.map((f: any) => {
+    const id = Number(f.IDfacture)
+    const client = clientMap.get(Number(f.IDclient))
+    const tva = tvaMap.get(Number(f.IDtva))
+    const code = codeMap.get(Number(f.IDcode_comptable))
+    const rate = Number(tva?.valeur) || 0
+
+    // No stored totals: HT = Σ(quantite×prix), TVA = HT×rate. Round each half
+    // before summing so TTC always equals the two posted lines exactly.
+    const ht = round2(totalsMap.get(id)?.total_ht ?? 0)
+    const tvaAmount = round2(ht * (rate / 100))
+
+    // computeDateEcheance returns dd/mm/yyyy, or null for "à réception"-style
+    // rules — the legacy export then falls back to the invoice date itself.
+    const ech = computeDateEcheance(f.DATE, echeances.get(Number(f.IDecheance) || 0) ?? null)
+    const echDigits = ech ? `${ech.slice(6, 10)}${ech.slice(3, 5)}${ech.slice(0, 2)}` : String(f.DATE ?? '')
+
+    return {
+      numero: Number(f.numero) || id,
+      date: String(f.DATE ?? ''),
+      dateEcheance: echDigits,
+      isAvoir: Number(f.TYPE) === 2,
+      compteTiers: (client?.compte ?? '').toString().trim(),
+      libelleTiers: (client?.nom ?? '').toString().trim(),
+      compteVente: (code?.numero ?? '').toString().trim(),
+      libelleVente: (code?.libelle ?? '').toString().trim(),
+      compteTva: (tva?.compte ?? '').toString().trim(),
+      libelleTva: (tva?.libelle_compte ?? '').toString().trim(),
+      ht,
+      tva: tvaAmount,
+      ttc: round2(ht + tvaAmount),
+    }
+  })
+}
+
+/** YYYYMMDD from ?date=, or null when absent/malformed. */
+function parseExportDate(raw: unknown): string | null {
+  const s = String(raw ?? '').replace(/-/g, '').trim()
+  return /^\d{8}$/.test(s) ? s : null
+}
+
+// Pre-flight for the export dialog: how many invoices would the file contain?
+facturesRouter.get('/ximport/summary', async (req: Request, res: Response) => {
+  try {
+    const date = parseExportDate(req.query.date)
+    if (!date) { res.status(400).json({ error: 'invalid_date' }); return }
+    const entries = await loadXImportEntries(date)
+    res.json({
+      date,
+      nb_factures: entries.filter((e) => !e.isAvoir).length,
+      nb_avoirs: entries.filter((e) => e.isAvoir).length,
+      nb_lignes: entries.length * 3,
+      total_ttc: entries.reduce((sum, e) => sum + (e.isAvoir ? -e.ttc : e.ttc), 0),
+    })
+  } catch (err) {
+    console.error('Error building XImport summary:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// The file itself. Opened via window.open() from the browser, so it must be a
+// plain GET that triggers a download (no JSON envelope).
+facturesRouter.get('/ximport', async (req: Request, res: Response) => {
+  try {
+    const date = parseExportDate(req.query.date)
+    if (!date) { res.status(400).json({ error: 'invalid_date' }); return }
+    const body = buildXImportFile(await loadXImportEntries(date))
+    // Latin-1: the content is ASCII-only (accents are stripped by the builder),
+    // but the accounting import expects a single-byte encoding, not UTF-8.
+    res.setHeader('Content-Type', 'text/plain; charset=iso-8859-1')
+    res.setHeader('Content-Disposition', 'attachment; filename="XImport.txt"')
+    res.end(Buffer.from(body, 'latin1'))
+  } catch (err) {
+    console.error('Error building XImport file:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ════════════════════════════════════════════════════════
 //  LIST  (one bucket per call: ?status=prov|def)
 // ════════════════════════════════════════════════════════
 
@@ -497,10 +624,22 @@ facturesRouter.get('/', async (req: Request, res: Response) => {
 
     const ids = factures.map((f: any) => Number(f[t.pk])).filter(Boolean)
     const clientIds = factures.map((f: any) => Number(f.IDclient)).filter(Boolean)
-    const [clientNames, tvaMap, totalsMap] = await Promise.all([
+    const [clientNames, tvaMap, totalsMap, envoyeIds] = await Promise.all([
       resolveClientNames(clientIds),
       loadTvaMap(),
       lineTotals(kind, ids),
+      // "Envoyé" flag — definitive only: at least one envoi_email row logged
+      // for this facture (IDreference = IDfacture, shared with the legacy
+      // app's own send log). Proformas never log (id-space collision — see
+      // file header), so the prov bucket reports everything as sent.
+      (async () => {
+        if (kind !== 'def' || ids.length === 0) return new Set<number>()
+        const rows = await query<{ IDreference: number }>(
+          `SELECT DISTINCT IDreference FROM envoi_email
+           WHERE IDtype_doc = ${TYPE_DOC_FACTURE} AND IDreference IN (${ids.join(',')})`,
+        )
+        return new Set(rows.map((r) => Number(r.IDreference)))
+      })(),
     ])
 
     const result = factures.map((f: any) => {
@@ -521,6 +660,7 @@ facturesRouter.get('/', async (req: Request, res: Response) => {
         total_tva: tvaAmount,
         total_ttc: totals.total_ht + tvaAmount,
         nb_lignes: totals.nb_lignes,
+        est_envoye: kind === 'def' ? (envoyeIds.has(id) ? 1 : 0) : 1,
       }
     })
     res.json(result)
