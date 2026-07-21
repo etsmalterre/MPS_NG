@@ -10,6 +10,30 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-21 — feat/dev-resilience
+Dev tooling — **spin-up paths tell the truth about whether the app actually works.**
+Motivated by a session lost to two silent failures. (1) **Wedged HFSQL connect**: an API
+whose cached `connectionPromise` never resolved served `/api/health` 200 while every data
+route hung forever with nothing logged — an infinite loading screen on a server the tooling
+reported `UP`. `hfsql.ts` (Windows dev path) now races `odbc.connect()` against
+`HFSQL_CONNECT_TIMEOUT_MS` (default 15s) and clears the cached promise on failure, so the
+next request retries instead of inheriting one hung connect for the process lifetime —
+matching the self-healing respawn the Linux bridge already had. (2) **Readiness vs
+liveness**: new `GET /api/health?db=1` runs a real query and returns 503 when HFSQL is
+unreachable; `up.mjs` and `serve-main.mjs` both probe it, plus a `checkCors()` that sends a
+real `Origin` header (a plain `curl` sends none, so CORS breakage is invisible from the
+terminal while the browser fails). An API predating `?db=1` reports `not checked`, never a
+false `UNREACHABLE`. (3) **The main checkout got the same preflight as worktrees** — it was
+the only spin-up path with no dependency install and no CORS wiring, so on a fresh machine
+`/serve-main` died as an instant "NOT UP" whose real cause (no `node_modules`) sat unread in
+a log. `ensureDeps()` (non-interactive: `confirmModulesPurge=false`) and `ensureCorsOrigin()`
+(rewrites `CORS_ORIGIN` from `DEV_WEB_ORIGINS` rather than trusting a gitignored per-machine
+file) now live in `lib.mjs` and run on both paths; `tailLog()` makes a failed start print its
+own cause. (4) **`up.mjs --restart`** reuses an existing tree's slot/ports/env, killing and
+respawning it — previously the create path aborted on an existing dir and hand-rolled spawn
+scripts were the only way back up. Docs corrected at the source: `dev_setup.md` was itself
+prescribing the single-origin `CORS_ORIGIN=http://localhost:5174` that caused the breakage.
+
 ## 2026-07-21 — feat/commande-client
 Clients › Commandes — **"Expédition" wording + Commandé/Expédié on line cards.**
 (1) **Terminology**: every user-facing "livraison / date de livraison" around the client
