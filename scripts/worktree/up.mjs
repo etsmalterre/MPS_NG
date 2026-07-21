@@ -25,6 +25,7 @@ import {
   allocateSlot, getProject, projectMainCheckout, slotKey, updateRegistry,
   spawnDetached, isPortInUse, DEV_WEB_ORIGINS, git, reapPending, PROJECTS, mainCheckout,
   readRegistry, entryProject, parseSlotKey, pidAlive, killTree,
+  waitForDbHealth, checkCors, tailLog, ensureDeps, ensureCorsOrigin,
 } from './lib.mjs'
 
 // Default project = the repo this script is invoked from (so `up.mjs <feature>`
@@ -149,7 +150,11 @@ if (isRestart) {
 }
 
 if (isRestart) {
-  // env/secrets already in place from the original create.
+  // env/secrets are already in place from the original create — but repair the
+  // two things that rot: deps (a pruned/ineffective node_modules) and a
+  // CORS_ORIGIN written before a port existed. Both fail confusingly at runtime.
+  ensureDeps(wt, { label: `${feature} worktree` })
+  if (proj.hasApi) ensureCorsOrigin(path.join(wt, 'apps/api/.env.development'))
 } else if (proj.hasApi) {
   // Copy gitignored dev config the new worktree needs, and force a CORS_ORIGIN
   // that allows every dev slot so cookie auth works regardless of which slot we
@@ -224,35 +229,11 @@ async function waitFor(port, ms = 90000) {
   }
   return false
 }
-/**
- * An open port only proves the process is listening. An API whose HFSQL
- * connection is wedged answers /api/health instantly while every data route
- * hangs forever — which looks exactly like a healthy start here and like a
- * blank loading screen in the browser. `?db=1` makes the API actually query
- * HFSQL, so a wedged connection fails loudly at spin-up instead.
- */
-async function waitForDb(port, ms = 60000) {
-  const t0 = Date.now()
-  let last = 'no response'
-  while (Date.now() - t0 < ms) {
-    try {
-      const res = await fetch(`http://localhost:${port}/api/health?db=1`, {
-        signal: AbortSignal.timeout(10000),
-      })
-      const body = await res.json().catch(() => ({}))
-      if (res.ok && body.db === 'ok') return { ok: true, ms: body.dbMs }
-      last = body.error || `HTTP ${res.status}`
-    } catch (err) {
-      last = err?.name === 'TimeoutError' ? 'timed out (connection wedged?)' : err?.message ?? String(err)
-    }
-    await new Promise((r) => setTimeout(r, 2000))
-  }
-  return { ok: false, error: last }
-}
-
 const apiUp = proj.hasApi ? await waitFor(api) : await isPortInUse(api)
 const webUp = await waitFor(web)
-const dbCheck = proj.hasApi && apiUp ? await waitForDb(api) : null
+// Readiness beyond "port is open" — see waitForDbHealth/checkCors in lib.mjs.
+const dbCheck = proj.hasApi && apiUp ? await waitForDbHealth(api) : null
+const corsOk = apiUp ? await checkCors(api, `http://localhost:${web}`) : false
 
 console.log('\n──────────────────────────────────────────')
 console.log(`Slot ${slot}  ${feature}  [${proj.label}]`)
@@ -264,17 +245,29 @@ if (proj.hasApi) {
   console.log(`  API      : http://localhost:${api}   (MPS_NG master — ${apiUp ? 'reachable' : 'NOT reachable; run /serve-main'})`)
 }
 if (dbCheck) {
-  console.log(`  HFSQL    : ${dbCheck.ok ? `OK (${dbCheck.ms}ms)` : `UNREACHABLE — ${dbCheck.error}`}`)
+  const verdict = dbCheck.ok ? `OK (${dbCheck.ms}ms)`
+    : dbCheck.unsupported ? `not checked (${dbCheck.error})`
+    : `UNREACHABLE — ${dbCheck.error}`
+  console.log(`  HFSQL    : ${verdict}`)
+}
+if (apiUp) {
+  console.log(`  CORS     : ${corsOk ? `accepts http://localhost:${web}` : `REJECTS http://localhost:${web} — the browser will fail`}`)
 }
 console.log(`  Web      : http://localhost:${web}   pid ${webPid}  ${webUp ? 'UP' : 'NOT UP (check log)'}`)
 console.log(`  Logs     : ${apiLog}`)
 console.log(`             ${webLog}`)
 console.log('──────────────────────────────────────────')
+if (proj.hasApi && !apiUp) tailLog(apiLog)
+if (!webUp) tailLog(webLog)
 if (!webUp || (proj.hasApi && !apiUp)) {
-  console.log('A server did not come up in time — tail the log(s) above.')
+  console.log('A server did not come up in time — cause above.')
   process.exitCode = 2
 }
-if (dbCheck && !dbCheck.ok) {
+if (apiUp && !corsOk) {
+  console.log(`The API rejects http://localhost:${web}: fix CORS_ORIGIN in apps/api/.env.development.`)
+  process.exitCode = 2
+}
+if (dbCheck && !dbCheck.ok && !dbCheck.unsupported) {
   console.log('The API is listening but cannot reach HFSQL, so every data screen will hang.')
   console.log('Check the HFSQL service (localhost:4900) and HFSQL_CONNECTION_STRING, then:')
   console.log(`  node scripts/worktree/up.mjs ${feature} ${projectKey} --restart`)

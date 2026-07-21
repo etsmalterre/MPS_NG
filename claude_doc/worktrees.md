@@ -71,7 +71,11 @@ idle (a live probe), so a stale entry can't hand out a busy port. `PROJECTS` in
 **Slot 0 is reserved for serving the main checkout (`master`) itself** — API `8080` / web `3000`,
 outside the 1–6 feature range so `allocateSlot()` never hands it out and a feature worktree can
 never collide with a running master. Defined as `MAIN_SLOT` in `scripts/worktree/lib.mjs`;
-`localhost:3000` is in `DEV_WEB_ORIGINS` (so every generated worktree env allows it too). Managed
+`localhost:3000` is in `DEV_WEB_ORIGINS` (so every generated worktree env allows it too). The
+main checkout's own `apps/api/.env.development` is **gitignored and per-machine**, so it is NOT
+guaranteed to list `:3000` — a station set up before slot 0 existed had only `:5174`, and the
+browser then failed CORS while `curl` still passed. `serve-main.mjs` now rewrites that line from
+`DEV_WEB_ORIGINS` on every start and verifies the API echoes the origin back. Managed
 by `scripts/worktree/serve-main.mjs` behind the `/serve-main` + `/serve-main-down` skills; state
 lives under `reg.main` (separate from `reg.slots`, so status/allocation ignore it). Use it to
 click through the integrated app on `master` before deploying.

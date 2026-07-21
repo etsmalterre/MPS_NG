@@ -15,8 +15,9 @@ Run this from the main checkout. Stop it later with `/serve-main-down`.
 
 Slot 0 is defined as `MAIN_SLOT` in `scripts/worktree/lib.mjs`; `allocateSlot()` only
 hands out slots 1–6, so it can never reuse 0. The web origin `http://localhost:3000`
-is in the API's `CORS_ORIGIN` (and in `DEV_WEB_ORIGINS`, so every regenerated worktree
-env allows it too). The committed pnpm scripts `@mps/api dev:8080` and
+must be in the API's `CORS_ORIGIN`; because `apps/api/.env.development` is gitignored
+and per-machine, `serve-main.mjs` rewrites that line from `DEV_WEB_ORIGINS` on every
+start rather than trusting it. The committed pnpm scripts `@mps/api dev:8080` and
 `@mps/web dev:3000` (→ `VITE_API_URL=http://localhost:8080/api`) wire the pair.
 State is recorded under `reg.main` in `~/.claude/mps-worktrees.json`, kept separate
 from `reg.slots` so `/worktree-status` and slot allocation ignore it.
@@ -27,16 +28,21 @@ from `reg.slots` so `/worktree-status` and slot allocation ignore it.
    ```bash
    node scripts/worktree/serve-main.mjs
    ```
-   It refuses to double-spawn if slot 0 is already serving, starts the API
-   (`dev:8080`) and web (`dev:3000`) detached (logs → `.dev-logs/main-api.log` /
-   `main-web.log`), records the PIDs, and health-checks both ports.
+   It refuses to double-spawn if slot 0 is already serving; installs deps if the
+   checkout has none; repairs `CORS_ORIGIN`; starts the API (`dev:8080`) and web
+   (`dev:3000`) detached (logs → `.dev-logs/main-api.log` / `main-web.log`); records
+   the PIDs; then checks ports **plus** HFSQL reachability and CORS.
 
-2. **Read the summary** (branch, the two `http://localhost:...` URLs, PIDs, UP/NOT UP).
-   If a server reports "NOT UP", tail its log to diagnose before declaring success:
+2. **Read the summary** (branch, URLs, PIDs, `UP`/`NOT UP`, `HFSQL`, `CORS`). A failed
+   start now prints the tail of its own log, so the cause should be on screen; if you
+   need more:
    ```bash
    tail -n 40 .dev-logs/main-api.log
    tail -n 40 .dev-logs/main-web.log
    ```
+   Do not report success on `UP` alone — `UP` means "port open". `HFSQL : UNREACHABLE`
+   means every data screen will hang; `CORS : REJECTS …` means the browser fails while
+   `curl` still passes.
 
 3. **Report to the user**: the web URL (`http://localhost:3000`) and that it serves the
    live `master` checkout. **Flag that it talks to the live shared HFSQL DB** — clicking
@@ -50,3 +56,22 @@ from `reg.slots` so `/worktree-status` and slot allocation ignore it.
   starting anything.
 - This serves whatever the main checkout currently has checked out (normally `master`);
   the summary prints the branch so you can confirm.
+
+## Failure modes
+
+- **Both servers "NOT UP" instantly, log shows `ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL`** →
+  the checkout has no `node_modules` (fresh machine: the main checkout is the one tree
+  nothing installs for). `serve-main.mjs` now installs automatically; by hand it is
+  `pnpm install --config.confirmModulesPurge=false` — without that flag pnpm can block
+  on an interactive "remove and reinstall modules dirs?" prompt and appear to hang.
+- **App loads but every list shows "Impossible de charger la liste"** → CORS. The API
+  rejects origins not in `CORS_ORIGIN`, and `curl` cannot see this because it sends no
+  `Origin` header. Verify the way the browser does:
+  ```bash
+  curl -s -D - -o /dev/null -H "Origin: http://localhost:3000" http://localhost:8080/api/health | grep -i access-control
+  ```
+- **Screens hang forever while `/api/health` returns 200** → the API's HFSQL connection
+  is wedged, not the DB. Confirm with `curl "http://localhost:8080/api/health?db=1"` and
+  restart slot 0 (`down` then up). See `claude_doc/worktrees.md` §health checks.
+- **`HFSQL : not checked (API predates ?db=1)`** → informational, not a fault: the
+  checkout being served is older than the readiness probe.

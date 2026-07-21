@@ -375,6 +375,115 @@ export function git(args, cwd) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
 }
 
+// ── Preflight + verification, shared by up.mjs and serve-main.mjs ───────────
+// These exist because the two spin-up paths drifted: worktree creation grew
+// dependency install / CORS wiring / health checks, while the main checkout —
+// which /serve-main runs on — got none of them and failed in ways that blamed
+// the wrong layer. Keep new setup steps HERE so both paths inherit them.
+
+/**
+ * A workspace with no node_modules fails as `ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL`
+ * and an instant exit, which the port health check reports only as "NOT UP" —
+ * nothing points at the missing install. Fresh clones and fresh machines hit
+ * this every time, so install rather than diagnose.
+ * `confirmModulesPurge=false` keeps pnpm from blocking on an interactive
+ * "remove and reinstall modules dirs?" prompt in a detached/non-tty context.
+ */
+export function ensureDeps(dir, { label = 'checkout' } = {}) {
+  const roots = [dir, path.join(dir, 'apps/api'), path.join(dir, 'apps/web')]
+  const missing = roots.filter(
+    (r) => fs.existsSync(r) && !fs.existsSync(path.join(r, 'node_modules'))
+  )
+  if (!missing.length) return false
+  console.log(`Dependencies missing in ${label} — running pnpm install …`)
+  execFileSync('pnpm', ['install', '--config.confirmModulesPurge=false'], {
+    cwd: dir, stdio: 'inherit', shell: true,
+  })
+  return true
+}
+
+/**
+ * Force CORS_ORIGIN to span every dev web port. The API rejects any origin not
+ * listed, and a browser then fails while curl (which sends no Origin header)
+ * still succeeds — so the API looks healthy from the terminal while every
+ * screen shows "Impossible de charger la liste".
+ * .env.development is gitignored, so a machine whose copy predates a port (the
+ * main checkout's did not know about slot 0's :3000) stays broken until this
+ * rewrites it.
+ */
+export function ensureCorsOrigin(envPath) {
+  if (!fs.existsSync(envPath)) return false
+  const line = `CORS_ORIGIN=${DEV_WEB_ORIGINS.join(',')}`
+  const env = fs.readFileSync(envPath, 'utf8')
+  const next = /^CORS_ORIGIN=.*$/m.test(env)
+    ? env.replace(/^CORS_ORIGIN=.*$/m, line)
+    : env.trimEnd() + `\n${line}\n`
+  if (next === env) return false
+  fs.writeFileSync(envPath, next)
+  console.log(`Updated CORS_ORIGIN in ${envPath} (spans all dev ports).`)
+  return true
+}
+
+/**
+ * Readiness, not liveness. An API whose HFSQL connection is wedged answers
+ * /api/health instantly while every data route hangs forever with nothing in
+ * the log — indistinguishable from a healthy start if you only probe the port,
+ * and an infinite loading screen in the browser. `?db=1` runs a real query.
+ */
+export async function waitForDbHealth(port, ms = 60000) {
+  const t0 = Date.now()
+  let last = 'no response'
+  while (Date.now() - t0 < ms) {
+    try {
+      const res = await fetch(`http://localhost:${port}/api/health?db=1`, {
+        signal: AbortSignal.timeout(10000),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (res.ok && body.db === 'ok') return { ok: true, ms: body.dbMs }
+      // An API built before ?db=1 existed answers 200 with no `db` field. That
+      // is "cannot tell", not "broken" — reporting it as UNREACHABLE would make
+      // this probe the very kind of lying health check it was added to kill.
+      if (res.ok && body.db === undefined) {
+        return { ok: false, unsupported: true, error: 'API predates ?db=1 — cannot verify' }
+      }
+      last = body.error || `HTTP ${res.status}`
+    } catch (err) {
+      last = err?.name === 'TimeoutError' ? 'timed out (connection wedged?)' : err?.message ?? String(err)
+    }
+    await new Promise((r) => setTimeout(r, 2000))
+  }
+  return { ok: false, error: last }
+}
+
+/**
+ * Verify from the browser's point of view: the API must echo back the web
+ * origin, or cookie-auth'd requests fail in the browser while every terminal
+ * check passes.
+ */
+export async function checkCors(apiPortNum, webOrigin) {
+  try {
+    const res = await fetch(`http://localhost:${apiPortNum}/api/health`, {
+      headers: { Origin: webOrigin },
+      signal: AbortSignal.timeout(10000),
+    })
+    return res.headers.get('access-control-allow-origin') === webOrigin
+  } catch {
+    return false
+  }
+}
+
+/** Print the tail of a log so a failed start shows its real cause in place. */
+export function tailLog(file, n = 15) {
+  for (const f of [file, file.replace(/\.log$/, '.err.log')]) {
+    try {
+      const lines = fs.readFileSync(f, 'utf8').trimEnd().split(/\r?\n/).filter(Boolean)
+      if (!lines.length) continue
+      console.log(`--- ${path.basename(f)} (last ${Math.min(n, lines.length)}) ---`)
+      for (const l of lines.slice(-n)) console.log(`    ${l}`)
+    } catch {}
+  }
+}
+
 /** ahead/behind origin/master for a worktree, using last-fetched refs. */
 export function aheadBehind(cwd) {
   try {

@@ -14,6 +14,7 @@ import path from 'node:path'
 import {
   MAIN_SLOT, apiPort, webPort, isPortInUse, spawnDetached, killTree,
   mainCheckout, readRegistry, updateRegistry, git, pidAlive,
+  ensureDeps, ensureCorsOrigin, waitForDbHealth, checkCors, tailLog,
 } from './lib.mjs'
 
 const API_PORT = apiPort(MAIN_SLOT) // 8080
@@ -81,6 +82,11 @@ async function up() {
   // Clear any stale registry entry from a previous crash.
   await down({ quiet: true })
 
+  // Preflight. The main checkout gets no `up.mjs` treatment (no install, no env
+  // wiring), so on a fresh machine it is the one tree that starts broken.
+  ensureDeps(main, { label: 'main checkout' })
+  ensureCorsOrigin(path.join(main, 'apps/api/.env.development'))
+
   fs.mkdirSync(logDir, { recursive: true })
   console.log(`Serving main checkout (${currentBranch()}) on slot 0 — API 8080 / web 3000 …`)
   const apiPid = spawnDetached(main, '@mps/api', `dev:${API_PORT}`, apiLog)
@@ -92,16 +98,35 @@ async function up() {
 
   const apiUp = await waitFor(API_PORT, 'API')
   const webUp = await waitFor(WEB_PORT, 'Web')
+  // Beyond "the port is open": can the API reach HFSQL, and will the browser's
+  // origin be accepted? Both fail invisibly to a port check.
+  const db = apiUp ? await waitForDbHealth(API_PORT) : null
+  const corsOk = apiUp ? await checkCors(API_PORT, `http://localhost:${WEB_PORT}`) : false
 
   console.log('──────────────────────────────────────────')
   console.log(`Slot 0  main (${currentBranch()})`)
   console.log(`  Checkout : ${main}`)
   reportLine('API', API_PORT, apiPid, apiUp)
+  if (db) {
+    const verdict = db.ok ? `OK (${db.ms}ms)` : db.unsupported ? `not checked (${db.error})` : `UNREACHABLE — ${db.error}`
+    console.log(`  HFSQL   : ${verdict}`)
+  }
+  if (apiUp) console.log(`  CORS    : ${corsOk ? `accepts http://localhost:${WEB_PORT}` : `REJECTS http://localhost:${WEB_PORT} — the browser will fail`}`)
   reportLine('Web', WEB_PORT, webPid, webUp)
   console.log(`  Logs     : ${apiLog}`)
   console.log(`             ${webLog}`)
   console.log('──────────────────────────────────────────')
+  if (!apiUp) tailLog(apiLog)
+  if (!webUp) tailLog(webLog)
   if (!apiUp || !webUp) process.exitCode = 1
+  if (db && !db.ok && !db.unsupported) {
+    console.log('The API is listening but cannot reach HFSQL — every data screen will hang.')
+    process.exitCode = 1
+  }
+  if (apiUp && !corsOk) {
+    console.log(`CORS_ORIGIN in apps/api/.env.development does not allow http://localhost:${WEB_PORT}.`)
+    process.exitCode = 1
+  }
 }
 
 if (cmd === 'down' || cmd === 'stop') await down()
