@@ -32,6 +32,7 @@ import { authRouter } from './routes/auth.js'
 import { permissionsRouter } from './routes/permissions.js'
 import { userEmailsRouter } from './routes/user-emails.js'
 import { userProfilesRouter } from './routes/user-profiles.js'
+import { query } from './lib/hfsql-auto.js'
 import { attachUser } from './lib/auth.js'
 import { closeConnection } from './lib/hfsql-auto.js'
 
@@ -59,8 +60,30 @@ app.use(cookieParser())
 // Never 401s — routes keep working without a cookie, same as before.
 app.use(attachUser())
 
-app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', app: 'MPS API', version: '0.1.0' })
+// Liveness by default. `?db=1` upgrades it to a readiness probe that actually
+// touches HFSQL — the process can answer the plain form perfectly while every
+// data route hangs on a poisoned connection, which is exactly the failure the
+// worktree spin-up scripts need to catch (they used to accept "port is open"
+// as proof the API was usable).
+app.get('/api/health', async (req, res) => {
+  const base = { status: 'ok', app: 'MPS API', version: '0.1.0' }
+  if (req.query.db === undefined) {
+    res.json(base)
+    return
+  }
+  const t0 = Date.now()
+  try {
+    await query('SELECT COUNT(*) AS n FROM utilisateur')
+    res.json({ ...base, db: 'ok', dbMs: Date.now() - t0 })
+  } catch (err) {
+    res.status(503).json({
+      ...base,
+      status: 'degraded',
+      db: 'error',
+      dbMs: Date.now() - t0,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
 })
 
 app.use('/api/auth', authRouter)

@@ -72,8 +72,17 @@ bookkeeping) is done by `scripts/worktree/up.mjs`. The registry lives at
 - "All 6 … slots are in use" → run `/worktree-status`; finish or `/feature-down` one of
   that project's worktrees before creating another.
 - "Branch already exists" / "Worktree dir already exists" → the script aborts to avoid
-  clobbering in-progress work. Pick a different name, or clean up the old one with
-  `/feature-complete` (if mergeable) or `node scripts/worktree/down.mjs <name> --remove`.
+  clobbering in-progress work. If you meant to **resume** that tree (its servers died,
+  e.g. after a reboot), restart it in place — this keeps the slot, ports and env:
+  ```bash
+  node scripts/worktree/up.mjs <feature-name> [ng|trm] --restart
+  ```
+  Otherwise pick a different name, or clean up the old one with `/feature-complete`
+  (if mergeable) or `node scripts/worktree/down.mjs <name> --remove`.
+- **API "UP" but every screen hangs on a loading spinner** → the API is listening but its
+  HFSQL connection is wedged. The spin-up summary now catches this itself
+  (`HFSQL : UNREACHABLE — …`); check by hand with
+  `curl "http://localhost:808N/api/health?db=1"`, and recover with `--restart`.
 - The dev servers are **detached** — they keep running after this Claude session ends,
   which is the point. They are stopped by `/feature-complete` or `/feature-down`.
 - **TRM worktrees need an MPS_NG API running** (master via `/serve-main`, or an NG worktree

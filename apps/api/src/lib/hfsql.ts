@@ -6,14 +6,40 @@ const CONNECTION_STRING =
 
 let connectionPromise: Promise<odbc.Connection> | null = null
 
+/**
+ * Hard ceiling on a single connect attempt. The driver's own `loginTimeout` is
+ * only a hint and has been observed not to fire: `odbc.connect()` then hangs
+ * forever, and because the pending promise is cached every later query awaits
+ * it too — the process serves /api/health fine while every DB route hangs with
+ * no error logged, until it's killed by hand. Racing the connect against this
+ * timeout and clearing the cache lets the next request retry instead, matching
+ * the self-healing respawn the Linux bridge already does.
+ */
+const CONNECT_TIMEOUT_MS = Number(process.env.HFSQL_CONNECT_TIMEOUT_MS) || 15000
+
 export function getConnection(): Promise<odbc.Connection> {
   if (!connectionPromise) {
-    connectionPromise = odbc.connect({
+    const attempt = odbc.connect({
       connectionString: CONNECTION_STRING,
       loginTimeout: 10,
     })
-    connectionPromise.catch(() => {
+    let timer: NodeJS.Timeout
+    connectionPromise = Promise.race([
+      attempt,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`HFSQL connect timed out after ${CONNECT_TIMEOUT_MS}ms`)),
+          CONNECT_TIMEOUT_MS
+        )
+      }),
+    ]).finally(() => clearTimeout(timer)) as Promise<odbc.Connection>
+
+    connectionPromise.catch((err) => {
+      console.error('[hfsql] connect failed, will retry on next query:', err?.message ?? err)
       connectionPromise = null
+      // If the hung connect ever does resolve, close the orphan so the driver
+      // doesn't leak a session we no longer reference.
+      attempt.then((conn) => conn.close().catch(() => {})).catch(() => {})
     })
   }
   return connectionPromise

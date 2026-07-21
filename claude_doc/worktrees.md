@@ -108,10 +108,40 @@ click through the integrated app on `master` before deploying.
 ```bash
 node scripts/worktree/status.mjs                       # what's running
 node scripts/worktree/up.mjs   <feature>               # create + start
+node scripts/worktree/up.mjs   <feature> --restart     # existing tree: kill + respawn on its slot
 node scripts/worktree/down.mjs <feature|slot>          # stop servers, free slot, keep tree
 node scripts/worktree/down.mjs <feature|slot> --remove # + remove worktree & branch
 git worktree list                                      # ground truth from git
 ```
+
+## Bringing a tree back up (`--restart`)
+
+Dev servers are detached, so they outlive their Claude — but not a reboot or a crash.
+`status.mjs` then shows the slot `DOWN` with dead PIDs while the worktree is untouched.
+`--restart` reuses the recorded slot, ports and env (no fetch, no `pnpm install`, no
+`.env` rewrite), kills whatever is still alive on it, respawns and refreshes the PIDs.
+The plain create path deliberately aborts on an existing dir, and now points at this.
+
+## Health checks: an open port is not a healthy API
+
+Spin-up used to accept "the port accepts connections" as proof the API worked. It isn't:
+an API whose HFSQL connection is wedged answers `/api/health` instantly while **every**
+data route hangs forever with nothing in the log — in the browser that's an infinite
+loading screen on a server that reports `UP`. `up.mjs` therefore also probes
+`/api/health?db=1`, which runs a real query (`SELECT COUNT(*) FROM utilisateur`) and
+returns 503 `{ db: 'error' }` when HFSQL is unreachable. The summary line reads
+`HFSQL : OK (207ms)` or `HFSQL : UNREACHABLE — …`; the latter sets a non-zero exit code.
+
+Use it by hand whenever screens hang but the app loads:
+
+```bash
+curl "http://localhost:808N/api/health?db=1"
+```
+
+The Windows connect path (`apps/api/src/lib/hfsql.ts`) now self-heals like the Linux
+bridge does: a connect attempt is raced against `HFSQL_CONNECT_TIMEOUT_MS` (default 15s,
+overridable) and the cached promise is cleared on failure, so the next request retries
+instead of every request inheriting one hung connect for the process lifetime.
 
 ## Notes
 

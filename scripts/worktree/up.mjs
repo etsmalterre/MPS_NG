@@ -1,5 +1,12 @@
 // Create a feature worktree on a free slot and spin up its dev server(s).
-//   node scripts/worktree/up.mjs <feature-name> [ng|trm] [--api <port>]
+//   node scripts/worktree/up.mjs <feature-name> [ng|trm] [--api <port>] [--restart]
+//
+// --restart reuses an EXISTING worktree + slot instead of creating anything:
+// it kills whatever is still alive, respawns the dev server(s) on the slot's
+// recorded ports and refreshes the PIDs. Use it when a tree's servers died (or
+// wedged) but the work in it is untouched — the create path deliberately
+// aborts on an existing dir, which otherwise leaves hand-rolled spawn scripts
+// as the only way back up.
 //
 // <feature-name> is kebab-case; it yields branch `feat/<name>` and worktree
 // `<repo>-<name>` beside the repo (repo = MPS_NG for ng, MPS-TRM for trm).
@@ -17,6 +24,7 @@ import fs from 'node:fs'
 import {
   allocateSlot, getProject, projectMainCheckout, slotKey, updateRegistry,
   spawnDetached, isPortInUse, DEV_WEB_ORIGINS, git, reapPending, PROJECTS, mainCheckout,
+  readRegistry, entryProject, parseSlotKey, pidAlive, killTree,
 } from './lib.mjs'
 
 // Default project = the repo this script is invoked from (so `up.mjs <feature>`
@@ -40,6 +48,9 @@ if (swept.reaped.length) {
 
 // ── Args: <feature> [ng|trm] [--api <port>] ─────────────────────────────────
 const argv = process.argv.slice(2)
+const restartIdx = argv.indexOf('--restart')
+const isRestart = restartIdx !== -1
+if (isRestart) argv.splice(restartIdx, 1)
 const apiIdx = argv.indexOf('--api')
 let apiOverride = null
 if (apiIdx !== -1) {
@@ -53,7 +64,7 @@ if (apiIdx !== -1) {
 const feature = (argv[0] || '').trim()
 const projectKey = (argv[1] || detectDefaultProject()).trim().toLowerCase()
 if (!/^[a-z0-9][a-z0-9-]*$/.test(feature)) {
-  console.error('Usage: node scripts/worktree/up.mjs <feature-name> [ng|trm] [--api <port>]  (feature kebab-case)')
+  console.error('Usage: node scripts/worktree/up.mjs <feature-name> [ng|trm] [--api <port>] [--restart]  (feature kebab-case)')
   process.exit(1)
 }
 if (projectKey !== 'ng' && projectKey !== 'trm') {
@@ -69,30 +80,77 @@ const main = projectMainCheckout(projectKey)
 const branch = `feat/${feature}`
 const wt = path.join(path.dirname(main), `${proj.dirName}-${feature}`)
 
-// Guards: don't clobber an existing branch or directory.
-if (fs.existsSync(wt)) { console.error(`Worktree dir already exists: ${wt}`); process.exit(1) }
-const branches = git(['-C', main, 'branch', '--list', branch], main)
-if (branches) { console.error(`Branch already exists: ${branch}`); process.exit(1) }
+// Guards: don't clobber an existing branch or directory (create path only —
+// --restart *requires* them to exist).
+if (!isRestart) {
+  if (fs.existsSync(wt)) {
+    console.error(`Worktree dir already exists: ${wt}`)
+    console.error(`  To bring its dev servers back up: node scripts/worktree/up.mjs ${feature} ${projectKey} --restart`)
+    process.exit(1)
+  }
+  const branches = git(['-C', main, 'branch', '--list', branch], main)
+  if (branches) { console.error(`Branch already exists: ${branch}`); process.exit(1) }
+}
 
 console.log(`Project  : ${proj.label}`)
-console.log(`Fetching origin in ${main} …`)
-execFileSync('git', ['-C', main, 'fetch', 'origin'], { stdio: 'inherit' })
 
-const slot = await allocateSlot(projectKey)
-const api = proj.hasApi ? proj.apiPort(slot) : (apiOverride || proj.defaultApiPort)
-const web = proj.webPort(slot)
-if (proj.hasApi) console.log(`Slot ${slot} → API ${api}, Web ${web}`)
-else console.log(`Slot ${slot} → Web ${web} (targets MPS_NG API on ${api})`)
+let slot
+let api
+let web
 
-console.log(`Creating worktree ${wt} on ${branch} …`)
-execFileSync('git', ['-C', main, 'worktree', 'add', wt, '-b', branch, 'origin/master'], {
-  stdio: 'inherit',
-})
+if (isRestart) {
+  // Reuse the recorded slot/ports so the tree comes back exactly where it was
+  // (its .env files already point at those ports, and the URL the user has open
+  // keeps working). No fetch, no install, no env rewrite — the tree is intact.
+  if (!fs.existsSync(wt)) {
+    console.error(`No worktree at ${wt} — nothing to restart. Drop --restart to create it.`)
+    process.exit(1)
+  }
+  const reg = readRegistry()
+  const hit = Object.entries(reg.slots ?? {}).find(
+    ([key, e]) => entryProject(e, key) === projectKey && e.feature === feature
+  )
+  if (!hit) {
+    console.error(`No registry entry for ${proj.label} feature "${feature}" — can't tell which slot it owns.`)
+    console.error(`  Run: node scripts/worktree/status.mjs   (then down.mjs <name> and re-create if it's gone)`)
+    process.exit(1)
+  }
+  const [key, entry] = hit
+  slot = parseSlotKey(key).slot
+  api = proj.hasApi ? proj.apiPort(slot) : (apiOverride || entry.apiTarget || proj.defaultApiPort)
+  web = proj.webPort(slot)
 
-console.log('Installing dependencies (pnpm install) …')
-execFileSync('pnpm', ['install'], { cwd: wt, stdio: 'inherit', shell: true })
+  // Kill anything still alive on the slot first, so we never end up with two
+  // dev servers fighting over the same port (a wedged API is still "alive").
+  for (const pid of [entry.apiPid, entry.webPid]) {
+    if (pid && pidAlive(pid)) {
+      console.log(`Killing existing pid ${pid} …`)
+      killTree(pid)
+    }
+  }
+  console.log(`Restarting slot ${slot} → ${proj.hasApi ? `API ${api}, ` : ''}Web ${web}`)
+} else {
+  console.log(`Fetching origin in ${main} …`)
+  execFileSync('git', ['-C', main, 'fetch', 'origin'], { stdio: 'inherit' })
 
-if (proj.hasApi) {
+  slot = await allocateSlot(projectKey)
+  api = proj.hasApi ? proj.apiPort(slot) : (apiOverride || proj.defaultApiPort)
+  web = proj.webPort(slot)
+  if (proj.hasApi) console.log(`Slot ${slot} → API ${api}, Web ${web}`)
+  else console.log(`Slot ${slot} → Web ${web} (targets MPS_NG API on ${api})`)
+
+  console.log(`Creating worktree ${wt} on ${branch} …`)
+  execFileSync('git', ['-C', main, 'worktree', 'add', wt, '-b', branch, 'origin/master'], {
+    stdio: 'inherit',
+  })
+
+  console.log('Installing dependencies (pnpm install) …')
+  execFileSync('pnpm', ['install'], { cwd: wt, stdio: 'inherit', shell: true })
+}
+
+if (isRestart) {
+  // env/secrets already in place from the original create.
+} else if (proj.hasApi) {
   // Copy gitignored dev config the new worktree needs, and force a CORS_ORIGIN
   // that allows every dev slot so cookie auth works regardless of which slot we
   // got (spans NG + TRM web ports — see DEV_WEB_ORIGINS).
@@ -144,12 +202,15 @@ const apiPid = proj.hasApi ? spawnDetached(wt, proj.apiPkg, proj.apiScript(slot)
 const webPid = spawnDetached(wt, proj.webPkg, proj.webScript(slot), webLog)
 
 updateRegistry((reg) => {
+  const prev = reg.slots[slotKey(projectKey, slot)] ?? {}
   reg.slots[slotKey(projectKey, slot)] = {
     project: projectKey, feature, branch, worktree: wt.replace(/\\/g, '/'),
     main: main.replace(/\\/g, '/'),
     apiPort: proj.hasApi ? api : null, apiTarget: proj.hasApi ? null : api,
     webPort: web, apiPid, webPid,
-    logDir: logDir.replace(/\\/g, '/'), createdAt: new Date().toISOString(),
+    logDir: logDir.replace(/\\/g, '/'),
+    createdAt: (isRestart && prev.createdAt) || new Date().toISOString(),
+    ...(isRestart ? { restartedAt: new Date().toISOString() } : {}),
   }
 })
 
@@ -163,8 +224,35 @@ async function waitFor(port, ms = 90000) {
   }
   return false
 }
+/**
+ * An open port only proves the process is listening. An API whose HFSQL
+ * connection is wedged answers /api/health instantly while every data route
+ * hangs forever — which looks exactly like a healthy start here and like a
+ * blank loading screen in the browser. `?db=1` makes the API actually query
+ * HFSQL, so a wedged connection fails loudly at spin-up instead.
+ */
+async function waitForDb(port, ms = 60000) {
+  const t0 = Date.now()
+  let last = 'no response'
+  while (Date.now() - t0 < ms) {
+    try {
+      const res = await fetch(`http://localhost:${port}/api/health?db=1`, {
+        signal: AbortSignal.timeout(10000),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (res.ok && body.db === 'ok') return { ok: true, ms: body.dbMs }
+      last = body.error || `HTTP ${res.status}`
+    } catch (err) {
+      last = err?.name === 'TimeoutError' ? 'timed out (connection wedged?)' : err?.message ?? String(err)
+    }
+    await new Promise((r) => setTimeout(r, 2000))
+  }
+  return { ok: false, error: last }
+}
+
 const apiUp = proj.hasApi ? await waitFor(api) : await isPortInUse(api)
 const webUp = await waitFor(web)
+const dbCheck = proj.hasApi && apiUp ? await waitForDb(api) : null
 
 console.log('\n──────────────────────────────────────────')
 console.log(`Slot ${slot}  ${feature}  [${proj.label}]`)
@@ -175,12 +263,21 @@ if (proj.hasApi) {
 } else {
   console.log(`  API      : http://localhost:${api}   (MPS_NG master — ${apiUp ? 'reachable' : 'NOT reachable; run /serve-main'})`)
 }
+if (dbCheck) {
+  console.log(`  HFSQL    : ${dbCheck.ok ? `OK (${dbCheck.ms}ms)` : `UNREACHABLE — ${dbCheck.error}`}`)
+}
 console.log(`  Web      : http://localhost:${web}   pid ${webPid}  ${webUp ? 'UP' : 'NOT UP (check log)'}`)
 console.log(`  Logs     : ${apiLog}`)
 console.log(`             ${webLog}`)
 console.log('──────────────────────────────────────────')
 if (!webUp || (proj.hasApi && !apiUp)) {
   console.log('A server did not come up in time — tail the log(s) above.')
+  process.exitCode = 2
+}
+if (dbCheck && !dbCheck.ok) {
+  console.log('The API is listening but cannot reach HFSQL, so every data screen will hang.')
+  console.log('Check the HFSQL service (localhost:4900) and HFSQL_CONNECTION_STRING, then:')
+  console.log(`  node scripts/worktree/up.mjs ${feature} ${projectKey} --restart`)
   process.exitCode = 2
 }
 if (!proj.hasApi && !apiUp) {

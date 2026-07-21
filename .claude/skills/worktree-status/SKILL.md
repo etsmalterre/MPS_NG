@@ -21,9 +21,16 @@ the shared registry at `~/.claude/mps-worktrees.json`).
 2. **Relay the output** to the user: the per-slot health (UP / PARTIAL / DOWN), URLs,
    branch divergence, and the list of free slots.
 
-3. **If it flags stale entries** (servers dead or the worktree missing on disk), offer to
-   clean them. For each stale slot the user confirms:
-   ```bash
-   cd /c/dev/MPS_NG && node scripts/worktree/down.mjs <slot> --remove
-   ```
-   (omit `--remove` to just free the slot while keeping the worktree on disk).
+3. **If it flags stale entries** (servers dead or the worktree missing on disk), check
+   whether the worktree still exists on disk before offering to clean it:
+   - **Tree still there** (servers just died — a reboot, a crash) → the work in it is
+     intact, so offer to **restart it in place** rather than remove it:
+     ```bash
+     node scripts/worktree/up.mjs <feature> [ng|trm] --restart
+     ```
+   - **Tree gone / work already landed** → clean the entry. For each stale slot the
+     user confirms:
+     ```bash
+     cd /c/dev/MPS_NG && node scripts/worktree/down.mjs <slot> --remove
+     ```
+     (omit `--remove` to just free the slot while keeping the worktree on disk).
