@@ -1,4 +1,6 @@
 import odbc from 'odbc'
+import { utimes } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 
 const CONNECTION_STRING =
   process.env.HFSQL_CONNECTION_STRING ||
@@ -17,6 +19,38 @@ let connectionPromise: Promise<odbc.Connection> | null = null
  */
 const CONNECT_TIMEOUT_MS = Number(process.env.HFSQL_CONNECT_TIMEOUT_MS) || 15000
 
+// ── Wedged-driver self-restart (dev only) ──────────────
+// Observed 2026-07-22: once one native odbc.connect() hangs, clearing the JS
+// cache does NOT recover the process — every retry also times out while a
+// fresh process connects in <1s. The wedge lives in process-wide native driver
+// state, so the only real cure is a process restart. tsx watch does NOT
+// respawn an exited process (verified: it waits for a file change), so
+// process.exit() would leave the API down; instead we touch the watched entry
+// file, which makes tsx watch restart the whole process with fresh driver
+// state. No-op outside NODE_ENV=development (prod runs the Linux bridge,
+// which has its own respawn logic).
+const WEDGE_RESTART_AFTER = 2
+const WEDGE_RESTART_MIN_INTERVAL_MS = 60_000
+let consecutiveConnectTimeouts = 0
+let lastWedgeRestartAt = 0
+
+function maybeSelfRestartOnWedge(): void {
+  if (process.env.NODE_ENV !== 'development') return
+  if (consecutiveConnectTimeouts < WEDGE_RESTART_AFTER) return
+  const now = Date.now()
+  if (now - lastWedgeRestartAt < WEDGE_RESTART_MIN_INTERVAL_MS) return
+  lastWedgeRestartAt = now
+  const entry = fileURLToPath(new URL('../index.ts', import.meta.url))
+  const t = new Date()
+  utimes(entry, t, t).then(
+    () =>
+      console.error(
+        `[hfsql] ${consecutiveConnectTimeouts} consecutive connect timeouts — native driver looks wedged; touched ${entry} to trigger a tsx-watch process restart`,
+      ),
+    (err) => console.error('[hfsql] wedge self-restart failed to touch entry file:', err?.message ?? err),
+  )
+}
+
 export function getConnection(): Promise<odbc.Connection> {
   if (!connectionPromise) {
     const attempt = odbc.connect({
@@ -34,12 +68,23 @@ export function getConnection(): Promise<odbc.Connection> {
       }),
     ]).finally(() => clearTimeout(timer)) as Promise<odbc.Connection>
 
-    connectionPromise.catch((err) => {
+    connectionPromise.then(() => {
+      consecutiveConnectTimeouts = 0
+    }).catch((err) => {
       console.error('[hfsql] connect failed, will retry on next query:', err?.message ?? err)
       connectionPromise = null
       // If the hung connect ever does resolve, close the orphan so the driver
       // doesn't leak a session we no longer reference.
       attempt.then((conn) => conn.close().catch(() => {})).catch(() => {})
+      // Only timeouts indicate the wedged-native-state failure mode; a fast
+      // refusal (server down, bad credentials) errors immediately and must not
+      // trigger restarts.
+      if (err instanceof Error && err.message.startsWith('HFSQL connect timed out')) {
+        consecutiveConnectTimeouts++
+        maybeSelfRestartOnWedge()
+      } else {
+        consecutiveConnectTimeouts = 0
+      }
     })
   }
   return connectionPromise
@@ -70,13 +115,12 @@ function cleanRow<T>(row: Record<string, unknown>): T {
   return cleaned as T
 }
 
-/** Run a SQL query against HFSQL via ODBC */
-export async function query<T = Record<string, unknown>>(
-  sql: string,
-  params?: (string | number | null)[]
-): Promise<T[]> {
+/** Run a SQL query against HFSQL via ODBC.
+ *  No params argument on purpose: `?` placeholders do not work on HFSQL
+ *  (CLAUDE.md rule) — build the SQL with esc()/parseInt/hex literals. */
+export async function query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
   const conn = await getConnection()
-  const rows = params ? await conn.query(sql, params) : await conn.query(sql)
+  const rows = await conn.query(sql)
   return (rows as Record<string, unknown>[]).map((row) => cleanRow<T>(row))
 }
 

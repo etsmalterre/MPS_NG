@@ -706,9 +706,30 @@ stockFiniRouter.get('/fini/:id/label', async (req: Request, res: Response) => {
 //   sqlText() so French observations don't corrupt the Linux bridge.
 //   MUST be registered before PATCH /fini/:id, otherwise "batch" is parsed as
 //   the :id param.
+//   Gated like the single-roll PATCH: edit_stock_fini + the sub-permission of
+//   each written field (emplacement → stockage, observations → notes).
 stockFiniRouter.patch('/fini/batch', async (req: Request, res: Response) => {
   try {
+    if (req.userId === undefined) {
+      res.status(401).json({ error: 'not authenticated' })
+      return
+    }
+    const admin = isEffectiveAdmin(req)
+    const allowed = await userHasPermission(req.userId, admin, 'edit_stock_fini')
+    if (!allowed) {
+      res.status(403).json({ error: 'permission denied: edit_stock_fini' })
+      return
+    }
+
     const body = req.body ?? {}
+    if (typeof body.emplacement === 'string' && !(await userHasPermission(req.userId, admin, 'edit_stock_fini_stockage'))) {
+      res.status(403).json({ error: 'permission denied: edit_stock_fini_stockage' })
+      return
+    }
+    if (typeof body.observations === 'string' && !(await userHasPermission(req.userId, admin, 'edit_stock_fini_notes'))) {
+      res.status(403).json({ error: 'permission denied: edit_stock_fini_notes' })
+      return
+    }
     const ids = (Array.isArray(body.ids) ? body.ids : [])
       .map((x: unknown) => parseInt(String(x), 10))
       .filter((n: number) => Number.isInteger(n) && n > 0)
@@ -738,21 +759,50 @@ stockFiniRouter.patch('/fini/batch', async (req: Request, res: Response) => {
   }
 })
 
+// Sub-permissions of edit_stock_fini, one per drawer section. A field may
+// only be written when the acting user holds edit_stock_fini AND the section's
+// sub-key (effective admins bypass both, inside userHasPermission).
+type EditSubKey =
+  | 'edit_stock_fini_stockage'
+  | 'edit_stock_fini_etat'
+  | 'edit_stock_fini_affectation'
+  | 'edit_stock_fini_notes'
+
+async function loadEditSubPermissions(
+  userId: number,
+  isAdmin: boolean,
+): Promise<Record<EditSubKey, boolean>> {
+  return {
+    edit_stock_fini_stockage: await userHasPermission(userId, isAdmin, 'edit_stock_fini_stockage'),
+    edit_stock_fini_etat: await userHasPermission(userId, isAdmin, 'edit_stock_fini_etat'),
+    edit_stock_fini_affectation: await userHasPermission(userId, isAdmin, 'edit_stock_fini_affectation'),
+    edit_stock_fini_notes: await userHasPermission(userId, isAdmin, 'edit_stock_fini_notes'),
+  }
+}
+
 // PATCH /api/stock/fini/:id - whitelist edit
 //   poids, metrage, IDref_fini, IDColoris, IDref_commande_source, IDstock_ecru,
 //   IDligne_expedition, IDligne_commande_client are NOT editable here — they
 //   belong to the sst reception / shipment flows.
+//   Field groups map to the edit_stock_fini_* sub-permissions:
+//     stockage    → emplacement, conteneur, pointage
+//     etat        → second_choix, IDetat_stock_fini
+//     affectation → don, destockage
+//     notes       → observations, observation_sst
 stockFiniRouter.patch('/fini/:id', async (req: Request, res: Response) => {
   try {
     if (req.userId === undefined) {
       res.status(401).json({ error: 'not authenticated' })
       return
     }
-    const allowed = await userHasPermission(req.userId, isEffectiveAdmin(req), 'edit_stock_fini')
+    const admin = isEffectiveAdmin(req)
+    const allowed = await userHasPermission(req.userId, admin, 'edit_stock_fini')
     if (!allowed) {
       res.status(403).json({ error: 'permission denied: edit_stock_fini' })
       return
     }
+    const sub = await loadEditSubPermissions(req.userId, admin)
+    const deny = (key: EditSubKey) => res.status(403).json({ error: `permission denied: ${key}` })
 
     const id = parseInt(req.params.id, 10)
     if (isNaN(id)) {
@@ -762,6 +812,19 @@ stockFiniRouter.patch('/fini/:id', async (req: Request, res: Response) => {
 
     const body = req.body ?? {}
     const sets: string[] = []
+
+    if (typeof body.observations === 'string' || typeof body.observation_sst === 'string') {
+      if (!sub.edit_stock_fini_notes) { deny('edit_stock_fini_notes'); return }
+    }
+    if (typeof body.emplacement === 'string' || typeof body.conteneur === 'string' || typeof body.pointage === 'string') {
+      if (!sub.edit_stock_fini_stockage) { deny('edit_stock_fini_stockage'); return }
+    }
+    if (body.second_choix !== undefined || body.IDetat_stock_fini !== undefined) {
+      if (!sub.edit_stock_fini_etat) { deny('edit_stock_fini_etat'); return }
+    }
+    if (body.don !== undefined || body.destockage !== undefined) {
+      if (!sub.edit_stock_fini_affectation) { deny('edit_stock_fini_affectation'); return }
+    }
 
     if (typeof body.observations === 'string') sets.push(`observations = ${sqlText(body.observations)}`)
     if (typeof body.observation_sst === 'string') sets.push(`observation_sst = ${sqlText(body.observation_sst)}`)

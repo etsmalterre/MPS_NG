@@ -8,6 +8,12 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
+    // Unit tests live under src/ only. Without this, vitest's default include
+    // collects the Playwright specs in e2e/ (which crash at import — they must
+    // run via `pnpm test:e2e`) and `pnpm test` always fails.
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    // No unit tests exist yet — an empty run must not fail the turbo pipeline.
+    passWithNoTests: true,
   },
   resolve: {
     alias: {

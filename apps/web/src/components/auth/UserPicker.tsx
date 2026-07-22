@@ -47,10 +47,14 @@ function displayName(u: PickerUser): string {
 export function UserPicker() {
   const { login } = useUser()
 
-  const { data, isLoading, isError } = useQuery<PickerUser[]>({
+  const { data, isLoading, isError, refetch } = useQuery<PickerUser[]>({
     queryKey: ['auth', 'users'],
     queryFn: () => apiFetch<PickerUser[]>('/auth/users'),
     staleTime: Infinity, // the list barely changes
+    // A wedged API answers this route with a ~15s DB timeout per attempt; the
+    // default 3 retries kept the spinner up for ~50s, which reads as "stuck
+    // forever". One retry, then show the error (with a manual Réessayer).
+    retry: 1,
   })
 
   return (
@@ -87,6 +91,13 @@ export function UserPicker() {
           <div className="flex flex-col items-center gap-3 text-destructive">
             <AlertCircle className="h-8 w-8" />
             <p className="text-sm">Impossible de charger la liste. Vérifiez que l'API est accessible.</p>
+            <button
+              type="button"
+              onClick={() => refetch()}
+              className="mt-1 px-4 py-1.5 text-sm font-medium rounded-md border border-input bg-white text-foreground hover:bg-accent/10 hover:text-accent transition-colors cursor-pointer"
+            >
+              Réessayer
+            </button>
           </div>
         )}
 

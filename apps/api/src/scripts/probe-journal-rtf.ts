@@ -94,7 +94,7 @@ async function main() {
   for (let i = 0; i < Math.min(8, rows.length); i++) {
     const r = rows[i] as any
     const j = r.journal
-    let kind = typeof j
+    let kind: string = typeof j
     let preview = ''
     let byteLen = -1
     if (j == null) {

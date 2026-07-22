@@ -11,13 +11,14 @@ import { Navigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Search, Loader2, AlertCircle, Shield, Check, Mail, Save,
-  Image as ImageIcon, PenLine, Trash2, User as UserIcon,
+  Image as ImageIcon, PenLine, Trash2, User as UserIcon, ChevronDown,
 } from 'lucide-react'
 import { apiFetch, API_URL } from '@/lib/api'
 import { useUser } from '@/contexts/UserContext'
 import { usePermissions } from '@/contexts/PermissionsContext'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { Avatar } from '@/components/ui/avatar'
 import { SignaturePreview } from '@/components/ui/signature-preview'
 import { userPhotoUrl } from '@/components/profile/ProfileModal'
@@ -73,6 +74,9 @@ interface PermissionKeyDef {
   label: string
   description: string
   category: string
+  /** Sub-permission: rendered indented under its parent toggle, visible only
+   *  while the parent is granted. */
+  parent?: string
 }
 
 // Maps the lowercase pc value to a human-readable role label (same as picker).
@@ -245,8 +249,16 @@ export function SettingsUtilisateurs() {
           onToggle={(key, nextValue) => {
             if (!selected) return
             const current = new Set(selected.granted)
-            if (nextValue) current.add(key)
-            else current.delete(key)
+            // Toggling a parent cascades to its sub-permissions: ON grants
+            // every child (the admin can then narrow), OFF removes them all.
+            const children = (keys ?? []).filter((k) => k.parent === key).map((k) => k.key)
+            if (nextValue) {
+              current.add(key)
+              for (const c of children) current.add(c)
+            } else {
+              current.delete(key)
+              for (const c of children) current.delete(c)
+            }
             updateMut.mutate({ id: selected.IDutilisateur, granted: Array.from(current) })
           }}
         />
@@ -544,35 +556,89 @@ function CategorySection({
   grantedSet: Set<string>
   onToggle: (key: string, nextValue: boolean) => void
 }) {
+  // Collapsed by default so the tab reads as a compact section index — the
+  // admin expands only the section they came to check (§23 collapsible cards).
+  const [open, setOpen] = useState(false)
+
+  // Sub-permissions render indented under their parent row, and only while
+  // the parent is granted (toggling the parent on auto-grants them all).
+  const topLevel = items.filter((k) => !k.parent)
+  const childrenOf = (parentKey: string) => items.filter((k) => k.parent === parentKey)
+
+  const grantedCount = items.filter((k) => isVin || grantedSet.has(k.key)).length
+
   return (
     <div className="rounded-lg border border-border/60 bg-white shadow-sm">
-      <div className="px-4 py-2 border-b border-border/60 bg-zinc-100/80 rounded-t-lg">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={cn(
+          'w-full flex items-center gap-2 px-4 py-2.5 bg-zinc-100/80 cursor-pointer select-none transition-colors hover:bg-zinc-200/60',
+          open ? 'border-b border-border/60 rounded-t-lg' : 'rounded-lg',
+        )}
+      >
         <p className="text-xs font-bold text-primary uppercase tracking-wide">{category}</p>
-      </div>
+        <Badge variant="secondary" className="text-xs ml-auto tabular-nums">
+          {grantedCount}/{items.length}
+        </Badge>
+        <ChevronDown
+          className={cn('h-4 w-4 text-muted-foreground transition-transform', open && 'rotate-180')}
+        />
+      </button>
+      {open && (
       <div className="divide-y divide-border/60">
-        {items.map((k) => {
+        {topLevel.map((k) => {
           const checked = isVin || grantedSet.has(k.key)
+          const children = childrenOf(k.key)
           return (
-            <label
-              key={k.key}
-              className={cn(
-                'flex items-center gap-3 px-4 py-3 transition-colors',
-                isVin || isUpdating ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-zinc-50',
+            <div key={k.key}>
+              <label
+                className={cn(
+                  'flex items-center gap-3 px-4 py-3 transition-colors',
+                  isVin || isUpdating ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-zinc-50',
+                )}
+              >
+                <ToggleSwitch
+                  checked={checked}
+                  disabled={isVin || isUpdating}
+                  onChange={(next) => onToggle(k.key, next)}
+                />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-foreground">{k.label}</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">{k.description}</p>
+                </div>
+              </label>
+              {checked && children.length > 0 && (
+                <div className="ml-12 mr-4 mb-3 border-l-2 border-accent/25 pl-3 space-y-0.5">
+                  {children.map((c) => {
+                    const childChecked = isVin || grantedSet.has(c.key)
+                    return (
+                      <label
+                        key={c.key}
+                        className={cn(
+                          'flex items-center gap-3 py-1.5 rounded-md transition-colors',
+                          isVin || isUpdating ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-zinc-50',
+                        )}
+                      >
+                        <ToggleSwitch
+                          checked={childChecked}
+                          disabled={isVin || isUpdating}
+                          onChange={(next) => onToggle(c.key, next)}
+                        />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-foreground">{c.label}</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">{c.description}</p>
+                        </div>
+                      </label>
+                    )
+                  })}
+                </div>
               )}
-            >
-              <ToggleSwitch
-                checked={checked}
-                disabled={isVin || isUpdating}
-                onChange={(next) => onToggle(k.key, next)}
-              />
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-foreground">{k.label}</p>
-                <p className="text-xs text-muted-foreground mt-0.5">{k.description}</p>
-              </div>
-            </label>
+            </div>
           )
         })}
       </div>
+      )}
     </div>
   )
 }

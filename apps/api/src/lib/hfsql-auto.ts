@@ -8,7 +8,8 @@ import { platform } from 'os'
  * Both modules export the same interface: query(), fixEncoding(), closeConnection()
  */
 
-type QueryFn = <T = Record<string, unknown>>(sql: string, params?: (string | number | null)[]) => Promise<T[]>
+// No params argument on QueryFn — `?` placeholders do not work on HFSQL.
+type QueryFn = <T = Record<string, unknown>>(sql: string) => Promise<T[]>
 type QueryRawFn = (sql: string) => Promise<Record<string, unknown>[]>
 type QueryB64TextFn = <T = Record<string, unknown>>(sql: string) => Promise<T[]>
 type FixEncodingFn = <T extends object>(rows: T[], table: string, idField: string, textFields: string[]) => Promise<T[]>

@@ -10,6 +10,42 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-22 — feat/stock-fini
+Finis › Stock — **granular edit sub-permissions, field-scoped search chips, Excel export,
+plus dev-resilience fixes.** (1) **Sub-permissions**: `PERMISSION_KEYS` entries may now
+carry `parent: '<key>'`; Paramètres › Utilisateurs renders those indented under the parent
+toggle, visible only while it's granted (toggling the parent ON grants every child, OFF
+removes them). Storage stays flat, so gated routes must check parent AND child.
+`edit_stock_fini` gained four: `_stockage` (emplacement/conteneur/pointage), `_etat`
+(2ᵉ choix, IDetat), `_affectation` (don/déstockage), `_notes` (observations/observation
+sous-traitant) — enforced per field-group on `PATCH /stock/fini/:id`, and on
+`PATCH /stock/fini/batch` which **was entirely ungated** (no auth, no permission check).
+The drawer only renders inputs + the gold edit highlight for granted sections, sends only
+those field groups, and hides "Modifier" when none are granted; Édition groupée hides
+un-granted fields and its button. **Migration note**: users who already had
+`edit_stock_fini` see nothing editable until sub-keys are granted — toggle the parent off
+and on to grant all four. The permission tab's category cards are now **collapsed by
+default** with a `granted/total` badge. (2) **Field-scoped search chips**: typing in the
+Finis › Stock search opens a suggestion popover ("« bd » — toutes les colonnes" + one row
+per column); picking one converts the term into a chip (`Emplacement : BD`) restricting it
+to that column. Chips AND-combine with each other and the free text; × or Backspace
+removes. Fixes the real complaint that searching "BD" for emplacement BD also matched every
+lot/observation containing "bd" (14 rows → 13 correct ones). Free typing is unchanged.
+(3) **Excel export**: icon-only toolbar button opening the same column-picker dialog as
+Rapport sst (20 columns, per-user localStorage memory), exporting exactly the visible rows
+(chips + search + sort) via lazy SheetJS; real date cells, numeric poids/métrage.
+(4) **Magasin**: `IDmagasin = 0` (at the factory) now displays **"Malterre"** instead of an
+em dash, normalized in the query `select` so table, drawer, sort and the Magasin chip agree.
+(5) **Dev resilience** — a wedged native `odbc.connect()` poisons the whole API process
+(in-process retries all time out while a fresh process connects in <1s); `hfsql.ts` now
+counts consecutive connect timeouts and, in dev, **touches `src/index.ts` to force a tsx-watch
+restart** (`process.exit()` does NOT work — tsx watch only reruns on file change). Verified by
+reproducing the wedge. UserPicker drops to `retry: 1` + a "Réessayer" button so this surfaces
+as an error in ~30s instead of a ~50s silent spinner. Also: the 7 baseline `@mps/api` tsc
+errors are **fixed** (`tsc --noEmit` is now clean — the dead `params` arg was removed from all
+three query layers since HFSQL rejects `?` placeholders), and `vitest.config.ts` scopes
+`include` to `src/**` + `passWithNoTests` so `pnpm --filter @mps/web test` no longer always
+fails by collecting the Playwright e2e specs.
 ## 2026-07-22 — feat/gestion-client
 Clients › Gestion — **tarif print/email search, tabbed Référence client dialog, view/edit
 tarif split.** (1) **TarifsSelectionDialog search** (Isabelle's request): the "Imprimer /

@@ -29,6 +29,8 @@ import {
   Plus,
   Minus,
   Paintbrush,
+  FileSpreadsheet,
+  Columns3,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -49,6 +51,7 @@ import { fmtNum } from '@/lib/format'
 import { apiFetch, API_URL } from '@/lib/api'
 import { EtatPill } from '@/lib/etat-stock-fini'
 import { useHasPermission } from '@/contexts/PermissionsContext'
+import { useUser } from '@/contexts/UserContext'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 import { CardKV, MobileSortRow } from '@/components/stock/StockCardParts'
 
@@ -97,6 +100,14 @@ interface EtatOption {
 
 // ── API helpers ────────────────────────────────────────
 
+// stock_fini.IDmagasin = 0 (HFSQL's "no FK") means the roll is stored at the
+// factory — surface that as "Malterre" instead of an empty dash. Normalized
+// here, at the query layer, so the table, the drawer, sorting AND the
+// "Magasin :" search chip all agree on the label.
+function withDefaultMagasin(r: StockFiniRow): StockFiniRow {
+  return r.magasin_nom ? r : { ...r, magasin_nom: 'Malterre' }
+}
+
 function useStockFiniList(filters: { hideShipped: boolean }) {
   const params = new URLSearchParams()
   if (!filters.hideShipped) params.set('expedie', 'all')
@@ -104,6 +115,7 @@ function useStockFiniList(filters: { hideShipped: boolean }) {
   return useQuery<StockFiniRow[]>({
     queryKey: ['stock-fini', filters],
     queryFn: () => apiFetch<StockFiniRow[]>(`/stock/fini${qs ? `?${qs}` : ''}`),
+    select: (rows) => rows.map(withDefaultMagasin),
   })
 }
 
@@ -112,6 +124,7 @@ function useStockFiniDetail(id: number | null) {
     queryKey: ['stock-fini', 'detail', id],
     queryFn: () => apiFetch<StockFiniRow>(`/stock/fini/${id}`),
     enabled: id !== null,
+    select: withDefaultMagasin,
   })
 }
 
@@ -164,6 +177,97 @@ function formatGrammage(v: number | null): string {
   return `${fmtNum(v, 0)} g/m²`
 }
 
+// ── Excel export column catalog ─────────────────────────
+// Ported from RapportCommandesSst.tsx: one entry per exportable column with a
+// stable `key` (persists the user's selection), header label, value getter and
+// Excel column width. The user picks columns in a dialog; the choice is
+// remembered per user in localStorage.
+
+/** Parse a date string into a real JS `Date` (local midnight) so SheetJS
+ *  writes a true date cell and Excel sorts chronologically. Handles both
+ *  HFSQL "YYYYMMDD" and the "YYYY-MM-DD hh:mm:ss.SSS" shape the Windows ODBC
+ *  driver returns for stock_fini.date_saisie. */
+function dateVal(v: string | null): Date | null {
+  if (!v) return null
+  if (/^\d{8}$/.test(v)) {
+    return new Date(Number(v.slice(0, 4)), Number(v.slice(4, 6)) - 1, Number(v.slice(6, 8)))
+  }
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(v)
+  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  const d = new Date(v)
+  return isNaN(d.getTime()) ? null : new Date(d.getFullYear(), d.getMonth(), d.getDate())
+}
+
+/** Round to 2 decimals, keeping numbers as numbers so Excel can sum them. */
+const round2cell = (v: number | null): number | '' => (v == null ? '' : Math.round(v * 100) / 100)
+
+interface ExportColumn {
+  key: string
+  label: string
+  width: number
+  /** 'date' columns emit real `Date` cells so Excel sorts them chronologically. */
+  kind?: 'date'
+  value: (r: StockFiniRow) => string | number | Date | null
+}
+const EXPORT_COLUMNS: ExportColumn[] = [
+  { key: 'reference', label: 'Référence', width: 12, value: (r) => r.ref_fini || '' },
+  { key: 'coloris', label: 'Coloris', width: 20, value: (r) => r.coloris_reference || '' },
+  { key: 'contexture', label: 'Contexture', width: 14, value: (r) => r.contexture_nom || '' },
+  { key: 'grammage', label: 'Grammage (g/m²)', width: 14, value: (r) => r.grammage ?? '' },
+  { key: 'numero', label: 'Numéro', width: 10, value: (r) => r.numero || '' },
+  { key: 'poids', label: 'Poids (kg)', width: 10, value: (r) => round2cell(r.poids) },
+  { key: 'metrage', label: 'Métrage (m)', width: 11, value: (r) => round2cell(r.metrage) },
+  { key: 'lot', label: 'Lot', width: 12, value: (r) => r.lot || '' },
+  { key: 'client', label: 'Client', width: 22, value: (r) => r.client_nom || '' },
+  { key: 'magasin', label: 'Magasin', width: 14, value: (r) => r.magasin_nom || '' },
+  { key: 'commande', label: 'N° Cmd', width: 8, value: (r) => r.commande_numero ?? '' },
+  { key: 'etat', label: 'État', width: 12, value: (r) => r.etat_libelle || '' },
+  { key: 'emplacement', label: 'Emplacement', width: 12, value: (r) => r.emplacement || '' },
+  { key: 'conteneur', label: 'Conteneur', width: 12, value: (r) => r.conteneur || '' },
+  { key: 'date_saisie', label: 'Date saisie', width: 11, kind: 'date', value: (r) => dateVal(r.date_saisie) },
+  // HFSQL stores " " for "no text" — trim so those cells are truly empty.
+  { key: 'observations', label: 'Observations', width: 40, value: (r) => r.observations?.trim() || '' },
+  { key: 'observation_sst', label: 'Observation sous-traitant', width: 30, value: (r) => r.observation_sst?.trim() || '' },
+  { key: 'second_choix', label: '2ᵉ choix', width: 9, value: (r) => (r.second_choix ? 'Oui' : '') },
+  { key: 'don', label: 'Don', width: 6, value: (r) => (r.don ? 'Oui' : '') },
+  { key: 'destockage', label: 'Déstockage', width: 11, value: (r) => (r.destockage ? 'Oui' : '') },
+]
+const EXPORT_COLUMN_KEYS = EXPORT_COLUMNS.map((c) => c.key)
+
+// Persisted column selection, keyed by user id so people sharing (or
+// switching users on) a PC don't overwrite each other's choice. Temporary:
+// localStorage only — replace with a server-side per-user preference once
+// proper user management lands post-migration.
+const EXPORT_PREF_KEY_BASE = 'mps:finis-stock:export-columns'
+const exportPrefKey = (userId: number | null) =>
+  userId == null ? EXPORT_PREF_KEY_BASE : `${EXPORT_PREF_KEY_BASE}:${userId}`
+
+function loadExportSelection(userId: number | null): string[] {
+  try {
+    const raw =
+      localStorage.getItem(exportPrefKey(userId)) ??
+      localStorage.getItem(EXPORT_PREF_KEY_BASE)
+    if (!raw) return EXPORT_COLUMN_KEYS
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return EXPORT_COLUMN_KEYS
+    // Keep only keys that still exist (and in canonical column order), so a
+    // stored selection survives future column additions/removals gracefully.
+    const stored = new Set(parsed.filter((k): k is string => typeof k === 'string'))
+    const kept = EXPORT_COLUMN_KEYS.filter((k) => stored.has(k))
+    return kept.length > 0 ? kept : EXPORT_COLUMN_KEYS
+  } catch {
+    return EXPORT_COLUMN_KEYS
+  }
+}
+
+function saveExportSelection(userId: number | null, keys: string[]): void {
+  try {
+    localStorage.setItem(exportPrefKey(userId), JSON.stringify(keys))
+  } catch {
+    /* ignore quota / privacy-mode errors */
+  }
+}
+
 // ── Sort handling ──────────────────────────────────────
 
 type SortKey =
@@ -211,6 +315,57 @@ const COLUMNS: { key: SortKey; label: string; width: string; align?: 'left' | 'r
 const ICON_COL_WIDTH = '3%'
 const SELECT_COL_WIDTH = '4%' // leading selection box column, edit mode only
 
+// ── Field-scoped search chips ──────────────────────────
+// The toolbar search accepts field-scoped chips ("Emplacement : BD") on top of
+// the free-text multi-term search. A chip restricts its term to ONE column —
+// the fix for "searching BD matches location BD but also every lot containing
+// bd". While typing, a suggestion popover offers one entry per field below;
+// picking one converts the typed term into a chip. Chips AND-combine with each
+// other and with the remaining free text.
+const SEARCH_FIELDS = [
+  { key: 'ref_fini', label: 'Référence' },
+  { key: 'coloris_reference', label: 'Coloris' },
+  { key: 'lot', label: 'Lot' },
+  { key: 'numero', label: 'Numéro' },
+  { key: 'client_nom', label: 'Client' },
+  { key: 'magasin_nom', label: 'Magasin' },
+  { key: 'etat_libelle', label: 'État' },
+  { key: 'emplacement', label: 'Emplacement' },
+  { key: 'conteneur', label: 'Conteneur' },
+  { key: 'contexture_nom', label: 'Contexture' },
+  { key: 'observations', label: 'Observations' },
+] as const
+type SearchFieldKey = (typeof SEARCH_FIELDS)[number]['key']
+
+/** A single active search criterion. field=null → match any column. */
+interface SearchChip {
+  field: SearchFieldKey | null
+  value: string
+}
+
+function searchFieldLabel(key: SearchFieldKey): string {
+  return SEARCH_FIELDS.find((f) => f.key === key)?.label ?? key
+}
+
+/** Lower-cased text columns of a row, for the any-column match. */
+function rowHaystacks(r: StockFiniRow): string[] {
+  return [
+    r.ref_fini,
+    r.coloris_reference,
+    r.contexture_nom,
+    r.lot,
+    r.numero,
+    r.emplacement,
+    r.conteneur,
+    r.client_nom,
+    r.magasin_nom,
+    r.observations,
+    r.observation_sst,
+  ]
+    .filter((f): f is string => !!f)
+    .map((f) => f.toLowerCase())
+}
+
 // One shared collator — constructing the Intl collation options on every
 // String.localeCompare() call (≈14k calls to sort 1.4k rows) is a measurable
 // per-sort cost; a cached Intl.Collator.compare is far cheaper.
@@ -231,6 +386,12 @@ function compareRows(a: StockFiniRow, b: StockFiniRow, key: SortKey): number {
 export function FinisStock() {
   const queryClient = useQueryClient()
   const [searchQuery, setSearchQuery] = useState('')
+  // Field-scoped chips + suggestion popover state (see SEARCH_FIELDS above).
+  const [searchChips, setSearchChips] = useState<SearchChip[]>([])
+  const [suggestOpen, setSuggestOpen] = useState(false)
+  const [suggestIdx, setSuggestIdx] = useState(0)
+  const searchWrapRef = useRef<HTMLDivElement>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
   const [hideShipped, setHideShipped] = useState(true)
   const [sort, setSort] = useState<SortState>({ key: 'date_saisie', dir: 'desc' })
   const [selectedId, setSelectedId] = useState<number | null>(null)
@@ -240,6 +401,14 @@ export function FinisStock() {
   const canCut = useHasPermission('cut_stock_fini')
   const canCreate = useHasPermission('create_stock_fini')
   const canSurteindre = useHasPermission('surteindre_stock_fini')
+  // Batch edit ("Édition groupée") writes emplacement/observations, so it needs
+  // edit_stock_fini plus at least one of the two matching sub-permissions.
+  const canEditRolls = useHasPermission('edit_stock_fini')
+  const hasStockageSub = useHasPermission('edit_stock_fini_stockage')
+  const hasNotesSub = useHasPermission('edit_stock_fini_notes')
+  const canBatchStockage = canEditRolls && hasStockageSub
+  const canBatchNotes = canEditRolls && hasNotesSub
+  const canBatchEdit = canBatchStockage || canBatchNotes
   const [createOpen, setCreateOpen] = useState(false)
 
   // Edit mode — multi-roll selection.
@@ -261,29 +430,26 @@ export function FinisStock() {
 
   const filteredSorted = useMemo(() => {
     let out = rows ?? []
-    // Split the query on whitespace and require EVERY term to match SOME
-    // column (AND across terms, OR across columns). This lets one search combine
-    // criteria from different columns — e.g. "029A marine" matches a row whose
-    // ref_fini is "029A" AND whose coloris is "marine". A single term behaves
-    // exactly as the old substring search.
+    // Field-scoped chips first: each chip ANDs, restricted to its column
+    // (field=null chips match any column, like a locked-in free term).
+    for (const chip of searchChips) {
+      const v = chip.value.toLowerCase()
+      out = out.filter((r) => {
+        if (chip.field) {
+          const cell = r[chip.field]
+          return typeof cell === 'string' && cell.toLowerCase().includes(v)
+        }
+        return rowHaystacks(r).some((h) => h.includes(v))
+      })
+    }
+    // Then the free text: split on whitespace and require EVERY term to match
+    // SOME column (AND across terms, OR across columns). This lets one search
+    // combine criteria from different columns — e.g. "029A marine" matches a
+    // row whose ref_fini is "029A" AND whose coloris is "marine".
     const terms = deferredSearch.trim().toLowerCase().split(/\s+/).filter(Boolean)
     if (terms.length > 0) {
       out = out.filter((r) => {
-        const haystacks = [
-          r.ref_fini,
-          r.coloris_reference,
-          r.contexture_nom,
-          r.lot,
-          r.numero,
-          r.emplacement,
-          r.conteneur,
-          r.client_nom,
-          r.magasin_nom,
-          r.observations,
-          r.observation_sst,
-        ]
-          .filter((f): f is string => !!f)
-          .map((f) => f.toLowerCase())
+        const haystacks = rowHaystacks(r)
         return terms.every((t) => haystacks.some((h) => h.includes(t)))
       })
     }
@@ -292,10 +458,94 @@ export function FinisStock() {
       return sort.dir === 'asc' ? cmp : -cmp
     })
     return out
-  }, [rows, deferredSearch, sort])
+  }, [rows, deferredSearch, searchChips, sort])
+
+  // Close the search suggestion popover on any outside click.
+  useEffect(() => {
+    if (!suggestOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (!searchWrapRef.current?.contains(e.target as Node)) setSuggestOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [suggestOpen])
+
+  // Convert the currently-typed term into a chip (field=null → any column).
+  const addSearchChip = useCallback((field: SearchFieldKey | null) => {
+    const value = searchQuery.trim()
+    if (!value) return
+    setSearchChips((prev) => [...prev, { field, value }])
+    setSearchQuery('')
+    setSuggestOpen(false)
+    setSuggestIdx(0)
+    searchInputRef.current?.focus()
+  }, [searchQuery])
+
+  const removeSearchChip = useCallback((idx: number) => {
+    setSearchChips((prev) => prev.filter((_, i) => i !== idx))
+  }, [])
 
   const handleSort = useCallback((key: SortKey) => {
     setSort((prev) => (prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }))
+  }, [])
+
+  // Excel export of the currently visible (chips + search-filtered + sorted)
+  // rows. Clicking "Exporter" opens a column-picker dialog; the actual export
+  // (SheetJS lazy-loaded so it stays out of the main bundle) runs on confirm,
+  // limited to the columns the user selected. The selection is remembered.
+  const [exporting, setExporting] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const { user } = useUser()
+  const userId = user?.IDutilisateur ?? null
+  const [exportCols, setExportCols] = useState<string[]>(() => loadExportSelection(userId))
+
+  // Re-read the saved selection if the logged-in user changes (user picker /
+  // admin impersonation) without the page remounting.
+  useEffect(() => {
+    setExportCols(loadExportSelection(userId))
+  }, [userId])
+
+  const handleExport = useCallback(async () => {
+    if (filteredSorted.length === 0) return
+    // Keep canonical column order regardless of click order, and never export
+    // an empty workbook (guarded again at the button, belt-and-suspenders).
+    const cols = EXPORT_COLUMNS.filter((c) => exportCols.includes(c.key))
+    if (cols.length === 0) return
+    setExporting(true)
+    try {
+      const XLSX = await import('xlsx')
+      const aoa: (string | number | Date | null)[][] = [
+        cols.map((c) => c.label),
+        ...filteredSorted.map((r) => cols.map((c) => c.value(r))),
+      ]
+      // cellDates → Date values become real date cells so Excel sorts them
+      // chronologically instead of lexically on the French display string.
+      const ws = XLSX.utils.aoa_to_sheet(aoa, { cellDates: true })
+      ws['!cols'] = cols.map((c) => ({ wch: c.width }))
+      cols.forEach((c, colIdx) => {
+        if (c.kind !== 'date') return
+        for (let rowIdx = 1; rowIdx <= filteredSorted.length; rowIdx++) {
+          const cell = ws[XLSX.utils.encode_cell({ r: rowIdx, c: colIdx })]
+          if (cell && cell.t === 'd') cell.z = 'dd/mm/yyyy'
+        }
+      })
+      const wb = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb, ws, 'Stock finis')
+      const stamp = new Date().toISOString().slice(0, 10)
+      XLSX.writeFile(wb, `Stock_finis_${stamp}.xlsx`)
+      saveExportSelection(userId, exportCols)
+      setExportOpen(false)
+    } catch (err) {
+      console.error('Export Excel échoué:', err)
+    } finally {
+      setExporting(false)
+    }
+  }, [filteredSorted, exportCols, userId])
+
+  const toggleExportCol = useCallback((key: string) => {
+    setExportCols((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
+    )
   }, [])
 
   // Drawer dirty tracking — populated by the drawer via refs.
@@ -439,15 +689,126 @@ export function FinisStock() {
             </Badge>
           </div>
         )}
-        <div className="relative order-1 sm:order-2 flex-1 min-w-0">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Rechercher (réf, coloris, contexture, lot, numéro, client, magasin, emplacement, observations…)"
-            className="h-9 w-full pl-8 pr-3 text-sm rounded-md border border-input bg-white focus:outline-none focus:ring-2 focus:ring-ring"
-          />
+        <div ref={searchWrapRef} className="relative order-1 sm:order-2 flex-1 min-w-0">
+          {/* top-2.5 (not top-1/2) so the icon stays on the first row when chips wrap */}
+          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground pointer-events-none" />
+          {/* The wrapper is the single focus indicator (thin ring); the inner
+              input suppresses the app-wide :focus-visible gold ring, which
+              otherwise draws a second ring inside this one. */}
+          <div
+            className="min-h-9 w-full pl-8 pr-3 py-[3px] rounded-md border border-input bg-white flex flex-wrap items-center gap-1 cursor-text focus-within:ring-1 focus-within:ring-ring"
+            onClick={() => searchInputRef.current?.focus()}
+          >
+            {searchChips.map((c, i) => (
+              <span
+                key={i}
+                className="inline-flex items-center gap-0.5 pl-2 pr-0.5 py-0.5 rounded bg-zinc-100 border border-border/60 text-xs max-w-full"
+              >
+                <span className="truncate">
+                  {c.field ? (
+                    <>
+                      <span className="text-muted-foreground">{searchFieldLabel(c.field)} : </span>
+                      <span className="font-medium text-foreground">{c.value}</span>
+                    </>
+                  ) : (
+                    <span className="font-medium text-foreground">{c.value}</span>
+                  )}
+                </span>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    removeSearchChip(i)
+                  }}
+                  className="rounded-sm p-0.5 text-muted-foreground hover:bg-destructive/15 hover:text-destructive transition-colors"
+                  title="Retirer ce critère"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value)
+                setSuggestOpen(e.target.value.trim().length > 0)
+                setSuggestIdx(0)
+              }}
+              onFocus={() => {
+                if (searchQuery.trim()) setSuggestOpen(true)
+              }}
+              onKeyDown={(e) => {
+                const count = SEARCH_FIELDS.length + 1
+                if (suggestOpen && searchQuery.trim()) {
+                  // 'Down'/'Up' are the legacy names some environments emit
+                  if (e.key === 'ArrowDown' || e.key === 'Down') {
+                    e.preventDefault()
+                    setSuggestIdx((i) => (i + 1) % count)
+                    return
+                  }
+                  if (e.key === 'ArrowUp' || e.key === 'Up') {
+                    e.preventDefault()
+                    setSuggestIdx((i) => (i - 1 + count) % count)
+                    return
+                  }
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    addSearchChip(suggestIdx === 0 ? null : SEARCH_FIELDS[suggestIdx - 1].key)
+                    return
+                  }
+                  if (e.key === 'Escape') {
+                    setSuggestOpen(false)
+                    return
+                  }
+                }
+                if (e.key === 'Backspace' && searchQuery === '' && searchChips.length > 0) {
+                  removeSearchChip(searchChips.length - 1)
+                }
+              }}
+              placeholder={
+                searchChips.length > 0
+                  ? 'Ajouter un critère…'
+                  : 'Rechercher (réf, coloris, contexture, lot, numéro, client, magasin, emplacement, observations…)'
+              }
+              className="flex-1 min-w-[140px] h-7 text-sm bg-transparent focus:outline-none focus-visible:ring-0 focus-visible:ring-offset-0"
+            />
+          </div>
+
+          {/* Suggestion popover — one row per scoped field, "toutes les colonnes" first */}
+          {suggestOpen && searchQuery.trim() !== '' && (
+            <div className="absolute left-0 right-0 top-full mt-1 z-40 rounded-md border border-border/60 bg-white shadow-lg overflow-hidden">
+              <div className="max-h-64 overflow-y-auto py-1 scrollbar-transparent">
+                <button
+                  type="button"
+                  onClick={() => addSearchChip(null)}
+                  onMouseEnter={() => setSuggestIdx(0)}
+                  className={cn(
+                    'w-full px-3 py-1.5 text-sm text-left transition-colors flex items-center gap-1.5',
+                    suggestIdx === 0 ? 'bg-accent/10 text-accent' : 'hover:bg-zinc-100',
+                  )}
+                >
+                  <Search className="h-3.5 w-3.5 flex-shrink-0 opacity-60" />
+                  <span className="truncate">« {searchQuery.trim()} » — toutes les colonnes</span>
+                </button>
+                {SEARCH_FIELDS.map((f, i) => (
+                  <button
+                    key={f.key}
+                    type="button"
+                    onClick={() => addSearchChip(f.key)}
+                    onMouseEnter={() => setSuggestIdx(i + 1)}
+                    className={cn(
+                      'w-full px-3 py-1.5 text-sm text-left transition-colors truncate',
+                      suggestIdx === i + 1 ? 'bg-accent/10 text-accent' : 'hover:bg-zinc-100',
+                    )}
+                  >
+                    <span className="text-muted-foreground">{f.label} :</span> {searchQuery.trim()}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         <label className="flex items-center gap-2 text-sm cursor-pointer select-none flex-shrink-0 order-4 sm:order-3 w-full sm:w-auto">
@@ -462,6 +823,16 @@ export function FinisStock() {
 
         {!isEditing ? (
           <div className="flex items-center gap-2 flex-shrink-0 order-2 sm:order-4">
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => setExportOpen(true)}
+              disabled={filteredSorted.length === 0}
+              title="Exporter Excel"
+              className="h-8 w-8 bg-white flex-shrink-0"
+            >
+              <FileSpreadsheet className="h-4 w-4" />
+            </Button>
             {canCreate && (
               <Button size="sm" onClick={() => setCreateOpen(true)} title="Nouveau">
                 <Plus className="h-3.5 w-3.5 sm:mr-1" />
@@ -486,7 +857,7 @@ export function FinisStock() {
                 <Scissors className="h-4 w-4" />
               </Button>
             )}
-            {selectedRollIds.size > 1 && (
+            {canBatchEdit && selectedRollIds.size > 1 && (
               <Button
                 variant="outline"
                 size="icon"
@@ -683,6 +1054,8 @@ export function FinisStock() {
       <BatchEditDialog
         open={batchOpen}
         ids={[...selectedRollIds]}
+        canStockage={canBatchStockage}
+        canNotes={canBatchNotes}
         onClose={() => setBatchOpen(false)}
         onSuccess={() => {
           onMutationSuccess()
@@ -714,6 +1087,79 @@ export function FinisStock() {
           if (newId && newId > 0) setSelectedId(newId)
         }}
       />
+
+      {/* Column-picker dialog for the Excel export (same UX as Rapport sst) */}
+      <Dialog open={exportOpen} onOpenChange={setExportOpen}>
+        <DialogContent className="max-w-md" onClose={() => setExportOpen(false)}>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Columns3 className="h-5 w-5 text-accent" />
+              Colonnes à exporter
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="mt-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-muted-foreground">
+                {exportCols.length} colonne{exportCols.length > 1 ? 's' : ''} sélectionnée
+                {exportCols.length > 1 ? 's' : ''}
+              </p>
+              <div className="flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs text-accent hover:text-accent hover:bg-accent/10"
+                  onClick={() => setExportCols(EXPORT_COLUMN_KEYS)}
+                >
+                  Tout sélectionner
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs text-muted-foreground"
+                  onClick={() => setExportCols([])}
+                >
+                  Tout désélectionner
+                </Button>
+              </div>
+            </div>
+
+            <div className="max-h-[50vh] overflow-y-auto scrollbar-transparent rounded-md border border-border/60 divide-y divide-border/40">
+              {EXPORT_COLUMNS.map((c) => {
+                const checked = exportCols.includes(c.key)
+                return (
+                  <label
+                    key={c.key}
+                    className="flex items-center gap-2.5 px-3 py-2 text-sm cursor-pointer select-none hover:bg-accent/5 transition-colors"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleExportCol(c.key)}
+                      className="h-4 w-4 rounded border-input text-accent focus:ring-2 focus:ring-ring cursor-pointer"
+                    />
+                    <span>{c.label}</span>
+                  </label>
+                )
+              })}
+            </div>
+          </div>
+
+          <DialogFooter className="mt-4">
+            <Button variant="outline" onClick={() => setExportOpen(false)}>
+              Annuler
+            </Button>
+            <Button onClick={handleExport} disabled={exporting || exportCols.length === 0}>
+              {exporting ? (
+                <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              ) : (
+                <FileSpreadsheet className="h-3.5 w-3.5 mr-1.5" />
+              )}
+              Exporter
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -997,11 +1443,17 @@ function SwitchPill({
 function BatchEditDialog({
   open,
   ids,
+  canStockage,
+  canNotes,
   onClose,
   onSuccess,
 }: {
   open: boolean
   ids: number[]
+  /** edit_stock_fini_stockage — gates the Emplacement field */
+  canStockage: boolean
+  /** edit_stock_fini_notes — gates the Observation field */
+  canNotes: boolean
   onClose: () => void
   onSuccess: () => void
 }) {
@@ -1028,14 +1480,14 @@ function BatchEditDialog({
         method: 'PATCH',
         body: JSON.stringify({
           ids,
-          ...(editEmplacement ? { emplacement } : {}),
-          ...(editObservations ? { observations } : {}),
+          ...(canStockage && editEmplacement ? { emplacement } : {}),
+          ...(canNotes && editObservations ? { observations } : {}),
         }),
       }),
     onSuccess: () => onSuccess(),
   })
 
-  const valid = (editEmplacement || editObservations) && count > 0
+  const valid = ((canStockage && editEmplacement) || (canNotes && editObservations)) && count > 0
 
   return (
     <Dialog open={open && count > 0} onOpenChange={(o) => !o && onClose()}>
@@ -1061,7 +1513,8 @@ function BatchEditDialog({
             mais vide efface la valeur existante.
           </p>
 
-          {/* Emplacement */}
+          {/* Emplacement — needs the Stockage sub-permission */}
+          {canStockage && (
           <div
             className={cn(
               'rounded-lg border p-3',
@@ -1085,8 +1538,10 @@ function BatchEditDialog({
               />
             )}
           </div>
+          )}
 
-          {/* Observation */}
+          {/* Observation — needs the Notes sub-permission */}
+          {canNotes && (
           <div
             className={cn(
               'rounded-lg border p-3',
@@ -1110,6 +1565,7 @@ function BatchEditDialog({
               />
             )}
           </div>
+          )}
 
           {mutation.isError && (
             <p className="text-sm text-destructive">
@@ -1813,7 +2269,19 @@ interface DrawerProps {
 function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRef, discardRef }: DrawerProps) {
   const { data: detail, isLoading } = useStockFiniDetail(id)
   const { data: provenance } = useStockFiniProvenance(id)
+  // Per-section sub-permissions of edit_stock_fini — each drawer card is only
+  // editable when the parent AND its own sub-key are granted. The API enforces
+  // the same pairs on PATCH /stock/fini/:id.
   const canEdit = useHasPermission('edit_stock_fini')
+  const hasStockage = useHasPermission('edit_stock_fini_stockage')
+  const hasEtat = useHasPermission('edit_stock_fini_etat')
+  const hasAffectation = useHasPermission('edit_stock_fini_affectation')
+  const hasNotes = useHasPermission('edit_stock_fini_notes')
+  const canEditStockage = canEdit && hasStockage
+  const canEditEtat = canEdit && hasEtat
+  const canEditAffectation = canEdit && hasAffectation
+  const canEditNotes = canEdit && hasNotes
+  const canEditAny = canEditStockage || canEditEtat || canEditAffectation || canEditNotes
   const drawerRef = useRef<HTMLDivElement>(null)
   const [searchParams] = useSearchParams()
   const embed = searchParams.get('embed') === 'true'
@@ -1887,15 +2355,21 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
     mutationFn: () =>
       apiFetch(`/stock/fini/${id}`, {
         method: 'PATCH',
+        // Only send the field groups the user may edit — the API 403s on any
+        // field whose edit_stock_fini_* sub-permission is missing.
         body: JSON.stringify({
-          observations: editObservations,
-          observation_sst: editObservationSst,
-          emplacement: editEmplacement,
-          conteneur: editConteneur,
-          pointage: editPointage ? inputDateToHfsql(editPointage) : '',
-          second_choix: editSecondChoix,
-          destockage: editDestockage,
-          don: editDon,
+          ...(canEditNotes
+            ? { observations: editObservations, observation_sst: editObservationSst }
+            : {}),
+          ...(canEditStockage
+            ? {
+                emplacement: editEmplacement,
+                conteneur: editConteneur,
+                pointage: editPointage ? inputDateToHfsql(editPointage) : '',
+              }
+            : {}),
+          ...(canEditEtat ? { second_choix: editSecondChoix } : {}),
+          ...(canEditAffectation ? { destockage: editDestockage, don: editDon } : {}),
         }),
       }),
     onMutate: () => setSaveError(null),
@@ -2031,7 +2505,7 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
                     >
                       <Printer className="h-4 w-4" />
                     </Button>
-                    {canEdit && (
+                    {canEditAny && (
                       <Button variant="gold" size="sm" onClick={startEdit}>
                         <Pencil className="h-3.5 w-3.5 mr-1.5" />
                         Modifier
@@ -2080,7 +2554,7 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
               </DrawerCard>
 
               {/* État + qualité */}
-              <DrawerCard icon={<Activity className="h-4 w-4 text-accent" />} title="État" highlight={isEditing}>
+              <DrawerCard icon={<Activity className="h-4 w-4 text-accent" />} title="État" highlight={isEditing && canEditEtat}>
                 <div className="space-y-2">
                   <KV
                     label="Statut"
@@ -2091,7 +2565,7 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
                   <KV
                     label="2ᵉ choix"
                     value={
-                      isEditing ? (
+                      isEditing && canEditEtat ? (
                         <input
                           type="checkbox"
                           checked={editSecondChoix}
@@ -2169,12 +2643,12 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
               </DrawerCard>
 
               {/* Stockage */}
-              <DrawerCard icon={<MapPin className="h-4 w-4 text-accent" />} title="Stockage" highlight={isEditing}>
+              <DrawerCard icon={<MapPin className="h-4 w-4 text-accent" />} title="Stockage" highlight={isEditing && canEditStockage}>
                 <div className="space-y-1.5">
                   <KV
                     label="Emplacement"
                     value={
-                      isEditing ? (
+                      isEditing && canEditStockage ? (
                         <input
                           type="text"
                           value={editEmplacement}
@@ -2189,7 +2663,7 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
                   <KV
                     label="Conteneur"
                     value={
-                      isEditing ? (
+                      isEditing && canEditStockage ? (
                         <input
                           type="text"
                           value={editConteneur}
@@ -2205,7 +2679,7 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
                   <KV
                     label="Pointage"
                     value={
-                      isEditing ? (
+                      isEditing && canEditStockage ? (
                         <input
                           type="date"
                           value={editPointage}
@@ -2223,7 +2697,7 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
               </DrawerCard>
 
               {/* Affectation */}
-              <DrawerCard icon={<Send className="h-4 w-4 text-accent" />} title="Affectation" highlight={isEditing}>
+              <DrawerCard icon={<Send className="h-4 w-4 text-accent" />} title="Affectation" highlight={isEditing && canEditAffectation}>
                 <div className="space-y-1.5">
                   <KV
                     label="Commande client"
@@ -2244,7 +2718,7 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
                   <KV
                     label="Donation"
                     value={
-                      isEditing ? (
+                      isEditing && canEditAffectation ? (
                         <input
                           type="checkbox"
                           checked={editDon}
@@ -2261,7 +2735,7 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
                   <KV
                     label="Déstockage"
                     value={
-                      isEditing ? (
+                      isEditing && canEditAffectation ? (
                         <input
                           type="checkbox"
                           checked={editDestockage}
@@ -2279,11 +2753,11 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
               </DrawerCard>
 
               {/* Notes */}
-              <DrawerCard icon={<MessageSquare className="h-4 w-4 text-accent" />} title="Notes" highlight={isEditing}>
+              <DrawerCard icon={<MessageSquare className="h-4 w-4 text-accent" />} title="Notes" highlight={isEditing && canEditNotes}>
                 <div className="space-y-2">
                   <div>
                     <p className="text-xs text-muted-foreground mb-1">Observations</p>
-                    {isEditing ? (
+                    {isEditing && canEditNotes ? (
                       <textarea
                         value={editObservations}
                         onChange={(e) => setEditObservations(e.target.value)}
@@ -2298,7 +2772,7 @@ function StockFiniDrawer({ id, onClose, onMutationSuccess, onDirtyChange, saveRe
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground mb-1">Observation sous-traitant</p>
-                    {isEditing ? (
+                    {isEditing && canEditNotes ? (
                       <textarea
                         value={editObservationSst}
                         onChange={(e) => setEditObservationSst(e.target.value)}

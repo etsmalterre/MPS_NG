@@ -7,6 +7,12 @@
 // Keys are flat snake_case strings — they're stored verbatim in the
 // permissions JSON file and sent on the wire, so don't rename without a
 // migration.
+//
+// Sub-permissions: an entry may carry `parent: '<key>'` — the admin UI then
+// renders it as an indented child toggle that only appears while the parent
+// is granted (toggling the parent on grants every child; off removes them).
+// The API must check parent AND child on gated routes (children are stored
+// as plain flat keys — nothing enforces the hierarchy at the storage layer).
 
 export const PERMISSION_KEYS = [
   // Tableau de bord — one key per dashboard widget. Granting shows the widget
@@ -124,6 +130,34 @@ export const PERMISSION_KEYS = [
     label: 'Éditer un rouleau',
     description: 'Affiche le bouton « Modifier » et autorise la modification d’un rouleau dans Finis > Stock.',
     category: 'Finis',
+  },
+  {
+    key: 'edit_stock_fini_stockage',
+    label: 'Stockage',
+    description: 'Autorise la modification de l’emplacement, du conteneur et de la date de pointage d’un rouleau.',
+    category: 'Finis',
+    parent: 'edit_stock_fini',
+  },
+  {
+    key: 'edit_stock_fini_etat',
+    label: 'État',
+    description: 'Autorise la modification de l’état d’un rouleau (2ᵉ choix, statut).',
+    category: 'Finis',
+    parent: 'edit_stock_fini',
+  },
+  {
+    key: 'edit_stock_fini_affectation',
+    label: 'Affectation',
+    description: 'Autorise la modification de l’affectation d’un rouleau (donation, déstockage).',
+    category: 'Finis',
+    parent: 'edit_stock_fini',
+  },
+  {
+    key: 'edit_stock_fini_notes',
+    label: 'Notes',
+    description: 'Autorise la modification des observations et de l’observation sous-traitant d’un rouleau.',
+    category: 'Finis',
+    parent: 'edit_stock_fini',
   },
   {
     key: 'surteindre_stock_fini',

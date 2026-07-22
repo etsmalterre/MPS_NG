@@ -218,11 +218,10 @@ function killBridge(): void {
   pendingResolve = null
 }
 
-/** Run a SQL query against HFSQL via the iODBC bridge, with auto-reconnect on connection loss */
-export async function query<T = Record<string, unknown>>(
-  sql: string,
-  _params?: (string | number | null)[]
-): Promise<T[]> {
+/** Run a SQL query against HFSQL via the iODBC bridge, with auto-reconnect on
+ *  connection loss. No params argument on purpose — `?` placeholders do not
+ *  work on HFSQL (CLAUDE.md rule). */
+export async function query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const raw = await sendQuery(sql)
