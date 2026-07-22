@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useLocation, NavLink } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { Menu, Maximize2, Minimize2, LogOut, CircleUser } from 'lucide-react'
+import { Menu, Maximize2, Minimize2, LogOut, CircleUser, MessageSquarePlus, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Avatar } from '@/components/ui/avatar'
 import { getActiveMenu } from '@/config/navigation'
@@ -9,6 +9,7 @@ import { cn } from '@/lib/utils'
 import { apiFetch } from '@/lib/api'
 import { useUser, canSwitchUser } from '@/contexts/UserContext'
 import { ProfileModal, userPhotoUrl, type UserProfileMe } from '@/components/profile/ProfileModal'
+import { TicketModal } from '@/components/tickets/TicketModal'
 
 interface HeaderProps {
   onMenuClick: () => void
@@ -24,6 +25,35 @@ export function Header({ onMenuClick }: HeaderProps) {
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const userMenuRef = useRef<HTMLDivElement | null>(null)
+
+  // Ticket reporting — the screenshot is captured BEFORE the modal opens so
+  // the modal itself is never in the shot.
+  const [ticketOpen, setTicketOpen] = useState(false)
+  const [screenshot, setScreenshot] = useState<File | null>(null)
+  const [capturingScreenshot, setCapturingScreenshot] = useState(false)
+
+  const openTicketModal = useCallback(async () => {
+    setScreenshot(null)
+    setCapturingScreenshot(true)
+    try {
+      // html-to-image (SVG <foreignObject> rasterization) rather than
+      // html2canvas — the latter mis-renders text inside form inputs.
+      // Dynamic import keeps the library out of the main chunk.
+      const htmlToImage = await import('html-to-image')
+      const blob = await htmlToImage.toBlob(document.body, {
+        cacheBust: true,
+        pixelRatio: window.devicePixelRatio || 1,
+      })
+      if (blob) {
+        setScreenshot(new File([blob], `capture_${Date.now()}.png`, { type: 'image/png' }))
+      }
+    } catch {
+      // Capture failure must not block reporting — open the modal anyway.
+    } finally {
+      setCapturingScreenshot(false)
+      setTicketOpen(true)
+    }
+  }, [])
 
   // Profile (photo + signature) of the logged-in user — drives the avatar
   // photo in the header and the "Mon profil" modal.
@@ -125,6 +155,22 @@ export function Header({ onMenuClick }: HeaderProps) {
 
       {/* Actions */}
       <div className="flex items-center gap-2">
+        {/* Ticket report */}
+        <Button
+          variant="ghost"
+          size="icon"
+          disabled={capturingScreenshot}
+          onClick={openTicketModal}
+          title="Envoyer un ticket"
+        >
+          {capturingScreenshot ? (
+            <Loader2 className="h-5 w-5 animate-spin" />
+          ) : (
+            <MessageSquarePlus className="h-5 w-5" />
+          )}
+          <span className="sr-only">Envoyer un ticket</span>
+        </Button>
+
         {/* Fullscreen toggle */}
         <Button
           variant="ghost"
@@ -196,6 +242,7 @@ export function Header({ onMenuClick }: HeaderProps) {
       </div>
 
       <ProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
+      <TicketModal open={ticketOpen} onOpenChange={setTicketOpen} initialScreenshot={screenshot} />
     </header>
   )
 }

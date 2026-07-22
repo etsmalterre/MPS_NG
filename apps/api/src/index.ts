@@ -29,6 +29,7 @@ import { suiviLotsRouter } from './routes/suivi-lots.js'
 import { rapportsRouter } from './routes/rapports.js'
 import { planningAtelierRouter } from './routes/planning-atelier.js'
 import { authRouter } from './routes/auth.js'
+import { ticketsRouter } from './routes/tickets.js'
 import { permissionsRouter } from './routes/permissions.js'
 import { userEmailsRouter } from './routes/user-emails.js'
 import { userProfilesRouter } from './routes/user-profiles.js'
@@ -87,6 +88,8 @@ app.get('/api/health', async (req, res) => {
 })
 
 app.use('/api/auth', authRouter)
+// Bug/feature ticket reporting — proxy to the LIVA issue tracker
+app.use('/api/tickets', ticketsRouter)
 app.use('/api/permissions', permissionsRouter)
 app.use('/api/user-emails', userEmailsRouter)
 app.use('/api/user-profiles', userProfilesRouter)

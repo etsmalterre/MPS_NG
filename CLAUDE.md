@@ -41,6 +41,7 @@ Full design system in `.claude/skills/mps_designer/SKILL.md`.
 | PDF | `@react-pdf/renderer` (server-side, Lato fonts bundled) |
 | Excel | `xlsx` (SheetJS) — **client-side**, lazy `await import('xlsx')` so it's a separate chunk; API returns JSON, browser builds the `.xlsx` |
 | Email | Gmail API via `googleapis` + domain-wide delegation |
+| Tickets | LIVA issue tracker (product `etm-erp`) via server-side proxy `apps/api/src/routes/tickets.ts` (`/api/tickets/*`, env `ISSUE_TRACKER_URL/_API_KEY/_PRODUCT_SLUG` — required in prod env too); widget `apps/web/src/components/tickets/` + header trigger, screenshot via lazy `html-to-image` |
 
 ## Project Structure
 
