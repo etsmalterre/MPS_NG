@@ -17,6 +17,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { SignaturePreview } from '@/components/ui/signature-preview'
 import { apiFetch } from '@/lib/api'
+import { useUser } from '@/contexts/UserContext'
 import { cn } from '@/lib/utils'
 import {
   EMAIL_REGEX,
@@ -147,9 +148,12 @@ export function SendEmailDialog({
   })
 
   // Sender's HTML signature — appended server-side at send time; shown here
-  // read-only so the user knows what the recipient will see.
+  // read-only so the user knows what the recipient will see. Keyed by
+  // IDutilisateur so a user switch on a shared PC never previews the
+  // previous user's cached signature.
+  const { user } = useUser()
   const { data: profileMe } = useQuery<{ signatureHtml: string | null }>({
-    queryKey: ['user-profile-me'],
+    queryKey: ['user-profile-me', user?.IDutilisateur],
     queryFn: () => apiFetch<{ signatureHtml: string | null }>('/user-profiles/me'),
     enabled: open,
   })

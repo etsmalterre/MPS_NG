@@ -26,14 +26,16 @@ export function userPhotoUrl(userId: number, photoVersion: number | null): strin
 export function ProfileModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { user } = useUser()
 
+  // Both keys are scoped by IDutilisateur: on shared PCs a user switch must
+  // not serve the previous user's cached profile/email within staleTime.
   const { data: profile, isLoading: profileLoading } = useQuery<UserProfileMe>({
-    queryKey: ['user-profile-me'],
+    queryKey: ['user-profile-me', user?.IDutilisateur],
     queryFn: () => apiFetch<UserProfileMe>('/user-profiles/me'),
     enabled: open && !!user,
   })
 
   const { data: emailData, isLoading: emailLoading } = useQuery<{ email: string | null }>({
-    queryKey: ['user-email-me'],
+    queryKey: ['user-email-me', user?.IDutilisateur],
     queryFn: () => apiFetch<{ email: string | null }>('/user-emails/me'),
     enabled: open && !!user,
   })

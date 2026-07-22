@@ -27,8 +27,10 @@ export function Header({ onMenuClick }: HeaderProps) {
 
   // Profile (photo + signature) of the logged-in user — drives the avatar
   // photo in the header and the "Mon profil" modal.
+  // Keyed by IDutilisateur: on shared PCs a user switch must not serve the
+  // previous user's cached profile (photo/signature) within staleTime.
   const { data: profileMe } = useQuery<UserProfileMe>({
-    queryKey: ['user-profile-me'],
+    queryKey: ['user-profile-me', user?.IDutilisateur],
     queryFn: () => apiFetch<UserProfileMe>('/user-profiles/me'),
     enabled: !!user,
   })
