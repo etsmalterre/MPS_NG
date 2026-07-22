@@ -10,6 +10,27 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-22 — feat/issue-tracker
+App-wide — **in-app bug/feature ticket reporting wired to the LIVA issue tracker**
+(liva-holding.com/issues, product `etm-erp`). (1) **Proxy** `apps/api/src/routes/tickets.ts`
+(`/api/tickets/*`): injects the company API key + product slug from server-side env
+(`ISSUE_TRACKER_URL` / `_API_KEY` / `_PRODUCT_SLUG` — **must be added to the prod API env
+before deploy**, they're in dev `.env.development` only, gitignored) and resolves reporter
+identity from the session cookie — name from `utilisateur`, email from the admin-managed
+Paramètres › Utilisateurs mapping (`user-emails.json`, same as Gmail send; users without a
+mapped email get the same French 400). List/detail are ownership-scoped by `reporter_email`;
+tracker 401 remaps to 502 (never confusable with an expired MPS session); missing config →
+503; timeout → 504. Attachment uploads stream multipart through after an ownership check.
+(2) **Widget** `apps/web/src/components/tickets/` + trigger in `Header.tsx` (MessageSquarePlus
+icon left of fullscreen): clicking captures a screenshot of the page **before** the modal
+opens (lazy `html-to-image` — new web dep), then a three-view modal (form / Mes tickets /
+détail) with Bug↔Fonctionnalité tabs, per-category severity pills (fixed semantic palette
+shared with the tracker), title/description, attachment zone (pre-captured screenshot toggle
++ file picker, 5×5 Mo, thumbnails + lightbox), and auto-captured navigation context
+("Menu › Sous-menu (path)" from the router). Attachment failure after create is non-fatal
+(warning, ticket still reported with its human n°). Verified end-to-end against the prod
+tracker (test ticket n°1014 with screenshot, since closed).
+
 ## 2026-07-22 — feat/stock-fini
 Finis › Stock — **granular edit sub-permissions, field-scoped search chips, Excel export,
 plus dev-resilience fixes.** (1) **Sub-permissions**: `PERMISSION_KEYS` entries may now
