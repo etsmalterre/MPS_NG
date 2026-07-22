@@ -10,6 +10,27 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-22 — feat/gestion-client
+Clients › Gestion — **tarif print/email search, tabbed Référence client dialog, view/edit
+tarif split.** (1) **TarifsSelectionDialog search** (Isabelle's request): the "Imprimer /
+Envoyer les tarifs" ref×coloris picker gains an auto-focused, accent-insensitive search
+field (matches ref client / ref interne / coloris); Tous/Aucun operate on the filtered
+rows and selection survives filter changes so multi-ref picks work. (2) **RefSettingsDialog
+is now tabbed** (Informations / Tarifs): fixes the July-16 regression where closing the
+coloris drawer on edit-mode entry made TarifModeDialog unreachable for users with
+`gestion_references`. The Tarifs tab lists the ref's saved coloris with their TarifModeTag;
+click opens TarifModeDialog (with `gestion_tarifs`) or the read-only TarifDialog, stacked
+over the settings dialog. Settings state stores the ref **id** and re-derives from the live
+`client-references` query (tarif saves refresh the tab in place), while form hydration keys
+on the id so refetches never clobber the draft; Tarifs tab disabled on create. `dialog.tsx`
+now supports stacking: Escape closes only the topmost `[data-dialog-root]` and body scroll
+stays locked until the last dialog closes. (3) **View/edit tarif split**: TarifDialog is
+pure consultation (removed the inline gold Modifier 15/30 panel and "Dupliquer le
+contrat" — renewal = "Nouveau contrat" in the edit dialog); TarifModeDialog gains a
+"Tranches négociées" section (15/30 rlx toggle pills with Ml · €/Ml info from the shared
+`client-tarif` query, hidden in contrat mode) whose save rides along the tarif-mode PUT
+(separate `/tranches` PUT only when changed).
+
 ## 2026-07-21 — feat/commande-client (2)
 Clients › Commandes — **invoice auto-surfaced in Docs, affecté gauge de-doubled, drawer
 metrage total.** (1) **Facture in the Docs tab**: new `GET /commandes-client/:id/factures`

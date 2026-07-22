@@ -10,11 +10,16 @@ interface DialogProps {
 }
 
 function Dialog({ open, onOpenChange, children }: DialogProps) {
+  const rootRef = React.useRef<HTMLDivElement | null>(null)
   React.useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && open) {
-        onOpenChange(false)
-      }
+      if (e.key !== 'Escape' || !open) return
+      // Dialogs can stack (e.g. tarif dialogs over the ref settings dialog).
+      // Portals append to <body> in open order, so the last [data-dialog-root]
+      // is the topmost — only that one closes on Escape.
+      const roots = document.querySelectorAll('[data-dialog-root]')
+      if (roots.length > 0 && roots[roots.length - 1] !== rootRef.current) return
+      onOpenChange(false)
     }
     if (open) {
       document.addEventListener('keydown', handleEscape)
@@ -22,14 +27,18 @@ function Dialog({ open, onOpenChange, children }: DialogProps) {
     }
     return () => {
       document.removeEventListener('keydown', handleEscape)
-      document.body.style.overflow = ''
+      // A stacked dialog may still be open underneath — keep the body scroll
+      // locked until the last one is gone.
+      if (document.querySelectorAll('[data-dialog-root]').length === 0) {
+        document.body.style.overflow = ''
+      }
     }
   }, [open, onOpenChange])
 
   if (!open) return null
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div ref={rootRef} data-dialog-root className="fixed inset-0 z-50 flex items-center justify-center p-4">
       {/* Overlay */}
       <div
         className="fixed inset-0 bg-black/80 animate-in fade-in-0"

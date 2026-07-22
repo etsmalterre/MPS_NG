@@ -35,7 +35,6 @@ import {
   Archive,
   ArchiveRestore,
   Link2,
-  Copy,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -488,9 +487,10 @@ function TarifsSelectionDialog({ open, mode, clientId, onClose, onEmail }: {
     enabled: open,
   })
   const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [search, setSearch] = useState('')
 
   // Fresh selection each time the dialog opens (or the client changes).
-  useEffect(() => { setSelected(new Set()) }, [open, clientId])
+  useEffect(() => { setSelected(new Set()); setSearch('') }, [open, clientId])
 
   const rows = useMemo<TarifRow[]>(() => {
     if (!data) return []
@@ -512,7 +512,15 @@ function TarifsSelectionDialog({ open, mode, clientId, onClose, onEmail }: {
     return out
   }, [data])
 
-  const priceableIds = useMemo(() => rows.filter((r) => r.priceable).map((r) => r.rccId), [rows])
+  // Accent-insensitive filter on ref client / ref interne / coloris, so typing
+  // the ref name jumps straight to it instead of scrolling the coloris list.
+  const visibleRows = useMemo(() => {
+    const q = normSearch(search.trim())
+    if (!q) return rows
+    return rows.filter((r) => normSearch(`${r.ref} ${r.refInterne} ${r.coloris}`).includes(q))
+  }, [rows, search])
+
+  const visiblePriceableIds = useMemo(() => visibleRows.filter((r) => r.priceable).map((r) => r.rccId), [visibleRows])
 
   const toggle = (id: number) => {
     setSelected((prev) => {
@@ -545,24 +553,43 @@ function TarifsSelectionDialog({ open, mode, clientId, onClose, onEmail }: {
               <p className="text-sm">Aucune référence pour ce client</p>
             </div>
           ) : (
-            <div className="rounded-lg border border-border/60 overflow-hidden">
-              {/* Header strip + Tous/Aucun */}
+            <div className="space-y-2">
+              {/* Type-to-filter: the coloris list gets long, let the user jump to a ref. */}
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Rechercher une référence ou un coloris..."
+                  autoFocus
+                  autoComplete="off"
+                  className="w-full h-9 pl-9 pr-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </div>
+              <div className="rounded-lg border border-border/60 overflow-hidden">
+              {/* Header strip + Tous/Aucun (scoped to the filtered rows) */}
               <div className="flex items-center gap-2 px-3 py-2 bg-zinc-200/50 border-b border-border/60 text-[10px] uppercase tracking-wide text-muted-foreground font-semibold">
                 <span className="w-4" />
                 <span className="w-24">Ref client</span>
                 <span className="w-24">Ref interne</span>
                 <span className="flex-1">Coloris</span>
-                <button type="button" onClick={() => setSelected(new Set(priceableIds))}
+                <button type="button" onClick={() => setSelected((prev) => new Set([...prev, ...visiblePriceableIds]))}
                   className="normal-case tracking-normal text-xs font-medium text-accent hover:bg-accent/10 rounded px-1.5 py-0.5 transition-colors">
                   Tous
                 </button>
-                <button type="button" onClick={() => setSelected(new Set())}
+                <button type="button" onClick={() => setSelected((prev) => { const next = new Set(prev); for (const r of visibleRows) next.delete(r.rccId); return next })}
                   className="normal-case tracking-normal text-xs font-medium text-muted-foreground hover:bg-accent/10 rounded px-1.5 py-0.5 transition-colors">
                   Aucun
                 </button>
               </div>
               <div className="max-h-[45vh] overflow-y-auto scrollbar-transparent">
-                {rows.map((r) => (
+                {visibleRows.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+                    <Search className="h-8 w-8 mb-2 opacity-40" />
+                    <p className="text-sm">Aucune référence ne correspond à « {search.trim()} »</p>
+                  </div>
+                ) : visibleRows.map((r) => (
                   <label
                     key={r.rccId}
                     title={r.priceable ? undefined : r.expired ? 'Contrat expiré — référence indisponible jusqu’à l’établissement d’un nouveau contrat' : 'Tarif indisponible pour cette référence'}
@@ -588,6 +615,7 @@ function TarifsSelectionDialog({ open, mode, clientId, onClose, onEmail }: {
                     </span>
                   </label>
                 ))}
+              </div>
               </div>
             </div>
           )}
@@ -1361,10 +1389,12 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs, canManageRefs }: 
   // mode on this tab: cards open the coloris drawer, no settings dialog,
   // no "Ajouter une référence".
   const canEditRefs = isEditing && canManageRefs
-  const [tarif, setTarif] = useState<{ rccId: number; label: string; coloris: RefColoris } | null>(null)
+  const [tarif, setTarif] = useState<{ rccId: number; label: string } | null>(null)
   const [tarifMode, setTarifMode] = useState<{ coloris: RefColoris; label: string; duplicate?: boolean } | null>(null)
-  // Ref-level settings dialog: { existing: null } = create, { existing: ref } = edit.
-  const [settings, setSettings] = useState<{ existing: ClientReference | null } | null>(null)
+  // Ref-level settings dialog: { refId: null } = create, { refId: n } = edit.
+  // Stores the id (not a snapshot) so the dialog's Tarifs tab re-derives the
+  // ref from the live query after a tarif-mode save invalidates the list.
+  const [settings, setSettings] = useState<{ refId: number | null } | null>(null)
   const [search, setSearch] = useState('')
   // §31 in-screen drawer: the selected ref's coloris. Toggle on reclick.
   const [drawerRefId, setDrawerRefId] = useState<number | null>(null)
@@ -1388,6 +1418,9 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs, canManageRefs }: 
 
   const drawerRef = drawerRefId !== null ? filtered.find((r) => r.IDdesignation_client === drawerRefId) ?? null : null
   const drawerOpen = drawerRef !== null
+  const settingsExisting = settings !== null && settings.refId !== null
+    ? (data ?? []).find((r) => r.IDdesignation_client === settings.refId) ?? null
+    : null
   // Close the drawer when the search narrows its ref out of the visible list.
   useEffect(() => {
     if (drawerRefId !== null && !filtered.some((r) => r.IDdesignation_client === drawerRefId)) setDrawerRefId(null)
@@ -1425,7 +1458,7 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs, canManageRefs }: 
               // Edit mode: the card click is reserved for the settings dialog (§31.3);
               // the drawer only opens from view mode.
               onClick={() => {
-                if (canEditRefs) setSettings({ existing: r })
+                if (canEditRefs) setSettings({ refId: r.IDdesignation_client })
                 else setDrawerRefId((prev) => (prev === r.IDdesignation_client ? null : r.IDdesignation_client))
               }}
               title={canEditRefs ? 'Modifier la référence' : drawerRefId === r.IDdesignation_client ? 'Masquer les coloris' : 'Voir les coloris'}
@@ -1469,22 +1502,24 @@ function ReferencesTab({ clientId, isEditing, canManageTarifs, canManageRefs }: 
             refItem={drawerRef}
             tarifEditable={isEditing && canManageTarifs}
             onClose={() => setDrawerRefId(null)}
-            onOpenTarif={(c) => setTarif({ rccId: c.IDref_client_colori, label: `${drawerRef.client_ref} · ${c.label}`, coloris: c })}
+            onOpenTarif={(c) => setTarif({ rccId: c.IDref_client_colori, label: `${drawerRef.client_ref} · ${c.label}` })}
             onOpenTarifMode={(c) => setTarifMode({ coloris: c, label: `${drawerRef.client_ref} · ${c.label}` })}
           />
         </div>
       )}
       {canEditRefs && (
         <div className="flex-shrink-0 mx-1">
-          <Button variant="ghost" size="sm" className="w-full text-muted-foreground hover:text-foreground" onClick={() => setSettings({ existing: null })}>
+          <Button variant="ghost" size="sm" className="w-full text-muted-foreground hover:text-foreground" onClick={() => setSettings({ refId: null })}>
             <Plus className="h-4 w-4 mr-1.5" />Ajouter une référence
           </Button>
         </div>
       )}
-      <TarifDialog open={tarif !== null} onClose={() => setTarif(null)} clientId={clientId} rccId={tarif?.rccId ?? 0} label={tarif?.label ?? ''} canManageTarifs={canManageTarifs}
-        onDuplicateContrat={canManageTarifs && tarif ? () => { setTarifMode({ coloris: tarif.coloris, label: tarif.label, duplicate: true }); setTarif(null) } : undefined} />
+      <TarifDialog open={tarif !== null} onClose={() => setTarif(null)} clientId={clientId} rccId={tarif?.rccId ?? 0} label={tarif?.label ?? ''} />
       <TarifModeDialog open={tarifMode !== null} onClose={() => setTarifMode(null)} clientId={clientId} target={tarifMode} />
-      <RefSettingsDialog open={settings !== null} existing={settings?.existing ?? null} clientId={clientId} onClose={() => setSettings(null)} />
+      <RefSettingsDialog open={settings !== null} existing={settingsExisting} clientId={clientId} onClose={() => setSettings(null)}
+        canManageTarifs={canManageTarifs}
+        onOpenTarif={(c, label) => setTarif({ rccId: c.IDref_client_colori, label })}
+        onOpenTarifMode={(c, label) => setTarifMode({ coloris: c, label })} />
     </>
   )
 }
@@ -1595,11 +1630,79 @@ function CheckList({ items, isChecked, onToggle, emptyText, isLoading }: {
   )
 }
 
-function RefSettingsDialog({ open, existing, clientId, onClose }: {
+// Tarifs tab of the settings dialog: the saved coloris of the ref with their
+// tarif mode — the entry point to the tarif-mode editor (standard / coefficient
+// / contrat) now that edit mode no longer opens the coloris drawer.
+function RefTarifsTab({ refItem, draftColoris, canManageTarifs, onOpenTarif, onOpenTarifMode }: {
+  refItem: ClientReference
+  /** The Informations tab's in-progress coloris selection — used only to flag unsaved changes. */
+  draftColoris: Set<number>
+  canManageTarifs: boolean
+  onOpenTarif: (c: RefColoris, label: string) => void
+  onOpenTarifMode: (c: RefColoris, label: string) => void
+}) {
+  // Tarifs hang off ref_client_colori rows, which exist only after Enregistrer.
+  const savedIds = new Set(refItem.coloris.map((c) => c.coloris_id).filter((x) => x > 0))
+  const draftDiffers = draftColoris.size !== savedIds.size || [...draftColoris].some((id) => !savedIds.has(id))
+
+  if (refItem.IDref_fini === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+        <BadgeEuro className="h-10 w-10 mb-3 opacity-40" />
+        <p className="text-sm">Les tarifs ne sont disponibles que pour les références ennoblies.</p>
+      </div>
+    )
+  }
+  return (
+    <div className="space-y-2">
+      {draftDiffers && (
+        <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/10 text-amber-800 text-xs font-medium">
+          <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+          <span>Les modifications de coloris de l’onglet Informations n’apparaîtront ici qu’après enregistrement.</span>
+        </div>
+      )}
+      {refItem.coloris.length === 0 ? (
+        <p className="text-sm text-muted-foreground italic py-2">Aucun coloris enregistré pour cette référence.</p>
+      ) : refItem.coloris.map((c) => {
+        const priceable = c.coloris_id > 0
+        const label = `${refItem.client_ref} · ${c.label}`
+        return (
+          <button key={c.IDref_client_colori} type="button" disabled={!priceable}
+            onClick={() => { if (priceable) (canManageTarifs ? onOpenTarifMode(c, label) : onOpenTarif(c, label)) }}
+            title={priceable ? (canManageTarifs ? 'Modifier le tarif' : 'Voir le tarif') : 'Tarif indisponible pour ce coloris'}
+            className={cn('group w-full flex items-center gap-2 rounded-lg border bg-card shadow-sm p-2.5 text-left transition-colors',
+              priceable ? 'hover:border-accent/50 cursor-pointer' : 'opacity-60 cursor-default')}>
+            <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-accent/10">
+              <Palette className="h-3.5 w-3.5 text-accent" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium truncate">{c.label || '—'}</p>
+              <div className="mt-0.5">
+                {c.tarif_mode === 'standard'
+                  ? <span className="text-[10px] text-muted-foreground">Tarif standard</span>
+                  : <TarifModeTag c={c} />}
+              </div>
+            </div>
+            {priceable && (canManageTarifs
+              ? <Pencil className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+              : <BadgeEuro className="h-3.5 w-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />)}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function RefSettingsDialog({ open, existing, clientId, onClose, canManageTarifs, onOpenTarif, onOpenTarifMode }: {
   open: boolean; existing: ClientReference | null; clientId: number; onClose: () => void
+  canManageTarifs: boolean
+  /** Open the read-only tarif breakdown / the tarif-mode editor for a saved coloris (stacks over this dialog). */
+  onOpenTarif: (c: RefColoris, label: string) => void
+  onOpenTarifMode: (c: RefColoris, label: string) => void
 }) {
   const queryClient = useQueryClient()
   const isNew = existing === null
+  const [tab, setTab] = useState<'infos' | 'tarifs'>('infos')
   const [nom, setNom] = useState('')
   const [finition, setFinition] = useState<'tm' | 'ennobli'>('ennobli')
   const [refId, setRefId] = useState(0)
@@ -1616,8 +1719,14 @@ function RefSettingsDialog({ open, existing, clientId, onClose }: {
   const originalRefId = existing ? (existing.IDref_fini > 0 ? existing.IDref_fini : existing.IDref_ecru) : 0
 
   // Hydrate on open (and when switching between create / different refs).
+  // Keyed on the ref ID, not the object: `existing` is derived from the live
+  // client-references query, so a tarif-mode save from the Tarifs tab produces
+  // a fresh object for the same ref — re-hydrating then would clobber the
+  // in-progress Informations draft.
+  const existingId = existing?.IDdesignation_client ?? null
   useEffect(() => {
     if (!open) return
+    setTab('infos')
     setError(null)
     if (existing) {
       setNom(existing.client_ref)
@@ -1632,7 +1741,8 @@ function RefSettingsDialog({ open, existing, clientId, onClose }: {
       setNom(''); setFinition('ennobli'); setRefId(0); setUnite(3); setSoumettre(false)
       setCheckedColoris(new Set()); setUncheckedFils(new Set()); setCheckedAssociees(new Set())
     }
-  }, [open, existing])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, existingId])
 
   const finiQ = useQuery<RefFiniLookup[]>({
     queryKey: ['lookup-refs-fini'],
@@ -1726,7 +1836,29 @@ function RefSettingsDialog({ open, existing, clientId, onClose }: {
             {isNew ? 'Nouvelle référence client' : `Référence client - ${existing.client_ref}`}
           </DialogTitle>
         </DialogHeader>
-        <div className="mt-4 flex-1 min-h-0 overflow-y-auto scrollbar-transparent px-1 space-y-3">
+
+        {/* Master tabs (§39 pill style): Informations = the ref form, Tarifs = per-coloris tarif management. */}
+        <div className="mt-4 flex-shrink-0 flex items-center gap-1 border-b border-border/60 pb-2">
+          <button type="button" onClick={() => setTab('infos')}
+            className={cn('flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium rounded-md transition-colors whitespace-nowrap',
+              tab === 'infos' ? 'bg-accent text-accent-foreground shadow-sm' : 'text-muted-foreground hover:bg-accent/10 hover:text-accent')}>
+            <Tag className="h-3.5 w-3.5" />Informations
+          </button>
+          <button type="button" disabled={isNew} onClick={() => setTab('tarifs')}
+            title={isNew ? 'Enregistrez d’abord la référence' : undefined}
+            className={cn('flex items-center gap-1.5 px-4 py-1.5 text-sm font-medium rounded-md transition-colors whitespace-nowrap',
+              tab === 'tarifs' ? 'bg-accent text-accent-foreground shadow-sm' : 'text-muted-foreground hover:bg-accent/10 hover:text-accent',
+              isNew && 'opacity-50 cursor-not-allowed hover:bg-transparent hover:text-muted-foreground')}>
+            <BadgeEuro className="h-3.5 w-3.5" />Tarifs
+          </button>
+        </div>
+
+        <div className="mt-3 flex-1 min-h-0 overflow-y-auto scrollbar-transparent px-1 space-y-3">
+          {tab === 'tarifs' && existing !== null ? (
+            <RefTarifsTab refItem={existing} draftColoris={checkedColoris} canManageTarifs={canManageTarifs}
+              onOpenTarif={onOpenTarif} onOpenTarifMode={onOpenTarifMode} />
+          ) : (
+          <>
           <LabeledInput label="Nom commercial" value={nom} onChange={setNom} autoFocus={isNew} />
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
@@ -1825,6 +1957,8 @@ function RefSettingsDialog({ open, existing, clientId, onClose }: {
                 isLoading={filsQ.isLoading} />
             )}
           </div>
+          </>
+          )}
 
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
@@ -1913,31 +2047,15 @@ function TrancheToggleRow({ label, tranche, value, onChange, disabled }: {
   )
 }
 
-function TarifDialog({ open, onClose, clientId, rccId, label, canManageTarifs, onDuplicateContrat }: {
-  open: boolean; onClose: () => void; clientId: number; rccId: number; label: string; canManageTarifs: boolean
-  /** Set (permission gestion_tarifs) → "Dupliquer le contrat" on an expired
-   *  contract opens the tarif-mode dialog prefilled from it as a new contract. */
-  onDuplicateContrat?: () => void
+function TarifDialog({ open, onClose, clientId, rccId, label }: {
+  open: boolean; onClose: () => void; clientId: number; rccId: number; label: string
 }) {
-  const queryClient = useQueryClient()
   const [selectedTranche, setSelectedTranche] = useState(0)
-  // Negotiated-tranches edit panel (15/30 rlx): null = view mode.
-  const [tranchesDraft, setTranchesDraft] = useState<{ t15: boolean; t30: boolean } | null>(null)
-  useEffect(() => { if (open) { setSelectedTranche(0); setTranchesDraft(null) } }, [open, rccId])
+  useEffect(() => { if (open) setSelectedTranche(0) }, [open, rccId])
   const { data, isLoading, isError } = useQuery<TarifResult>({
     queryKey: ['client-tarif', clientId, rccId],
     queryFn: () => apiFetch(`/clients/${clientId}/coloris/${rccId}/tarif`),
     enabled: open && rccId > 0,
-  })
-  const saveTranchesMut = useMutation({
-    mutationFn: (b: { t15: boolean; t30: boolean }) =>
-      apiFetch(`/clients/${clientId}/coloris/${rccId}/tranches`, { method: 'PUT', body: JSON.stringify(b) }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['client-tarif', clientId, rccId] })
-      // lst_tranche travels on the references payload too — keep it in sync.
-      queryClient.invalidateQueries({ queryKey: ['client-references', clientId] })
-      setTranchesDraft(null)
-    },
   })
   // Contrat mode (active contract): the user only ever buys at the negotiated
   // prices — show exclusively the contracted tranches, like the legacy Tarifs
@@ -1950,9 +2068,6 @@ function TarifDialog({ open, onClose, clientId, rccId, label, canManageTarifs, o
     : allTranches.filter((_, i) => enabledIdx.includes(i))
   const current = tranches[Math.min(selectedTranche, Math.max(tranches.length - 1, 0))] ?? null
   const eurKg = (v: number) => `${fmtNum(v, 2)} €/Kg`
-  // The 15/30 toggles only make sense where the standard table rules the rows
-  // (contrat rows are managed through the Mode de tarif dialog instead).
-  const canEditTranches = canManageTarifs && !!data && !isLoading && !isError && data.tarif_mode !== 'contrat'
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
       <DialogContent className="max-w-lg" onClose={onClose}>
@@ -2004,13 +2119,6 @@ function TarifDialog({ open, onClose, clientId, rccId, label, canManageTarifs, o
                   </table>
                 </div>
               )}
-              {onDuplicateContrat && data.contrats.length > 0 && (
-                <div className="flex justify-end">
-                  <Button size="sm" onClick={onDuplicateContrat}>
-                    <Copy className="h-3.5 w-3.5 mr-1.5" />Dupliquer le contrat
-                  </Button>
-                </div>
-              )}
             </>
           ) : tranches.length === 0 ? (
             <p className="text-sm text-muted-foreground italic">Tarif indisponible pour cette référence / ce coloris.</p>
@@ -2057,33 +2165,6 @@ function TarifDialog({ open, onClose, clientId, rccId, label, canManageTarifs, o
                   </tbody>
                 </table>
               </div>
-              {canEditTranches && tranchesDraft === null && (
-                <div className="flex justify-end">
-                  <Button variant="gold" size="sm"
-                    onClick={() => setTranchesDraft({ t15: enabledIdx.includes(7), t30: enabledIdx.includes(8) })}>
-                    <Pencil className="h-3.5 w-3.5 mr-1.5" />Modifier
-                  </Button>
-                </div>
-              )}
-              {tranchesDraft !== null && (
-                <div className="rounded-lg border border-accent/25 bg-accent/[0.03] p-3 space-y-2">
-                  <p className="text-xs font-semibold text-accent uppercase tracking-wide">Tranches négociées</p>
-                  <TrancheToggleRow label="15 rouleaux" tranche={allTranches[7] ?? null} value={tranchesDraft.t15}
-                    onChange={(v) => setTranchesDraft({ ...tranchesDraft, t15: v })} disabled={saveTranchesMut.isPending} />
-                  <TrancheToggleRow label="30 rouleaux" tranche={allTranches[8] ?? null} value={tranchesDraft.t30}
-                    onChange={(v) => setTranchesDraft({ ...tranchesDraft, t30: v })} disabled={saveTranchesMut.isPending} />
-                  {saveTranchesMut.isError && (
-                    <p className="text-xs text-destructive">Erreur lors de l’enregistrement des tranches.</p>
-                  )}
-                  <div className="flex justify-end gap-2 pt-1">
-                    <Button variant="outline" size="sm" disabled={saveTranchesMut.isPending} onClick={() => setTranchesDraft(null)}>Annuler</Button>
-                    <Button size="sm" disabled={saveTranchesMut.isPending} onClick={() => saveTranchesMut.mutate(tranchesDraft)}>
-                      {saveTranchesMut.isPending ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Save className="h-3.5 w-3.5 mr-1.5" />}
-                      Enregistrer
-                    </Button>
-                  </div>
-                </div>
-              )}
               {current && (() => {
                 // Contract tranche: legacy computes the "Calcul du Tarif" detail
                 // on the 15-roll cost basis (bulk dye/treatment bands, -5%
@@ -2172,9 +2253,7 @@ function TarifModeCard({ selected, onSelect, icon: Icon, title, desc, children }
 
 function TarifModeDialog({ open, onClose, clientId, target }: {
   open: boolean; onClose: () => void; clientId: number
-  /** duplicate: hydrate the contrat form from the latest (expired) contract as
-   *  a NEW contract — same tranches, fresh dates, no IDcontrat_tarif. */
-  target: { coloris: RefColoris; label: string; duplicate?: boolean } | null
+  target: { coloris: RefColoris; label: string } | null
 }) {
   const queryClient = useQueryClient()
   const [mode, setMode] = useState<TarifMode>('standard')
@@ -2183,6 +2262,11 @@ function TarifModeDialog({ open, onClose, clientId, target }: {
   const [dateDebut, setDateDebut] = useState('')
   const [dateExpiration, setDateExpiration] = useState('')
   const [tranches, setTranches] = useState<TrancheDraft[]>([])
+  // Negotiated 15/30 rouleaux tranches (lst_tranche indices 7/8) — apply to the
+  // standard and coefficient modes only (a contrat rules its own tranches).
+  const [t15, setT15] = useState(false)
+  const [t30, setT30] = useState(false)
+  const initialTranchesRef = useRef({ t15: false, t30: false })
   const [showHistory, setShowHistory] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const keyRef = useRef(0)
@@ -2195,16 +2279,9 @@ function TarifModeDialog({ open, onClose, clientId, target }: {
     setCoefficient(c.coefficient > 0 ? String(c.coefficient) : '')
     const base = c.contrat_actif ?? c.contrats[0] ?? null
     if (base) {
-      if (target.duplicate) {
-        // Renewal from the same base: keep the tranche grid, save as new.
-        setContratId(null)
-        setDateDebut(new Date().toISOString().slice(0, 10))
-        setDateExpiration('')
-      } else {
-        setContratId(base.IDcontrat_tarif)
-        setDateDebut(hfsqlDateToInput(base.date_debut))
-        setDateExpiration(hfsqlDateToInput(base.date_expiration))
-      }
+      setContratId(base.IDcontrat_tarif)
+      setDateDebut(hfsqlDateToInput(base.date_debut))
+      setDateExpiration(hfsqlDateToInput(base.date_expiration))
       setTranches(base.tranches.map((t) => ({ key: ++keyRef.current, nb_rouleaux: t.nb_rouleaux, prix: String(t.prix) })))
     } else {
       setContratId(null)
@@ -2212,13 +2289,34 @@ function TarifModeDialog({ open, onClose, clientId, target }: {
       setDateExpiration('')
       setTranches([{ key: ++keyRef.current, nb_rouleaux: 1, prix: '' }])
     }
+    // Empty lst_tranche = legacy default (base tranches only, no 15/30).
+    const idx = c.lst_tranche.split(',').map((s) => parseInt(s, 10))
+    const init = { t15: idx.includes(7), t30: idx.includes(8) }
+    setT15(init.t15)
+    setT30(init.t30)
+    initialTranchesRef.current = init
     setShowHistory(false)
     setError(null)
   }, [open, target])
 
   const rccId = target?.coloris.IDref_client_colori ?? 0
+  // Same computation the view dialog shows — here it feeds the Ml / €/Ml info
+  // on the 15/30 toggle rows (cache-shared with the view dialog).
+  const tarifQ = useQuery<TarifResult>({
+    queryKey: ['client-tarif', clientId, rccId],
+    queryFn: () => apiFetch(`/clients/${clientId}/coloris/${rccId}/tarif`),
+    enabled: open && rccId > 0,
+  })
+  const allTranches = tarifQ.data?.tranches ?? []
   const saveMut = useMutation({
-    mutationFn: (body: unknown) => apiFetch(`/clients/${clientId}/coloris/${rccId}/tarif-mode`, { method: 'PUT', body: JSON.stringify(body) }),
+    mutationFn: async (body: { mode: TarifMode } & Record<string, unknown>) => {
+      await apiFetch(`/clients/${clientId}/coloris/${rccId}/tarif-mode`, { method: 'PUT', body: JSON.stringify(body) })
+      // The 15/30 toggles ride along for the non-contrat modes.
+      const init = initialTranchesRef.current
+      if (body.mode !== 'contrat' && (t15 !== init.t15 || t30 !== init.t30)) {
+        await apiFetch(`/clients/${clientId}/coloris/${rccId}/tranches`, { method: 'PUT', body: JSON.stringify({ t15, t30 }) })
+      }
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['client-references', clientId] })
       queryClient.invalidateQueries({ queryKey: ['client-tarif', clientId, rccId] })
@@ -2363,6 +2461,18 @@ function TarifModeDialog({ open, onClose, clientId, target }: {
               )}
             </div>
           </TarifModeCard>
+
+          {/* Negotiated 15/30 rlx tranches — only meaningful when the standard
+              table rules the rows (a contrat manages its own tranche grid). */}
+          {mode !== 'contrat' && (
+            <div className="pt-2 space-y-2">
+              <p className="text-xs font-semibold text-accent uppercase tracking-wide">Tranches négociées</p>
+              <TrancheToggleRow label="15 rouleaux" tranche={allTranches[7] ?? null} value={t15}
+                onChange={setT15} disabled={saveMut.isPending} />
+              <TrancheToggleRow label="30 rouleaux" tranche={allTranches[8] ?? null} value={t30}
+                onChange={setT30} disabled={saveMut.isPending} />
+            </div>
+          )}
 
           {error && (
             <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-red-500/25 bg-red-500/10 text-red-700 text-xs">
