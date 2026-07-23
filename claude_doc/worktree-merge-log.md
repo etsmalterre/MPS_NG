@@ -10,6 +10,21 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-23 — feat/app-wide
+App-wide — **app versioning + refresh from the profile menu.** The monorepo root
+`package.json` `version` (currently 0.1.0) is now the single source of truth for the app
+version: `apps/web/vite.config.ts` reads it and injects it as the `__APP_VERSION__`
+constant (mirrored in `vitest.config.ts` so unit tests resolve it; declared for TS in the
+new hand-written `apps/web/src/vite-env.d.ts`, which needed a `.gitignore` negation
+against the stale-artifact `apps/web/src/**/*.d.ts` rule). The header profile menu
+(avatar, top right) gains two items below "Changer d'utilisateur": an **"Actualiser
+l'application"** button (RefreshCw icon, spins while pending) that calls
+`registration.update()` on all service workers then reloads — with the PWA's
+`autoUpdate` registration this pulls a fresh deploy without closing the app — and a
+**"Version X.Y.Z"** footer line under a divider. Release convention documented in
+CLAUDE.md §Versioning: bump the root package.json version, deploy; per-package versions
+in `apps/*` are not displayed and need no syncing.
+
 ## 2026-07-23 — feat/facturation
 Clients › Facturation — **one-off prod data backfill: legacy invoices marked "envoyée".**
 The list derives `est_envoye` from the `envoi_email` audit log (`IDtype_doc = 19`,

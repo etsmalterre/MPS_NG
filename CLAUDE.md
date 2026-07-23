@@ -139,6 +139,11 @@ Full details in `claude_doc/hfsql_odbc.md`. These are the non-negotiable rules f
 
 **Sidebar logo**: `public/logo-full.png` (expanded, `h-10 mx-auto`) / `public/logo-small.png` (collapsed, `h-8 mx-auto`).
 
+## Versioning
+
+- **Single source of truth**: `version` in the **root** `package.json` (currently the app-wide version, e.g. `0.1.0`). The web build injects it as `__APP_VERSION__` (see `apps/web/vite.config.ts` + `vitest.config.ts` `define`) and displays it in the header profile menu, which also holds the "Actualiser l'application" button (SW update + reload).
+- To release a new version: bump the root `package.json` version, then deploy. The per-package versions in `apps/*/package.json` are not displayed anywhere - no need to keep them in sync.
+
 ## Conventions
 
 - **Code**: English. **UI**: French. **Comments**: English.

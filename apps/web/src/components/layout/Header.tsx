@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useLocation, NavLink } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { Menu, Maximize2, Minimize2, LogOut, CircleUser, MessageSquarePlus, Loader2 } from 'lucide-react'
+import { Menu, Maximize2, Minimize2, LogOut, CircleUser, MessageSquarePlus, Loader2, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Avatar } from '@/components/ui/avatar'
 import { getActiveMenu } from '@/config/navigation'
@@ -24,7 +24,25 @@ export function Header({ onMenuClick }: HeaderProps) {
   const allowSwitch = canSwitchUser(user)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const userMenuRef = useRef<HTMLDivElement | null>(null)
+
+  // Force-refresh the app: ask the service worker to fetch the latest build
+  // (registerType 'autoUpdate' activates it immediately), then reload so the
+  // new assets are served. Users on the PWA can pick up a deploy without
+  // closing the app.
+  const refreshApp = useCallback(async () => {
+    setRefreshing(true)
+    try {
+      if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations()
+        await Promise.all(regs.map((r) => r.update()))
+      }
+    } catch {
+      // SW update failure must not block the reload.
+    }
+    window.location.reload()
+  }, [])
 
   // Ticket reporting — the screenshot is captured BEFORE the modal opens so
   // the modal itself is never in the shot.
@@ -236,6 +254,19 @@ export function Header({ onMenuClick }: HeaderProps) {
                   Changer d'utilisateur
                 </button>
               )}
+              <button
+                onClick={() => void refreshApp()}
+                disabled={refreshing}
+                className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs text-muted-foreground hover:bg-accent/10 hover:text-accent transition-colors disabled:opacity-60"
+              >
+                <RefreshCw className={cn('h-3 w-3', refreshing && 'animate-spin')} />
+                Actualiser l'application
+              </button>
+              <div className="mt-2 pt-2 border-t border-border/60 px-2">
+                <p className="text-[10px] text-muted-foreground text-center">
+                  Version {__APP_VERSION__}
+                </p>
+              </div>
             </div>
           )}
         </div>

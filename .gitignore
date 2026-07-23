@@ -13,6 +13,8 @@ apps/web/src/**/*.js
 apps/web/src/**/*.js.map
 apps/web/src/**/*.d.ts
 apps/web/src/**/*.d.ts.map
+# ...but vite-env.d.ts is hand-written source (declares __APP_VERSION__), not an artifact
+!apps/web/src/vite-env.d.ts
 
 # Emitted vite config artifacts — source is vite.config.ts, but a stray
 # `tsc -b` emits vite.config.js/.d.ts at the package root, and Vite loads the
