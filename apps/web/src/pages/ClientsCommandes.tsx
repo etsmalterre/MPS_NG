@@ -590,6 +590,7 @@ export function ClientsCommandes() {
             isLoading={detailLoading && selectedId !== null}
             hasSelection={selectedId !== null}
             isEditing={isEditing}
+            editDonation={editDonation}
             onMutationSuccess={invalidateAll}
             onLinesDirtyChange={setLinesDirty}
             affectationLineId={affectationLineId}
@@ -937,12 +938,13 @@ function DetailHeader({
 // ── Center: Detail Main ────────────────────────────────
 
 function DetailMain({
-  commande, isLoading, hasSelection, isEditing, onMutationSuccess, onLinesDirtyChange, affectationLineId, onOpenAffectation,
+  commande, isLoading, hasSelection, isEditing, editDonation, onMutationSuccess, onLinesDirtyChange, affectationLineId, onOpenAffectation,
 }: {
   commande: CommandeDetail | null
   isLoading: boolean
   hasSelection: boolean
   isEditing: boolean
+  editDonation: boolean
   onMutationSuccess: () => void
   onLinesDirtyChange: (dirty: boolean) => void
   affectationLineId: number | null
@@ -961,11 +963,19 @@ function DetailMain({
 
   // Donation orders carry stock pieces instead of lignes — the whole center
   // panel swaps to the donation view (mirrors the legacy "Donation" tab).
-  if (commande.donation === 1) {
+  // While editing, the layout follows the *draft* toggle so flipping Donation
+  // swaps the panel instantly; content mutations (add ligne / add pieces) stay
+  // gated until the flag is saved, so cancelling the edit can't leave orphaned
+  // lignes on a donation order or donation pieces on a normal one.
+  const effectiveDonation = isEditing ? editDonation : commande.donation === 1
+  const donationPending = isEditing && editDonation !== (commande.donation === 1)
+
+  if (effectiveDonation) {
     return (
       <DonationSection
         commande={commande}
         isEditing={isEditing}
+        pendingSave={donationPending}
         onMutationSuccess={onMutationSuccess}
       />
     )
@@ -977,6 +987,7 @@ function DetailMain({
     <LignesSection
       commande={commande}
       isEditing={isEditing}
+      donationPending={donationPending}
       totalEur={totalEur}
       onMutationSuccess={onMutationSuccess}
       onLinesDirtyChange={onLinesDirtyChange}
@@ -1001,10 +1012,12 @@ const emptyLineForm = {
 type LineFormState = typeof emptyLineForm
 
 function LignesSection({
-  commande, isEditing, totalEur, onMutationSuccess, onLinesDirtyChange, affectationLineId, onOpenAffectation,
+  commande, isEditing, donationPending, totalEur, onMutationSuccess, onLinesDirtyChange, affectationLineId, onOpenAffectation,
 }: {
   commande: CommandeDetail
   isEditing: boolean
+  /** Donation flag toggled off in the draft but not saved yet — adding lignes is blocked until save. */
+  donationPending: boolean
   totalEur: number
   onMutationSuccess: () => void
   onLinesDirtyChange: (dirty: boolean) => void
@@ -1075,9 +1088,13 @@ function LignesSection({
               <Layers className="h-12 w-12 mb-3 opacity-40" />
               <p className="text-sm">Aucune ligne</p>
               {isEditing && !linesLocked && (
-                <Button variant="outline" size="sm" className="mt-3" onClick={startAddLine}>
-                  <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter une ligne
-                </Button>
+                donationPending ? (
+                  <p className="text-xs italic mt-3">Enregistrez la commande pour pouvoir ajouter des lignes.</p>
+                ) : (
+                  <Button variant="outline" size="sm" className="mt-3" onClick={startAddLine}>
+                    <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter une ligne
+                  </Button>
+                )
               )}
             </div>
           ) : (
@@ -1095,7 +1112,7 @@ function LignesSection({
             ))
           )}
 
-          {isEditing && !linesLocked && commande.lignes.length > 0 && (
+          {isEditing && !linesLocked && !donationPending && commande.lignes.length > 0 && (
             <Button
               variant="ghost"
               size="sm"
@@ -1203,10 +1220,12 @@ function DonationPieceCells({ p }: { p: DonationPiece }) {
 }
 
 function DonationSection({
-  commande, isEditing, onMutationSuccess,
+  commande, isEditing, pendingSave, onMutationSuccess,
 }: {
   commande: CommandeDetail
   isEditing: boolean
+  /** Donation flag toggled on in the draft but not saved yet — attaching pieces is blocked until save. */
+  pendingSave: boolean
   onMutationSuccess: () => void
 }) {
   const commandeId = commande.IDcommande_client
@@ -1238,7 +1257,7 @@ function DonationSection({
             <Gift className="h-3.5 w-3.5 text-accent" />
             Pièces en donation
           </div>
-          {isEditing && !locked && nb > 0 && (
+          {isEditing && !locked && !pendingSave && nb > 0 && (
             <Button variant="outline" size="sm" onClick={() => setPickerOpen(true)}>
               <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter / Modifier
             </Button>
@@ -1252,9 +1271,13 @@ function DonationSection({
             <Gift className="h-12 w-12 mb-3 opacity-40" />
             <p className="text-sm">Aucune pièce en donation</p>
             {isEditing && !locked && (
-              <Button variant="outline" size="sm" className="mt-3" onClick={() => setPickerOpen(true)}>
-                <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter des pièces
-              </Button>
+              pendingSave ? (
+                <p className="text-xs italic mt-3">Enregistrez la commande pour pouvoir ajouter des pièces.</p>
+              ) : (
+                <Button variant="outline" size="sm" className="mt-3" onClick={() => setPickerOpen(true)}>
+                  <Plus className="h-3.5 w-3.5 mr-1.5" />Ajouter des pièces
+                </Button>
+              )
             )}
           </div>
         ) : (

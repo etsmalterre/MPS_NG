@@ -10,6 +10,19 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-23 — feat/commande-client
+Clients › Commandes — **instant Donation toggle.** The center panel (lignes view vs
+"Pièces en donation" view) used to switch on the *saved* `commande.donation` flag, so
+flipping the Donation toggle in edit mode required Enregistrer + Modifier before the
+layout followed. `DetailMain` now receives the `editDonation` draft and, while editing,
+drives the layout from it — the panel swaps instantly on toggle. Because lignes and
+donation pieces are written to the DB immediately while the flag itself only persists
+on Enregistrer, content mutations are gated while the draft differs from the saved
+value (`donationPending`): the "Ajouter une ligne" / "Ajouter des pièces" affordances
+are replaced by a French hint ("Enregistrez la commande pour pouvoir ajouter des
+lignes/pièces.") until the user saves, so cancelling an edit can never leave orphaned
+lignes on a donation order or orphaned pieces on a normal one.
+
 ## 2026-07-22 — feat/issue-tracker
 App-wide — **in-app bug/feature ticket reporting wired to the LIVA issue tracker**
 (liva-holding.com/issues, product `etm-erp`). (1) **Proxy** `apps/api/src/routes/tickets.ts`
