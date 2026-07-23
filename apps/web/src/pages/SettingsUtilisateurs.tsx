@@ -17,6 +17,7 @@ import { apiFetch, API_URL } from '@/lib/api'
 import { useUser } from '@/contexts/UserContext'
 import { usePermissions } from '@/contexts/PermissionsContext'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { useAutoSelectFirst } from '@/hooks/useAutoSelectFirst'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Avatar } from '@/components/ui/avatar'
@@ -175,12 +176,14 @@ export function SettingsUtilisateurs() {
     },
   })
 
-  // Auto-select first user once loaded
-  useEffect(() => {
-    if (users && users.length > 0 && selectedId === null) {
-      setSelectedId(users[0].IDutilisateur)
-    }
-  }, [users, selectedId])
+  // Auto-select first user once loaded (desktop only — stacked mode lands on the list)
+  useAutoSelectFirst({
+    rows: users,
+    selectedId,
+    getId: (u) => u.IDutilisateur,
+    select: setSelectedId,
+    behavior: 'fill',
+  })
 
   // ── Mutation: toggle a permission key ─────────
   const updateMut = useMutation({

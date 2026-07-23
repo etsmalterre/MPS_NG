@@ -28,6 +28,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { useAutoSelectFirst } from '@/hooks/useAutoSelectFirst'
 import { SendEmailDialog } from '@/components/email/SendEmailDialog'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput } from '@/lib/dates'
@@ -130,9 +131,13 @@ export function Entreprises() {
   const { data: entreprises, isLoading, isError, error } = useEntreprises()
   const { data: detail, isLoading: detailLoading } = useEntrepriseDetail(selectedId)
 
-  useEffect(() => {
-    if (entreprises && entreprises.length > 0 && selectedId === null) setSelectedId(entreprises[0].IDentreprise)
-  }, [entreprises, selectedId])
+  useAutoSelectFirst({
+    rows: entreprises,
+    selectedId,
+    getId: (e) => e.IDentreprise,
+    select: setSelectedId,
+    behavior: 'fill',
+  })
 
   const startEdit = useCallback(() => {
     if (detail) {

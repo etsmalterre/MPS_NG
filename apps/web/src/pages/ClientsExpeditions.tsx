@@ -36,6 +36,7 @@ import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { useAutoSelectFirst } from '@/hooks/useAutoSelectFirst'
 import { SendEmailDialog } from '@/components/email/SendEmailDialog'
 import { postEmail } from '@/lib/email'
 import { cn } from '@/lib/utils'
@@ -375,17 +376,14 @@ export function ClientsExpeditions() {
 
   const list = useMemo(() => (rowPages?.pages ?? []).flat(), [rowPages])
 
-  useEffect(() => {
-    if (isEditing || isFetching) return
-    if (list.length === 0) {
-      // List settled empty (search with no hits, or the last row left the
-      // current bucket) — clear the stale selection so the placeholder shows.
-      if (selectedId !== null) setSelectedId(null)
-      return
-    }
-    const stillVisible = selectedId !== null && list.some((r) => r.id === selectedId)
-    if (!stillVisible) setSelectedId(list[0].id)
-  }, [list, selectedId, isEditing, isFetching])
+  useAutoSelectFirst({
+    rows: list,
+    selectedId,
+    getId: (r) => r.id,
+    select: setSelectedId,
+    behavior: 'sync',
+    suspended: isEditing || isFetching,
+  })
 
   return (
     <>

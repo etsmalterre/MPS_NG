@@ -31,6 +31,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { PopoverSelect } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { useAutoSelectFirst } from '@/hooks/useAutoSelectFirst'
 import { TmRollIcon } from '@/components/icons/TmRollIcon'
 import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
 import { BobineIcon } from '@/components/icons/BobineIcon'
@@ -217,9 +218,13 @@ export function SousTraitantsGestion() {
     return rows
   }, [sousTraitants, searchQuery, statusFilter])
 
-  useEffect(() => {
-    if (filtered.length > 0 && selectedId === null) setSelectedId(filtered[0].IDsous_traitant)
-  }, [filtered, selectedId])
+  useAutoSelectFirst({
+    rows: filtered,
+    selectedId,
+    getId: (s) => s.IDsous_traitant,
+    select: setSelectedId,
+    behavior: 'fill',
+  })
 
   const startEdit = useCallback(() => {
     if (detail) {

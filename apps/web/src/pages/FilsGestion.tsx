@@ -35,6 +35,7 @@ import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { PopoverSelect } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { useAutoSelectFirst } from '@/hooks/useAutoSelectFirst'
 import { BobineIcon } from '@/components/icons/BobineIcon'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
@@ -173,9 +174,13 @@ export function FilsGestion() {
   const { data: fournisseurs, isLoading, isError, error } = useFournisseurs()
   const { data: detail, isLoading: detailLoading } = useFournisseurDetail(selectedId)
 
-  useEffect(() => {
-    if (fournisseurs && fournisseurs.length > 0 && selectedId === null) setSelectedId(fournisseurs[0].IDfournisseur)
-  }, [fournisseurs, selectedId])
+  useAutoSelectFirst({
+    rows: fournisseurs,
+    selectedId,
+    getId: (f) => f.IDfournisseur,
+    select: setSelectedId,
+    behavior: 'fill',
+  })
 
   const startEdit = useCallback(() => {
     if (detail) {

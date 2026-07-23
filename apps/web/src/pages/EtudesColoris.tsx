@@ -50,6 +50,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { useAutoSelectFirst } from '@/hooks/useAutoSelectFirst'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
 import { apiFetch, API_URL } from '@/lib/api'
@@ -518,18 +519,14 @@ export function EtudesColoris() {
   // top. Covers both the initial load and search narrowing the list — so typing
   // in the search bar auto-selects the first visible étude. Skip while editing
   // so we never discard unsaved changes out from under the user.
-  useEffect(() => {
-    if (isEditing) return
-    if (filteredEtudes.length === 0) {
-      // No visible rows (empty search result, or the last row left the current
-      // filter) — clear the stale selection so the placeholder shows.
-      if (selectedId !== null) setSelectedId(null)
-      return
-    }
-    const stillVisible =
-      selectedId !== null && filteredEtudes.some((e) => e.IDetude_col === selectedId)
-    if (!stillVisible) setSelectedId(filteredEtudes[0].IDetude_col)
-  }, [filteredEtudes, selectedId, isEditing])
+  useAutoSelectFirst({
+    rows: filteredEtudes,
+    selectedId,
+    getId: (e) => e.IDetude_col,
+    select: setSelectedId,
+    behavior: 'sync',
+    suspended: isEditing,
+  })
 
   // ── Render ──────────────────────────────────────────────
 

@@ -41,6 +41,7 @@ import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { useAutoSelectFirst } from '@/hooks/useAutoSelectFirst'
 import { SendEmailDialog } from '@/components/email/SendEmailDialog'
 import { postEmail } from '@/lib/email'
 import { cn } from '@/lib/utils'
@@ -264,17 +265,14 @@ export function ClientsGestion() {
   }, [clients, searchQuery, archiveFilter])
 
   // Keep selection valid against the (search/filter-narrowed) list.
-  useEffect(() => {
-    if (isEditing) return
-    if (filtered.length === 0) {
-      // No visible rows (empty search result, or the last row left the current
-      // filter) — clear the stale selection so the placeholder shows.
-      if (selectedId !== null) setSelectedId(null)
-      return
-    }
-    const stillVisible = selectedId !== null && filtered.some((c) => c.IDclient === selectedId)
-    if (!stillVisible) setSelectedId(filtered[0].IDclient)
-  }, [filtered, selectedId, isEditing])
+  useAutoSelectFirst({
+    rows: filtered,
+    selectedId,
+    getId: (c) => c.IDclient,
+    select: setSelectedId,
+    behavior: 'sync',
+    suspended: isEditing,
+  })
 
   const startEdit = useCallback(() => {
     if (!detail) return

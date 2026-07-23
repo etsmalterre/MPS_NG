@@ -38,6 +38,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { useAutoSelectFirst } from '@/hooks/useAutoSelectFirst'
 import { BobineIcon } from '@/components/icons/BobineIcon'
 import { cn } from '@/lib/utils'
 import { apiFetch } from '@/lib/api'
@@ -387,12 +388,14 @@ export function FilsReferences() {
     return true
   }, [compositionOk, compositionTotalPct])
 
-  // Auto-select first on initial load
-  useEffect(() => {
-    if (refs && refs.length > 0 && selectedId === null) {
-      setSelectedId(refs[0].IDref_fil)
-    }
-  }, [refs, selectedId])
+  // Auto-select first on initial load (desktop only — stacked mode lands on the list)
+  useAutoSelectFirst({
+    rows: refs,
+    selectedId,
+    getId: (r) => r.IDref_fil,
+    select: setSelectedId,
+    behavior: 'fill',
+  })
 
   const startEdit = useCallback(() => {
     if (!detail) return

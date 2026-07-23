@@ -66,6 +66,7 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { useResponsiveLayout } from '@/hooks/useResponsiveLayout'
 import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
 import { TmRollIcon } from '@/components/icons/TmRollIcon'
 import { BobineIcon } from '@/components/icons/BobineIcon'
@@ -651,6 +652,7 @@ function useDebouncedValue<T>(value: T, delay: number): T {
 
 export function SousTraitantsCommandes() {
   const queryClient = useQueryClient()
+  const { isStacked } = useResponsiveLayout()
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('open')
@@ -839,8 +841,10 @@ export function SousTraitantsCommandes() {
     const key = `${statusFilter}|${debouncedSearch}`
     if (lastAppliedListKey.current === key) return
     lastAppliedListKey.current = key
-    setSelectedId(commandes.length > 0 ? commandes[0].IDcommande_sous_traitant : null)
-  }, [commandes, statusFilter, debouncedSearch, isEditing])
+    // Stacked mode (phone): a null selection IS the list view — never
+    // auto-jump into the first row's detail.
+    setSelectedId(!isStacked && commandes.length > 0 ? commandes[0].IDcommande_sous_traitant : null)
+  }, [commandes, statusFilter, debouncedSearch, isEditing, isStacked])
 
   // Reset the pieces drawer when the active commande changes — avoids stale
   // drawer state leaking into the next commande's lines.

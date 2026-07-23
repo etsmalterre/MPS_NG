@@ -32,6 +32,7 @@ import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { useAutoSelectFirst } from '@/hooks/useAutoSelectFirst'
 import { SendEmailDialog } from '@/components/email/SendEmailDialog'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
@@ -351,17 +352,14 @@ export function ClientsDevis() {
 
   const rows = devis ?? []
 
-  useEffect(() => {
-    if (isEditing || isFetching) return
-    if (rows.length === 0) {
-      // List settled empty (search with no hits, or the last row left the
-      // current bucket) — clear the stale selection so the placeholder shows.
-      if (selectedId !== null) setSelectedId(null)
-      return
-    }
-    const stillVisible = selectedId !== null && rows.some((c) => c.IDDevis_etm === selectedId)
-    if (!stillVisible) setSelectedId(rows[0].IDDevis_etm)
-  }, [rows, selectedId, isEditing, isFetching])
+  useAutoSelectFirst({
+    rows,
+    selectedId,
+    getId: (c) => c.IDDevis_etm,
+    select: setSelectedId,
+    behavior: 'sync',
+    suspended: isEditing || isFetching,
+  })
 
   return (
     <>

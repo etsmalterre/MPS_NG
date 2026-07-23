@@ -52,6 +52,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 import { Tooltip } from '@/components/ui/tooltip'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { useAutoSelectFirst } from '@/hooks/useAutoSelectFirst'
 import { SendEmailDialog } from '@/components/email/SendEmailDialog'
 import { cn } from '@/lib/utils'
 import { formatHfsqlDate, hfsqlDateToInput, inputDateToHfsql } from '@/lib/dates'
@@ -534,17 +535,14 @@ export function ClientsCommandes() {
   // list is refetching: after creating a commande we setSelectedId(newId) before
   // the refetch settles, so the stale list wouldn't yet contain it — resetting
   // here would clobber the new selection (and break the auto-enter-edit flow).
-  useEffect(() => {
-    if (isEditing || isFetching) return
-    if (rows.length === 0) {
-      // List settled empty (e.g. the only search hit was just clôturée out of
-      // the current bucket) — clear the stale selection so the placeholder shows.
-      if (selectedId !== null) setSelectedId(null)
-      return
-    }
-    const stillVisible = selectedId !== null && rows.some((c) => c.IDcommande_client === selectedId)
-    if (!stillVisible) setSelectedId(rows[0].IDcommande_client)
-  }, [rows, selectedId, isEditing, isFetching])
+  useAutoSelectFirst({
+    rows,
+    selectedId,
+    getId: (c) => c.IDcommande_client,
+    select: setSelectedId,
+    behavior: 'sync',
+    suspended: isEditing || isFetching,
+  })
 
   return (
     <>

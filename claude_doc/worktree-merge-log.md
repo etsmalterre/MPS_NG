@@ -10,6 +10,27 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-23 — feat/responsive
+App-wide (17 master-detail screens) — **phone/stacked mode no longer auto-jumps into the
+first row's detail, and "Retour" works.** Root cause: every master-detail screen auto-selects
+the first list row whenever nothing is selected (a desktop convention — the detail pane sits
+beside the list). Below 1240px `MasterDetailLayout` stacks (list OR detail), so a null
+selection IS the list view: the effect force-navigated to the first row's detail on arrival
+and re-selected it the instant "Retour" set the selection back to null. Fix: new shared hook
+`apps/web/src/hooks/useAutoSelectFirst.ts` — reproduces the historical behavior verbatim in
+full/compact modes, but in stacked mode never picks a row on its own, and when the selection
+drops out of a filtered list it falls back to null (return to the list) instead of jumping to
+another row's detail. Two behaviors: `'fill'` (load-once auto-select: SettingsUtilisateurs,
+Entreprises, FilsGestion, SousTraitantsGestion, FilsReferences, FinisReferences) and `'sync'`
+(the mps_designer §5 canonical stillVisible reselect: ClientsGestion, ClientsCommandes,
+ClientsFacturation, ClientsDevis, ClientsExpeditions, EtudesColoris, FilsCommandes,
+ProspectsDemandes, QualiteSuiviLots, TombeMetierReferences), with `suspended` carrying each
+screen's existing isEditing/isFetching/autoEditForId guards. SousTraitantsCommandes keeps its
+lastAppliedListKey filter-reset logic and gets the same stacked gate inline via
+`useResponsiveLayout`. Table-centric screens (FilsStock, FinisStock) were never affected.
+Verified live at 390px (Utilisateurs, Fils › Commandes land on the list; Retour sticks) and
+at 1920px (first row still auto-selected, 3-panel layout unchanged).
+
 ## 2026-07-23 — feat/issue-tracker
 App-wide — **ticket widget: instant modal open, background screenshot capture.** The
 header "Envoyer un ticket" button used to rasterize the whole page with `html-to-image`

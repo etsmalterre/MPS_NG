@@ -40,6 +40,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { SearchableCombobox } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { useAutoSelectFirst } from '@/hooks/useAutoSelectFirst'
 import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
 import { cn } from '@/lib/utils'
 import { apiFetch } from '@/lib/api'
@@ -443,12 +444,14 @@ export function FinisReferences() {
   const { data: detail, isLoading: detailLoading } = useRefFiniDetail(selectedId)
   const { data: ecruOptions } = useEcruLookup(isEditing)
 
-  // Auto-select first on initial load
-  useEffect(() => {
-    if (refs && refs.length > 0 && selectedId === null) {
-      setSelectedId(refs[0].IDref_fini)
-    }
-  }, [refs, selectedId])
+  // Auto-select first on initial load (desktop only — stacked mode lands on the list)
+  useAutoSelectFirst({
+    rows: refs,
+    selectedId,
+    getId: (r) => r.IDref_fini,
+    select: setSelectedId,
+    behavior: 'fill',
+  })
 
   const startEdit = useCallback(() => {
     if (!detail) return

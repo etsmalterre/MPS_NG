@@ -46,6 +46,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { PopoverSelect, SearchableCombobox } from '@/components/ui/popover-select'
 import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
+import { useAutoSelectFirst } from '@/hooks/useAutoSelectFirst'
 import { TmRollIcon } from '@/components/icons/TmRollIcon'
 import { cn } from '@/lib/utils'
 import { apiFetch } from '@/lib/api'
@@ -549,17 +550,14 @@ export function TombeMetierReferences() {
   // Auto-select first visible row; re-selects when the filter/search narrows the list.
   // Skip while a just-created row is pending: its id is set before the list refetch
   // lands, so it isn't in `filtered` yet and we'd otherwise clobber the selection.
-  useEffect(() => {
-    if (isEditing || autoEditForId !== null) return
-    if (filtered.length === 0) {
-      // No visible rows (empty search result, or the last row left the current
-      // filter) — clear the stale selection so the placeholder shows.
-      if (selectedId !== null) setSelectedId(null)
-      return
-    }
-    const stillVisible = selectedId !== null && filtered.some((r) => r.IDref_ecru === selectedId)
-    if (!stillVisible) setSelectedId(filtered[0].IDref_ecru)
-  }, [filtered, selectedId, isEditing, autoEditForId])
+  useAutoSelectFirst({
+    rows: filtered,
+    selectedId,
+    getId: (r) => r.IDref_ecru,
+    select: setSelectedId,
+    behavior: 'sync',
+    suspended: isEditing || autoEditForId !== null,
+  })
 
   const startEdit = useCallback(() => {
     if (!detail) return
