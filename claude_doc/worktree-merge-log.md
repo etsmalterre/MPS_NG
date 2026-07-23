@@ -10,6 +10,22 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-23 — feat/facturation
+Clients › Facturation — **one-off prod data backfill: legacy invoices marked "envoyée".**
+The list derives `est_envoye` from the `envoi_email` audit log (`IDtype_doc = 19`,
+`IDreference = IDfacture`), so the 3 293 of 4 870 definitive factures/avoirs issued or
+sent outside the app (n°4300, Oct 2020 → n°9174, Jul 2026; 488 avoirs) had no log row and
+showed the red "non envoyée" border. New script
+`apps/api/src/scripts/backfill-factures-envoyees.ts` (dry-run / `--apply`, same pattern as
+`migrate-journal-rtf-to-plain.ts`) inserts ONE marker `envoi_email` row per unsent facture
+(empty `adresse`, `notes = 'backfill marque envoyee 2026-07-23'`) — idempotent, skips
+anything already logged. **Executed against prod HFSQL (10.10.20.2, prod creds from the
+API server env) on 2026-07-23: 3293/3293 inserted, 0 failures, verification pass reports
+0 unsent.** Undo: `DELETE FROM envoi_email WHERE IDtype_doc = 19 AND notes = 'backfill
+marque envoyee 2026-07-23'`. Side effect: each backfilled facture's Historique tab shows
+one recipient-less "Document envoyé" event dated 2026-07-23. New invoices still show the
+red border until actually emailed.
+
 ## 2026-07-23 — feat/commande-client
 Clients › Commandes — **instant Donation toggle.** The center panel (lignes view vs
 "Pièces en donation" view) used to switch on the *saved* `commande.donation` flag, so
