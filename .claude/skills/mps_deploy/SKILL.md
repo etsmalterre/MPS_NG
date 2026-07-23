@@ -108,6 +108,15 @@ of every deploy — see the deploy steps). The check:
    server's `DEPLOYED_SHA` is `none` (first deploy after adopting this) or the SHA is unknown to
    git, treat that side as needing deploy and just ship it.
 
+   **Exception — `apps/api/src/scripts/**`-only changes have no runtime effect.** One-off
+   backfill/migration scripts under `src/scripts/` are never imported by the running service,
+   so if the API diff touches **only** those, do NOT redeploy/restart the shared API (a restart
+   blips both `mpsng` and `mpstrm` for nothing). Confirm with
+   `git diff --name-only ${API_SHA}..origin/master -- apps/api | grep -v '^apps/api/src/scripts/'`
+   — empty output → skip the API side. (Seen 2026-07-23: `backfill-factures-envoyees.ts` was
+   the only API delta; web-only deploy shipped.) Run the script itself on the server by hand if
+   the migration hasn't been applied yet — that's separate from a service deploy.
+
 4. **Report the plan to the user before proceeding**: e.g. *"prod API at `9b208bc`, origin/master
    at `f4c26c9` (1 ahead: facturation) — touches apps/api + apps/web → deploying both."*
 
@@ -197,9 +206,14 @@ of every deploy — see the deploy steps). The check:
 ### Deploy Steps (Web)
 
 1. **Build locally — use PowerShell, NOT the Bash tool.** `VITE_API_URL=/api`
-   MUST be set in the build env:
+   MUST be set in the build env. **Run `pnpm install` first** — features are built in
+   worktrees (which get their own fresh install), so the main checkout's `node_modules`
+   lags whenever a landed feature added a dependency. Skipping it fails the build with a
+   misleading `tsc` error like `Cannot find module 'html-to-image'` (seen 2026-07-23:
+   the tickets feature's dep wasn't in the main checkout). `pnpm install` is a no-op when
+   already current, so always run it:
    ```powershell
-   cd C:\dev\etsmalterre\MPS_NG; $env:VITE_API_URL='/api'; pnpm --filter web build   # USE THIS
+   cd C:\dev\etsmalterre\MPS_NG; pnpm install; $env:VITE_API_URL='/api'; pnpm --filter web build   # USE THIS
    ```
    ```bash
    MSYS_NO_PATHCONV=1 VITE_API_URL=/api pnpm --filter web build          # bash ONLY with the guard
@@ -224,14 +238,21 @@ of every deploy — see the deploy steps). The check:
 
    **Verify the built bundle BEFORE upload — both a negative AND a positive
    check (the negative alone is necessary-but-not-sufficient, it misses Footgun A):**
+   The build now emits **more than one `index-*.js` chunk** (e.g. the ~1.6 MB main
+   bundle `index-BGQgngLQ.js` **and** a small ~14 KB `index-*.js`), so `ls … | head`/
+   `tail -1` picks an arbitrary one — and the `="/api"` base lives **only in the main
+   bundle**, so grabbing the wrong chunk gives a false "assertion doesn't match, do NOT
+   deploy" (seen 2026-07-23). Grep **across all** index chunks: the negatives must be 0
+   in every chunk, the positive must match in **at least one**.
    ```bash
-   B=$(ls apps/web/dist/assets/index-*.js)
-   grep -oc 'localhost:3002'        "$B"   # must be 0  (Footgun B)
-   grep -oc 'Program Files/Git/api' "$B"   # must be 0  (Footgun A)
-   grep -oE  'ht="/api"|="/api"'    "$B"   # MUST match — confirms API base is literally /api
+   B=$(ls apps/web/dist/assets/index-*.js)                        # ALL index chunks
+   grep -oc 'localhost:3002'        $B   # must be 0 for every file  (Footgun B)
+   grep -oc 'Program Files/Git/api' $B   # must be 0 for every file  (Footgun A)
+   grep -lE  'ht="/api"|="/api"'    $B   # MUST list ≥1 file — that chunk has API base /api
    ```
-   If the positive `="/api"` assertion doesn't match, do NOT deploy — the base is
-   wrong regardless of what the negative checks say.
+   If no chunk matches the positive `="/api"` assertion, do NOT deploy — the base is
+   wrong regardless of what the negative checks say. (Do not `"$B"`-quote when it holds
+   multiple filenames.)
 
 2. **Upload** the dist folder (uses `$SSH`/`$SCP`/`$KEY`/`$OPTS` from the SSH Access block):
    ```bash
