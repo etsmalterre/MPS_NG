@@ -10,6 +10,19 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-23 — feat/issue-tracker
+App-wide — **ticket widget: instant modal open, background screenshot capture.** The
+header "Envoyer un ticket" button used to rasterize the whole page with `html-to-image`
+(with `cacheBust: true`, re-downloading every image on the page) BEFORE opening the
+modal — a multi-second spinner on the header button. Now the modal opens immediately and
+the capture runs in the background: `cacheBust` is dropped, and the capture's `filter`
+excludes any element carrying `data-dialog-root` (the marker our `Dialog` puts on its
+portal) so the ticket modal never appears in its own screenshot — safe because dialog
+overlays cover the header button, so no other dialog can be open at click time.
+`TicketModal` gains a `capturingScreenshot` prop: while capturing, the "Capture d'écran"
+attachment button shows a spinner + "Capture en cours..." and is disabled, becoming
+clickable once the file arrives (capture failure leaves it disabled, as before).
+
 ## 2026-07-23 — feat/app-wide
 App-wide — **app versioning + refresh from the profile menu.** The monorepo root
 `package.json` `version` (currently 0.1.0) is now the single source of truth for the app

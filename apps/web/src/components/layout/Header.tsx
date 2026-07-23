@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useLocation, NavLink } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { Menu, Maximize2, Minimize2, LogOut, CircleUser, MessageSquarePlus, Loader2, RefreshCw } from 'lucide-react'
+import { Menu, Maximize2, Minimize2, LogOut, CircleUser, MessageSquarePlus, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Avatar } from '@/components/ui/avatar'
 import { getActiveMenu } from '@/config/navigation'
@@ -44,33 +44,38 @@ export function Header({ onMenuClick }: HeaderProps) {
     window.location.reload()
   }, [])
 
-  // Ticket reporting — the screenshot is captured BEFORE the modal opens so
-  // the modal itself is never in the shot.
+  // Ticket reporting — the modal opens immediately; the screenshot is captured
+  // in the background and excludes dialog portals from the shot (the ticket
+  // modal is the only one that can be open — dialog overlays cover this button).
   const [ticketOpen, setTicketOpen] = useState(false)
   const [screenshot, setScreenshot] = useState<File | null>(null)
   const [capturingScreenshot, setCapturingScreenshot] = useState(false)
 
-  const openTicketModal = useCallback(async () => {
+  const openTicketModal = useCallback(() => {
     setScreenshot(null)
+    setTicketOpen(true)
     setCapturingScreenshot(true)
-    try {
-      // html-to-image (SVG <foreignObject> rasterization) rather than
-      // html2canvas — the latter mis-renders text inside form inputs.
-      // Dynamic import keeps the library out of the main chunk.
-      const htmlToImage = await import('html-to-image')
-      const blob = await htmlToImage.toBlob(document.body, {
-        cacheBust: true,
-        pixelRatio: window.devicePixelRatio || 1,
-      })
-      if (blob) {
-        setScreenshot(new File([blob], `capture_${Date.now()}.png`, { type: 'image/png' }))
+    void (async () => {
+      try {
+        // html-to-image (SVG <foreignObject> rasterization) rather than
+        // html2canvas — the latter mis-renders text inside form inputs.
+        // Dynamic import keeps the library out of the main chunk.
+        // No cacheBust: it forces a network re-fetch of every image on the
+        // page, which made the capture take several seconds.
+        const htmlToImage = await import('html-to-image')
+        const blob = await htmlToImage.toBlob(document.body, {
+          pixelRatio: window.devicePixelRatio || 1,
+          filter: (node) => !(node instanceof Element && node.hasAttribute('data-dialog-root')),
+        })
+        if (blob) {
+          setScreenshot(new File([blob], `capture_${Date.now()}.png`, { type: 'image/png' }))
+        }
+      } catch {
+        // Capture failure must not block reporting — the modal is already open.
+      } finally {
+        setCapturingScreenshot(false)
       }
-    } catch {
-      // Capture failure must not block reporting — open the modal anyway.
-    } finally {
-      setCapturingScreenshot(false)
-      setTicketOpen(true)
-    }
+    })()
   }, [])
 
   // Profile (photo + signature) of the logged-in user — drives the avatar
@@ -177,15 +182,10 @@ export function Header({ onMenuClick }: HeaderProps) {
         <Button
           variant="ghost"
           size="icon"
-          disabled={capturingScreenshot}
           onClick={openTicketModal}
           title="Envoyer un ticket"
         >
-          {capturingScreenshot ? (
-            <Loader2 className="h-5 w-5 animate-spin" />
-          ) : (
-            <MessageSquarePlus className="h-5 w-5" />
-          )}
+          <MessageSquarePlus className="h-5 w-5" />
           <span className="sr-only">Envoyer un ticket</span>
         </Button>
 
@@ -273,7 +273,12 @@ export function Header({ onMenuClick }: HeaderProps) {
       </div>
 
       <ProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
-      <TicketModal open={ticketOpen} onOpenChange={setTicketOpen} initialScreenshot={screenshot} />
+      <TicketModal
+        open={ticketOpen}
+        onOpenChange={setTicketOpen}
+        initialScreenshot={screenshot}
+        capturingScreenshot={capturingScreenshot}
+      />
     </header>
   )
 }

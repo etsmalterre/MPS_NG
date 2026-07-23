@@ -1,7 +1,9 @@
 // Ticket widget modal — three views: new-ticket form / "Mes tickets" list /
-// ticket detail. The screenshot is captured by the Header trigger BEFORE the
-// modal opens (so the modal is never in the shot) and arrives here as
-// initialScreenshot, exposed as an "include screenshot" attachment button.
+// ticket detail. The screenshot is captured by the Header trigger in the
+// background while the modal is already open (the capture filters out dialog
+// portals so the modal is never in the shot) and arrives here as
+// initialScreenshot, exposed as an "include screenshot" attachment button
+// that shows a spinner while capturingScreenshot is true.
 
 import { useState, useEffect, useRef } from 'react'
 import {
@@ -41,6 +43,7 @@ interface TicketModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   initialScreenshot?: File | null
+  capturingScreenshot?: boolean
 }
 
 type View = 'form' | 'list' | 'detail'
@@ -107,7 +110,7 @@ function StatusChip({ status }: { status: Ticket['status'] }) {
   )
 }
 
-export function TicketModal({ open, onOpenChange, initialScreenshot }: TicketModalProps) {
+export function TicketModal({ open, onOpenChange, initialScreenshot, capturingScreenshot }: TicketModalProps) {
   const [view, setView] = useState<View>('form')
   const [titre, setTitre] = useState('')
   const [description, setDescription] = useState('')
@@ -524,10 +527,23 @@ export function TicketModal({ open, onOpenChange, initialScreenshot }: TicketMod
                       variant="outline"
                       size="sm"
                       onClick={addScreenshot}
-                      disabled={!initialScreenshot || screenshotUsed || attachments.length >= MAX_FILES}
+                      disabled={
+                        capturingScreenshot ||
+                        !initialScreenshot ||
+                        screenshotUsed ||
+                        attachments.length >= MAX_FILES
+                      }
                     >
-                      <Camera className="h-3.5 w-3.5 mr-1.5" />
-                      {screenshotUsed ? 'Capture ajoutée' : "Capture d'écran"}
+                      {capturingScreenshot ? (
+                        <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                      ) : (
+                        <Camera className="h-3.5 w-3.5 mr-1.5" />
+                      )}
+                      {capturingScreenshot
+                        ? 'Capture en cours...'
+                        : screenshotUsed
+                          ? 'Capture ajoutée'
+                          : "Capture d'écran"}
                     </Button>
                     <Button
                       type="button"
