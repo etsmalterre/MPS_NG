@@ -129,6 +129,24 @@ if (isRestart) {
       killTree(pid)
     }
   }
+
+  // With our pids dead, the slot's ports MUST be free. If one is still open, a
+  // FOREIGN process owns it (seen live 2026-07-24: a global node sweep killed
+  // every MPS server, then the LIVA issue tracker took port 3000). Spawning
+  // anyway is worse than useless — the post-spawn "UP" check is port-based and
+  // can't tell whose port it is, so it would report a dead server as UP. Abort
+  // and name the owner instead. (TRM slots skip the API port — it belongs to
+  // the NG master API and SHOULD be in use.)
+  await new Promise((r) => setTimeout(r, 700)) // let killed trees release their sockets
+  const portsToGuard = [...(proj.hasApi ? [['API', api]] : []), ['Web', web]]
+  for (const [portLabel, port] of portsToGuard) {
+    if (await isPortInUse(port)) {
+      console.error(`${portLabel} port ${port} is STILL in use after killing this slot's pids — a foreign process owns it.`)
+      console.error(`  Identify it:  powershell "Get-Process -Id (Get-NetTCPConnection -LocalPort ${port} -State Listen).OwningProcess | Select-Object Id,ProcessName,Path"`)
+      console.error('  Kill or relocate that process, then re-run with --restart.')
+      process.exit(1)
+    }
+  }
   console.log(`Restarting slot ${slot} → ${proj.hasApi ? `API ${api}, ` : ''}Web ${web}`)
 } else {
   console.log(`Fetching origin in ${main} …`)

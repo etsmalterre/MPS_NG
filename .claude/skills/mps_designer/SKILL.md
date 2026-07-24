@@ -2674,11 +2674,12 @@ Do NOT use the semantic `destructive` / `warning` tokens here — those vary sli
 Apply it to any list card that carries a deadline the user cares about. Candidates in MPS_NG:
 
 - Fils → Commandes (implemented) — earliest line `date_livraison`
-- Clients → Commandes — earliest line `date_livraison`
 - Clients → Facturation — `date_echeance`
-- Sous-traitants → Commandes — `date_retour_prevue`
+- Sous-traitants → Commandes (implemented) — relance / delivery deadlines
 - Production → Tricotage / Teinture / Confection — `date_prevue`
 - Transport → Expéditions / Livraisons — `date_expedition` / `date_livraison`
+
+**Exception — Clients → Commandes**: its left-list cards are neutral-by-default and color only on workflow state (amber = non affectée), NOT on delivery deadlines — see §41. Deadline urgency on that screen survives only at the line-card level inside the detail panel. When a screen's every card would end up red/amber under the deadline rule (long-running orders), prefer the §41 workflow-state model for the left list.
 
 The three-day window can be tuned per domain, but the visual language (red = late/missing, amber = soon, no decoration = normal) stays constant across the whole app so users don't have to re-learn it per screen.
 
@@ -3699,29 +3700,36 @@ The match is **case-insensitive on the French label** (`type.trim().toLowerCase(
 
 ## 37. Stock-fini état pill (`EtatPill`) — one component, everywhere
 
-Reference: **`apps/web/src/lib/etat-stock-fini.tsx`** — `<EtatPill libelle={...} />` + `etatPillClass(libelle)`. Consumers: `FinisStock.tsx` (table État column + drawer Statut KV), `SousTraitantsGestion.tsx` (rolls-on-site table), `ClientsCommandes.tsx` (Affectation drawer roll rows).
+Reference: **`apps/web/src/lib/etat-stock-fini.tsx`** — `<EtatPill libelle={...} variant={...} />` + `etatPillClass(libelle, variant)`. Consumers: `FinisStock.tsx` (table État column + drawer Statut KV — soft), `SousTraitantsGestion.tsx` (rolls-on-site table — soft), `ClientsCommandes.tsx` (Affectation drawer roll rows — solid).
 
-Whenever a screen displays a `stock_fini` roll's **état** (the `etat_stock_fini` libellé — En Contrôle, Validé, Reprise, Refusé…), render the shared `<EtatPill>` component. **Never** an ad-hoc `<Badge variant="outline">`, never inline colour classes. The whole point of the pill is its colour language, and it only works if it is identical on every screen:
+Whenever a screen displays a `stock_fini` roll's **état** (the `etat_stock_fini` libellé — En Contrôle, Validé, Reprise, Refusé…), render the shared `<EtatPill>` component. **Never** an ad-hoc `<Badge variant="outline">`, never inline colour classes. The whole point of the pill is its colour language, and it only works if it is identical on every screen.
 
-| État (libellé match) | Colours |
-|---|---|
-| contrôle | `bg-amber-100 text-amber-800 border-amber-200` |
-| reprise | `bg-orange-100 text-orange-800 border-orange-200` |
-| validé / disponible / prêt | `bg-emerald-100 text-emerald-800 border-emerald-200` |
-| refusé / rebut | `bg-red-100 text-red-700 border-red-200` |
-| unknown / other | `bg-zinc-100 text-zinc-700 border-zinc-200` |
+**One hue per état, two intensity variants.** The hue mapping is the standard; the variant only changes intensity:
+
+| État (libellé match) | Hue | `soft` (tables, inline chips) | `solid` (roll cards, catch-the-eye) |
+|---|---|---|---|
+| contrôle | amber | `bg-amber-100 text-amber-800 border-amber-200` | `bg-amber-500 text-white border-amber-500` |
+| reprise | orange | `bg-orange-100 text-orange-800 border-orange-200` | `bg-orange-500 text-white border-orange-500` |
+| validé / disponible / prêt | emerald | `bg-emerald-100 text-emerald-800 border-emerald-200` | `bg-emerald-600 text-white border-emerald-600` |
+| refusé / rebut | red | `bg-red-100 text-red-700 border-red-200` | `bg-red-600 text-white border-red-600` |
+| unknown / other | zinc | `bg-zinc-100 text-zinc-700 border-zinc-200` | `bg-zinc-500 text-white border-zinc-500` |
 
 ```tsx
 import { EtatPill } from '@/lib/etat-stock-fini'
 
-<EtatPill libelle={roll.etat_libelle} />
+<EtatPill libelle={roll.etat_libelle} />                    // soft (default) — table cells, inline chips
+<EtatPill libelle={roll.etat_label} variant="solid" />      // solid — roll cards
 ```
+
+**Which variant where**:
+- **`soft` (default)** — dense table cells, drawer KV values, inline chips next to other text. The pastel keeps rows calm when many pills stack in a column.
+- **`solid`** — roll cards where the état is a primary scanning cue (Clients/Commandes Affectation drawer). **Anchor it at the far right of the card** (`flex-shrink-0`, LAST element of the row — after the hover icons AND the action button). Rationale: the état is the only element present on every row, while defect/observation icons and action buttons are conditional — so the constant gets the edge and the variables flow in on its left. Pinning the pill's right edge makes all rows' statuses read as a right-aligned column even when labels differ in width. Do NOT place it inline after the roll number/lot, and do NOT place it before the conditional icons — both make its x position wander row to row.
 
 Conventions — do not deviate:
 
-- **Markup is fixed**: `inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border` + the colour classes. It's baked into the component — don't rebuild the `<span>` by hand with `etatPillClass`; the class-only export exists for exceptional cases (e.g. applying the colours to a non-pill element), not as an invitation to fork the markup.
+- **Markup is fixed**: `inline-flex items-center rounded-full border font-medium` + per-variant sizing (`px-2 py-0.5 text-[10px]` soft / `px-2.5 py-0.5 text-xs font-semibold` solid) + the colour classes. It's baked into the component — don't rebuild the `<span>` by hand with `etatPillClass`; the class-only export exists for exceptional cases (e.g. applying the colours to a non-pill element), not as an invitation to fork the markup.
 - **`EtatPill` renders `null` for an empty libellé.** When the surrounding layout needs an explicit empty marker (a table cell), the call site renders the `—` fallback itself: `{row.etat_libelle ? <EtatPill libelle={row.etat_libelle} /> : <span className="text-muted-foreground">—</span>}`. Inline flows (chips row on a roll card) just render `<EtatPill libelle={x} />` and let it disappear.
-- **Matching is substring-based on the French libellé** (case-insensitive, accent-tolerant for contrôle/prêt). New états added to the `etat_stock_fini` catalog that deserve their own colour get added to `etatPillClass` in the shared module — never a per-screen override.
+- **Matching is substring-based on the French libellé** (case-insensitive, accent-tolerant for contrôle/prêt). New états added to the `etat_stock_fini` catalog that deserve their own colour get added to `etatPillClass` in the shared module — **both variants at once** — never a per-screen override.
 - This pill is a **read-only category/status display** — it is NOT the §29 user-controlled status footer (état changes go through their own workflows, e.g. Qualité/Suivi lots), and NOT the §36 sous-traitant type chip (different palette, different domain).
 - **History**: the Clients/Commandes Affectation drawer originally rendered the état as a plain outline Badge (grey, regardless of state) — exactly the drift this rule prevents. If you find another surface showing a roll état without `EtatPill`, fix it as part of your change.
 
@@ -3927,4 +3935,46 @@ Lives in `apps/web/e2e/` (Playwright, chromium only, own vite server on **port 3
 - Projects: `desktop-1920`, `desktop-1366`, `tablet-768` run the standard spec (table layout); `fold-open-717`, `phone-390`, `fold-cover-345` run only `*-responsive.spec.ts` (card layout) via `testMatch`.
 - Baselines are machine-specific (system-ui fonts) — regenerate locally, never trust cross-machine diffs. Not wired into turbo `test`; run explicitly: `pnpm --filter @mps/web test:e2e`.
 - **Adding a screen to the rollout**: capture its API responses into `e2e/fixtures/`, add routes in `mock-api.ts`, write a `<screen>.spec.ts` (default + drawer/dialog + edit states), bless desktop baselines BEFORE touching the screen, then do the §40.2–§40.6 edits, then add its `*-responsive.spec.ts` snapshots.
+
+---
+
+## 41. Left-list card liseré + search-bar counter pill (attention-state standard)
+
+References: **`SousTraitantsCommandes.tsx`** (red + amber relance pills — the original implementation) and **`ClientsCommandes.tsx`** (amber "non affectée" pill).
+
+The standard color-coding model for master-detail **left-list cards**:
+
+1. **Cards are NEUTRAL by default.** White `bg-white`, `border-border`, hover `hover:border-zinc-400/60`, selected `border-zinc-400 ring-1 ring-zinc-400`. No color unless the card is in a registered attention state. Resist the urge to color-code every status onto the card frame — the status pill on the card already does that job (§29.8); the frame color is reserved for "this needs my attention now".
+
+2. **An attention state = a colored liseré** (4px inset left strip) plus matching hover/selection tint:
+   - Liseré: `shadow-[inset_4px_0_0_0_<rgb>]` — inset shadow, NOT `border-l-4` (§30.3 explains why: it composes with the selection ring instead of fighting the border shorthand).
+   - Hover: `border-border hover:border-<color>-500/50`. Selected: `border-<color>-500 ring-1 ring-<color>-500` — the attention color takes over the selection ring so it dominates.
+   - Raw Tailwind palette values, not semantic tokens (theme-stable): red `rgb(239 68 68)` (red-500), amber `rgb(245 158 11)` (amber-500).
+
+3. **Each colored state gets a counter pill flush right of the search input.** Number-only toggle button, one per state, sitting in a `flex items-center gap-2` row with the search input (`relative flex-1 min-w-0` wrapper):
+   ```tsx
+   {count > 0 && (
+     <button type="button" onClick={onToggle} aria-pressed={on} title="<state label>"
+       className={cn(
+         'h-7 min-w-[1.75rem] px-1.5 inline-flex items-center justify-center rounded-md text-xs font-semibold tabular-nums border transition-colors flex-shrink-0',
+         on ? 'bg-amber-500 text-white border-amber-500 shadow-sm'
+            : 'bg-amber-500/10 text-amber-800 border-amber-500/30 hover:bg-amber-500/20',
+       )}>
+       {count}
+     </button>
+   )}
+   ```
+   Rules: **hidden when the count is 0** (never a grey disabled pill); **active = solid fill** with white text, inactive = tinted (`/10` bg, dark text, `/30` border); toggling **narrows the list to only that state's cards**; multiple pills (SST red + amber) are independent toggles. Pill color = liseré color, always. Add a `title` naming the state.
+
+4. **Guard the empty-filter trap.** The pill hides at count 0, so an armed filter must not survive an emptying bucket: either derive an effective flag (`const active = on && count > 0`, ClientsCommandes) or make the toggle handler reset conflicting filters (SST bumps `terminee` → `open` when a pill is clicked, since its pills count open orders polled globally).
+
+5. **The meaning of each color is per-screen business logic and MUST be registered here** when a screen adopts the pattern:
+
+| Screen | Color | Meaning |
+|---|---|---|
+| Sous-traitants → Commandes | red | `attente_delai` relance due/overdue (`date_notif`), or delivery deadline passed/missing (§30) |
+| Sous-traitants → Commandes | amber | relance tomorrow, or delivery within 3 days (§30) |
+| Clients → Commandes | amber | **commande non affectée** — open order with no roll reserved yet (`phase === 'a_affecter'`) |
+
+Note the two families of meaning: SST colors are **deadline-derived** (§30 `deliveryUrgency`), Clients colors are **workflow-state-derived** (phase). Both render through the same visual system. When adding a new state: pick the color by severity (red = overdue/blocking, amber = needs action), add the liseré + pill wiring, and add a row to this table. Clients → Commandes deliberately does NOT color cards by delivery urgency anymore — neutral-by-default won over "every card is red or amber" noise.
 

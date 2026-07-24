@@ -75,3 +75,16 @@ from `reg.slots` so `/worktree-status` and slot allocation ignore it.
   restart slot 0 (`down` then up). See `claude_doc/worktrees.md` §health checks.
 - **`HFSQL : not checked (API predates ?db=1)`** → informational, not a fault: the
   checkout being served is older than the readiness probe.
+- **Port 3000 serves the wrong app (or web dies instantly with "Port 3000 is already in
+  use")** → a foreign process is squatting slot 0's web port. Seen live 2026-07-24: a
+  global node kill took down every MPS dev server, then the **LIVA issue tracker**
+  (`C:\dev\liva\issue-tracker\frontend`, `next start --port 3000`) claimed 3000.
+  Identify the owner before assuming an MPS problem:
+  ```powershell
+  Get-Process -Id (Get-NetTCPConnection -LocalPort 3000 -State Listen).OwningProcess | Select-Object Id,ProcessName,Path
+  ```
+  If it's the issue tracker (or anything non-MPS), stop it or move it to another port —
+  do NOT kill node blindly: a blanket `node` kill is exactly what causes the "every MPS
+  server dead at once" incident (all worktree slots + master die as collateral). The
+  same symptom on ports 3001–3006 means a feature slot is squatted; `up.mjs --restart`
+  detects this and prints the owner.

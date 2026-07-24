@@ -80,7 +80,13 @@ export default defineConfig({
     })
   ],
   server: {
-    port: 5174
+    port: 5174,
+    // Never silently bump to port+1 when the requested port is taken. Dev slots
+    // are registry-addressed (3000-300N); a foreign process squatting a slot
+    // port (seen: LIVA issue tracker on 3000) would otherwise shift this server
+    // onto the NEXT slot's port while every URL/registry entry still points at
+    // the old one. Fail loudly instead.
+    strictPort: true,
   },
   resolve: {
     alias: {

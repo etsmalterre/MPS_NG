@@ -2212,6 +2212,53 @@ commandesClientRouter.delete('/:id/lignes/:ligneId/pieces/fini/:stockId', async 
   }
 })
 
+// Batch-reserve rolls (Affectation tab "Stock disponible" multi-select).
+// All-or-nothing: every roll is validated up front with the same rules as the
+// per-roll PUT, before any UPDATE runs — a bad id can't leave the batch
+// half-applied. Returns the refreshed payload like the per-roll endpoints.
+const batchAffectSchema = z.object({
+  stockIds: z.array(z.number().int().positive()).min(1).max(500),
+})
+
+commandesClientRouter.post('/:id/lignes/:ligneId/pieces/:kind/affecter', async (req: Request, res: Response) => {
+  try {
+    const commandeId = parseInt(req.params.id, 10)
+    const ligneId = parseInt(req.params.ligneId, 10)
+    if (isNaN(commandeId) || isNaN(ligneId)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const kindParam = req.params.kind
+    if (kindParam !== 'ecru' && kindParam !== 'fini') { res.status(400).json({ error: 'Invalid kind' }); return }
+    const parsed = batchAffectSchema.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Validation failed', details: parsed.error.issues }); return }
+    const stockIds = Array.from(new Set(parsed.data.stockIds))
+    const ctx = await loadClientLineContext(commandeId, ligneId)
+    if (!ctx || ctx.kind !== kindParam) { res.status(404).json({ error: 'Line not found or does not match kind' }); return }
+    if (refuseIfSoldee(res, await loadCommandeSoldee(commandeId))) return
+
+    const table = kindParam === 'ecru' ? 'stock_ecru' : 'stock_fini'
+    const pk = kindParam === 'ecru' ? 'IDstock_ecru' : 'IDstock_fini'
+    const refCol = kindParam === 'ecru' ? 'IDref_ecru' : 'IDref_fini'
+    const colCol = kindParam === 'ecru' ? 'IDcolori_ecru' : 'IDColoris'
+    const idList = stockIds.join(',')
+    const rows = await query<Record<string, unknown>>(
+      `SELECT ${pk}, ${refCol}, ${colCol}, IDligne_commande_client FROM ${table} WHERE ${pk} IN (${idList})`,
+    )
+    const byId = new Map(rows.map((r) => [Number(r[pk]), r]))
+    for (const sid of stockIds) {
+      const r = byId.get(sid)
+      if (!r) { res.status(404).json({ error: `Stock ${kindParam} ${sid} not found` }); return }
+      if (Number(r[refCol]) !== ctx.refId) { res.status(400).json({ error: `Roll ${sid}: ref does not match the line` }); return }
+      if (ctx.coloriId > 0 && Number(r[colCol]) !== ctx.coloriId) { res.status(400).json({ error: `Roll ${sid}: coloris does not match the line` }); return }
+      const current = Number(r.IDligne_commande_client) || 0
+      if (current !== 0 && current !== ligneId) { res.status(409).json({ error: `Roll ${sid} already reserved to another line` }); return }
+    }
+    await query(`UPDATE ${table} SET IDligne_commande_client = ${ligneId} WHERE ${pk} IN (${idList})`)
+    res.json(await fetchAffectationPayload(ctx))
+  } catch (err) {
+    console.error('Error batch-linking rolls to client line:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // Update a roll's free-text observations from the affectation drawer.
 // Roll-level metadata (same column FinisStock edits), so no soldée guard —
 // but the roll must belong to this line's ref and be either unreserved or

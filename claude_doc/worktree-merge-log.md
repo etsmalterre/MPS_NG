@@ -10,6 +10,32 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-24 — feat/cmd-client
+Clients › Commandes — **Affectation drawer UX overhaul + left-list color standard.**
+(1) Roll état pills: shared `EtatPill` gains a `variant` prop — `soft` (pastel, tables)
+vs new `solid` (saturated bg, white text; same hue map, single source) — and roll cards
+anchor the solid pill at the FAR RIGHT of the row (the one element present on every row
+gets the edge; conditional icons/buttons flow in on its left). Redundant per-roll coloris
+dropped (drawer is already line-scoped). (2) Batch affectation: per-row "Affecter"
+buttons replaced by checkbox multi-select in Stock disponible (same checkbox UX as the
+quick-ship selection); the two selections are mutually exclusive and drive ONE bottom
+action bar — appears only when ≥1 roll ticked, shows Tout/Aucun + count + summed qty,
+button flips Expédier ↔ Affecter per selection source. New all-or-nothing endpoint
+`POST /:id/lignes/:ligneId/pieces/:kind/affecter` (validates every roll with the per-roll
+PUT rules before any UPDATE, returns refreshed payload). (3) Left list: cards now
+NEUTRAL by default (delivery-urgency red/amber removed from list cards); amber liseré =
+commande non affectée (`phase a_affecter`); amber counter pill flush right of the search
+input (SST-pill recipe: hidden at 0, tinted → solid when armed, toggle narrows the list,
+auto-disarms on empty bucket). (4) Info tab reordered: metadata, Commentaire, Journal,
+Tombé de métier commandé, Fiche client. Design system: mps_designer §37 rewritten
+(two-variant état table + far-right anchor rule), new §41 (neutral-by-default left-list
+liseré + search-bar counter-pill standard, per-screen color registry), §30.5 reconciled.
+Tooling (from the 2026-07-24 node-sweep incident): vite dev `strictPort: true` (a
+squatted port can no longer silently shift a server onto the next slot's port),
+`up.mjs --restart` aborts naming a foreign port owner instead of spawning a zombie
+behind a port-based "UP", `/serve-main` failure-modes documents the LIVA-tracker-on-3000
+squat and warns against blanket node kills.
+
 ## 2026-07-24 — feat/commande-client
 Clients › Commandes — **Historique tab surfaces legacy "envoyée" confirmations.** The
 legacy WinDev app never writes `envoi_email` for commandes client; it only flips the

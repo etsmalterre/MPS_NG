@@ -357,6 +357,8 @@ export function ClientsCommandes() {
   const [searchQuery, setSearchQuery] = useState('')
   const [debouncedQuery, setDebouncedQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'open' | 'terminee'>('open')
+  // Amber counter-pill toggle: narrow the list to commandes non affectées.
+  const [amberOnly, setAmberOnly] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [affectationLineId, setAffectationLineId] = useState<number | null>(null)
@@ -531,12 +533,21 @@ export function ClientsCommandes() {
 
   const rows = commandes ?? []
 
+  // "Non affectée" counter pill (mps_designer §41): open commandes with no
+  // roll reserved yet, counted over the loaded list. The toggle narrows the
+  // list to those cards; it disarms implicitly when the bucket empties (the
+  // pill is hidden at 0, so an armed empty filter would strand the user on
+  // an empty list with no visible way out).
+  const amberCount = rows.reduce((n, r) => n + (r.phase === 'a_affecter' ? 1 : 0), 0)
+  const amberActive = amberOnly && amberCount > 0
+  const visibleRows = amberActive ? rows.filter((r) => r.phase === 'a_affecter') : rows
+
   // Keep the selection valid against the (server-filtered) list. Skip while the
   // list is refetching: after creating a commande we setSelectedId(newId) before
   // the refetch settles, so the stale list wouldn't yet contain it — resetting
   // here would clobber the new selection (and break the auto-enter-edit flow).
   useAutoSelectFirst({
-    rows,
+    rows: visibleRows,
     selectedId,
     getId: (c) => c.IDcommande_client,
     select: setSelectedId,
@@ -549,7 +560,7 @@ export function ClientsCommandes() {
       <MasterDetailLayout
         list={
           <CommandeList
-            rows={rows}
+            rows={visibleRows}
             isLoading={isLoading}
             isError={isError}
             error={error as Error | null}
@@ -559,6 +570,9 @@ export function ClientsCommandes() {
             onSearchChange={setSearchQuery}
             statusFilter={statusFilter}
             onStatusFilterChange={handleStatusFilterChange}
+            amberCount={amberCount}
+            amberOn={amberActive}
+            onToggleAmber={() => setAmberOnly((v) => !v)}
             onNew={() => setCreateOpen(true)}
             canCreate={canEditCommandes}
             isEditing={isEditing}
@@ -678,6 +692,7 @@ function CommandeList({
   selectedId, onSelect,
   searchQuery, onSearchChange,
   statusFilter, onStatusFilterChange,
+  amberCount, amberOn, onToggleAmber,
   onNew, canCreate, isEditing,
 }: {
   rows: CommandeListRow[]
@@ -690,6 +705,11 @@ function CommandeList({
   onSearchChange: (q: string) => void
   statusFilter: 'all' | 'open' | 'terminee'
   onStatusFilterChange: (s: 'all' | 'open' | 'terminee') => void
+  /** Count of loaded commandes non affectées — shown as the amber counter
+   *  pill right of the search input (mps_designer §41). 0 hides the pill. */
+  amberCount: number
+  amberOn: boolean
+  onToggleAmber: () => void
   onNew: () => void
   canCreate: boolean
   isEditing: boolean
@@ -697,16 +717,37 @@ function CommandeList({
   return (
     <div className="flex flex-col h-full rounded-lg border shadow-sm bg-zinc-100/80">
       <div className="p-3 border-b rounded-t-lg bg-zinc-200/50 space-y-2">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <input
-            type="text"
-            placeholder="Rechercher (n°, client...)"
-            value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
-            autoComplete="off"
-            className="w-full h-9 pl-9 pr-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-          />
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1 min-w-0">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <input
+              type="text"
+              placeholder="Rechercher (n°, client...)"
+              value={searchQuery}
+              onChange={(e) => onSearchChange(e.target.value)}
+              autoComplete="off"
+              className="w-full h-9 pl-9 pr-3 text-sm rounded-md border border-input bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+          {/* Amber counter pill: commandes non affectées. Number-only toggle
+              flush right of the search input, hidden when the bucket is
+              empty (mps_designer §41). */}
+          {amberCount > 0 && (
+            <button
+              type="button"
+              onClick={onToggleAmber}
+              aria-pressed={amberOn}
+              title="Commandes non affectées"
+              className={cn(
+                'h-7 min-w-[1.75rem] px-1.5 inline-flex items-center justify-center rounded-md text-xs font-semibold tabular-nums border transition-colors flex-shrink-0',
+                amberOn
+                  ? 'bg-amber-500 text-white border-amber-500 shadow-sm'
+                  : 'bg-amber-500/10 text-amber-800 border-amber-500/30 hover:bg-amber-500/20',
+              )}
+            >
+              {amberCount}
+            </button>
+          )}
         </div>
         <div className="flex gap-1">
           {([
@@ -745,14 +786,15 @@ function CommandeList({
           </div>
         ) : rows.map((row) => {
           const isSelected = selectedId === row.IDcommande_client
-          const urgency = deliveryUrgency(row.earliest_delivery, row.est_soldee)
-          const selectedRingClass =
-            urgency === 'late' ? 'border-red-500 ring-1 ring-red-500'
-            : urgency === 'soon' ? 'border-amber-500 ring-1 ring-amber-500'
+          // Neutral by default (mps_designer §41): the amber liseré flags
+          // commandes non affectées (no roll reserved yet). Delivery urgency
+          // no longer colors the list cards on this screen.
+          const isAmber = row.phase === 'a_affecter'
+          const selectedRingClass = isAmber
+            ? 'border-amber-500 ring-1 ring-amber-500'
             : 'border-zinc-400 ring-1 ring-zinc-400'
-          const hoverClass =
-            urgency === 'late' ? 'border-border hover:border-red-500/50'
-            : urgency === 'soon' ? 'border-border hover:border-amber-500/50'
+          const hoverClass = isAmber
+            ? 'border-border hover:border-amber-500/50'
             : 'border-border hover:border-zinc-400/60'
           return (
             <div
@@ -761,8 +803,7 @@ function CommandeList({
               className={cn(
                 'p-3 border rounded-lg cursor-pointer transition-all bg-white',
                 isSelected ? selectedRingClass : hoverClass,
-                urgency === 'late' && 'shadow-[inset_4px_0_0_0_rgb(239_68_68)]',
-                urgency === 'soon' && 'shadow-[inset_4px_0_0_0_rgb(245_158_11)]',
+                isAmber && 'shadow-[inset_4px_0_0_0_rgb(245_158_11)]',
               )}
             >
               <div className="flex items-center gap-2">
@@ -1729,9 +1770,21 @@ function AffectationDrawer({
 
   const kind = data?.kind ?? (ligne.type === 1 ? 'ecru' : 'fini')
 
-  const linkMut = useMutation({
-    mutationFn: (stockId: number) => apiFetch(`/commandes-client/${commandeId}/lignes/${ligne.IDligne_commande_client}/pieces/${kind}/${stockId}`, { method: 'PUT' }),
-    onSuccess: (payload: AffectationPayload) => { queryClient.setQueryData(queryKey, payload); onSuccess() },
+  // Batch affect (Stock disponible): tick rolls → one "Affecter (n)" button in
+  // the section header links them all in a single round-trip. All-or-nothing
+  // server-side, returns the refreshed payload like the per-roll mutations.
+  const [linkSel, setLinkSel] = useState<Set<number>>(new Set())
+  const linkBatchMut = useMutation({
+    mutationFn: (stockIds: number[]) =>
+      apiFetch(`/commandes-client/${commandeId}/lignes/${ligne.IDligne_commande_client}/pieces/${kind}/affecter`, {
+        method: 'POST',
+        body: JSON.stringify({ stockIds }),
+      }),
+    onSuccess: (payload: AffectationPayload) => {
+      setLinkSel(new Set())
+      queryClient.setQueryData(queryKey, payload)
+      onSuccess()
+    },
   })
   const unlinkMut = useMutation({
     mutationFn: (stockId: number) => apiFetch(`/commandes-client/${commandeId}/lignes/${ligne.IDligne_commande_client}/pieces/${kind}/${stockId}`, { method: 'DELETE' }),
@@ -1837,11 +1890,39 @@ function AffectationDrawer({
   const shippable = linked.filter((r) => !r.expedie)
   const shipSelected = shippable.filter((r) => shipSel.has(r.id))
   const shipQty = shipSelected.reduce((s, r) => s + (dim === 'metrage' ? (Number(r.metrage) || 0) : (Number(r.poids) || 0)), 0)
-  const toggleShip = (id: number) => setShipSel((prev) => {
-    const next = new Set(prev)
-    if (next.has(id)) next.delete(id); else next.add(id)
-    return next
-  })
+  // The two selections are mutually exclusive: ticking a roll in one list
+  // clears the other list's selection, so the action bar below always maps
+  // to exactly one action (Expédier vs Affecter).
+  const toggleShip = (id: number) => {
+    setLinkSel(new Set())
+    setShipSel((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  // Batch-affect selection, re-filtered against the live available pool so a
+  // refetch can't leave stale ids (same discipline as shipSelected above).
+  const linkSelected = available.filter((r) => linkSel.has(r.id))
+  const linkQty = linkSelected.reduce((s, r) => s + (dim === 'metrage' ? (Number(r.metrage) || 0) : (Number(r.poids) || 0)), 0)
+  const toggleLink = (id: number) => {
+    setShipSel(new Set())
+    setLinkSel((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  // Which list currently drives the action bar (mutual exclusion guarantees
+  // at most one is non-empty).
+  const selMode: 'ship' | 'link' | null =
+    linkSelected.length > 0 ? 'link' : shipSelected.length > 0 ? 'ship' : null
+  const selRolls = selMode === 'link' ? linkSelected : shipSelected
+  const selQty = selMode === 'link' ? linkQty : shipQty
+  const selAllCount = selMode === 'link' ? available.length : shippable.length
+  const selBusy = shipMut.isPending || linkBatchMut.isPending
 
   // Obs edit toggle rides the first section heading row of the Affectation
   // tab (title left, action right — §23 header pattern) instead of claiming
@@ -1952,11 +2033,11 @@ function AffectationDrawer({
                 </div>
                 <div className="space-y-1.5">
                   {available.map((roll) => (
-                    <RollRow key={roll.id} roll={roll} dim={dim} action="link"
+                    <RollRow key={roll.id} roll={roll} dim={dim}
                       kind={kind === 'fini' ? 'fini' : 'ecru'}
                       onEditObs={obsEditMode ? () => setEditObsRoll(roll) : undefined}
-                      onAction={() => linkMut.mutate(roll.id)}
-                      isBusy={linkMut.isPending && linkMut.variables === roll.id} />
+                      selected={linkSel.has(roll.id)}
+                      onToggleSelect={() => toggleLink(roll.id)} />
                   ))}
                 </div>
               </section>
@@ -1967,30 +2048,43 @@ function AffectationDrawer({
             )}
           </div>
 
-          {/* Quick-ship bar (legacy "Expédier"): select affected rolls above,
-              ship them on a brand-new expedition. */}
-          {!soldee && shippable.length > 0 && (
+          {/* Selection action bar — appears as soon as rolls are ticked in
+              either list. Affecté selection → Expédier (legacy quick-ship);
+              Stock disponible selection → Affecter. Mutual exclusion above
+              guarantees the bar maps to exactly one action. */}
+          {!soldee && selMode !== null && (
             <div className="flex-shrink-0 px-3 py-2 border-t bg-zinc-200/50 flex items-center gap-2">
               <div className="flex items-center gap-1">
-                <button type="button" onClick={() => setShipSel(new Set(shippable.map((r) => r.id)))}
-                  disabled={shipMut.isPending || shipSelected.length === shippable.length}
+                <button type="button"
+                  onClick={() => selMode === 'link'
+                    ? setLinkSel(new Set(available.map((r) => r.id)))
+                    : setShipSel(new Set(shippable.map((r) => r.id)))}
+                  disabled={selBusy || selRolls.length === selAllCount}
                   className="text-[11px] text-accent hover:underline disabled:text-muted-foreground/50 disabled:no-underline disabled:cursor-default px-1">Tout</button>
                 <span className="text-muted-foreground/40 text-[11px]">·</span>
-                <button type="button" onClick={() => setShipSel(new Set())}
-                  disabled={shipMut.isPending || shipSelected.length === 0}
+                <button type="button" onClick={() => { setLinkSel(new Set()); setShipSel(new Set()) }}
+                  disabled={selBusy}
                   className="text-[11px] text-muted-foreground hover:text-foreground disabled:text-muted-foreground/40 disabled:cursor-default px-1">Aucun</button>
               </div>
               <p className="text-[11px] text-muted-foreground tabular-nums ml-auto whitespace-nowrap">
-                {shipSelected.length > 0
-                  ? `${shipSelected.length} rouleau${shipSelected.length > 1 ? 'x' : ''} · ${fmtNum(shipQty, 1)} ${uniteLabel}`
-                  : 'Aucun rouleau sélectionné'}
+                {selRolls.length} rouleau{selRolls.length > 1 ? 'x' : ''} · {fmtNum(selQty, 1)} {uniteLabel}
               </p>
-              <Button size="sm" onClick={() => setConfirmShip(true)} disabled={shipSelected.length === 0 || shipMut.isPending} className="flex-shrink-0">
-                {shipMut.isPending
-                  ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-                  : <Truck className="h-3.5 w-3.5 mr-1.5" />}
-                Expédier
-              </Button>
+              {selMode === 'link' ? (
+                <Button size="sm" onClick={() => linkBatchMut.mutate(linkSelected.map((r) => r.id))}
+                  disabled={linkBatchMut.isPending} className="flex-shrink-0">
+                  {linkBatchMut.isPending
+                    ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                    : <Link2 className="h-3.5 w-3.5 mr-1.5" />}
+                  Affecter
+                </Button>
+              ) : (
+                <Button size="sm" onClick={() => setConfirmShip(true)} disabled={shipMut.isPending} className="flex-shrink-0">
+                  {shipMut.isPending
+                    ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                    : <Truck className="h-3.5 w-3.5 mr-1.5" />}
+                  Expédier
+                </Button>
+              )}
             </div>
           )}
         </>
@@ -2248,9 +2342,11 @@ function RollRow({
 }: {
   roll: RollLite
   dim: 'metrage' | 'poids'
-  action: 'link' | 'unlink'
-  onAction: () => void
-  isBusy: boolean
+  /** Per-row action button. Omit action/onAction for checkbox-only rows
+   *  (batch selection lists — the batch button lives in the section header). */
+  action?: 'link' | 'unlink'
+  onAction?: () => void
+  isBusy?: boolean
   /** Drives the domain icon: fini → green FiniRollIcon, écru → TmRollIcon
    *  (mirrors the sous-traitant commande pieces drawer). */
   kind?: 'ecru' | 'fini'
@@ -2289,7 +2385,7 @@ function RollRow({
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onToggleSelect() }}
-            title={selected ? 'Retirer de la sélection' : 'Sélectionner pour expédition'}
+            title={selected ? 'Retirer de la sélection' : 'Sélectionner'}
             className={cn(
               'h-5 w-5 rounded flex items-center justify-center flex-shrink-0 border transition-colors',
               selected ? 'bg-accent border-accent text-accent-foreground' : 'border-input bg-background hover:border-accent/60',
@@ -2310,12 +2406,12 @@ function RollRow({
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-semibold truncate">{roll.numero || `Rouleau ${roll.id}`}</span>
             {roll.lot && <span className="text-xs text-muted-foreground truncate">· Lot {roll.lot}</span>}
-            <EtatPill libelle={roll.etat_label} />
           </div>
           <div className="flex items-center gap-3 mt-1 text-[11px] text-muted-foreground tabular-nums">
             <span className="font-medium text-foreground">{fmtNum(primary, 1)} {primaryLabel}</span>
             {secondary > 0 && <span>· {fmtNum(secondary, 1)} {secondaryLabel}</span>}
-            {roll.coloris_reference && <span className="truncate">· {roll.coloris_reference}</span>}
+            {/* No coloris here — every roll in the drawer already matches the
+                line's coloris, so repeating it per row is pure noise. */}
             {roll.magasin_nom && <span className="flex items-center gap-0.5 truncate"><MapPin className="h-2.5 w-2.5" />{roll.magasin_nom}</span>}
           </div>
         </div>
@@ -2382,13 +2478,17 @@ function RollRow({
         {/* A shipped roll's affectation is locked (the expedition owns it) —
             no "Retirer"; the état pill already says why. Read-only mode
             (commande terminée) hides the action entirely. */}
-        {!readOnly && !(action === 'unlink' && roll.expedie) && (
+        {!readOnly && action && onAction && !(action === 'unlink' && roll.expedie) && (
           <Button size="sm" variant={action === 'link' ? 'default' : 'outline'} onClick={(e) => { e.stopPropagation(); onAction() }} disabled={isBusy} className="flex-shrink-0">
             {isBusy ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
               : action === 'link' ? <Link2 className="h-3.5 w-3.5 mr-1.5" /> : <Unlink className="h-3.5 w-3.5 mr-1.5" />}
             {action === 'link' ? 'Affecter' : 'Retirer'}
           </Button>
         )}
+        {/* État pill anchored at the far right — the one element present on
+            every row, so it lands on the same spot regardless of which icons
+            or buttons happen to render on its left (mps_designer §37). */}
+        <EtatPill libelle={roll.etat_label} variant="solid" className="flex-shrink-0" />
       </div>
     </div>
   )
@@ -4190,41 +4290,6 @@ function InfoTab({
         })()}
       </div>
 
-      {/* Fiche client — customer-specific handling notes (client.commentaire),
-          read-only here; edited from Clients › Gestion. */}
-      {!!commande.client_fiche && (
-        <div className="p-3 rounded-lg border bg-card shadow-sm">
-          <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
-            <ClipboardList className="h-3.5 w-3.5" />Fiche client
-          </p>
-          <p className="text-sm text-muted-foreground whitespace-pre-line">{commande.client_fiche}</p>
-        </div>
-      )}
-
-      {commande.tombe_metier.length > 0 && (
-        <div className="p-3 rounded-lg border bg-card shadow-sm">
-          <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
-            <TmRollIcon className="h-3.5 w-3.5" />Tombé de métier commandé
-          </p>
-          <div className="space-y-1.5">
-            {commande.tombe_metier.map((t) => (
-              <div key={`${t.IDref_ecru}|${t.coloris_label}`} className="flex items-center justify-between gap-2">
-                <span className="text-sm">{t.ref_label}{t.coloris_label ? ` /${t.coloris_label}` : ''}</span>
-                <span className="text-sm font-semibold tabular-nums text-accent">{fmtNum(t.poids_kg, 1)} kg</span>
-              </div>
-            ))}
-            {commande.tombe_metier.length > 1 && (
-              <div className="flex items-center justify-between gap-2 pt-1.5 mt-0.5 border-t border-border/60">
-                <span className="text-[11px] uppercase tracking-wide text-muted-foreground font-semibold">Total</span>
-                <span className="text-sm font-bold tabular-nums">
-                  {fmtNum(commande.tombe_metier.reduce((s, t) => s + t.poids_kg, 0), 1)} kg
-                </span>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
       <div className={cn('p-3 rounded-lg border bg-card shadow-sm', isEditing && editSectionClass)}>
         <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
           <MessageSquare className="h-3.5 w-3.5" />Commentaire
@@ -4252,6 +4317,41 @@ function InfoTab({
           <p className="text-sm text-muted-foreground italic">Journal vide</p>
         )}
       </div>
+
+      {commande.tombe_metier.length > 0 && (
+        <div className="p-3 rounded-lg border bg-card shadow-sm">
+          <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
+            <TmRollIcon className="h-3.5 w-3.5" />Tombé de métier commandé
+          </p>
+          <div className="space-y-1.5">
+            {commande.tombe_metier.map((t) => (
+              <div key={`${t.IDref_ecru}|${t.coloris_label}`} className="flex items-center justify-between gap-2">
+                <span className="text-sm">{t.ref_label}{t.coloris_label ? ` /${t.coloris_label}` : ''}</span>
+                <span className="text-sm font-semibold tabular-nums text-accent">{fmtNum(t.poids_kg, 1)} kg</span>
+              </div>
+            ))}
+            {commande.tombe_metier.length > 1 && (
+              <div className="flex items-center justify-between gap-2 pt-1.5 mt-0.5 border-t border-border/60">
+                <span className="text-[11px] uppercase tracking-wide text-muted-foreground font-semibold">Total</span>
+                <span className="text-sm font-bold tabular-nums">
+                  {fmtNum(commande.tombe_metier.reduce((s, t) => s + t.poids_kg, 0), 1)} kg
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Fiche client — customer-specific handling notes (client.commentaire),
+          read-only here; edited from Clients › Gestion. */}
+      {!!commande.client_fiche && (
+        <div className="p-3 rounded-lg border bg-card shadow-sm">
+          <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1.5">
+            <ClipboardList className="h-3.5 w-3.5" />Fiche client
+          </p>
+          <p className="text-sm text-muted-foreground whitespace-pre-line">{commande.client_fiche}</p>
+        </div>
+      )}
     </div>
   )
 }
