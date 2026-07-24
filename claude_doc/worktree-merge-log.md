@@ -10,6 +10,24 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-24 — feat/commande-client
+Clients › Commandes — **Historique tab surfaces legacy "envoyée" confirmations.** The
+legacy WinDev app never writes `envoi_email` for commandes client; it only flips the
+accented boolean `commande_client.envoyé_client` (no date, no recipient). The historique
+endpoint now also reads that flag (`SELECT *` + `pickKey(/^envoy/i)` — the accented column
+is never named in SQL, safe on Windows ODBC and the Linux bridge) and appends an undated
+`{kind:'legacy'}` event when set. If a dated MPS_NG confirmation send exists for the
+commande, the legacy card is suppressed (the dated card is strictly more informative).
+Frontend renders the legacy event as a muted-icon card titled "Confirmation de commande"
+with the italic sub-line "Envoyée depuis l'ancienne application"; MPS_NG sends keep their
+gold icon + timestamp + recipients. Known one-way limitation (documented, unchanged):
+sends from MPS_NG cannot set `envoyé_client` through the Linux bridge, so the legacy app
+still shows those as not sent. Investigation context: the original "card missing after
+send" report was the pre-v0.1.1 stale-cache UI (fixed by the historique auto-refresh
+invalidation deployed 2026-07-23); prod writes were verified intact. Also adds the
+diagnostic script `apps/api/src/scripts/probe-historique-cmd-client.ts` (dumps recent
+type-7 `envoi_email` rows + replays the historique SELECT for a given commande).
+
 ## 2026-07-24 — feat/expe
 Clients › Expéditions — **delete now completes in the UI.** Clicking "Supprimer" in the
 confirm modal deleted the expedition server-side but the screen froze on the open modal:

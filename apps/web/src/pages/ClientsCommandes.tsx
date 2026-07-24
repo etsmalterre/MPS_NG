@@ -4716,7 +4716,9 @@ function FactureViewDialog({ facture, onClose }: { facture: CommandeFactureRow |
 
 // ── Sidebar Tab: Historique ────────────────────────────
 
-interface HistoriqueEvent { kind: 'email'; type_label: string; recipients: string[]; DATE: string }
+// kind 'legacy' = commande_client.envoyé_client flag set by the WinDev app —
+// no date and no recipients are recorded there, only the fact it was sent.
+interface HistoriqueEvent { kind: 'email' | 'legacy'; type_label: string; recipients: string[]; DATE: string }
 
 function HistoriqueTab({ commandeId }: { commandeId: number }) {
   const { data, isLoading, error } = useQuery<HistoriqueEvent[]>({
@@ -4737,10 +4739,14 @@ function HistoriqueTab({ commandeId }: { commandeId: number }) {
       {data.map((ev, i) => (
         <div key={i} className="p-3 rounded-lg border bg-card shadow-sm">
           <div className="flex items-center gap-2">
-            <div className="h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0 bg-accent/10"><AtSign className="h-3.5 w-3.5 text-accent" /></div>
+            <div className={cn('h-7 w-7 rounded-md flex items-center justify-center flex-shrink-0', ev.kind === 'legacy' ? 'bg-muted' : 'bg-accent/10')}>
+              <AtSign className={cn('h-3.5 w-3.5', ev.kind === 'legacy' ? 'text-muted-foreground' : 'text-accent')} />
+            </div>
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium truncate">{ev.type_label}</p>
-              <p className="text-[11px] text-muted-foreground">{ev.DATE ? formatDateTime(ev.DATE) : ''}</p>
+              <p className={cn('text-[11px] text-muted-foreground', ev.kind === 'legacy' && 'italic')}>
+                {ev.kind === 'legacy' ? 'Envoyée depuis l\'ancienne application' : ev.DATE ? formatDateTime(ev.DATE) : ''}
+              </p>
             </div>
           </div>
           {ev.recipients.length > 0 && (

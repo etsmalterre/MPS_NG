@@ -4146,6 +4146,13 @@ commandesClientRouter.get('/:id/historique', async (req: Request, res: Response)
     const rows = await query<{ adresse: string | null; DATE: string | null; notes: string | null }>(
       `SELECT adresse, DATE, notes FROM envoi_email WHERE IDreference = ${id} AND IDtype_doc = ${TYPE_DOC_COMMANDE_CLIENT}`,
     )
+    // The legacy WinDev app never writes envoi_email for commandes client — it
+    // only flips commande_client.envoyé_client. Accented column → SELECT * and
+    // resolve the (possibly mangled) key via pickKey.
+    const ccRows = await query<Record<string, unknown>>(
+      `SELECT * FROM commande_client WHERE IDcommande_client = ${id}`,
+    )
+    const legacySent = ccRows.length > 0 && Number(pickKey(ccRows[0], /^envoy/i)) === 1
     // Group by send timestamp + document kind (one event, possibly multiple
     // recipients). notes='proforma' marks commande-based proforma sends —
     // they share IDtype_doc=7 with confirmations.
@@ -4159,9 +4166,16 @@ commandesClientRouter.get('/:id/historique', async (req: Request, res: Response)
       if (addr) acc.recipients.push(addr)
       byDate.set(key, acc)
     }
-    const events = Array.from(byDate.values())
-      .map((e) => ({ kind: 'email' as const, type_label: e.proforma ? 'Facture proforma' : 'Confirmation de commande', recipients: e.recipients, DATE: e.DATE }))
-      .sort((a, b) => (a.DATE < b.DATE ? 1 : -1))
+    const events: Array<{ kind: 'email' | 'legacy'; type_label: string; recipients: string[]; DATE: string }> =
+      Array.from(byDate.values())
+        .map((e) => ({ kind: 'email' as const, type_label: e.proforma ? 'Facture proforma' : 'Confirmation de commande', recipients: e.recipients, DATE: e.DATE }))
+        .sort((a, b) => (a.DATE < b.DATE ? 1 : -1))
+    // Legacy flag carries no date/recipient — only surface it when no MPS_NG
+    // confirmation send is already in the timeline, appended last (undated).
+    const hasConfirmation = events.some((e) => e.type_label === 'Confirmation de commande')
+    if (legacySent && !hasConfirmation) {
+      events.push({ kind: 'legacy', type_label: 'Confirmation de commande', recipients: [], DATE: '' })
+    }
     res.json(events)
   } catch (err) {
     console.error('Error fetching commande-client historique:', err)
