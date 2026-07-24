@@ -338,8 +338,9 @@ export function ClientsExpeditions() {
   const deleteMut = useMutation({
     mutationFn: (id: number) => apiFetch(`/expeditions/${bucket}/${id}`, { method: 'DELETE' }),
     onSuccess: (_data, deletedId) => {
-      const cached = queryClient.getQueryData<ExpeditionListRow[]>(['expeditions', bucket, stateFilter, debouncedQuery]) ?? []
-      const remaining = cached.filter((r) => r.id !== deletedId)
+      // Infinite query: the cache entry is { pages, pageParams }, not a flat array.
+      const cached = queryClient.getQueryData<{ pages: ExpeditionListRow[][] }>(['expeditions', bucket, stateFilter, debouncedQuery])
+      const remaining = (cached?.pages ?? []).flat().filter((r) => r.id !== deletedId)
       queryClient.invalidateQueries({ queryKey: ['expeditions'] })
       setIsEditing(false)
       setDeleteConfirmOpen(false)

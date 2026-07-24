@@ -10,6 +10,20 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-24 — feat/expe
+Clients › Expéditions — **delete now completes in the UI.** Clicking "Supprimer" in the
+confirm modal deleted the expedition server-side but the screen froze on the open modal:
+`deleteMut.onSuccess` read the list cache as a flat `ExpeditionListRow[]` and called
+`.filter()` on it, but the expéditions list is a `useInfiniteQuery`, so the cache entry is
+`{ pages, pageParams }` — the `TypeError` aborted the handler before it could close the
+dialog, exit edit mode, or invalidate the list (handler predates the list's conversion to
+infinite pagination; SousTraitantsCommandes, the only other infinite-list screen, was
+already correct). Fix in `ClientsExpeditions.tsx`: read the cache as
+`{ pages: ExpeditionListRow[][] }` and flatten before filtering. Post-delete behavior now
+lands as designed: modal closes, edit mode exits, selection moves to the first remaining
+expedition or the empty placeholder if none. Verified live through the browser (created a
+throwaway expedition via the API, deleted it through the UI; no console errors).
+
 ## 2026-07-24 — feat/facturation
 Clients › Facturation — **"Faire un avoir" from a definitive facture.** New icon-only
 `FileMinus2` button in the detail header (leftmost of the Imprimer/Email trio; definitive
