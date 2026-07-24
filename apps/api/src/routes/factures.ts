@@ -1399,6 +1399,76 @@ facturesRouter.post('/prov/convert-batch', async (req: Request, res: Response) =
 })
 
 // ════════════════════════════════════════════════════════
+//  AVOIR  (definitive facture → prefilled proforma credit note)
+// ════════════════════════════════════════════════════════
+
+/** POST /def/:id/avoir — create a proforma Avoir prefilled from a definitive
+ *  facture: billing header fields are copied as-is, every line is duplicated
+ *  (amounts stay positive — the credit sign is presentational), DATE is today.
+ *  The result is a normal editable proforma: the user trims the lines to what
+ *  is actually reimbursed, then converts it like any other proforma. */
+facturesRouter.post('/def/:id/avoir', async (req: Request, res: Response) => {
+  try {
+    if (!(await requireEditFactures(req, res))) return
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const rows = await query<any>(`SELECT * FROM facture WHERE IDfacture = ${id} AND IDsociete = 1`)
+    if (rows.length === 0) { res.status(404).json({ error: 'Facture not found' }); return }
+    const f = rows[0]
+    if (Number(f.TYPE) === 2) {
+      res.status(409).json({ error: 'facture_avoir', message: 'Ce document est déjà un avoir.' })
+      return
+    }
+
+    const lignes = await loadFactureLines('def', id)
+    const numTva = (f.num_tva ?? '').toString()
+
+    // Allocate a proforma numero (vestigial internal sequence) with retry.
+    let newNumero = 0
+    let inserted = false
+    let lastErr: unknown = null
+    for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
+      newNumero = await nextNumero('prov')
+      try {
+        await query(
+          `INSERT INTO facture_prov
+             (IDsociete, numero, IDclient, IDadresse, IDmode_paiement, IDecheance,
+              DATE, IDtva, num_tva, TYPE, IDcode_comptable, IDexpedition_divers)
+           VALUES
+             (1, ${newNumero}, ${n(f.IDclient)}, ${n(f.IDadresse)}, ${n(f.IDmode_paiement)}, ${n(f.IDecheance)},
+              '${todayDigits()}', ${n(f.IDtva)}, ${sqlText(numTva)}, 2, ${n(f.IDcode_comptable)}, 0)`,
+        )
+        inserted = true
+      } catch (e) { lastErr = e }
+    }
+    if (!inserted) throw lastErr ?? new Error('insert failed after 3 attempts')
+
+    const newRows = await query<{ IDfacture_prov: number }>(
+      `SELECT IDfacture_prov FROM facture_prov WHERE IDsociete = 1 AND numero = ${newNumero} ORDER BY IDfacture_prov DESC`,
+    )
+    const newId = Number(newRows[0]?.IDfacture_prov) || 0
+    if (!newId) throw new Error('could not resolve new proforma id')
+
+    // Duplicate the lines. IDligne_expedition carries over so the credited
+    // shipment lines stay traceable (and keep their stock-kind icon); the
+    // original facture still references them, so deleting this avoir never
+    // reopens an expedition (wipeOpenProformas checks the definitive ledger).
+    for (const l of lignes) {
+      await query(
+        `INSERT INTO ligne_facture_prov (IDfacture_prov, IDligne_expedition, designation, quantite, unite, prix)
+         VALUES (${newId}, ${n(l.IDligne_expedition)}, ${sqlText(l.designation ?? '')}, ${Number(l.quantite) || 0}, ${sqlText(l.unite ?? '')}, ${Number(l.prix) || 0})`,
+      )
+    }
+
+    res.status(201).json({ id: newId, kind: 'prov' as const })
+  } catch (err) {
+    console.error('Error creating avoir from facture:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ════════════════════════════════════════════════════════
 //  LINE CRUD
 // ════════════════════════════════════════════════════════
 

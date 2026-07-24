@@ -24,6 +24,7 @@ import {
   Lock,
   FileText,
   FilePlus2,
+  FileMinus2,
   FileDown,
   Package,
   CalendarDays,
@@ -199,6 +200,7 @@ export function ClientsFacturation() {
   const [autoEditForId, setAutoEditForId] = useState<number | null>(null)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [convertConfirmOpen, setConvertConfirmOpen] = useState(false)
+  const [avoirConfirmOpen, setAvoirConfirmOpen] = useState(false)
   const [convertResult, setConvertResult] = useState<{ numero: number } | null>(null)
   // Batch actions on the proforma list panel (generate from expeditions /
   // pick-and-convert / pick-and-delete proformas).
@@ -324,6 +326,27 @@ export function ClientsFacturation() {
       setConvertResult({ numero: data.numero })
       setBucket('def')
       setSelectedId(data.IDfacture)
+    },
+  })
+
+  // "Faire un avoir" — creates a proforma Avoir prefilled from the selected
+  // definitive facture (header + all lines), then jumps to it in the proforma
+  // bucket in edit mode so the user can trim the lines to reimburse.
+  const avoirMut = useMutation({
+    mutationFn: (defId: number) => apiFetch(`/factures/def/${defId}/avoir`, { method: 'POST' }),
+    onSuccess: (data: { id: number }) => {
+      queryClient.invalidateQueries({ queryKey: ['factures'] })
+      setAvoirConfirmOpen(false)
+      setIsEditing(false)
+      setBucket('prov')
+      setNonEnvoyeOn(false)
+      // Make sure the new avoir is visible in the list (a 'facture'-only type
+      // filter or a stale search would hide it and auto-select would steal
+      // the selection right after the jump).
+      if (typeFilter === 'facture') setTypeFilter('all')
+      setSearchQuery('')
+      setSelectedId(data.id)
+      setAutoEditForId(data.id)
     },
   })
 
@@ -476,6 +499,7 @@ export function ClientsFacturation() {
             onPrintClick={() => { if (selectedId !== null) window.open(`${API_URL}/factures/${bucket}/${selectedId}/pdf`, '_blank') }}
             onEmailClick={() => setEmailModalOpen(true)}
             onConvertClick={() => setConvertConfirmOpen(true)}
+            onAvoirClick={() => setAvoirConfirmOpen(true)}
             canEdit={canEditFactures}
           />
         }
@@ -542,6 +566,17 @@ export function ClientsFacturation() {
         isPending={convertMut.isPending}
         onCancel={() => setConvertConfirmOpen(false)}
         onConfirm={() => { if (selectedId !== null) convertMut.mutate(selectedId) }}
+      />
+
+      <ConfirmDialog
+        open={avoirConfirmOpen}
+        variant="default"
+        title="Faire un avoir"
+        description={`Un avoir proforma sera créé à partir de la facture N° ${detail?.numero ?? ''} avec toutes ses lignes. Vous pourrez ensuite ajuster les lignes à rembourser avant de le convertir en avoir définitif.`}
+        confirmLabel="Créer l'avoir"
+        isPending={avoirMut.isPending}
+        onCancel={() => setAvoirConfirmOpen(false)}
+        onConfirm={() => { if (selectedId !== null) avoirMut.mutate(selectedId) }}
       />
 
       <ConfirmDialog
@@ -1193,7 +1228,7 @@ function FactureList({
 function DetailHeader({
   facture, isLoading, isEditing, editable,
   onStartEdit, onCancelEdit, onSave, isSaving,
-  onDelete, onPrintClick, onEmailClick, onConvertClick,
+  onDelete, onPrintClick, onEmailClick, onConvertClick, onAvoirClick,
   canEdit,
 }: {
   facture: FactureDetail | null
@@ -1208,6 +1243,7 @@ function DetailHeader({
   onPrintClick: () => void
   onEmailClick: () => void
   onConvertClick: () => void
+  onAvoirClick: () => void
   canEdit: boolean
 }) {
   if (!facture && !isLoading) return null
@@ -1264,6 +1300,13 @@ function DetailHeader({
               </>
             ) : (
               <>
+                {/* Faire un avoir — definitive factures only (not on an avoir):
+                    creates a prefilled proforma Avoir (edit_factures permission) */}
+                {facture?.kind === 'def' && facture.type !== 2 && canEdit && (
+                  <Button variant="outline" size="icon" className="h-9 w-9" onClick={onAvoirClick} title="Créer un avoir à partir de cette facture">
+                    <FileMinus2 className="h-4 w-4" />
+                  </Button>
+                )}
                 <Button variant="outline" size="icon" className="h-9 w-9" title="Imprimer" onClick={onPrintClick}>
                   <Printer className="h-4 w-4" />
                 </Button>

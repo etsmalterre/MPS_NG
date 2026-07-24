@@ -10,6 +10,20 @@ other worktrees see what changed when they rebase. Format:
 
 <!-- entries below -->
 
+## 2026-07-24 — feat/facturation
+Clients › Facturation — **"Faire un avoir" from a definitive facture.** New icon-only
+`FileMinus2` button in the detail header (leftmost of the Imprimer/Email trio; definitive
+non-avoir factures only, `edit_factures` permission) opens a light confirm, then
+`POST /factures/def/:id/avoir` creates a proforma Avoir prefilled from the facture: billing
+header copied as-is (client, adresse, mode de paiement, échéance, TVA, n° TVA, code
+comptable), `TYPE = 2`, DATE = today, every line duplicated into `ligne_facture_prov` with
+positive amounts (credit sign stays presentational) and `IDligne_expedition` carried over
+for traceability — the original facture still references those lines, so deleting the avoir
+never reopens an expedition. 409 if the source is itself an avoir. On success the UI jumps
+to the new avoir in the Proforma bucket in edit mode (clears search, relaxes a
+'Factures'-only type filter so auto-select can't steal the selection), where the user trims
+the lines to reimburse and later converts it like any proforma.
+
 ## 2026-07-23 — feat/responsive
 App-wide (17 master-detail screens) — **phone/stacked mode no longer auto-jumps into the
 first row's detail, and "Retour" works.** Root cause: every master-detail screen auto-selects
