@@ -36,6 +36,32 @@ squatted port can no longer silently shift a server onto the next slot's port),
 behind a port-based "UP", `/serve-main` failure-modes documents the LIVA-tracker-on-3000
 squat and warns against blanket node kills.
 
+## 2026-07-24 — feat/finis
+Finis › Références — **print menu: fiche technique + fiche tarifs PDFs.** The view-mode
+header gains the §42 `DocMenuButton` contextual print menu (pattern recorded in
+`mps_designer` §42 — renumbered from §41 at rebase, cmd-client took §41 — cross-ref in
+§6.1) with two documents. (1) **Fiche technique**
+(`GET /api/references-fini/:id/pdf`, `FicheTechniquePdf.tsx`): ports the legacy
+ETAT_Fiche_technique to the MalterreDocument frame — caractéristiques (référence /
+désignation / contexture via `ref_ecru.IDcontexture→contexture.nom`, min-moy-max grid for
+laize HT / laize utile / poids), composition computed from `composition_ecru` (rows scoped
+to the ref's `IDcolori_ecru`, falling back to the generic `IDcolori_ecru=0` rows) ×
+`asso_fil_matiere` × `matiere_premiere` (both have accented column NAMES — `SELECT *` +
+`pickKey(/^idmati/i)`, never named in SQL; `matiere_premiere`'s accented PK also blocks
+fixEncoding so libellés repair via U+FFFD→é), stabilités/allongements, conditionnement,
+observations, static douane/provenance lines (60062100 / C.E.E oui / FRANCE — no DB field
+anywhere, static in the legacy report too), five ISO care symbols as inline SVGs (wash tub
+shows `temp_lavage`), legacy footnotes, and the création/modification dates pinned
+bottom-right (`marginTop:'auto'`). (2) **Fiche tarifs**
+(`GET /api/references-fini/:id/tarifs/pdf?rlx15=0|1&rlx30=0|1`): standard (non-negotiated)
+price grid for ALL coloris of the ref, reusing `TarifsClientPdf` + `calcTarifRefFini` —
+coloris priced sequentially (never Promise.all — bridge flood), unpriceable ones skipped,
+columns chunked 4 per grid. The menu row opens a small options Dialog with two independent
+§35 pill switches ("Inclure la tranche 15 rouleaux" / "30 rouleaux", both off by default =
+the standard ≤10-rouleaux grid) before generating. Both endpoints follow the
+build/render-buffer split + helmet header strip; `dump-fiche-technique-pdf.ts` renders a
+ref against the dev DB for inspection.
+
 ## 2026-07-24 — feat/commande-client
 Clients › Commandes — **Historique tab surfaces legacy "envoyée" confirmations.** The
 legacy WinDev app never writes `envoi_email` for commandes client; it only flips the

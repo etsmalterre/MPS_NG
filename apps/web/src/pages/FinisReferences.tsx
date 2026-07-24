@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef, type ComponentType } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { UnsavedChangesDialog } from '@/components/shared/UnsavedChangesDialog'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
@@ -11,6 +11,13 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import {
   Search,
   Loader2,
@@ -34,6 +41,7 @@ import {
   Archive,
   Lock,
   BadgeEuro,
+  Printer,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -43,7 +51,7 @@ import { MasterDetailLayout } from '@/components/layout/MasterDetailLayout'
 import { useAutoSelectFirst } from '@/hooks/useAutoSelectFirst'
 import { FiniRollIcon } from '@/components/icons/FiniRollIcon'
 import { cn } from '@/lib/utils'
-import { apiFetch } from '@/lib/api'
+import { apiFetch, API_URL } from '@/lib/api'
 import { fmtNum } from '@/lib/format'
 import { formatHfsqlDate } from '@/lib/dates'
 
@@ -436,6 +444,7 @@ export function FinisReferences() {
   const originalDraftRef = useRef<HeaderDraft | null>(null)
 
   const [autoEditForId, setAutoEditForId] = useState<number | null>(null)
+  const [tarifsDialogOpen, setTarifsDialogOpen] = useState(false)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [createError, setCreateError] = useState<string | null>(null)
@@ -615,6 +624,14 @@ export function FinisReferences() {
               setDeleteError(null)
               setDeleteConfirmOpen(true)
             }}
+            onPrintDoc={(doc) => {
+              if (selectedId === null) return
+              if (doc === 'technique') {
+                window.open(`${API_URL}/references-fini/${selectedId}/pdf`, '_blank')
+              } else {
+                setTarifsDialogOpen(true)
+              }
+            }}
           />
         }
         detail={
@@ -646,6 +663,11 @@ export function FinisReferences() {
             setSelectedId(null)
           })
         }
+      />
+      <TarifsPrintDialog
+        open={tarifsDialogOpen}
+        onClose={() => setTarifsDialogOpen(false)}
+        refId={selectedId}
       />
       <UnsavedChangesDialog open={guard.showDialog} onAction={guard.handleAction} isSaving={guard.isSaving} />
       <ConfirmDialog
@@ -820,6 +842,7 @@ function DetailHeader({
   onSave,
   isSaving,
   onDelete,
+  onPrintDoc,
 }: {
   detail: RefFiniDetail | null
   isLoading: boolean
@@ -831,6 +854,7 @@ function DetailHeader({
   onSave: () => void
   isSaving: boolean
   onDelete: () => void
+  onPrintDoc: (doc: PrintDocKind) => void
 }) {
   if (!detail && !isLoading) return null
   return (
@@ -894,10 +918,21 @@ function DetailHeader({
                 </Button>
               </>
             ) : (
-              <Button variant="gold" size="sm" onClick={onStartEdit}>
-                <Pencil className="h-3.5 w-3.5 mr-1.5" />
-                Modifier
-              </Button>
+              <>
+                <DocMenuButton
+                  icon={Printer}
+                  title="Imprimer"
+                  items={[
+                    { key: 'technique', label: 'Fiche technique', icon: FileText },
+                    { key: 'tarifs', label: 'Fiche tarifs', icon: BadgeEuro },
+                  ]}
+                  onSelect={onPrintDoc}
+                />
+                <Button variant="gold" size="sm" onClick={onStartEdit}>
+                  <Pencil className="h-3.5 w-3.5 mr-1.5" />
+                  Modifier
+                </Button>
+              </>
             )}
           </div>
         )}
@@ -909,6 +944,154 @@ function DetailHeader({
         )}
       />
     </div>
+  )
+}
+
+// ── Print: doc menu + fiche tarifs options dialog ──────
+
+type PrintDocKind = 'technique' | 'tarifs'
+
+/** Icon button opening a small popover menu — the print header button uses it
+ *  to pick which document to generate. Pattern: DocMenuButton in
+ *  ClientsCommandes.tsx / PrintMenuButton in ClientsExpeditions.tsx. */
+function DocMenuButton({ icon: TriggerIcon, title, items, onSelect }: {
+  icon: ComponentType<{ className?: string }>
+  title: string
+  items: Array<{ key: PrintDocKind; label: string; icon: ComponentType<{ className?: string }> }>
+  onSelect: (key: PrintDocKind) => void
+}) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  // Click outside to close the menu.
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [menuOpen])
+
+  return (
+    <div ref={rootRef} className="relative">
+      <Button variant="outline" size="icon" className="h-9 w-9" title={title} onClick={() => setMenuOpen((v) => !v)}>
+        <TriggerIcon className="h-4 w-4" />
+      </Button>
+      {menuOpen && (
+        <div className="absolute top-full right-0 mt-1 w-64 rounded-lg border bg-white shadow-lg overflow-hidden z-50">
+          {items.map((item) => {
+            const ItemIcon = item.icon
+            return (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => { onSelect(item.key); setMenuOpen(false) }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left transition-colors hover:bg-zinc-100"
+              >
+                <ItemIcon className="h-4 w-4 text-muted-foreground" />
+                {item.label}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** §35 toggle row used by the fiche tarifs options dialog. */
+function TrancheToggleRow({
+  label,
+  hint,
+  value,
+  onChange,
+}: {
+  label: string
+  hint: string
+  value: boolean
+  onChange: (v: boolean) => void
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-lg border border-border/60 bg-white shadow-sm">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5 text-xs font-semibold">
+          <BadgeEuro className="h-3.5 w-3.5 text-accent" />
+          <span>{label}</span>
+        </div>
+        <p className="text-[10px] text-muted-foreground mt-0.5">{hint}</p>
+      </div>
+      <Pill value={value} onChange={onChange} />
+    </div>
+  )
+}
+
+/** Pre-generation options for the fiche tarifs: the 15 and 30 rouleaux
+ *  tranches are each opt-in on top of the standard grid (up to 10 rouleaux). */
+function TarifsPrintDialog({
+  open,
+  onClose,
+  refId,
+}: {
+  open: boolean
+  onClose: () => void
+  refId: number | null
+}) {
+  const [include15, setInclude15] = useState(false)
+  const [include30, setInclude30] = useState(false)
+
+  // Reset the toggles every time the dialog opens.
+  useEffect(() => {
+    if (open) {
+      setInclude15(false)
+      setInclude30(false)
+    }
+  }, [open])
+
+  if (refId === null) return null
+
+  const openFicheTarifs = () => {
+    window.open(
+      `${API_URL}/references-fini/${refId}/tarifs/pdf?rlx15=${include15 ? 1 : 0}&rlx30=${include30 ? 1 : 0}`,
+      '_blank',
+    )
+    onClose()
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <DialogContent className="max-w-md" onClose={onClose}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <BadgeEuro className="h-5 w-5 text-accent" />
+            Fiche tarifs
+          </DialogTitle>
+        </DialogHeader>
+        <div className="mt-4 space-y-2">
+          <TrancheToggleRow
+            label="Inclure la tranche 15 rouleaux"
+            hint={include15 ? 'La ligne 15 rouleaux sera imprimée' : 'Ligne 15 rouleaux masquée'}
+            value={include15}
+            onChange={setInclude15}
+          />
+          <TrancheToggleRow
+            label="Inclure la tranche 30 rouleaux"
+            hint={include30 ? 'La ligne 30 rouleaux sera imprimée' : 'Ligne 30 rouleaux masquée'}
+            value={include30}
+            onChange={setInclude30}
+          />
+        </div>
+        <DialogFooter className="mt-4">
+          <Button variant="outline" onClick={onClose}>
+            Annuler
+          </Button>
+          <Button onClick={openFicheTarifs}>
+            <Printer className="h-3.5 w-3.5 mr-1.5" />
+            Générer
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

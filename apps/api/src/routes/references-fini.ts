@@ -1,7 +1,11 @@
 import { Router, type Request, type Response, type Router as RouterType } from 'express'
 import { z } from 'zod'
+import React from 'react'
+import { renderToBuffer } from '@react-pdf/renderer'
 import { query, fixEncoding } from '../lib/hfsql-auto.js'
 import { calcTarifRefFini } from '../lib/pricing-fini-tarif.js'
+import { FicheTechniquePdf, type FicheTechniquePdfData } from '../lib/pdf/FicheTechniquePdf.js'
+import { TarifsClientPdf, type TarifsClientPdfData, type TarifsSectionData } from '../lib/pdf/TarifsClientPdf.js'
 
 export const referencesFiniRouter: RouterType = Router()
 
@@ -425,6 +429,354 @@ referencesFiniRouter.get('/:id/tarif', async (req: Request, res: Response) => {
     res.json(result)
   } catch (err) {
     console.error('Error computing ref_fini tarif:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ──────────────────────────────────────────────────────────
+// FICHE TECHNIQUE PDF
+// ──────────────────────────────────────────────────────────
+
+/** Format an HFSQL date ("20230221") or datetime ("2024-03-18 09:07:26.721")
+ *  as French dd/mm/yyyy. Returns null when unparseable. */
+function formatFicheDate(raw: string | null): string | null {
+  if (!raw) return null
+  const s = String(raw).trim()
+  let m = s.match(/^(\d{4})(\d{2})(\d{2})/)
+  if (!m) m = s.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (!m) return null
+  const [, y, mo, d] = m
+  if (y === '0000' || (mo === '00' && d === '00')) return null
+  return `${d}/${mo}/${y}`
+}
+
+/** Build the fiche technique data for one ref_fini. Reused by /pdf (and a
+ *  future /email endpoint) per the mandatory build/render split. */
+export async function buildFicheTechniquePdfData(id: number): Promise<FicheTechniquePdfData | null> {
+  const rows = await query<Record<string, unknown>>(`SELECT * FROM ref_fini WHERE IDref_fini = ${id}`)
+  if (rows.length === 0) return null
+  let ref = normalizeRefFini(rows[0])
+  const fixed = await fixEncoding(
+    [ref] as any,
+    'ref_fini',
+    'IDref_fini',
+    ['reference', 'designation', 'conditionnement', 'observations'],
+  ) as RefFini[]
+  ref = fixed[0]
+
+  // Contexture: ref_ecru.IDcontexture (ASCII column) → contexture.nom.
+  let contexture: string | null = null
+  if (ref.IDref_ecru > 0) {
+    try {
+      const er = await query<{ IDcontexture: number }>(
+        `SELECT IDref_ecru, IDcontexture FROM ref_ecru WHERE IDref_ecru = ${ref.IDref_ecru}`,
+      )
+      const ctxId = Number(er[0]?.IDcontexture) || 0
+      if (ctxId > 0) {
+        const cr = await query<{ IDcontexture: number; nom: string | null }>(
+          `SELECT IDcontexture, nom FROM contexture WHERE IDcontexture = ${ctxId}`,
+        )
+        const crFixed = (await fixEncoding(cr, 'contexture', 'IDcontexture', ['nom'])) as any[]
+        contexture = (crFixed[0]?.nom ?? null) as string | null
+      }
+    } catch { /* tolerate — fiche renders without contexture */ }
+  }
+
+  // Composition: composition_ecru (per écru, optionally per colori_ecru) gives
+  // the yarn mix; asso_fil_matiere gives each yarn's matière percentages
+  // (stored as 0-1 fractions). Aggregate matière % = Σ yarnShare × matièreFrac.
+  const composition: Array<{ matiere: string; pourcentage: number }> = []
+  try {
+    if (ref.IDref_ecru > 0) {
+      const comp = await query<{ IDcolori_ecru: number; IDref_fil: number; pourcentage: number }>(
+        `SELECT IDcomposition_ecru, IDcolori_ecru, IDref_fil, pourcentage
+           FROM composition_ecru WHERE IDref_ecru = ${ref.IDref_ecru}`,
+      )
+      // Prefer the rows scoped to the ref's écru coloris, then the generic
+      // (IDcolori_ecru = 0) rows, then whatever exists.
+      let chosen = ref.IDcolori_ecru > 0 ? comp.filter((r) => Number(r.IDcolori_ecru) === ref.IDcolori_ecru) : []
+      if (chosen.length === 0) chosen = comp.filter((r) => Number(r.IDcolori_ecru) === 0)
+      if (chosen.length === 0) chosen = comp
+
+      const totalPct = chosen.reduce((s, r) => s + (Number(r.pourcentage) || 0), 0)
+      if (totalPct > 0) {
+        const filIds = Array.from(new Set(chosen.map((r) => Number(r.IDref_fil)).filter((n) => n > 0)))
+        // asso_fil_matiere / matiere_premiere both have accented column NAMES
+        // (IDMatière, IDmatière_première) — never name them in SQL. SELECT * and
+        // resolve the keys via pickKey. matiere_premiere's PK is accented too,
+        // so fixEncoding can't repair libelle; U+FFFD → é is the only accent
+        // that occurs in matière names (élasthanne, acétate, polyéthylène…).
+        const assoByFil = new Map<number, Array<{ matiereId: number; frac: number }>>()
+        if (filIds.length > 0) {
+          const asso = await query<Record<string, unknown>>(
+            `SELECT * FROM asso_fil_matiere WHERE IDRef_fil IN (${filIds.join(',')})`,
+          )
+          for (const a of asso) {
+            const filId = Number(a.IDRef_fil) || 0
+            const matiereId = Number(pickKey(a, /^idmati/i)) || 0
+            const frac = Number(a.pourcentage) || 0
+            if (filId <= 0 || matiereId <= 0 || frac <= 0) continue
+            const arr = assoByFil.get(filId) ?? []
+            arr.push({ matiereId, frac })
+            assoByFil.set(filId, arr)
+          }
+        }
+        const libelleById = new Map<number, string>()
+        if (assoByFil.size > 0) {
+          const mats = await query<Record<string, unknown>>(`SELECT * FROM matiere_premiere`)
+          for (const m of mats) {
+            const mid = Number(pickKey(m, /^idmati/i)) || 0
+            const lib = String(m.libelle ?? '').replace(/�/g, 'é').trim()
+            if (mid > 0 && lib) libelleById.set(mid, lib)
+          }
+        }
+        const pctByMatiere = new Map<string, number>()
+        for (const row of chosen) {
+          const share = (Number(row.pourcentage) || 0) / totalPct
+          for (const a of assoByFil.get(Number(row.IDref_fil)) ?? []) {
+            const lib = libelleById.get(a.matiereId)
+            if (!lib) continue
+            pctByMatiere.set(lib, (pctByMatiere.get(lib) ?? 0) + share * a.frac * 100)
+          }
+        }
+        for (const [matiere, pourcentage] of pctByMatiere) composition.push({ matiere, pourcentage })
+        composition.sort((a, b) => b.pourcentage - a.pourcentage)
+      }
+    }
+  } catch { /* tolerate — fiche renders with an empty composition */ }
+
+  return {
+    reference: ref.reference ?? `#${id}`,
+    designation: ref.designation,
+    contexture,
+    laizeHT: { min: ref.laizeHT_Min, moy: ref.laizeHT_Moy, max: ref.laizeHT_Max },
+    laizeUtile: { min: ref.laizeUtile_Min, moy: ref.laizeUtile_Moy, max: ref.laizeUtile_Max },
+    poids: { min: ref.poids_Min, moy: ref.poids_Moy, max: ref.poids_Max },
+    composition,
+    stabHauteur: ref.stab_hauteur,
+    stabLargeur: ref.stab_largeur,
+    allongementH: { min: ref.allongementH_Min, moy: ref.allongementH_Moy, max: ref.allongementH_Max },
+    allongementL: { min: ref.allongementL_Min, moy: ref.allongementL_Moy, max: ref.allongementL_Max },
+    conditionnement: ref.conditionnement,
+    observations: ref.observations,
+    tempLavage: ref.temp_lavage,
+    dateCreation: formatFicheDate(ref.date_creation),
+    dateModification: formatFicheDate(ref.date_modification),
+  }
+}
+
+/** Render the fiche technique PDF as a Buffer. */
+export async function renderFicheTechniquePdfBuffer(data: FicheTechniquePdfData): Promise<Buffer> {
+  return renderToBuffer(
+    React.createElement(FicheTechniquePdf, { data }) as unknown as React.ReactElement<
+      import('@react-pdf/renderer').DocumentProps
+    >,
+  )
+}
+
+// GET /api/references-fini/:id/pdf — fiche technique, streamed inline.
+referencesFiniRouter.get('/:id/pdf', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+
+    const data = await buildFicheTechniquePdfData(id)
+    if (!data) { res.status(404).json({ error: 'Ref fini not found' }); return }
+    const buffer = await renderFicheTechniquePdfBuffer(data)
+
+    const safeRef = data.reference.replace(/[^\w.-]+/g, '_')
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `inline; filename="fiche-technique-${safeRef}.pdf"`)
+    // Strip helmet's restrictive headers so the web app (different origin/port
+    // in dev) can embed the PDF in an <iframe>. See mps_designer §21.
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.send(buffer)
+  } catch (err) {
+    console.error('Error rendering fiche technique PDF:', err)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// ──────────────────────────────────────────────────────────
+// FICHE TARIFS PDF
+// ──────────────────────────────────────────────────────────
+// Standard (non client-negotiated) price grid for one reference: every coloris
+// of the ref priced via calcTarifRefFini, rendered through the same
+// TarifsClientPdf component as the Clients › Gestion fiche. The 15 and 30
+// rouleaux tranches (indices 7 and 8 of the 9-tranche array) are each opt-in
+// via ?rlx15=1 / ?rlx30=1 — the caller asks the user before generating.
+
+/** Default visible tranches: up to 10 rouleaux (indices 0..6). */
+const TARIF_TRANCHE_IDX_DEFAULT = [0, 1, 2, 3, 4, 5, 6]
+/** Price columns per grid — bounded by the A4 content width. */
+const TARIF_COLORIS_PER_TABLE = 4
+
+const MOIS_FR = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre']
+function formatDateLongFr(d: Date): string {
+  return `${d.getDate()} ${MOIS_FR[d.getMonth()]} ${d.getFullYear()}`
+}
+function formatDateShortFr(d: Date): string {
+  const p = (x: number) => String(x).padStart(2, '0')
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()}`
+}
+
+/** Build the fiche tarifs data for one ref_fini. */
+export async function buildFicheTarifsPdfData(
+  id: number,
+  include15: boolean,
+  include30: boolean,
+): Promise<TarifsClientPdfData | null> {
+  const rows = await query<Record<string, unknown>>(`SELECT * FROM ref_fini WHERE IDref_fini = ${id}`)
+  if (rows.length === 0) return null
+  let ref = normalizeRefFini(rows[0])
+  const fixed = await fixEncoding([ref] as any, 'ref_fini', 'IDref_fini', ['reference']) as RefFini[]
+  ref = fixed[0]
+
+  // Écru context: contexture label + bio flag (ASCII columns only).
+  let contexture: string | null = null
+  let bio = false
+  if (ref.IDref_ecru > 0) {
+    try {
+      const er = await query<{ IDcontexture: number; bio: number }>(
+        `SELECT IDref_ecru, IDcontexture, bio FROM ref_ecru WHERE IDref_ecru = ${ref.IDref_ecru}`,
+      )
+      bio = Number(er[0]?.bio) === 1
+      const ctxId = Number(er[0]?.IDcontexture) || 0
+      if (ctxId > 0) {
+        const cr = await query<{ IDcontexture: number; nom: string | null }>(
+          `SELECT IDcontexture, nom FROM contexture WHERE IDcontexture = ${ctxId}`,
+        )
+        const crFixed = (await fixEncoding(cr, 'contexture', 'IDcontexture', ['nom'])) as any[]
+        contexture = (crFixed[0]?.nom ?? null) as string | null
+      }
+    } catch { /* tolerate */ }
+  }
+
+  // Coloris catalog — polymorphic by avec_teinture (explicit columns: SELECT *
+  // fails on both tables).
+  let coloris: Array<{ id: number; label: string }> = []
+  if (ref.avec_teinture !== 0) {
+    const cr = await query<{ IDref_fini_colori: number; reference: string | null }>(
+      `SELECT IDref_fini_colori, reference FROM ref_fini_colori WHERE IDref_fini = ${id} ORDER BY reference`,
+    )
+    const crFixed = (await fixEncoding(cr, 'ref_fini_colori', 'IDref_fini_colori', ['reference'])) as any[]
+    coloris = crFixed.map((c) => ({ id: Number(c.IDref_fini_colori), label: String(c.reference ?? '').trim() }))
+  } else if (ref.IDref_ecru > 0) {
+    const cr = await query<{ IDcolori_ecru: number; reference: string | null }>(
+      `SELECT IDcolori_ecru, reference FROM colori_ecru WHERE IDref_ecru = ${ref.IDref_ecru} ORDER BY reference`,
+    )
+    const crFixed = (await fixEncoding(cr, 'colori_ecru', 'IDcolori_ecru', ['reference'])) as any[]
+    coloris = crFixed.map((c) => ({ id: Number(c.IDcolori_ecru), label: String(c.reference ?? '').trim() }))
+  }
+  coloris = coloris.filter((c) => c.id > 0 && c.label.length > 0).slice(0, 60)
+
+  const trancheIdx = [
+    ...TARIF_TRANCHE_IDX_DEFAULT,
+    ...(include15 ? [7] : []),
+    ...(include30 ? [8] : []),
+  ]
+
+  // Price each coloris sequentially (calcTarifRefFini fires several HFSQL
+  // queries — a Promise.all over dozens of coloris would flood the bridge).
+  const priced: Array<{ label: string; tranches: Awaited<ReturnType<typeof calcTarifRefFini>>['tranches'] }> = []
+  for (const c of coloris) {
+    try {
+      const t = await calcTarifRefFini(id, c.id)
+      const hasPrice = trancheIdx.some((i) => (t.tranches[i]?.moPrixDeVenteAuMl ?? 0) > 0)
+      if (hasPrice) priced.push({ label: c.label, tranches: t.tranches })
+    } catch { /* skip unpriceable coloris */ }
+  }
+  if (priced.length === 0) {
+    return {
+      clientNom: ref.reference ?? `#${id}`,
+      dateDocument: formatDateLongFr(new Date()),
+      validUntil: '',
+      sections: [],
+    }
+  }
+
+  const laize = ref.laizeHT_Moy != null ? Math.round(ref.laizeHT_Moy) : null
+  const poids = ref.poids_Moy != null ? Math.round(ref.poids_Moy) : null
+
+  // Chunk the coloris into groups so each grid fits the page width.
+  const sections: TarifsSectionData[] = []
+  for (let start = 0; start < priced.length; start += TARIF_COLORIS_PER_TABLE) {
+    const group = priced.slice(start, start + TARIF_COLORIS_PER_TABLE)
+    const sectionRows: TarifsSectionData['rows'] = []
+    for (const i of trancheIdx) {
+      const anyTranche = group.find((g) => g.tranches.length > i)?.tranches[i]
+      if (!anyTranche) continue
+      sectionRows.push({
+        rlx: anyTranche.isMetrage ? '< 1' : String(anyTranche.rolls),
+        ml: anyTranche.isMetrage ? `< ${anyTranche.qte_ml}` : String(anyTranche.qte_ml),
+        prices: group.map((g) => {
+          const t = g.tranches[i]
+          return t && t.moPrixDeVenteAuMl > 0 ? t.moPrixDeVenteAuMl : null
+        }),
+      })
+    }
+    if (sectionRows.length === 0) continue
+    sections.push({
+      ref: ref.reference ?? `#${id}`,
+      contexture,
+      laize,
+      poids,
+      bio,
+      colorisLabels: group.map((g) => g.label),
+      rows: sectionRows,
+    })
+  }
+
+  const now = new Date()
+  const validUntil = new Date(now)
+  validUntil.setFullYear(validUntil.getFullYear() + 1)
+
+  return {
+    clientNom: ref.reference ?? `#${id}`,
+    dateDocument: formatDateLongFr(now),
+    validUntil: formatDateShortFr(validUntil),
+    sections,
+  }
+}
+
+/** Render the fiche tarifs PDF as a Buffer. */
+export async function renderFicheTarifsPdfBuffer(data: TarifsClientPdfData): Promise<Buffer> {
+  return renderToBuffer(
+    React.createElement(TarifsClientPdf, { data }) as unknown as React.ReactElement<
+      import('@react-pdf/renderer').DocumentProps
+    >,
+  )
+}
+
+// GET /api/references-fini/:id/tarifs/pdf?rlx15=1&rlx30=1 — fiche tarifs, inline.
+referencesFiniRouter.get('/:id/tarifs/pdf', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (isNaN(id)) { res.status(400).json({ error: 'Invalid ID' }); return }
+    const include15 = String(req.query.rlx15 ?? '') === '1'
+    const include30 = String(req.query.rlx30 ?? '') === '1'
+
+    const data = await buildFicheTarifsPdfData(id, include15, include30)
+    if (!data) { res.status(404).json({ error: 'Ref fini not found' }); return }
+    if (data.sections.length === 0) {
+      res.status(404).json({ error: 'Aucun tarif calculable pour cette référence.' })
+      return
+    }
+    const buffer = await renderFicheTarifsPdfBuffer(data)
+
+    const safeRef = data.clientNom.replace(/[^\w.-]+/g, '_')
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', `inline; filename="fiche-tarifs-${safeRef}.pdf"`)
+    // Strip helmet's restrictive headers so the web app (different origin/port
+    // in dev) can embed the PDF in an <iframe>. See mps_designer §21.
+    res.removeHeader('X-Frame-Options')
+    res.removeHeader('Content-Security-Policy')
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+    res.send(buffer)
+  } catch (err) {
+    console.error('Error rendering fiche tarifs PDF:', err)
     res.status(500).json({ error: 'Internal server error' })
   }
 })

@@ -471,6 +471,8 @@ Every detail screen should surface the same canonical set of view-mode action bu
 
 `onPrintClick` and `onEmailClick` flip page-level state (`setPrintModalOpen(true)` / `setEmailModalOpen(true)`) that opens the corresponding placeholder Dialog (§18). Both Dialogs are always mounted at the page root as siblings of the `MasterDetailLayout`, alongside any other top-level dialogs (`UnsavedChangesDialog`, `CreateXxxDialog`, etc.).
 
+**When the screen can produce more than one document** (confirmation vs proforma, fiche technique vs fiche tarifs…), the Print/Email icon button does NOT act directly — it opens a small contextual popover menu listing the documents. See §42 (`DocMenuButton`). A single-document screen keeps the plain direct-action button.
+
 Reference implementations: `apps/web/src/pages/Entreprises.tsx`, `apps/web/src/pages/FilsGestion.tsx`, `apps/web/src/pages/FilsStock.tsx`, and `apps/web/src/pages/FilsCommandes.tsx` — all four use `<Button variant="gold">` for the Modifier action.
 
 ---
@@ -3978,3 +3980,98 @@ The standard color-coding model for master-detail **left-list cards**:
 
 Note the two families of meaning: SST colors are **deadline-derived** (§30 `deliveryUrgency`), Clients colors are **workflow-state-derived** (phase). Both render through the same visual system. When adding a new state: pick the color by severity (red = overdue/blocking, amber = needs action), add the liseré + pill wiring, and add a row to this table. Clients → Commandes deliberately does NOT color cards by delivery urgency anymore — neutral-by-default won over "every card is red or amber" noise.
 
+---
+
+## 42. Header doc-menu button (`DocMenuButton`) — contextual print/email menu
+
+References: **`apps/web/src/pages/ClientsCommandes.tsx`** → `DocMenuButton` (print + email, confirmation vs proforma), **`apps/web/src/pages/ClientsExpeditions.tsx`** → `PrintMenuButton` (the original), **`apps/web/src/pages/FinisReferences.tsx`** → `DocMenuButton` (print, fiche technique vs fiche tarifs).
+
+When a detail screen's Print (or Email) header action can produce **more than one document**, the §6.1 icon button does not act directly — clicking it opens a **small contextual popover menu** anchored under the button, one row per document. The user picks the document; the row's action fires and the menu closes. A screen with a single document keeps the plain direct-action button — no menu, no chooser dialog.
+
+**Do NOT use a chooser Dialog for this.** A modal that only asks "which document?" is heavier than the decision it carries; the anchored menu keeps the choice in context and costs one click less.
+
+### 42.1 Markup — copy this shape
+
+```tsx
+/** Icon button opening a small popover menu — the print/email header buttons
+ *  use it to pick which document to act on. */
+function DocMenuButton({ icon: TriggerIcon, title, items, onSelect }: {
+  icon: ComponentType<{ className?: string }>
+  title: string
+  items: Array<{ key: DocKind; label: string; icon: ComponentType<{ className?: string }> }>
+  onSelect: (key: DocKind) => void
+}) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  // Click outside to close the menu.
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [menuOpen])
+
+  return (
+    <div ref={rootRef} className="relative">
+      <Button variant="outline" size="icon" className="h-9 w-9" title={title} onClick={() => setMenuOpen((v) => !v)}>
+        <TriggerIcon className="h-4 w-4" />
+      </Button>
+      {menuOpen && (
+        <div className="absolute top-full right-0 mt-1 w-64 rounded-lg border bg-white shadow-lg overflow-hidden z-50">
+          {items.map((item) => {
+            const ItemIcon = item.icon
+            return (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => { onSelect(item.key); setMenuOpen(false) }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left transition-colors hover:bg-zinc-100"
+              >
+                <ItemIcon className="h-4 w-4 text-muted-foreground" />
+                {item.label}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+```
+
+Usage in the §6.1 view-mode button row:
+
+```tsx
+<DocMenuButton
+  icon={Printer}
+  title="Imprimer"
+  items={[
+    { key: 'technique', label: 'Fiche technique', icon: FileText },
+    { key: 'tarifs', label: 'Fiche tarifs', icon: BadgeEuro },
+  ]}
+  onSelect={onPrintDoc}
+/>
+```
+
+### 42.2 Conventions — do not deviate
+
+- **Trigger**: the standard §6.1 header icon button (`variant="outline" size="icon" className="h-9 w-9"`, `Printer` / `AtSign` icon, French `title`). The menu does not change the trigger's look.
+- **Popover**: `absolute top-full right-0 mt-1 w-64 rounded-lg border bg-white shadow-lg overflow-hidden z-50` — right-aligned under the button (the button sits at the screen's right edge). No portal needed: the detail header is not inside an `overflow: hidden` ancestor (unlike KV rows, §11bis).
+- **Rows**: `w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-zinc-100`, leading Lucide icon at `h-4 w-4 text-muted-foreground`, French document label. `onSelect(key)` then `setMenuOpen(false)`.
+- **Item icons** name the document, e.g. `FileCheck2` confirmation, `ReceiptText` proforma/facture, `FileText` fiche technique, `BadgeEuro` fiche tarifs.
+- **Conditional items**: build the `items` array conditionally when a document doesn't apply (e.g. donation orders get no proforma row in `ClientsCommandes`). One remaining item still shows the menu — the consistency is worth the extra click, and the missing row explains itself.
+- **Print and Email share the same `items` array** when both actions exist on the screen — one definition, two `DocMenuButton` mounts.
+- **Follow-up options go in a Dialog after selection**, not in the menu. When a document needs a pre-generation question (e.g. the fiche tarifs' "Inclure les tranches 15 et 30 rouleaux" toggle in `FinisReferences`), the menu row opens a small §18.A Dialog with the option control (§35 pill for booleans) and an Annuler / Générer footer. The menu itself stays a flat list of documents — never nest inputs inside it.
+- **Outside-click close** via the `mousedown` listener + `rootRef.contains` guard, same as the §29.4 status-footer menu. No scroll-close needed (the header doesn't scroll).
+
+### 42.3 When to use vs the direct button
+
+| Situation | Pattern |
+|---|---|
+| One document (bon de commande, fiche seule) | Plain §6.1 icon button, direct `window.open` / dialog |
+| 2+ documents from the same trigger | **§42 `DocMenuButton`** |
+| Document needs pre-generation options | §42 menu row → small §18.A options Dialog → generate |
+| Action is a user-controlled state change | §29 status footer, not a header menu |
